@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
 import '../src/rust/api/clipper.dart';
+import '../utils/app_platform.dart';
+import '../widgets/clipper_brand.dart';
+import '../widgets/loading_filled_button.dart';
+import '../widgets/responsive_card_scaffold.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -10,11 +14,15 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   final _passphraseController = TextEditingController();
-  final _serverUrlController = TextEditingController(
-    text: 'http://127.0.0.1:8787',
-  );
+  late final TextEditingController _serverUrlController;
   bool _loading = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _serverUrlController = TextEditingController(text: defaultServerUrl());
+  }
 
   @override
   void dispose() {
@@ -39,8 +47,8 @@ class _LoginScreenState extends State<LoginScreen> {
       final url = _serverUrlController.text.trim();
       await login(
         passphrase: passphrase,
-        deviceName: _deviceName(),
-        serverUrl: url.isNotEmpty ? url : 'http://127.0.0.1:8787',
+        deviceName: clipperDeviceName(),
+        serverUrl: url.isNotEmpty ? url : defaultServerUrl(),
       );
       // State change will be picked up by AppRoot's watcher
     } catch (e) {
@@ -52,84 +60,49 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  String _deviceName() {
-    return 'macOS-Clipper';
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Center(
-        child: SizedBox(
-          width: 400,
-          child: Card(
-            child: Padding(
-              padding: const EdgeInsets.all(32),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.content_paste_rounded,
-                    size: 64,
-                    color: Colors.blue,
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Clipper',
-                    style: Theme.of(context).textTheme.headlineMedium,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Encrypted clipboard & file sync',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 32),
-                  TextField(
-                    controller: _serverUrlController,
-                    decoration: const InputDecoration(
-                      labelText: 'Server URL',
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.dns),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: _passphraseController,
-                    obscureText: true,
-                    decoration: const InputDecoration(
-                      labelText: 'Passphrase',
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.lock),
-                    ),
-                    onSubmitted: (_) => _login(),
-                  ),
-                  if (_error != null) ...[
-                    const SizedBox(height: 12),
-                    Text(
-                      _error!,
-                      style: const TextStyle(color: Colors.redAccent),
-                      textAlign: TextAlign.center,
-                    ),
-                  ],
-                  const SizedBox(height: 24),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 48,
-                    child: FilledButton(
-                      onPressed: _loading ? null : _login,
-                      child: _loading
-                          ? const SizedBox(
-                              height: 20,
-                              width: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Text('Login'),
-                    ),
-                  ),
-                ],
+      body: ResponsiveCardScaffold(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const ClipperBrandHeader(),
+            const SizedBox(height: 32),
+            TextField(
+              controller: _serverUrlController,
+              decoration: const InputDecoration(
+                labelText: 'Server URL',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.dns),
               ),
             ),
-          ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _passphraseController,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'Passphrase',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.lock),
+              ),
+              onSubmitted: (_) => _login(),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                _error!,
+                style: const TextStyle(color: Colors.redAccent),
+                textAlign: TextAlign.center,
+              ),
+            ],
+            const SizedBox(height: 24),
+            LoadingFilledButton(
+              loading: _loading,
+              onPressed: _login,
+              child: const Text('Login'),
+            ),
+          ],
         ),
       ),
     );

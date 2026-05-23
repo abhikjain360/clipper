@@ -7,7 +7,7 @@ use axum::{
 use chrono::Utc;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
-use crate::entity::session;
+use crate::entity::sessions;
 use crate::state::AppState;
 use clipper_core::crypto::sha256;
 
@@ -31,8 +31,8 @@ pub async fn auth_middleware(
     let token_hash = sha256(&token_bytes);
     let now = Utc::now().to_rfc3339();
 
-    let sess = session::Entity::find()
-        .filter(session::Column::TokenHash.eq(token_hash.to_vec()))
+    let sess = sessions::Entity::find()
+        .filter(sessions::Column::TokenHash.eq(token_hash.to_vec()))
         .one(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -44,7 +44,7 @@ pub async fn auth_middleware(
     }
 
     // Update last_seen_at
-    let mut active: session::ActiveModel = sess.clone().into();
+    let mut active: sessions::ActiveModel = sess.clone().into();
     active.last_seen_at = Set(now);
     let _ = active.update(state.db()).await;
 

@@ -11,7 +11,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::auth::AuthInfo;
-use crate::entity::{device, server_config, session};
+use crate::entity::{devices, server_config, sessions};
 use crate::rate_limit::RateLimiter;
 use crate::routes::error_response;
 use crate::state::AppState;
@@ -148,7 +148,7 @@ pub async fn login(
     let device_name = req.device_name.unwrap_or_else(|| "Unknown Device".into());
     let platform = req.platform.unwrap_or_else(|| "unknown".into());
 
-    let existing_device = device::Entity::find_by_id(&device_id)
+    let existing_device = devices::Entity::find_by_id(&device_id)
         .one(state.db())
         .await
         .map_err(|_| {
@@ -162,16 +162,16 @@ pub async fn login(
 
     if existing_device.is_some() {
         // Update only timestamps — use raw update
-        device::Entity::update_many()
+        devices::Entity::update_many()
             .col_expr(
-                device::Column::LastSeenAt,
+                devices::Column::LastSeenAt,
                 sea_orm::sea_query::Expr::value(&now),
             )
             .col_expr(
-                device::Column::UpdatedAt,
+                devices::Column::UpdatedAt,
                 sea_orm::sea_query::Expr::value(&now),
             )
-            .filter(device::Column::Id.eq(&device_id))
+            .filter(devices::Column::Id.eq(&device_id))
             .exec(state.db())
             .await
             .map_err(|_| {
@@ -183,7 +183,7 @@ pub async fn login(
                 )
             })?;
     } else {
-        let new_device = device::ActiveModel {
+        let new_device = devices::ActiveModel {
             id: Set(device_id.clone()),
             name: Set(device_name),
             platform: Set(platform),
@@ -213,7 +213,7 @@ pub async fn login(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let new_session = session::ActiveModel {
+    let new_session = sessions::ActiveModel {
         id: Set(session_id),
         token_hash: Set(token_hash.to_vec()),
         device_id: Set(device_id.clone()),
@@ -251,7 +251,7 @@ pub async fn logout(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
 ) -> Result<Json<OkResponse>, StatusCode> {
-    session::Entity::delete_by_id(&auth.session_id)
+    sessions::Entity::delete_by_id(&auth.session_id)
         .exec(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

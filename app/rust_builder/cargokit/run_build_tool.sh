@@ -55,11 +55,12 @@ fi
 # package directory. This should be good enough, as the build_tool package
 # itself is not meant to have any path dependencies.
 
-if [[ "$OSTYPE" == "darwin"* ]]; then
-  PACKAGE_HASH=$(ls -lTR "$BUILD_TOOL_PKG_DIR" | shasum)
-else
-  PACKAGE_HASH=$(ls -lR --full-time "$BUILD_TOOL_PKG_DIR" | shasum)
-fi
+PACKAGE_HASH=$(
+  find "$BUILD_TOOL_PKG_DIR" -type f -print \
+    | sort \
+    | while IFS= read -r file; do shasum "$file"; done \
+    | shasum
+)
 
 PACKAGE_HASH_FILE=".package_hash"
 

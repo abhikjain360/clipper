@@ -16,7 +16,7 @@ use tokio_util::io::ReaderStream;
 use tracing::info;
 
 use crate::auth::AuthInfo;
-use crate::entity::{event_log, file};
+use crate::entity::{event_log, files};
 use crate::routes::{error_response, validate_client_id};
 use crate::state::AppState;
 use crate::ws::WsBroadcast;
@@ -38,7 +38,7 @@ pub async fn init_upload(
     validate_client_id(&req.id)?;
     let blob_size = validate_blob_size(req.blob_size)?;
 
-    if file::Entity::find_by_id(&req.id)
+    if files::Entity::find_by_id(&req.id)
         .one(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
@@ -64,7 +64,7 @@ pub async fn init_upload(
 
     let blob_filename = format!("{}.bin", req.id);
 
-    let new_file = file::ActiveModel {
+    let new_file = files::ActiveModel {
         id: Set(req.id.clone()),
         blob_path: Set(blob_filename),
         meta_ciphertext: Set(meta_ciphertext),
@@ -98,7 +98,7 @@ pub async fn upload_blob(
     validate_client_id(&file_id)?;
 
     // Verify file exists and is pending
-    let existing = file::Entity::find_by_id(&file_id)
+    let existing = files::Entity::find_by_id(&file_id)
         .one(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
@@ -117,18 +117,18 @@ pub async fn upload_blob(
 
     let expected_size = validate_blob_size(existing.blob_size)?;
     let now = Utc::now().to_rfc3339();
-    let claimed = file::Entity::update_many()
+    let claimed = files::Entity::update_many()
         .col_expr(
-            file::Column::Status,
+            files::Column::Status,
             sea_orm::sea_query::Expr::value("uploading"),
         )
         .col_expr(
-            file::Column::UpdatedAt,
+            files::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         )
-        .filter(file::Column::Id.eq(&file_id))
-        .filter(file::Column::Status.eq("pending"))
-        .filter(file::Column::SourceDeviceId.eq(&auth.device_id))
+        .filter(files::Column::Id.eq(&file_id))
+        .filter(files::Column::Status.eq("pending"))
+        .filter(files::Column::SourceDeviceId.eq(&auth.device_id))
         .exec(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
@@ -235,17 +235,17 @@ pub async fn upload_blob(
     }
 
     let now = Utc::now().to_rfc3339();
-    let uploaded = file::Entity::update_many()
+    let uploaded = files::Entity::update_many()
         .col_expr(
-            file::Column::Status,
+            files::Column::Status,
             sea_orm::sea_query::Expr::value("uploaded"),
         )
         .col_expr(
-            file::Column::UpdatedAt,
+            files::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         )
-        .filter(file::Column::Id.eq(&file_id))
-        .filter(file::Column::Status.eq("uploading"))
+        .filter(files::Column::Id.eq(&file_id))
+        .filter(files::Column::Status.eq("uploading"))
         .exec(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
@@ -273,7 +273,7 @@ pub async fn complete_upload(
 
     validate_client_id(&file_id)?;
 
-    let existing = file::Entity::find_by_id(&file_id)
+    let existing = files::Entity::find_by_id(&file_id)
         .one(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
@@ -326,26 +326,26 @@ pub async fn complete_upload(
         .begin()
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
-    let updated = file::Entity::update_many()
+    let updated = files::Entity::update_many()
         .col_expr(
-            file::Column::Sha256Ciphertext,
+            files::Column::Sha256Ciphertext,
             sea_orm::sea_query::Expr::value(computed_hash.to_vec()),
         )
         .col_expr(
-            file::Column::BlobSize,
+            files::Column::BlobSize,
             sea_orm::sea_query::Expr::value(actual_size as i64),
         )
         .col_expr(
-            file::Column::Status,
+            files::Column::Status,
             sea_orm::sea_query::Expr::value("complete"),
         )
         .col_expr(
-            file::Column::UpdatedAt,
+            files::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now.clone()),
         )
-        .filter(file::Column::Id.eq(&file_id))
-        .filter(file::Column::Status.eq("uploaded"))
-        .filter(file::Column::SourceDeviceId.eq(&auth.device_id))
+        .filter(files::Column::Id.eq(&file_id))
+        .filter(files::Column::Status.eq("uploaded"))
+        .filter(files::Column::SourceDeviceId.eq(&auth.device_id))
         .exec(&txn)
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
@@ -407,12 +407,12 @@ pub async fn list_files(
     let b64 = &base64::engine::general_purpose::STANDARD;
     let limit = query.limit.unwrap_or(100).min(500);
 
-    let mut q = file::Entity::find()
-        .filter(file::Column::Status.eq("complete"))
-        .order_by(file::Column::CreatedAt, Order::Desc);
+    let mut q = files::Entity::find()
+        .filter(files::Column::Status.eq("complete"))
+        .order_by(files::Column::CreatedAt, Order::Desc);
 
     if let Some(before) = &query.before {
-        q = q.filter(file::Column::CreatedAt.lt(before.clone()));
+        q = q.filter(files::Column::CreatedAt.lt(before.clone()));
     }
 
     let items = q
@@ -421,7 +421,7 @@ pub async fn list_files(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let has_more = items.len() as u64 > limit;
-    let items: Vec<file::Model> = items.into_iter().take(limit as usize).collect();
+    let items: Vec<files::Model> = items.into_iter().take(limit as usize).collect();
 
     let result_items: Vec<FileListItem> = items
         .iter()
@@ -454,8 +454,8 @@ pub async fn download_blob(
 ) -> Result<Body, StatusCode> {
     validate_client_id(&file_id).map_err(|(status, _)| status)?;
 
-    let existing = file::Entity::find_by_id(&file_id)
-        .filter(file::Column::Status.eq("complete"))
+    let existing = files::Entity::find_by_id(&file_id)
+        .filter(files::Column::Status.eq("complete"))
         .one(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -477,7 +477,7 @@ pub async fn delete_file(
 ) -> Result<Json<OkResponse>, StatusCode> {
     validate_client_id(&file_id).map_err(|(status, _)| status)?;
 
-    let existing = file::Entity::find_by_id(&file_id)
+    let existing = files::Entity::find_by_id(&file_id)
         .one(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -491,7 +491,7 @@ pub async fn delete_file(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Delete DB record and log event atomically.
-    file::Entity::delete_by_id(&file_id)
+    files::Entity::delete_by_id(&file_id)
         .exec(&txn)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -532,14 +532,14 @@ pub async fn delete_file(
 
 async fn reset_file_status(state: &AppState, file_id: &str, from: &str, to: &str) {
     let now = Utc::now().to_rfc3339();
-    let _ = file::Entity::update_many()
-        .col_expr(file::Column::Status, sea_orm::sea_query::Expr::value(to))
+    let _ = files::Entity::update_many()
+        .col_expr(files::Column::Status, sea_orm::sea_query::Expr::value(to))
         .col_expr(
-            file::Column::UpdatedAt,
+            files::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         )
-        .filter(file::Column::Id.eq(file_id))
-        .filter(file::Column::Status.eq(from))
+        .filter(files::Column::Id.eq(file_id))
+        .filter(files::Column::Status.eq(from))
         .exec(state.db())
         .await;
 }
@@ -668,7 +668,7 @@ mod tests {
         .await
         .expect("init");
 
-        let file = file::Entity::find_by_id(id)
+        let file = files::Entity::find_by_id(id)
             .one(state.db())
             .await
             .expect("query")
@@ -781,7 +781,7 @@ mod tests {
         .await
         .expect("complete");
 
-        let file = file::Entity::find_by_id(id.clone())
+        let file = files::Entity::find_by_id(id.clone())
             .one(state.db())
             .await
             .expect("query")

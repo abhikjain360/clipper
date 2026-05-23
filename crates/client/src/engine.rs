@@ -80,9 +80,19 @@ impl SyncEngine {
         passphrase: &str,
         device_name: &str,
     ) -> Result<(), ClientError> {
+        self.login_with_platform(passphrase, device_name, "macos")
+            .await
+    }
+
+    pub async fn login_with_platform(
+        self: &Arc<Self>,
+        passphrase: &str,
+        device_name: &str,
+        platform: &str,
+    ) -> Result<(), ClientError> {
         let login_resp = {
             let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.login(passphrase, device_name, "macos").await?
+            api.login(passphrase, device_name, platform).await?
         };
 
         let enc_salt = B64

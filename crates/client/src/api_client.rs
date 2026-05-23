@@ -376,7 +376,7 @@ fn validate_server_url(base_url: &str) -> Result<(), ClientError> {
 
     match url.scheme() {
         "https" => Ok(()),
-        "http" if is_loopback_host(&url) => Ok(()),
+        "http" if is_loopback_host(&url) || is_android_emulator_host(&url) => Ok(()),
         "http" => Err(ClientError::Other(
             "Plain HTTP is only allowed for localhost servers".into(),
         )),
@@ -393,6 +393,15 @@ fn is_loopback_host(url: &Url) -> bool {
         Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
         None => false,
     }
+}
+
+fn is_android_emulator_host(url: &Url) -> bool {
+    matches!(
+        url.host(),
+        Some(url::Host::Ipv4(addr))
+            if addr == std::net::Ipv4Addr::new(10, 0, 2, 2)
+                || addr == std::net::Ipv4Addr::new(10, 0, 3, 2)
+    )
 }
 
 // ── Encryption helpers ──
@@ -507,6 +516,12 @@ mod tests {
         assert!(validate_server_url("http://127.0.0.1:8787").is_ok());
         assert!(validate_server_url("http://[::1]:8787").is_ok());
         assert!(validate_server_url("http://localhost:8787").is_ok());
+    }
+
+    #[test]
+    fn server_url_allows_android_emulator_host_http() {
+        assert!(validate_server_url("http://10.0.2.2:8787").is_ok());
+        assert!(validate_server_url("http://10.0.3.2:8787").is_ok());
     }
 
     #[test]

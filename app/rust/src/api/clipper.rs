@@ -132,7 +132,7 @@ pub async fn logout() -> anyhow::Result<()> {
 }
 
 pub async fn get_state() -> BridgeAppState {
-    runtime::current_state().into()
+    runtime::current_state().await.into()
 }
 
 pub async fn send_clipboard(text: String) -> anyhow::Result<()> {

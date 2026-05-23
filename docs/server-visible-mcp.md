@@ -4,6 +4,12 @@ Goal: let MCP/ChatGPT search and read only things user marks visible.
 
 Default stays private.
 
+Client boundary:
+
+- macOS app transitions go through the local daemon and shared Rust client engine.
+- Android app transitions go through the same Rust client engine in-process.
+- Platform UI code may request a visibility change, but only client-side code may decrypt private data before uploading a server-readable form.
+
 ## Visibility
 
 One column:
@@ -41,6 +47,10 @@ Invariant:
 - client encrypts locally
 - uploads encrypted form
 - server deletes readable storage and index rows
+
+Review note: both transitions must be implemented consistently across macOS and
+Android. The server must not be given private-mode plaintext as part of normal
+sync, bootstrap, list, download, or WebSocket flows.
 
 ## Files
 

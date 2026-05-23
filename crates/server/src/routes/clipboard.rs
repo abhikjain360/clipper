@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::info;
 
 use crate::auth::AuthInfo;
-use crate::entity::{clipboard_item, event_log};
+use crate::entity::{clipboard_items, event_log};
 use crate::routes::{error_response, validate_client_id};
 use crate::state::AppState;
 use crate::ws::WsBroadcast;
@@ -49,7 +49,7 @@ pub async fn upload(
         return Err(error_response(StatusCode::BAD_REQUEST, "SHA-256 mismatch"));
     }
 
-    if clipboard_item::Entity::find_by_id(&req.id)
+    if clipboard_items::Entity::find_by_id(&req.id)
         .one(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
@@ -98,7 +98,7 @@ pub async fn upload(
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
 
-    let item = clipboard_item::ActiveModel {
+    let item = clipboard_items::ActiveModel {
         id: Set(req.id.clone()),
         ciphertext_path: Set(filename),
         nonce: Set(nonce),
@@ -173,20 +173,20 @@ pub async fn list(
     let limit = query.limit.unwrap_or(100).min(500);
 
     let mut q =
-        clipboard_item::Entity::find().order_by(clipboard_item::Column::CreatedAt, Order::Desc);
+        clipboard_items::Entity::find().order_by(clipboard_items::Column::CreatedAt, Order::Desc);
 
     if let Some(before) = &query.before {
-        q = q.filter(clipboard_item::Column::CreatedAt.lt(before.clone()));
+        q = q.filter(clipboard_items::Column::CreatedAt.lt(before.clone()));
     }
 
-    let items: Vec<clipboard_item::Model> = q
+    let items: Vec<clipboard_items::Model> = q
         .all(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Take limit + 1 to determine if there are more
     let has_more = items.len() as u64 > limit;
-    let items: Vec<clipboard_item::Model> = items.into_iter().take(limit as usize).collect();
+    let items: Vec<clipboard_items::Model> = items.into_iter().take(limit as usize).collect();
 
     let mut result_items = Vec::new();
     for item in &items {
@@ -297,7 +297,7 @@ mod tests {
         .await
         .expect("upload");
 
-        let item = clipboard_item::Entity::find_by_id(id)
+        let item = clipboard_items::Entity::find_by_id(id)
             .one(state.db())
             .await
             .expect("query")

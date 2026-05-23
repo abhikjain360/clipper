@@ -1,115 +1,277 @@
 use sea_orm_migration::prelude::*;
 
+#[derive(DeriveMigrationName)]
 pub struct Migration;
-
-impl MigrationName for Migration {
-    fn name(&self) -> &str {
-        "m20260312_000001_create_tables"
-    }
-}
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // Use raw SQL for SQLite-specific CHECK constraints
-        let db = manager.get_connection();
+        manager
+            .create_table(
+                Table::create()
+                    .table(ServerConfig::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(ServerConfig::Id)
+                            .integer()
+                            .not_null()
+                            .primary_key()
+                            .check(Expr::col(ServerConfig::Id).eq(1)),
+                    )
+                    .col(ColumnDef::new(ServerConfig::AuthSalt).blob().not_null())
+                    .col(ColumnDef::new(ServerConfig::AuthHash).blob().not_null())
+                    .col(ColumnDef::new(ServerConfig::EncSalt).blob().not_null())
+                    .col(ColumnDef::new(ServerConfig::CreatedAt).text().not_null())
+                    .col(ColumnDef::new(ServerConfig::UpdatedAt).text().not_null())
+                    .to_owned(),
+            )
+            .await?;
 
-        db.execute_unprepared(
-            "CREATE TABLE IF NOT EXISTS server_config (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                auth_salt BLOB NOT NULL,
-                auth_hash BLOB NOT NULL,
-                enc_salt BLOB NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )",
-        )
-        .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(Sessions::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Sessions::Id)
+                            .text()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Sessions::TokenHash)
+                            .blob()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(ColumnDef::new(Sessions::DeviceId).text().not_null())
+                    .col(ColumnDef::new(Sessions::CreatedAt).text().not_null())
+                    .col(ColumnDef::new(Sessions::ExpiresAt).text().not_null())
+                    .col(ColumnDef::new(Sessions::LastSeenAt).text().not_null())
+                    .col(ColumnDef::new(Sessions::UserAgent).text())
+                    .col(ColumnDef::new(Sessions::IpAddr).text())
+                    .to_owned(),
+            )
+            .await?;
 
-        db.execute_unprepared(
-            "CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                token_hash BLOB NOT NULL UNIQUE,
-                device_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                last_seen_at TEXT NOT NULL,
-                user_agent TEXT,
-                ip_addr TEXT
-            )",
-        )
-        .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(ClipboardItems::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(ClipboardItems::Id)
+                            .text()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(ClipboardItems::CiphertextPath)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(ClipboardItems::Nonce).blob().not_null())
+                    .col(
+                        ColumnDef::new(ClipboardItems::CiphertextSize)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ClipboardItems::Sha256Ciphertext)
+                            .blob()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(ClipboardItems::CreatedAt).text().not_null())
+                    .col(ColumnDef::new(ClipboardItems::ExpiresAt).text().not_null())
+                    .col(
+                        ColumnDef::new(ClipboardItems::SourceDeviceId)
+                            .text()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
 
-        db.execute_unprepared(
-            "CREATE TABLE IF NOT EXISTS clipboard_items (
-                id TEXT PRIMARY KEY,
-                ciphertext_path TEXT NOT NULL,
-                nonce BLOB NOT NULL,
-                ciphertext_size INTEGER NOT NULL,
-                sha256_ciphertext BLOB NOT NULL,
-                created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                source_device_id TEXT NOT NULL
-            )",
-        )
-        .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(Files::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Files::Id)
+                            .text()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Files::BlobPath).text().not_null())
+                    .col(ColumnDef::new(Files::MetaCiphertext).blob().not_null())
+                    .col(ColumnDef::new(Files::MetaNonce).blob().not_null())
+                    .col(ColumnDef::new(Files::BlobNonce).blob().not_null())
+                    .col(ColumnDef::new(Files::BlobSize).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(Files::Sha256Ciphertext)
+                            .blob()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(Files::CreatedAt).text().not_null())
+                    .col(ColumnDef::new(Files::UpdatedAt).text().not_null())
+                    .col(ColumnDef::new(Files::SourceDeviceId).text().not_null())
+                    .col(
+                        ColumnDef::new(Files::Status)
+                            .text()
+                            .not_null()
+                            .default("pending"),
+                    )
+                    .to_owned(),
+            )
+            .await?;
 
-        db.execute_unprepared(
-            "CREATE TABLE IF NOT EXISTS files (
-                id TEXT PRIMARY KEY,
-                blob_path TEXT NOT NULL,
-                meta_ciphertext BLOB NOT NULL,
-                meta_nonce BLOB NOT NULL,
-                blob_nonce BLOB NOT NULL,
-                blob_size INTEGER NOT NULL,
-                sha256_ciphertext BLOB NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                source_device_id TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending'
-            )",
-        )
-        .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(Devices::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Devices::Id)
+                            .text()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Devices::Name).text().not_null())
+                    .col(ColumnDef::new(Devices::Platform).text().not_null())
+                    .col(ColumnDef::new(Devices::CreatedAt).text().not_null())
+                    .col(ColumnDef::new(Devices::UpdatedAt).text().not_null())
+                    .col(ColumnDef::new(Devices::LastSeenAt).text().not_null())
+                    .to_owned(),
+            )
+            .await?;
 
-        db.execute_unprepared(
-            "CREATE TABLE IF NOT EXISTS devices (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                platform TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                last_seen_at TEXT NOT NULL
-            )",
-        )
-        .await?;
-
-        db.execute_unprepared(
-            "CREATE TABLE IF NOT EXISTS event_log (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_type TEXT NOT NULL,
-                object_kind TEXT NOT NULL,
-                object_id TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )",
-        )
-        .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(EventLog::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(EventLog::Seq)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(EventLog::EventType).text().not_null())
+                    .col(ColumnDef::new(EventLog::ObjectKind).text().not_null())
+                    .col(ColumnDef::new(EventLog::ObjectId).text().not_null())
+                    .col(ColumnDef::new(EventLog::CreatedAt).text().not_null())
+                    .to_owned(),
+            )
+            .await?;
 
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let db = manager.get_connection();
-        db.execute_unprepared("DROP TABLE IF EXISTS event_log")
+        manager
+            .drop_table(Table::drop().table(EventLog::Table).if_exists().to_owned())
             .await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS devices")
+        manager
+            .drop_table(Table::drop().table(Devices::Table).if_exists().to_owned())
             .await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS files").await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS clipboard_items")
+        manager
+            .drop_table(Table::drop().table(Files::Table).if_exists().to_owned())
             .await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS sessions")
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(ClipboardItems::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS server_config")
+        manager
+            .drop_table(Table::drop().table(Sessions::Table).if_exists().to_owned())
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(ServerConfig::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         Ok(())
     }
+}
+
+#[derive(DeriveIden)]
+enum ServerConfig {
+    Table,
+    Id,
+    AuthSalt,
+    AuthHash,
+    EncSalt,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum Sessions {
+    Table,
+    Id,
+    TokenHash,
+    DeviceId,
+    CreatedAt,
+    ExpiresAt,
+    LastSeenAt,
+    UserAgent,
+    IpAddr,
+}
+
+#[derive(DeriveIden)]
+enum ClipboardItems {
+    Table,
+    Id,
+    CiphertextPath,
+    Nonce,
+    CiphertextSize,
+    Sha256Ciphertext,
+    CreatedAt,
+    ExpiresAt,
+    SourceDeviceId,
+}
+
+#[derive(DeriveIden)]
+enum Files {
+    Table,
+    Id,
+    BlobPath,
+    MetaCiphertext,
+    MetaNonce,
+    BlobNonce,
+    BlobSize,
+    Sha256Ciphertext,
+    CreatedAt,
+    UpdatedAt,
+    SourceDeviceId,
+    Status,
+}
+
+#[derive(DeriveIden)]
+enum Devices {
+    Table,
+    Id,
+    Name,
+    Platform,
+    CreatedAt,
+    UpdatedAt,
+    LastSeenAt,
+}
+
+#[derive(DeriveIden)]
+enum EventLog {
+    Table,
+    Seq,
+    EventType,
+    ObjectKind,
+    ObjectId,
+    CreatedAt,
 }

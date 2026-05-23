@@ -1,8 +1,8 @@
 # Backend Review Flow
 
 Use this document to rebuild server context before reviewing security-sensitive
-changes. The frontend, daemon, desktop app, and future mobile apps should be
-treated as untrusted clients.
+changes. The frontend, daemon, desktop app, Android app, and any future clients
+should be treated as untrusted clients.
 
 ## 1. Architecture Map
 
@@ -32,6 +32,21 @@ then send encrypted records and opaque metadata to the server.
   - defines the HTTP/WebSocket API contracts shared by server and clients.
 - `crates/client/src/api_client.rs`
   - is the reference client implementation and should be checked when route models or crypto flow change.
+- `crates/client/src/engine.rs`
+  - owns client-side auth completion, key derivation, encryption/decryption, HTTP/WebSocket sync, and decrypted in-memory state.
+- `app/rust/src/runtime.rs`
+  - selects the Flutter bridge runtime:
+    - macOS talks to the local `clipper-daemon` over a Unix socket;
+    - Android runs the shared Rust `SyncEngine` in-process and talks to the server directly.
+
+Current app client paths:
+
+- macOS Flutter app -> Rust FRB bridge -> local daemon -> `clipper-client` -> server.
+- Android Flutter app -> Rust FRB bridge -> in-process `clipper-client::SyncEngine` -> server.
+
+Android system integration, such as writing sensitive clipboard contents to the
+local OS clipboard, stays in Flutter/Kotlin through a `MethodChannel`. The Rust
+client should stay portable and should not need JNI for Android framework calls.
 
 SQLite stores durable metadata. The filesystem stores larger encrypted blobs:
 
@@ -68,6 +83,13 @@ Normal client login:
 4. Client finishes OPAQUE locally and sends `POST /api/auth/login` with challenge ID, OPAQUE credential finalization, and device info.
 5. Server consumes the single-use challenge, finishes OPAQUE, creates/updates the device row, and returns a bearer token.
 6. Client uses `Authorization: Bearer <token>` on private HTTP routes and WebSocket connections.
+
+Client runtime notes:
+
+- macOS login requests are sent to the daemon, which uses the shared Rust client engine.
+- Android login requests are handled by the Rust client engine inside the Flutter app process.
+- Both paths must produce the same server-facing OPAQUE, bearer-token, encryption, sync, and file/clipboard behavior.
+- Android emulator development uses `http://10.0.2.2:8787` for host loopback. Production and physical-device deployments should use HTTPS.
 
 Clipboard upload/list flow:
 
@@ -106,11 +128,13 @@ Cleanup flow:
 ## 3. Security Model To Rebuild Before Review
 
 - Identify which routes are public and which routes require `auth_middleware`.
+- Identify which client runtime path is affected: macOS daemon, Android in-process engine, or both.
 - Confirm what the server is allowed to know:
   - It may know device IDs, timestamps, ciphertext sizes, event IDs, upload status, encrypted metadata, and ciphertext hashes.
   - It must not receive plaintext clipboard contents, plaintext file bytes, plaintext file metadata, raw passphrases, or reusable client-side encryption keys.
 - Confirm whether the route handles attacker-controlled input from a client, even if authenticated.
 - Treat SQLite rows and blob filenames as security-sensitive because many routes convert DB values into filesystem paths.
+- Treat client-supplied `platform` and `device_name` values as display/provenance metadata only.
 
 ## 4. Authentication And Sessions
 
@@ -158,6 +182,7 @@ Review `clipper-core` and `clipper-client` when server API shapes change.
 
 - Clipboard text must be encrypted client-side before upload.
 - File metadata and file blobs must be encrypted separately client-side.
+- Android and macOS should share the same Rust encryption and sync path through `clipper-client`; platform-specific code should only handle local OS integration.
 - Nonces must be random and never reused with the same key.
 - Server responses must never include plaintext content.
 - Server-side logs and errors must not include decrypted data, passphrases, OPAQUE messages, or bearer tokens.

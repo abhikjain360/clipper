@@ -3133,6 +3133,7 @@ name = "rust_lib_clipper_app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clipper-client",
  "clipper-daemon-types",
  "dirs",
  "flutter_rust_bridge",

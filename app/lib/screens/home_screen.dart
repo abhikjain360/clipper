@@ -3,6 +3,13 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
 import '../services/secure_clipboard.dart';
 import '../src/rust/api/clipper.dart';
+import '../utils/file_helpers.dart';
+import '../utils/formatters.dart';
+import '../widgets/app_status.dart';
+import '../widgets/clipper_brand.dart';
+import '../widgets/connection_badge.dart';
+import '../widgets/loading_icon_button.dart';
+import '../widgets/sync_list_tile_card.dart';
 
 class HomeScreen extends StatefulWidget {
   final BridgeAppState state;
@@ -74,7 +81,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final dir = await FilePicker.platform.getDirectoryPath();
     if (dir == null) return;
 
-    final targetPath = p.join(dir, _safeDownloadFilename(filename));
+    final targetPath = p.join(dir, safeDownloadFilename(filename));
     try {
       await downloadFile(fileId: fileId, targetPath: targetPath);
       if (mounted) {
@@ -85,16 +92,6 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       _showError(e.toString());
     }
-  }
-
-  String _safeDownloadFilename(String filename) {
-    final name = p
-        .basename(filename)
-        .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '_');
-    if (name.isEmpty || name == '.' || name == '..') {
-      return 'download';
-    }
-    return name;
   }
 
   Future<void> _deleteFileConfirm(String fileId, String filename) async {
@@ -142,26 +139,15 @@ class _HomeScreenState extends State<HomeScreen> {
       length: 2,
       child: Scaffold(
         appBar: AppBar(
-          title: Row(
-            children: [
-              const Icon(Icons.content_paste_rounded, color: Colors.blue),
-              const SizedBox(width: 8),
-              const Text('Clipper'),
-              const SizedBox(width: 12),
-              _connectionBadge(state.connectionStatus),
-            ],
+          title: ClipperAppTitle(
+            trailing: ConnectionBadge(status: state.connectionStatus),
           ),
           actions: [
-            IconButton(
-              icon: _refreshing
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.refresh),
-              onPressed: _refreshing ? null : _refresh,
+            LoadingIconButton(
+              loading: _refreshing,
+              icon: Icons.refresh,
               tooltip: 'Refresh',
+              onPressed: _refresh,
             ),
             IconButton(
               icon: const Icon(Icons.logout),
@@ -183,46 +169,12 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _connectionBadge(BridgeConnectionStatus status) {
-    Color color;
-    String label;
-    switch (status) {
-      case BridgeConnectionStatus.connected:
-        color = Colors.green;
-        label = 'Connected';
-      case BridgeConnectionStatus.connecting:
-        color = Colors.orange;
-        label = 'Connecting...';
-      default:
-        color = Colors.red;
-        label = 'Disconnected';
-    }
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withAlpha(40),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withAlpha(100)),
-      ),
-      child: Text(label, style: TextStyle(fontSize: 12, color: color)),
-    );
-  }
-
   Widget _buildClipboardTab(BridgeAppState state) {
     final items = state.clipboardItems;
     if (items.isEmpty) {
-      return const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.content_paste_off, size: 64, color: Colors.white24),
-            SizedBox(height: 16),
-            Text(
-              'No clipboard items yet',
-              style: TextStyle(color: Colors.white38),
-            ),
-          ],
-        ),
+      return const AppStatus(
+        icon: Icons.content_paste_off,
+        title: 'No clipboard items yet',
       );
     }
 
@@ -231,26 +183,23 @@ class _HomeScreenState extends State<HomeScreen> {
       itemCount: items.length,
       itemBuilder: (context, index) {
         final item = items[index];
-        return Card(
-          margin: const EdgeInsets.symmetric(vertical: 4),
-          child: ListTile(
-            title: Text(
-              item.text,
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-            ),
-            subtitle: Text(
-              _formatTimestamp(item.createdAt),
-              style: const TextStyle(fontSize: 11, color: Colors.white38),
-            ),
-            trailing: IconButton(
-              icon: const Icon(Icons.copy, size: 20),
-              onPressed: () => _copyToClipboard(item.id),
-              tooltip: 'Copy to clipboard',
-            ),
-            onTap: () => _copyToClipboard(item.id),
+        return SyncListTileCard(
+          title: Text(
+            item.text,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
           ),
+          subtitle: Text(
+            formatRelativeTimestamp(item.createdAt),
+            style: const TextStyle(fontSize: 11, color: Colors.white38),
+          ),
+          trailing: IconButton(
+            icon: const Icon(Icons.copy, size: 20),
+            onPressed: () => _copyToClipboard(item.id),
+            tooltip: 'Copy to clipboard',
+          ),
+          onTap: () => _copyToClipboard(item.id),
         );
       },
     );
@@ -274,16 +223,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         if (files.isEmpty)
           const Expanded(
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.folder_off, size: 64, color: Colors.white24),
-                  SizedBox(height: 16),
-                  Text('No files yet', style: TextStyle(color: Colors.white38)),
-                ],
-              ),
-            ),
+            child: AppStatus(icon: Icons.folder_off, title: 'No files yet'),
           )
         else
           Expanded(
@@ -292,39 +232,35 @@ class _HomeScreenState extends State<HomeScreen> {
               itemCount: files.length,
               itemBuilder: (context, index) {
                 final file = files[index];
-                return Card(
-                  margin: const EdgeInsets.symmetric(vertical: 4),
-                  child: ListTile(
-                    leading: Icon(_fileIcon(file.mimeType), color: Colors.blue),
-                    title: Text(file.filename),
-                    subtitle: Text(
-                      '${_formatSize(file.blobSize)} - ${_formatTimestamp(file.createdAt)}',
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: Colors.white38,
+                return SyncListTileCard(
+                  leading: Icon(
+                    fileIconForMimeType(file.mimeType),
+                    color: Colors.blue,
+                  ),
+                  title: Text(file.filename),
+                  subtitle: Text(
+                    '${formatByteSize(file.blobSize)} - ${formatRelativeTimestamp(file.createdAt)}',
+                    style: const TextStyle(fontSize: 11, color: Colors.white38),
+                  ),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.download, size: 20),
+                        onPressed: () => _downloadFile(file.id, file.filename),
+                        tooltip: 'Download',
                       ),
-                    ),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.download, size: 20),
-                          onPressed: () =>
-                              _downloadFile(file.id, file.filename),
-                          tooltip: 'Download',
+                      IconButton(
+                        icon: const Icon(
+                          Icons.delete,
+                          size: 20,
+                          color: Colors.redAccent,
                         ),
-                        IconButton(
-                          icon: const Icon(
-                            Icons.delete,
-                            size: 20,
-                            color: Colors.redAccent,
-                          ),
-                          onPressed: () =>
-                              _deleteFileConfirm(file.id, file.filename),
-                          tooltip: 'Delete',
-                        ),
-                      ],
-                    ),
+                        onPressed: () =>
+                            _deleteFileConfirm(file.id, file.filename),
+                        tooltip: 'Delete',
+                      ),
+                    ],
                   ),
                 );
               },
@@ -332,44 +268,5 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
       ],
     );
-  }
-
-  IconData _fileIcon(String mimeType) {
-    if (mimeType.startsWith('image/')) return Icons.image;
-    if (mimeType.startsWith('video/')) return Icons.videocam;
-    if (mimeType.startsWith('audio/')) return Icons.audiotrack;
-    if (mimeType.startsWith('text/')) return Icons.description;
-    if (mimeType.contains('pdf')) return Icons.picture_as_pdf;
-    if (mimeType.contains('zip') ||
-        mimeType.contains('tar') ||
-        mimeType.contains('gz')) {
-      return Icons.archive;
-    }
-    return Icons.insert_drive_file;
-  }
-
-  String _formatSize(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
-  }
-
-  String _formatTimestamp(String rfc3339) {
-    try {
-      final dt = DateTime.parse(rfc3339).toLocal();
-      final now = DateTime.now();
-      final diff = now.difference(dt);
-
-      if (diff.inMinutes < 1) return 'Just now';
-      if (diff.inHours < 1) return '${diff.inMinutes}m ago';
-      if (diff.inDays < 1) return '${diff.inHours}h ago';
-      if (diff.inDays < 7) return '${diff.inDays}d ago';
-      return '${dt.month}/${dt.day}/${dt.year}';
-    } catch (_) {
-      return rfc3339;
-    }
   }
 }

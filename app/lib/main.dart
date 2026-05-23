@@ -3,6 +3,7 @@ import 'src/rust/api/clipper.dart';
 import 'src/rust/frb_generated.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
+import 'widgets/app_status.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -24,9 +25,7 @@ class ClipperApp extends StatelessWidget {
         colorSchemeSeed: Colors.blue,
         useMaterial3: true,
         scaffoldBackgroundColor: const Color(0xFF121212),
-        cardTheme: const CardThemeData(
-          color: Color(0xFF1E1E1E),
-        ),
+        cardTheme: const CardThemeData(color: Color(0xFF1E1E1E)),
         appBarTheme: const AppBarTheme(
           backgroundColor: Color(0xFF1E1E1E),
           elevation: 0,
@@ -83,8 +82,7 @@ class _AppRootState extends State<AppRoot> {
         final state = await getState();
         if (!mounted) return;
 
-        if (state.connectionStatus ==
-            BridgeConnectionStatus.daemonNotRunning) {
+        if (state.connectionStatus == BridgeConnectionStatus.daemonNotRunning) {
           setState(() {
             _state = null;
             _connectError = 'Daemon stopped';
@@ -104,32 +102,25 @@ class _AppRootState extends State<AppRoot> {
   Widget build(BuildContext context) {
     if (!_isDaemonConnected) {
       return Scaffold(
-        body: Center(
-          child: Column(
+        body: AppStatus(
+          icon: Icons.cloud_off,
+          iconColor: Colors.grey,
+          title: 'Daemon not running',
+          titleStyle: const TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+          ),
+          message: _connectError,
+          footer: const Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.cloud_off, size: 64, color: Colors.grey),
-              const SizedBox(height: 16),
-              const Text(
-                'Daemon not running',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-              if (_connectError != null) ...[
-                const SizedBox(height: 8),
-                Text(
-                  _connectError!,
-                  style: const TextStyle(color: Colors.grey),
-                  textAlign: TextAlign.center,
-                ),
-              ],
-              const SizedBox(height: 24),
-              const SizedBox(
+              SizedBox(
                 width: 24,
                 height: 24,
                 child: CircularProgressIndicator(strokeWidth: 2),
               ),
-              const SizedBox(height: 8),
-              const Text(
+              SizedBox(height: 8),
+              Text(
                 'Reconnecting...',
                 style: TextStyle(color: Colors.grey, fontSize: 12),
               ),

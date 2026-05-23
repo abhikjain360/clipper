@@ -2,7 +2,7 @@ use chrono::{Duration, Utc};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tracing::info;
 
-use crate::entity::{clipboard_item, event_log, file};
+use crate::entity::{clipboard_items, event_log, files};
 use crate::state::AppState;
 
 /// Run periodic cleanup tasks.
@@ -26,8 +26,8 @@ pub async fn run_cleanup_loop(state: AppState) {
 async fn cleanup_expired_clipboard(state: &AppState) -> anyhow::Result<()> {
     let now = Utc::now().to_rfc3339();
 
-    let expired = clipboard_item::Entity::find()
-        .filter(clipboard_item::Column::ExpiresAt.lt(&now))
+    let expired = clipboard_items::Entity::find()
+        .filter(clipboard_items::Column::ExpiresAt.lt(&now))
         .all(state.db())
         .await?;
 
@@ -38,8 +38,8 @@ async fn cleanup_expired_clipboard(state: &AppState) -> anyhow::Result<()> {
     }
 
     if count > 0 {
-        clipboard_item::Entity::delete_many()
-            .filter(clipboard_item::Column::ExpiresAt.lt(&now))
+        clipboard_items::Entity::delete_many()
+            .filter(clipboard_items::Column::ExpiresAt.lt(&now))
             .exec(state.db())
             .await?;
         info!(count, "Cleaned up expired clipboard items");
@@ -70,9 +70,9 @@ async fn cleanup_orphan_uploads(state: &AppState) -> anyhow::Result<()> {
     // Delete incomplete uploads stuck before completion for more than 1 hour.
     let cutoff = (Utc::now() - Duration::hours(1)).to_rfc3339();
 
-    let orphans = file::Entity::find()
-        .filter(file::Column::Status.ne("complete"))
-        .filter(file::Column::CreatedAt.lt(&cutoff))
+    let orphans = files::Entity::find()
+        .filter(files::Column::Status.ne("complete"))
+        .filter(files::Column::CreatedAt.lt(&cutoff))
         .all(state.db())
         .await?;
 
@@ -83,9 +83,9 @@ async fn cleanup_orphan_uploads(state: &AppState) -> anyhow::Result<()> {
     }
 
     if count > 0 {
-        file::Entity::delete_many()
-            .filter(file::Column::Status.ne("complete"))
-            .filter(file::Column::CreatedAt.lt(&cutoff))
+        files::Entity::delete_many()
+            .filter(files::Column::Status.ne("complete"))
+            .filter(files::Column::CreatedAt.lt(&cutoff))
             .exec(state.db())
             .await?;
         info!(count, "Cleaned up orphan file uploads");

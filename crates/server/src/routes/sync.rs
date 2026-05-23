@@ -7,7 +7,7 @@ use base64::Engine;
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
 
 use crate::auth::AuthInfo;
-use crate::entity::{clipboard_item, device, event_log, file, server_config};
+use crate::entity::{clipboard_items, devices, event_log, files, server_config};
 use crate::state::AppState;
 use clipper_core::crypto::Argon2Params;
 use clipper_core::models::{
@@ -21,7 +21,7 @@ pub async fn bootstrap(
     let b64 = &base64::engine::general_purpose::STANDARD;
 
     // Get device info
-    let dev = device::Entity::find_by_id(&auth.device_id)
+    let dev = devices::Entity::find_by_id(&auth.device_id)
         .one(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -35,13 +35,13 @@ pub async fn bootstrap(
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Recent clipboard items (last 100)
-    let clips = clipboard_item::Entity::find()
-        .order_by(clipboard_item::Column::CreatedAt, Order::Desc)
+    let clips = clipboard_items::Entity::find()
+        .order_by(clipboard_items::Column::CreatedAt, Order::Desc)
         .all(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let clips: Vec<clipboard_item::Model> = clips.into_iter().take(100).collect();
+    let clips: Vec<clipboard_items::Model> = clips.into_iter().take(100).collect();
 
     let mut clipboard_items = Vec::new();
     for item in &clips {
@@ -58,14 +58,14 @@ pub async fn bootstrap(
     }
 
     // Recent files (last 100)
-    let files = file::Entity::find()
-        .filter(file::Column::Status.eq("complete"))
-        .order_by(file::Column::CreatedAt, Order::Desc)
+    let files = files::Entity::find()
+        .filter(files::Column::Status.eq("complete"))
+        .order_by(files::Column::CreatedAt, Order::Desc)
         .all(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let files: Vec<file::Model> = files.into_iter().take(100).collect();
+    let files: Vec<files::Model> = files.into_iter().take(100).collect();
     let file_items: Vec<FileListItem> = files
         .iter()
         .map(|f| FileListItem {
