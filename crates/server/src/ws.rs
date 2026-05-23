@@ -36,7 +36,7 @@ pub async fn ws_handler(
 async fn handle_socket(mut socket: WebSocket, state: AppState, auth: Option<AuthInfo>) {
     let device_id = auth
         .as_ref()
-        .map(|a| a.device_id.clone())
+        .map(|a| a.device_id.to_string())
         .unwrap_or_else(|| "unknown".to_string());
     info!(device_id = %device_id, "WebSocket connected");
 
@@ -83,10 +83,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: Option<Auth
             } else {
                 for evt in events {
                     let msg = WsServerMessage::Event {
-                        seq: evt.seq,
+                        seq: i64::from(evt.seq),
                         event_type: evt.event_type,
                         object_kind: evt.object_kind,
-                        object_id: evt.object_id,
+                        object_id: evt.object_id.to_string(),
                         created_at: evt.created_at,
                     };
                     if socket
@@ -155,13 +155,19 @@ async fn get_latest_seq(state: &AppState) -> Result<i64, sea_orm::DbErr> {
         .order_by(event_log::Column::Seq, Order::Desc)
         .one(state.db())
         .await?;
-    Ok(row.map(|r| r.seq).unwrap_or(0))
+    Ok(row.map(|r| i64::from(r.seq)).unwrap_or(0))
 }
 
 async fn get_events_since(
     state: &AppState,
     last_seq: i64,
 ) -> Result<Vec<event_log::Model>, sea_orm::DbErr> {
+    let last_seq = match i32::try_from(last_seq) {
+        Ok(seq) => seq,
+        Err(_) if last_seq.is_negative() => i32::MIN,
+        Err(_) => i32::MAX,
+    };
+
     event_log::Entity::find()
         .filter(event_log::Column::Seq.gt(last_seq))
         .order_by_asc(event_log::Column::Seq)
@@ -172,7 +178,7 @@ async fn get_events_since(
 fn replay_is_contiguous(last_seq: i64, events: &[event_log::Model]) -> bool {
     events
         .first()
-        .is_some_and(|event| event.seq == last_seq.saturating_add(1))
+        .is_some_and(|event| i64::from(event.seq) == last_seq.saturating_add(1))
 }
 
 #[cfg(test)]
@@ -181,10 +187,10 @@ mod tests {
 
     fn event(seq: i64) -> event_log::Model {
         event_log::Model {
-            seq,
+            seq: i32::try_from(seq).expect("test seq fits i32"),
             event_type: "file.created".into(),
             object_kind: "file".into(),
-            object_id: "00000000-0000-0000-0000-000000000000".into(),
+            object_id: uuid::Uuid::nil(),
             created_at: "2026-01-01T00:00:00Z".into(),
         }
     }

@@ -5,9 +5,9 @@ use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
 #[sea_orm(table_name = "files")]
 pub struct Model {
-    #[sea_orm(primary_key, auto_increment = false, column_type = "Text")]
-    pub id: String,
-    #[sea_orm(column_type = "Text")]
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub id: Uuid,
+    #[sea_orm(column_type = "Text", unique)]
     pub blob_path: String,
     #[sea_orm(column_type = "Blob")]
     pub meta_ciphertext: Vec<u8>,
@@ -22,13 +22,27 @@ pub struct Model {
     pub created_at: String,
     #[sea_orm(column_type = "Text")]
     pub updated_at: String,
-    #[sea_orm(column_type = "Text")]
-    pub source_device_id: String,
+    pub source_device_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub status: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
+pub enum Relation {
+    #[sea_orm(
+        belongs_to = "super::devices::Entity",
+        from = "Column::SourceDeviceId",
+        to = "super::devices::Column::Id",
+        on_update = "Cascade",
+        on_delete = "Restrict"
+    )]
+    Devices,
+}
+
+impl Related<super::devices::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Devices.def()
+    }
+}
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -20,10 +20,10 @@ pub(crate) fn error_response(
     )
 }
 
-pub(crate) fn validate_client_id(id: &str) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    if id.len() == 36 && Uuid::parse_str(id).is_ok() {
-        Ok(())
-    } else {
-        Err(error_response(StatusCode::BAD_REQUEST, "Invalid id"))
+pub(crate) fn validate_client_id(id: &str) -> Result<Uuid, (StatusCode, Json<ErrorResponse>)> {
+    if id.len() != 36 {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Invalid id"));
     }
+
+    Uuid::parse_str(id).map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid id"))
 }

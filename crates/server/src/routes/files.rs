@@ -35,10 +35,10 @@ pub async fn init_upload(
     let b64 = &base64::engine::general_purpose::STANDARD;
     let now = Utc::now().to_rfc3339();
 
-    validate_client_id(&req.id)?;
+    let file_uuid = validate_client_id(&req.id)?;
     let blob_size = validate_blob_size(req.blob_size)?;
 
-    if files::Entity::find_by_id(&req.id)
+    if files::Entity::find_by_id(file_uuid)
         .one(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
@@ -65,7 +65,7 @@ pub async fn init_upload(
     let blob_filename = format!("{}.bin", req.id);
 
     let new_file = files::ActiveModel {
-        id: Set(req.id.clone()),
+        id: Set(file_uuid),
         blob_path: Set(blob_filename),
         meta_ciphertext: Set(meta_ciphertext),
         meta_nonce: Set(meta_nonce),
@@ -74,7 +74,7 @@ pub async fn init_upload(
         sha256_ciphertext: Set(vec![]), // filled on complete
         created_at: Set(now.clone()),
         updated_at: Set(now),
-        source_device_id: Set(auth.device_id.clone()),
+        source_device_id: Set(auth.device_id),
         status: Set("pending".into()),
     };
     new_file
@@ -95,10 +95,10 @@ pub async fn upload_blob(
     Path(file_id): Path<String>,
     body: Body,
 ) -> Result<Json<OkResponse>, (StatusCode, Json<ErrorResponse>)> {
-    validate_client_id(&file_id)?;
+    let file_uuid = validate_client_id(&file_id)?;
 
     // Verify file exists and is pending
-    let existing = files::Entity::find_by_id(&file_id)
+    let existing = files::Entity::find_by_id(file_uuid)
         .one(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
@@ -126,9 +126,9 @@ pub async fn upload_blob(
             files::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         )
-        .filter(files::Column::Id.eq(&file_id))
+        .filter(files::Column::Id.eq(file_uuid))
         .filter(files::Column::Status.eq("pending"))
-        .filter(files::Column::SourceDeviceId.eq(&auth.device_id))
+        .filter(files::Column::SourceDeviceId.eq(auth.device_id))
         .exec(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
@@ -143,7 +143,7 @@ pub async fn upload_blob(
     // Stream body to disk
     let files_dir = state.files_dir();
     if tokio::fs::create_dir_all(&files_dir).await.is_err() {
-        reset_file_status(&state, &file_id, "uploading", "pending").await;
+        reset_file_status(&state, file_uuid, "uploading", "pending").await;
         return Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Storage error",
@@ -163,7 +163,7 @@ pub async fn upload_blob(
     {
         Ok(file) => file,
         Err(_) => {
-            reset_file_status(&state, &file_id, "uploading", "pending").await;
+            reset_file_status(&state, file_uuid, "uploading", "pending").await;
             return Err(error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Storage error",
@@ -180,7 +180,7 @@ pub async fn upload_blob(
             Err(_) => {
                 drop(out_file);
                 let _ = tokio::fs::remove_file(&tmp_path).await;
-                reset_file_status(&state, &file_id, "uploading", "pending").await;
+                reset_file_status(&state, file_uuid, "uploading", "pending").await;
                 return Err(error_response(StatusCode::BAD_REQUEST, "Stream error"));
             }
         };
@@ -188,7 +188,7 @@ pub async fn upload_blob(
         if total_size > expected_size {
             drop(out_file);
             let _ = tokio::fs::remove_file(&tmp_path).await;
-            reset_file_status(&state, &file_id, "uploading", "pending").await;
+            reset_file_status(&state, file_uuid, "uploading", "pending").await;
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
                 "Blob size does not match initialized size",
@@ -197,7 +197,7 @@ pub async fn upload_blob(
         if out_file.write_all(&data).await.is_err() {
             drop(out_file);
             let _ = tokio::fs::remove_file(&tmp_path).await;
-            reset_file_status(&state, &file_id, "uploading", "pending").await;
+            reset_file_status(&state, file_uuid, "uploading", "pending").await;
             return Err(error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Write error",
@@ -207,7 +207,7 @@ pub async fn upload_blob(
     if out_file.flush().await.is_err() {
         drop(out_file);
         let _ = tokio::fs::remove_file(&tmp_path).await;
-        reset_file_status(&state, &file_id, "uploading", "pending").await;
+        reset_file_status(&state, file_uuid, "uploading", "pending").await;
         return Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Flush error",
@@ -217,7 +217,7 @@ pub async fn upload_blob(
 
     if total_size != expected_size {
         let _ = tokio::fs::remove_file(&tmp_path).await;
-        reset_file_status(&state, &file_id, "uploading", "pending").await;
+        reset_file_status(&state, file_uuid, "uploading", "pending").await;
         return Err(error_response(
             StatusCode::BAD_REQUEST,
             "Blob size does not match initialized size",
@@ -227,7 +227,7 @@ pub async fn upload_blob(
     let _ = tokio::fs::remove_file(&path).await;
     if tokio::fs::rename(&tmp_path, &path).await.is_err() {
         let _ = tokio::fs::remove_file(&tmp_path).await;
-        reset_file_status(&state, &file_id, "uploading", "pending").await;
+        reset_file_status(&state, file_uuid, "uploading", "pending").await;
         return Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Storage error",
@@ -244,7 +244,7 @@ pub async fn upload_blob(
             files::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         )
-        .filter(files::Column::Id.eq(&file_id))
+        .filter(files::Column::Id.eq(file_uuid))
         .filter(files::Column::Status.eq("uploading"))
         .exec(state.db())
         .await
@@ -271,9 +271,9 @@ pub async fn complete_upload(
 ) -> Result<Json<OkResponse>, (StatusCode, Json<ErrorResponse>)> {
     let b64 = &base64::engine::general_purpose::STANDARD;
 
-    validate_client_id(&file_id)?;
+    let file_uuid = validate_client_id(&file_id)?;
 
-    let existing = files::Entity::find_by_id(&file_id)
+    let existing = files::Entity::find_by_id(file_uuid)
         .one(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
@@ -305,14 +305,14 @@ pub async fn complete_upload(
     if computed_hash.as_slice() != provided_hash.as_slice() {
         // Delete the corrupt blob
         let _ = tokio::fs::remove_file(&blob_path).await;
-        reset_file_status(&state, &file_id, "uploaded", "pending").await;
+        reset_file_status(&state, file_uuid, "uploaded", "pending").await;
         return Err(error_response(StatusCode::BAD_REQUEST, "SHA-256 mismatch"));
     }
 
     let client_size = validate_blob_size(req.blob_size)?;
     if actual_size != expected_size || client_size != expected_size {
         let _ = tokio::fs::remove_file(&blob_path).await;
-        reset_file_status(&state, &file_id, "uploaded", "pending").await;
+        reset_file_status(&state, file_uuid, "uploaded", "pending").await;
         return Err(error_response(
             StatusCode::BAD_REQUEST,
             "Blob size does not match initialized size",
@@ -343,9 +343,9 @@ pub async fn complete_upload(
             files::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now.clone()),
         )
-        .filter(files::Column::Id.eq(&file_id))
+        .filter(files::Column::Id.eq(file_uuid))
         .filter(files::Column::Status.eq("uploaded"))
-        .filter(files::Column::SourceDeviceId.eq(&auth.device_id))
+        .filter(files::Column::SourceDeviceId.eq(auth.device_id))
         .exec(&txn)
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
@@ -363,7 +363,7 @@ pub async fn complete_upload(
         seq: Default::default(),
         event_type: Set("file.created".into()),
         object_kind: Set("file".into()),
-        object_id: Set(file_id.clone()),
+        object_id: Set(file_uuid),
         created_at: Set(now.clone()),
     };
     let inserted = match event.insert(&txn).await {
@@ -382,7 +382,7 @@ pub async fn complete_upload(
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
 
     let _ = state.ws_tx().send(WsBroadcast {
-        seq: inserted.seq,
+        seq: i64::from(inserted.seq),
         event_type: "file.created".into(),
         object_kind: "file".into(),
         object_id: file_id.clone(),
@@ -426,13 +426,13 @@ pub async fn list_files(
     let result_items: Vec<FileListItem> = items
         .iter()
         .map(|f| FileListItem {
-            id: f.id.clone(),
+            id: f.id.to_string(),
             meta_nonce_b64: b64.encode(&f.meta_nonce),
             meta_ciphertext_b64: b64.encode(&f.meta_ciphertext),
             blob_nonce_b64: b64.encode(&f.blob_nonce),
             blob_size: f.blob_size,
             created_at: f.created_at.clone(),
-            source_device_id: f.source_device_id.clone(),
+            source_device_id: f.source_device_id.to_string(),
         })
         .collect();
 
@@ -452,9 +452,9 @@ pub async fn download_blob(
     State(state): State<AppState>,
     Path(file_id): Path<String>,
 ) -> Result<Body, StatusCode> {
-    validate_client_id(&file_id).map_err(|(status, _)| status)?;
+    let file_uuid = validate_client_id(&file_id).map_err(|(status, _)| status)?;
 
-    let existing = files::Entity::find_by_id(&file_id)
+    let existing = files::Entity::find_by_id(file_uuid)
         .filter(files::Column::Status.eq("complete"))
         .one(state.db())
         .await
@@ -475,9 +475,9 @@ pub async fn delete_file(
     Extension(auth): Extension<AuthInfo>,
     Path(file_id): Path<String>,
 ) -> Result<Json<OkResponse>, StatusCode> {
-    validate_client_id(&file_id).map_err(|(status, _)| status)?;
+    let file_uuid = validate_client_id(&file_id).map_err(|(status, _)| status)?;
 
-    let existing = files::Entity::find_by_id(&file_id)
+    let existing = files::Entity::find_by_id(file_uuid)
         .one(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -491,7 +491,7 @@ pub async fn delete_file(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Delete DB record and log event atomically.
-    files::Entity::delete_by_id(&file_id)
+    files::Entity::delete_by_id(file_uuid)
         .exec(&txn)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -500,7 +500,7 @@ pub async fn delete_file(
         seq: Default::default(),
         event_type: Set("file.deleted".into()),
         object_kind: Set("file".into()),
-        object_id: Set(file_id.clone()),
+        object_id: Set(file_uuid),
         created_at: Set(now.clone()),
     };
     let inserted = match event.insert(&txn).await {
@@ -518,7 +518,7 @@ pub async fn delete_file(
     let _ = tokio::fs::remove_file(&path).await;
 
     let _ = state.ws_tx().send(WsBroadcast {
-        seq: inserted.seq,
+        seq: i64::from(inserted.seq),
         event_type: "file.deleted".into(),
         object_kind: "file".into(),
         object_id: file_id.clone(),
@@ -530,7 +530,7 @@ pub async fn delete_file(
     Ok(Json(OkResponse { ok: true }))
 }
 
-async fn reset_file_status(state: &AppState, file_id: &str, from: &str, to: &str) {
+async fn reset_file_status(state: &AppState, file_id: uuid::Uuid, from: &str, to: &str) {
     let now = Utc::now().to_rfc3339();
     let _ = files::Entity::update_many()
         .col_expr(files::Column::Status, sea_orm::sea_query::Expr::value(to))
@@ -582,11 +582,12 @@ async fn sha256_file(path: &std::path::Path) -> std::io::Result<([u8; 32], u64)>
 mod tests {
     use super::*;
     use base64::Engine;
-    use sea_orm::{Database, EntityTrait};
+    use sea_orm::{ActiveModelTrait, Database, EntityTrait, Set};
     use sea_orm_migration::MigratorTrait;
     use tempfile::TempDir;
     use uuid::Uuid;
 
+    use crate::entity::devices;
     use crate::migration;
 
     const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -598,11 +599,26 @@ mod tests {
         (AppState::new(db, data_dir.path().to_path_buf()), data_dir)
     }
 
-    fn auth(device_id: &str) -> AuthInfo {
+    fn auth(device_id: Uuid) -> AuthInfo {
         AuthInfo {
-            session_id: "session-id".into(),
-            device_id: device_id.into(),
+            session_id: Uuid::new_v4(),
+            device_id,
         }
+    }
+
+    async fn insert_device(state: &AppState, id: Uuid) {
+        let now = Utc::now().to_rfc3339();
+        devices::ActiveModel {
+            id: Set(id),
+            name: Set("test-device".into()),
+            platform: Set("test".into()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            last_seen_at: Set(now),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert device");
     }
 
     fn init_request(id: String, blob_size: i64, source_device_id: &str) -> FileInitRequest {
@@ -625,7 +641,7 @@ mod tests {
 
         let result = init_upload(
             State(state),
-            Extension(auth("device-a")),
+            Extension(auth(Uuid::new_v4())),
             Json(init_request("../escape".into(), 3, "device-a")),
         )
         .await;
@@ -644,7 +660,7 @@ mod tests {
 
         let result = init_upload(
             State(state),
-            Extension(auth("device-a")),
+            Extension(auth(Uuid::new_v4())),
             Json(init_request(id, MAX_FILE_BLOB_BYTES as i64 + 1, "device-a")),
         )
         .await;
@@ -658,12 +674,14 @@ mod tests {
     #[tokio::test]
     async fn init_uses_authenticated_device_as_source() {
         let (state, _data_dir) = test_state().await;
-        let id = Uuid::new_v4().to_string();
+        let device_auth = Uuid::new_v4();
+        insert_device(&state, device_auth).await;
+        let id = Uuid::new_v4();
 
         let _ = init_upload(
             State(state.clone()),
-            Extension(auth("device-auth")),
-            Json(init_request(id.clone(), 3, "device-spoof")),
+            Extension(auth(device_auth)),
+            Json(init_request(id.to_string(), 3, "device-spoof")),
         )
         .await
         .expect("init");
@@ -673,7 +691,7 @@ mod tests {
             .await
             .expect("query")
             .expect("file");
-        assert_eq!(file.source_device_id, "device-auth");
+        assert_eq!(file.source_device_id, device_auth);
     }
 
     // This uploads a body whose byte count does not match the init metadata. We
@@ -682,11 +700,13 @@ mod tests {
     #[tokio::test]
     async fn upload_blob_rejects_body_size_mismatch() {
         let (state, data_dir) = test_state().await;
+        let device_a = Uuid::new_v4();
+        insert_device(&state, device_a).await;
         let id = Uuid::new_v4().to_string();
 
         let _ = init_upload(
             State(state.clone()),
-            Extension(auth("device-a")),
+            Extension(auth(device_a)),
             Json(init_request(id.clone(), 2, "device-a")),
         )
         .await
@@ -694,7 +714,7 @@ mod tests {
 
         let result = upload_blob(
             State(state),
-            Extension(auth("device-a")),
+            Extension(auth(device_a)),
             Path(id.clone()),
             Body::from(vec![1_u8, 2, 3]),
         )
@@ -713,11 +733,13 @@ mod tests {
     #[tokio::test]
     async fn upload_blob_rejects_duplicate_without_overwriting_blob() {
         let (state, data_dir) = test_state().await;
+        let device_a = Uuid::new_v4();
+        insert_device(&state, device_a).await;
         let id = Uuid::new_v4().to_string();
 
         let _ = init_upload(
             State(state.clone()),
-            Extension(auth("device-a")),
+            Extension(auth(device_a)),
             Json(init_request(id.clone(), 5, "device-a")),
         )
         .await
@@ -725,7 +747,7 @@ mod tests {
 
         let _ = upload_blob(
             State(state.clone()),
-            Extension(auth("device-a")),
+            Extension(auth(device_a)),
             Path(id.clone()),
             Body::from("first"),
         )
@@ -734,7 +756,7 @@ mod tests {
 
         let result = upload_blob(
             State(state),
-            Extension(auth("device-a")),
+            Extension(auth(device_a)),
             Path(id.clone()),
             Body::from("xxxxx"),
         )
@@ -750,20 +772,27 @@ mod tests {
     #[tokio::test]
     async fn complete_upload_marks_file_complete_and_logs_event() {
         let (state, _data_dir) = test_state().await;
-        let id = Uuid::new_v4().to_string();
+        let device_a = Uuid::new_v4();
+        insert_device(&state, device_a).await;
+        let id = Uuid::new_v4();
+        let id_string = id.to_string();
         let blob = b"encrypted blob";
 
         let _ = init_upload(
             State(state.clone()),
-            Extension(auth("device-a")),
-            Json(init_request(id.clone(), blob.len() as i64, "device-a")),
+            Extension(auth(device_a)),
+            Json(init_request(
+                id_string.clone(),
+                blob.len() as i64,
+                "device-a",
+            )),
         )
         .await
         .expect("init");
         let _ = upload_blob(
             State(state.clone()),
-            Extension(auth("device-a")),
-            Path(id.clone()),
+            Extension(auth(device_a)),
+            Path(id_string.clone()),
             Body::from(blob.to_vec()),
         )
         .await
@@ -771,8 +800,8 @@ mod tests {
 
         let _ = complete_upload(
             State(state.clone()),
-            Extension(auth("device-a")),
-            Path(id.clone()),
+            Extension(auth(device_a)),
+            Path(id_string.clone()),
             Json(FileCompleteRequest {
                 sha256_ciphertext_b64: B64.encode(clipper_core::crypto::sha256(blob)),
                 blob_size: blob.len() as i64,
@@ -781,7 +810,7 @@ mod tests {
         .await
         .expect("complete");
 
-        let file = files::Entity::find_by_id(id.clone())
+        let file = files::Entity::find_by_id(id)
             .one(state.db())
             .await
             .expect("query")

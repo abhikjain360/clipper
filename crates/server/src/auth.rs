@@ -6,6 +6,7 @@ use axum::{
 };
 use chrono::Utc;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use uuid::Uuid;
 
 use crate::entity::sessions;
 use crate::state::AppState;
@@ -59,6 +60,6 @@ pub async fn auth_middleware(
 
 #[derive(Clone, Debug)]
 pub struct AuthInfo {
-    pub session_id: String,
-    pub device_id: String,
+    pub session_id: Uuid,
+    pub device_id: Uuid,
 }

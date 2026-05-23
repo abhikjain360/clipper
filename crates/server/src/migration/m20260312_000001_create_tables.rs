@@ -30,26 +30,44 @@ impl MigrationTrait for Migration {
         manager
             .create_table(
                 Table::create()
+                    .table(Devices::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(Devices::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(Devices::Name).text().not_null())
+                    .col(ColumnDef::new(Devices::Platform).text().not_null())
+                    .col(ColumnDef::new(Devices::CreatedAt).text().not_null())
+                    .col(ColumnDef::new(Devices::UpdatedAt).text().not_null())
+                    .col(ColumnDef::new(Devices::LastSeenAt).text().not_null())
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
                     .table(Sessions::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(Sessions::Id)
-                            .text()
-                            .not_null()
-                            .primary_key(),
-                    )
+                    .col(ColumnDef::new(Sessions::Id).uuid().not_null().primary_key())
                     .col(
                         ColumnDef::new(Sessions::TokenHash)
                             .blob()
                             .not_null()
                             .unique_key(),
                     )
-                    .col(ColumnDef::new(Sessions::DeviceId).text().not_null())
+                    .col(ColumnDef::new(Sessions::DeviceId).uuid().not_null())
                     .col(ColumnDef::new(Sessions::CreatedAt).text().not_null())
                     .col(ColumnDef::new(Sessions::ExpiresAt).text().not_null())
                     .col(ColumnDef::new(Sessions::LastSeenAt).text().not_null())
                     .col(ColumnDef::new(Sessions::UserAgent).text())
                     .col(ColumnDef::new(Sessions::IpAddr).text())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_sessions_device_id")
+                            .from(Sessions::Table, Sessions::DeviceId)
+                            .to(Devices::Table, Devices::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -61,20 +79,22 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(ClipboardItems::Id)
-                            .text()
+                            .uuid()
                             .not_null()
                             .primary_key(),
                     )
                     .col(
                         ColumnDef::new(ClipboardItems::CiphertextPath)
                             .text()
-                            .not_null(),
+                            .not_null()
+                            .unique_key(),
                     )
                     .col(ColumnDef::new(ClipboardItems::Nonce).blob().not_null())
                     .col(
                         ColumnDef::new(ClipboardItems::CiphertextSize)
                             .big_integer()
-                            .not_null(),
+                            .not_null()
+                            .check(Expr::col(ClipboardItems::CiphertextSize).gte(0)),
                     )
                     .col(
                         ColumnDef::new(ClipboardItems::Sha256Ciphertext)
@@ -85,8 +105,16 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(ClipboardItems::ExpiresAt).text().not_null())
                     .col(
                         ColumnDef::new(ClipboardItems::SourceDeviceId)
-                            .text()
+                            .uuid()
                             .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_clipboard_items_source_device_id")
+                            .from(ClipboardItems::Table, ClipboardItems::SourceDeviceId)
+                            .to(Devices::Table, Devices::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
             )
@@ -97,51 +125,46 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Files::Table)
                     .if_not_exists()
+                    .col(ColumnDef::new(Files::Id).uuid().not_null().primary_key())
                     .col(
-                        ColumnDef::new(Files::Id)
+                        ColumnDef::new(Files::BlobPath)
                             .text()
                             .not_null()
-                            .primary_key(),
+                            .unique_key(),
                     )
-                    .col(ColumnDef::new(Files::BlobPath).text().not_null())
                     .col(ColumnDef::new(Files::MetaCiphertext).blob().not_null())
                     .col(ColumnDef::new(Files::MetaNonce).blob().not_null())
                     .col(ColumnDef::new(Files::BlobNonce).blob().not_null())
-                    .col(ColumnDef::new(Files::BlobSize).big_integer().not_null())
                     .col(
-                        ColumnDef::new(Files::Sha256Ciphertext)
-                            .blob()
-                            .not_null(),
+                        ColumnDef::new(Files::BlobSize)
+                            .big_integer()
+                            .not_null()
+                            .check(Expr::col(Files::BlobSize).gte(0)),
                     )
+                    .col(ColumnDef::new(Files::Sha256Ciphertext).blob().not_null())
                     .col(ColumnDef::new(Files::CreatedAt).text().not_null())
                     .col(ColumnDef::new(Files::UpdatedAt).text().not_null())
-                    .col(ColumnDef::new(Files::SourceDeviceId).text().not_null())
+                    .col(ColumnDef::new(Files::SourceDeviceId).uuid().not_null())
                     .col(
                         ColumnDef::new(Files::Status)
                             .text()
                             .not_null()
-                            .default("pending"),
+                            .default("pending")
+                            .check(Expr::col(Files::Status).is_in([
+                                "pending",
+                                "uploading",
+                                "uploaded",
+                                "complete",
+                            ])),
                     )
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_table(
-                Table::create()
-                    .table(Devices::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(Devices::Id)
-                            .text()
-                            .not_null()
-                            .primary_key(),
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_files_source_device_id")
+                            .from(Files::Table, Files::SourceDeviceId)
+                            .to(Devices::Table, Devices::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
                     )
-                    .col(ColumnDef::new(Devices::Name).text().not_null())
-                    .col(ColumnDef::new(Devices::Platform).text().not_null())
-                    .col(ColumnDef::new(Devices::CreatedAt).text().not_null())
-                    .col(ColumnDef::new(Devices::UpdatedAt).text().not_null())
-                    .col(ColumnDef::new(Devices::LastSeenAt).text().not_null())
                     .to_owned(),
             )
             .await?;
@@ -159,9 +182,33 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(EventLog::EventType).text().not_null())
-                    .col(ColumnDef::new(EventLog::ObjectKind).text().not_null())
-                    .col(ColumnDef::new(EventLog::ObjectId).text().not_null())
+                    .col(
+                        ColumnDef::new(EventLog::ObjectKind)
+                            .text()
+                            .not_null()
+                            .check(Expr::col(EventLog::ObjectKind).is_in(["clipboard", "file"])),
+                    )
+                    .col(ColumnDef::new(EventLog::ObjectId).uuid().not_null())
                     .col(ColumnDef::new(EventLog::CreatedAt).text().not_null())
+                    .check(
+                        Cond::any()
+                            .add(
+                                Cond::all()
+                                    .add(Expr::col(EventLog::EventType).eq("clipboard.created"))
+                                    .add(Expr::col(EventLog::ObjectKind).eq("clipboard")),
+                            )
+                            .add(
+                                Cond::all()
+                                    .add(Expr::col(EventLog::EventType).eq("file.created"))
+                                    .add(Expr::col(EventLog::ObjectKind).eq("file")),
+                            )
+                            .add(
+                                Cond::all()
+                                    .add(Expr::col(EventLog::EventType).eq("file.deleted"))
+                                    .add(Expr::col(EventLog::ObjectKind).eq("file")),
+                            )
+                            .into(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -172,9 +219,6 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(Table::drop().table(EventLog::Table).if_exists().to_owned())
-            .await?;
-        manager
-            .drop_table(Table::drop().table(Devices::Table).if_exists().to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(Files::Table).if_exists().to_owned())
@@ -189,6 +233,9 @@ impl MigrationTrait for Migration {
             .await?;
         manager
             .drop_table(Table::drop().table(Sessions::Table).if_exists().to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(Devices::Table).if_exists().to_owned())
             .await?;
         manager
             .drop_table(

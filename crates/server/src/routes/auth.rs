@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::auth::AuthInfo;
 use crate::entity::{devices, server_config, sessions};
 use crate::rate_limit::RateLimiter;
-use crate::routes::error_response;
+use crate::routes::{error_response, validate_client_id};
 use crate::state::AppState;
 use clipper_core::crypto;
 use clipper_core::models::{
@@ -144,11 +144,15 @@ pub async fn login(
 
     // Create or update device
     let now = Utc::now().to_rfc3339();
-    let device_id = req.device_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let device_id = match req.device_id {
+        Some(id) => validate_client_id(&id)?,
+        None => Uuid::new_v4(),
+    };
+    let device_id_for_response = device_id.to_string();
     let device_name = req.device_name.unwrap_or_else(|| "Unknown Device".into());
     let platform = req.platform.unwrap_or_else(|| "unknown".into());
 
-    let existing_device = devices::Entity::find_by_id(&device_id)
+    let existing_device = devices::Entity::find_by_id(device_id)
         .one(state.db())
         .await
         .map_err(|_| {
@@ -171,7 +175,7 @@ pub async fn login(
                 devices::Column::UpdatedAt,
                 sea_orm::sea_query::Expr::value(&now),
             )
-            .filter(devices::Column::Id.eq(&device_id))
+            .filter(devices::Column::Id.eq(device_id))
             .exec(state.db())
             .await
             .map_err(|_| {
@@ -184,7 +188,7 @@ pub async fn login(
             })?;
     } else {
         let new_device = devices::ActiveModel {
-            id: Set(device_id.clone()),
+            id: Set(device_id),
             name: Set(device_name),
             platform: Set(platform),
             created_at: Set(now.clone()),
@@ -206,7 +210,7 @@ pub async fn login(
     let token_hash = crypto::sha256(&token_raw);
     let token_b64 = base64::engine::general_purpose::STANDARD.encode(token_raw);
 
-    let session_id = Uuid::new_v4().to_string();
+    let session_id = Uuid::new_v4();
     let expires_at = (Utc::now() + Duration::days(30)).to_rfc3339();
     let user_agent = headers
         .get("user-agent")
@@ -216,7 +220,7 @@ pub async fn login(
     let new_session = sessions::ActiveModel {
         id: Set(session_id),
         token_hash: Set(token_hash.to_vec()),
-        device_id: Set(device_id.clone()),
+        device_id: Set(device_id),
         created_at: Set(now.clone()),
         expires_at: Set(expires_at),
         last_seen_at: Set(now),
@@ -238,7 +242,7 @@ pub async fn login(
 
     Ok(Json(LoginResponse {
         token: token_b64,
-        device_id,
+        device_id: device_id_for_response,
         server: ServerInfo {
             enc_salt_b64,
             auth_params,
@@ -251,7 +255,7 @@ pub async fn logout(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
 ) -> Result<Json<OkResponse>, StatusCode> {
-    sessions::Entity::delete_by_id(&auth.session_id)
+    sessions::Entity::delete_by_id(auth.session_id)
         .exec(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

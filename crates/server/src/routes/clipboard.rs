@@ -29,7 +29,7 @@ pub async fn upload(
 ) -> Result<Json<OkResponse>, (StatusCode, Json<ErrorResponse>)> {
     let b64 = &base64::engine::general_purpose::STANDARD;
 
-    validate_client_id(&req.id)?;
+    let item_id = validate_client_id(&req.id)?;
 
     let ciphertext = b64
         .decode(&req.ciphertext_b64)
@@ -49,7 +49,7 @@ pub async fn upload(
         return Err(error_response(StatusCode::BAD_REQUEST, "SHA-256 mismatch"));
     }
 
-    if clipboard_items::Entity::find_by_id(&req.id)
+    if clipboard_items::Entity::find_by_id(item_id)
         .one(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
@@ -99,14 +99,14 @@ pub async fn upload(
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
 
     let item = clipboard_items::ActiveModel {
-        id: Set(req.id.clone()),
+        id: Set(item_id),
         ciphertext_path: Set(filename),
         nonce: Set(nonce),
         ciphertext_size: Set(ciphertext.len() as i64),
         sha256_ciphertext: Set(computed_hash.to_vec()),
         created_at: Set(now.clone()),
         expires_at: Set(expires),
-        source_device_id: Set(auth.device_id.clone()),
+        source_device_id: Set(auth.device_id),
     };
     if item.insert(&txn).await.is_err() {
         let _ = txn.rollback().await;
@@ -122,7 +122,7 @@ pub async fn upload(
         seq: Default::default(),
         event_type: Set("clipboard.created".into()),
         object_kind: Set("clipboard".into()),
-        object_id: Set(req.id.clone()),
+        object_id: Set(item_id),
         created_at: Set(now.clone()),
     };
     let inserted = match event.insert(&txn).await {
@@ -147,7 +147,7 @@ pub async fn upload(
 
     // Broadcast to WebSocket clients
     let _ = state.ws_tx().send(WsBroadcast {
-        seq: inserted.seq,
+        seq: i64::from(inserted.seq),
         event_type: "clipboard.created".into(),
         object_kind: "clipboard".into(),
         object_id: req.id,
@@ -197,11 +197,11 @@ pub async fn list(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         result_items.push(ClipboardItem {
-            id: item.id.clone(),
+            id: item.id.to_string(),
             nonce_b64: b64.encode(&item.nonce),
             ciphertext_b64: b64.encode(&ciphertext),
             created_at: item.created_at.clone(),
-            source_device_id: item.source_device_id.clone(),
+            source_device_id: item.source_device_id.to_string(),
         });
     }
 
@@ -221,11 +221,12 @@ pub async fn list(
 mod tests {
     use super::*;
     use base64::Engine;
-    use sea_orm::{Database, EntityTrait};
+    use sea_orm::{ActiveModelTrait, Database, EntityTrait, Set};
     use sea_orm_migration::MigratorTrait;
     use tempfile::TempDir;
     use uuid::Uuid;
 
+    use crate::entity::devices;
     use crate::migration;
 
     const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -237,11 +238,26 @@ mod tests {
         (AppState::new(db, data_dir.path().to_path_buf()), data_dir)
     }
 
-    fn auth(device_id: &str) -> AuthInfo {
+    fn auth(device_id: Uuid) -> AuthInfo {
         AuthInfo {
-            session_id: "session-id".into(),
-            device_id: device_id.into(),
+            session_id: Uuid::new_v4(),
+            device_id,
         }
+    }
+
+    async fn insert_device(state: &AppState, id: Uuid) {
+        let now = Utc::now().to_rfc3339();
+        devices::ActiveModel {
+            id: Set(id),
+            name: Set("test-device".into()),
+            platform: Set("test".into()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            last_seen_at: Set(now),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert device");
     }
 
     fn upload_request(id: String, source_device_id: &str) -> ClipboardUploadRequest {
@@ -272,7 +288,7 @@ mod tests {
 
         let result = upload(
             State(state),
-            Extension(auth("device-a")),
+            Extension(auth(Uuid::new_v4())),
             Json(upload_request("../escape".into(), "device-a")),
         )
         .await;
@@ -287,12 +303,14 @@ mod tests {
     #[tokio::test]
     async fn upload_uses_authenticated_device_as_source() {
         let (state, _data_dir) = test_state().await;
-        let id = Uuid::new_v4().to_string();
+        let device_auth = Uuid::new_v4();
+        insert_device(&state, device_auth).await;
+        let id = Uuid::new_v4();
 
         let _ = upload(
             State(state.clone()),
-            Extension(auth("device-auth")),
-            Json(upload_request(id.clone(), "device-spoof")),
+            Extension(auth(device_auth)),
+            Json(upload_request(id.to_string(), "device-spoof")),
         )
         .await
         .expect("upload");
@@ -302,7 +320,7 @@ mod tests {
             .await
             .expect("query")
             .expect("item");
-        assert_eq!(item.source_device_id, "device-auth");
+        assert_eq!(item.source_device_id, device_auth);
     }
 
     // This uploads two clipboard blobs with the same client ID. We test it
@@ -311,11 +329,13 @@ mod tests {
     #[tokio::test]
     async fn upload_rejects_duplicate_id_without_overwriting_blob() {
         let (state, data_dir) = test_state().await;
+        let device_a = Uuid::new_v4();
+        insert_device(&state, device_a).await;
         let id = Uuid::new_v4().to_string();
 
         let _ = upload(
             State(state.clone()),
-            Extension(auth("device-a")),
+            Extension(auth(device_a)),
             Json(upload_request_with_ciphertext(
                 id.clone(),
                 "device-a",
@@ -327,7 +347,7 @@ mod tests {
 
         let result = upload(
             State(state),
-            Extension(auth("device-a")),
+            Extension(auth(device_a)),
             Json(upload_request_with_ciphertext(
                 id.clone(),
                 "device-a",

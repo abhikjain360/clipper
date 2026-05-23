@@ -11,8 +11,7 @@ pub struct Model {
     pub event_type: String,
     #[sea_orm(column_type = "Text")]
     pub object_kind: String,
-    #[sea_orm(column_type = "Text")]
-    pub object_id: String,
+    pub object_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub created_at: String,
 }

@@ -21,7 +21,7 @@ pub async fn bootstrap(
     let b64 = &base64::engine::general_purpose::STANDARD;
 
     // Get device info
-    let dev = devices::Entity::find_by_id(&auth.device_id)
+    let dev = devices::Entity::find_by_id(auth.device_id)
         .one(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -48,11 +48,11 @@ pub async fn bootstrap(
         let path = state.clipboard_dir().join(&item.ciphertext_path);
         if let Ok(ct) = tokio::fs::read(&path).await {
             clipboard_items.push(ClipboardItem {
-                id: item.id.clone(),
+                id: item.id.to_string(),
                 nonce_b64: b64.encode(&item.nonce),
                 ciphertext_b64: b64.encode(&ct),
                 created_at: item.created_at.clone(),
-                source_device_id: item.source_device_id.clone(),
+                source_device_id: item.source_device_id.to_string(),
             });
         }
     }
@@ -69,13 +69,13 @@ pub async fn bootstrap(
     let file_items: Vec<FileListItem> = files
         .iter()
         .map(|f| FileListItem {
-            id: f.id.clone(),
+            id: f.id.to_string(),
             meta_nonce_b64: b64.encode(&f.meta_nonce),
             meta_ciphertext_b64: b64.encode(&f.meta_ciphertext),
             blob_nonce_b64: b64.encode(&f.blob_nonce),
             blob_size: f.blob_size,
             created_at: f.created_at.clone(),
-            source_device_id: f.source_device_id.clone(),
+            source_device_id: f.source_device_id.to_string(),
         })
         .collect();
 
@@ -85,12 +85,12 @@ pub async fn bootstrap(
         .one(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(|e| e.seq)
+        .map(|e| i64::from(e.seq))
         .unwrap_or(0);
 
     Ok(Json(BootstrapResponse {
         device: DeviceInfo {
-            id: dev.id,
+            id: dev.id.to_string(),
             name: dev.name,
             platform: dev.platform,
         },
