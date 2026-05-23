@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-net
+#!/usr/bin/env -S deno run --allow-net --allow-env
 
 /**
  * Clipper server end-to-end test script (§20 step 6 checkpoint).
@@ -9,11 +9,15 @@
  *   cargo run -p clipper-server -- serve --data-dir /tmp/clipper-test-data --addr 127.0.0.1:8787
  *
  *   # Then run this script:
- *   deno run --allow-net test-server.ts
+ *   # Challenge/proof login is implemented in the Rust client because it needs
+ *   # Argon2id. This script expects an already-issued token for route testing.
+ *   CLIPPER_TOKEN="..." deno run --allow-net --allow-env test-server.ts
  */
 
 const BASE = "http://127.0.0.1:8787";
-const PASSPHRASE = "test-passphrase-123";
+const token = Deno.env.get("CLIPPER_TOKEN") ?? "";
+const deviceId = Deno.env.get("CLIPPER_DEVICE_ID") ?? "deno-test-device";
+assert(token.length > 0, "CLIPPER_TOKEN is set");
 
 // ── Helpers ──
 
@@ -46,7 +50,9 @@ function b64encode(data: Uint8Array): string {
 }
 
 async function sha256(data: Uint8Array): Promise<Uint8Array> {
-  const hash = await crypto.subtle.digest("SHA-256", data);
+  const input = new ArrayBuffer(data.byteLength);
+  new Uint8Array(input).set(data);
+  const hash = await crypto.subtle.digest("SHA-256", input);
   return new Uint8Array(hash);
 }
 
@@ -60,44 +66,14 @@ console.log("\n=== 1. Health Check ===");
   assert(json.ok === true, "health ok=true");
 }
 
-console.log("\n=== 2. Login with wrong passphrase ===");
-{
-  const res = await api("POST", "/api/auth/login", {
-    passphrase: "wrong-pass",
-  });
-  assert(res.status === 401, `status 401 (got ${res.status})`);
-  await res.body?.cancel();
-}
-
-console.log("\n=== 3. Login with correct passphrase ===");
-let token: string;
-let deviceId: string;
-let encSaltB64: string;
-{
-  const res = await api("POST", "/api/auth/login", {
-    passphrase: PASSPHRASE,
-    device_name: "deno-test",
-    platform: "macos",
-  });
-  assert(res.status === 200, `status 200 (got ${res.status})`);
-  const json = await res.json();
-  token = json.token;
-  deviceId = json.device_id;
-  encSaltB64 = json.server.enc_salt_b64;
-  assert(typeof token === "string" && token.length > 0, "got session token");
-  assert(typeof deviceId === "string", `got device_id: ${deviceId}`);
-  assert(typeof encSaltB64 === "string", "got enc_salt_b64");
-  console.log(`  token: ${token.substring(0, 12)}...`);
-}
-
-console.log("\n=== 4. Unauthenticated request rejected ===");
+console.log("\n=== 2. Unauthenticated request rejected ===");
 {
   const res = await api("GET", "/api/clipboard");
   assert(res.status === 401, `status 401 (got ${res.status})`);
   await res.body?.cancel();
 }
 
-console.log("\n=== 5. Upload clipboard item ===");
+console.log("\n=== 3. Upload clipboard item ===");
 const clipId = crypto.randomUUID();
 {
   // Simulate encrypted ciphertext (in real usage this would be XChaCha20-Poly1305 output)
@@ -125,7 +101,7 @@ const clipId = crypto.randomUUID();
   assert(json.ok === true, "clipboard upload ok=true");
 }
 
-console.log("\n=== 6. List clipboard items ===");
+console.log("\n=== 4. List clipboard items ===");
 {
   const res = await api("GET", "/api/clipboard?limit=10", undefined, token);
   assert(res.status === 200, `status 200 (got ${res.status})`);
@@ -144,7 +120,7 @@ console.log("\n=== 6. List clipboard items ===");
   assert(typeof found.nonce_b64 === "string", "item has nonce");
 }
 
-console.log("\n=== 7. Verify ciphertext storage on disk ===");
+console.log("\n=== 5. Verify ciphertext storage on disk ===");
 {
   // The server should have stored the ciphertext file
   const res = await api("GET", "/api/clipboard?limit=1", undefined, token);
@@ -155,7 +131,7 @@ console.log("\n=== 7. Verify ciphertext storage on disk ===");
   assert(!ct.includes("hello"), "ciphertext is not plaintext");
 }
 
-console.log("\n=== 8. File upload flow (init → blob → complete) ===");
+console.log("\n=== 6. File upload flow (init → blob → complete) ===");
 const fileId = crypto.randomUUID();
 {
   const fakeMetaCiphertext = new TextEncoder().encode("encrypted-meta");
@@ -214,7 +190,7 @@ const fileId = crypto.randomUUID();
   assert(completeJson.ok === true, "file complete ok=true");
 }
 
-console.log("\n=== 9. List files ===");
+console.log("\n=== 7. List files ===");
 {
   const res = await api("GET", "/api/files?limit=10", undefined, token);
   assert(res.status === 200, `status 200 (got ${res.status})`);
@@ -226,7 +202,7 @@ console.log("\n=== 9. List files ===");
   assert(found !== undefined, `found uploaded file ${fileId}`);
 }
 
-console.log("\n=== 10. Download file blob ===");
+console.log("\n=== 8. Download file blob ===");
 {
   const res = await fetch(`${BASE}/api/files/${fileId}/blob`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -240,7 +216,7 @@ console.log("\n=== 10. Download file blob ===");
   );
 }
 
-console.log("\n=== 11. Delete file ===");
+console.log("\n=== 9. Delete file ===");
 {
   const res = await fetch(`${BASE}/api/files/${fileId}`, {
     method: "DELETE",
@@ -259,20 +235,19 @@ console.log("\n=== 11. Delete file ===");
   assert(found === undefined, "file no longer in list after delete");
 }
 
-console.log("\n=== 12. Sync bootstrap ===");
+console.log("\n=== 10. Sync bootstrap ===");
 {
   const res = await api("GET", "/api/sync/bootstrap", undefined, token);
   assert(res.status === 200, `status 200 (got ${res.status})`);
   const json = await res.json();
   assert(typeof json.device === "object", "has device info");
-  assert(json.device.name === "deno-test", "device name matches");
   assert(Array.isArray(json.clipboard_items), "has clipboard_items");
   assert(Array.isArray(json.files), "has files");
   assert(typeof json.latest_seq === "number", "has latest_seq");
   assert(typeof json.server.enc_salt_b64 === "string", "has enc_salt_b64");
 }
 
-console.log("\n=== 13. Logout ===");
+console.log("\n=== 11. Logout ===");
 {
   const res = await api("POST", "/api/auth/logout", undefined, token);
   assert(res.status === 200, `status 200 (got ${res.status})`);

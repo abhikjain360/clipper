@@ -130,12 +130,11 @@ async fn cmd_login(
             // Store credentials in Keychain
             let url = engine.base_url().await;
             let creds = Credentials {
-                passphrase: passphrase.to_string(),
                 device_name: device_name.to_string(),
                 server_url: url,
             };
             if let Err(e) = keychain::store_credentials(&creds) {
-                warn!("Failed to store credentials in Keychain: {}", e);
+                warn!("Failed to store server profile in Keychain: {}", e);
             }
             DaemonResponse::success(id, None)
         }

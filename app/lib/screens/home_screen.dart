@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:path/path.dart' as p;
+import '../services/secure_clipboard.dart';
 import '../src/rust/api/clipper.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -36,7 +37,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _copyToClipboard(String id) async {
     try {
       final text = await copyToLocal(id: id);
-      await Clipboard.setData(ClipboardData(text: text));
+      await setSecureClipboardText(text);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -73,7 +74,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final dir = await FilePicker.platform.getDirectoryPath();
     if (dir == null) return;
 
-    final targetPath = '$dir/$filename';
+    final targetPath = p.join(dir, _safeDownloadFilename(filename));
     try {
       await downloadFile(fileId: fileId, targetPath: targetPath);
       if (mounted) {
@@ -84,6 +85,16 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       _showError(e.toString());
     }
+  }
+
+  String _safeDownloadFilename(String filename) {
+    final name = p
+        .basename(filename)
+        .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '_');
+    if (name.isEmpty || name == '.' || name == '..') {
+      return 'download';
+    }
+    return name;
   }
 
   Future<void> _deleteFileConfirm(String fileId, String filename) async {

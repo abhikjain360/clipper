@@ -12,9 +12,39 @@ use uuid::Uuid;
 use crate::auth::AuthInfo;
 use crate::entity::{device, server_config, session};
 use crate::rate_limit::RateLimiter;
+use crate::routes::error_response;
 use crate::state::AppState;
 use clipper_core::crypto;
-use clipper_core::models::{ErrorResponse, LoginRequest, LoginResponse, OkResponse, ServerInfo};
+use clipper_core::models::{
+    ErrorResponse, LoginChallengeResponse, LoginRequest, LoginResponse, OkResponse, ServerInfo,
+};
+
+pub async fn challenge(
+    State(state): State<AppState>,
+) -> Result<Json<LoginChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let config = server_config::Entity::find_by_id(1)
+        .one(state.db())
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+        .ok_or_else(|| {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server not initialized")
+        })?;
+
+    let (challenge_id, challenge_nonce) = state.create_auth_challenge();
+    let b64 = &base64::engine::general_purpose::STANDARD;
+    let auth_params = crypto::Argon2Params::default();
+
+    Ok(Json(LoginChallengeResponse {
+        challenge_id,
+        challenge_nonce_b64: b64.encode(challenge_nonce),
+        auth_salt_b64: b64.encode(&config.auth_salt),
+        server: ServerInfo {
+            enc_salt_b64: b64.encode(&config.enc_salt),
+            auth_params,
+            enc_params: crypto::Argon2Params::default(),
+        },
+    }))
+}
 
 pub async fn login(
     State(state): State<AppState>,
@@ -60,7 +90,7 @@ pub async fn login(
             )
         })?;
 
-    // Verify passphrase
+    // Verify challenge proof without receiving the raw passphrase or reusable auth hash.
     let auth_params = crypto::Argon2Params::default();
     let auth_hash: [u8; 32] = config.auth_hash.try_into().map_err(|_| {
         (
@@ -71,22 +101,37 @@ pub async fn login(
         )
     })?;
 
-    let valid = crypto::verify_auth(
-        req.passphrase.as_bytes(),
-        &config.auth_salt,
-        &auth_params,
-        &auth_hash,
-    )
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Auth error".into(),
-            }),
-        )
-    })?;
+    let challenge_nonce = state
+        .take_auth_challenge(&req.challenge_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Invalid challenge".into(),
+                }),
+            )
+        })?;
+    let provided_proof = base64::engine::general_purpose::STANDARD
+        .decode(&req.auth_proof_b64)
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Invalid auth proof".into(),
+                }),
+            )
+        })?;
+    let expected_proof =
+        crypto::compute_login_proof(&auth_hash, &challenge_nonce).map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Auth error".into(),
+                }),
+            )
+        })?;
 
-    if !valid {
+    if !constant_time_eq::constant_time_eq(&expected_proof, &provided_proof) {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(ErrorResponse {
@@ -212,4 +257,125 @@ pub async fn logout(
     info!(device_id = %auth.device_id, "Logout");
 
     Ok(Json(OkResponse { ok: true }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::{ActiveModelTrait, Database, Set};
+    use sea_orm_migration::MigratorTrait;
+    use tempfile::TempDir;
+
+    use crate::entity::server_config;
+    use crate::migration;
+
+    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+    async fn test_state(passphrase: &[u8]) -> (AppState, TempDir) {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::connect("sqlite::memory:").await.expect("db");
+        migration::Migrator::up(&db, None).await.expect("migrate");
+
+        let params = crypto::Argon2Params::default();
+        let auth_salt = crypto::generate_salt();
+        let enc_salt = crypto::generate_salt();
+        let auth_hash =
+            crypto::compute_auth_hash(passphrase, &auth_salt, &params).expect("auth hash");
+        let now = Utc::now().to_rfc3339();
+
+        server_config::ActiveModel {
+            id: Set(1),
+            auth_salt: Set(auth_salt.to_vec()),
+            auth_hash: Set(auth_hash.to_vec()),
+            enc_salt: Set(enc_salt.to_vec()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+        }
+        .insert(&db)
+        .await
+        .expect("insert config");
+
+        (AppState::new(db, data_dir.path().to_path_buf()), data_dir)
+    }
+
+    fn login_request(challenge: LoginChallengeResponse, passphrase: &[u8]) -> LoginRequest {
+        let auth_salt = B64.decode(challenge.auth_salt_b64).expect("auth salt");
+        let challenge_nonce = B64
+            .decode(challenge.challenge_nonce_b64)
+            .expect("challenge nonce");
+        let auth_hash =
+            crypto::compute_auth_hash(passphrase, &auth_salt, &challenge.server.auth_params)
+                .expect("auth hash");
+        let proof = crypto::compute_login_proof(&auth_hash, &challenge_nonce).expect("proof");
+
+        LoginRequest {
+            challenge_id: challenge.challenge_id,
+            auth_proof_b64: B64.encode(proof),
+            device_id: None,
+            device_name: Some("test-device".into()),
+            platform: Some("test".into()),
+        }
+    }
+
+    // This exercises the happy path for challenge/proof login. We test it
+    // because clients must prove knowledge of the passphrase-derived auth hash
+    // without sending the raw passphrase or a reusable hash to the server.
+    #[tokio::test]
+    async fn login_accepts_challenge_proof() {
+        let passphrase = b"correct horse battery staple";
+        let (state, _data_dir) = test_state(passphrase).await;
+
+        let Json(challenge) = challenge(State(state.clone())).await.expect("challenge");
+        let req = login_request(challenge, passphrase);
+
+        let Json(resp) = login(
+            State(state),
+            Extension(std::sync::Arc::new(RateLimiter::new())),
+            HeaderMap::new(),
+            Json(req),
+        )
+        .await
+        .expect("login");
+
+        assert!(!resp.token.is_empty());
+        assert!(!resp.device_id.is_empty());
+    }
+
+    // This reuses a captured login proof against the same challenge. We test it
+    // because challenge proofs must be single-use; replayable proofs would let a
+    // network observer or log leak mint fresh sessions.
+    #[tokio::test]
+    async fn login_challenge_is_single_use() {
+        let passphrase = b"correct horse battery staple";
+        let (state, _data_dir) = test_state(passphrase).await;
+
+        let Json(challenge) = challenge(State(state.clone())).await.expect("challenge");
+        let req = login_request(challenge, passphrase);
+        let reused_req = LoginRequest {
+            challenge_id: req.challenge_id.clone(),
+            auth_proof_b64: req.auth_proof_b64.clone(),
+            device_id: None,
+            device_name: Some("test-device".into()),
+            platform: Some("test".into()),
+        };
+
+        let _ = login(
+            State(state.clone()),
+            Extension(std::sync::Arc::new(RateLimiter::new())),
+            HeaderMap::new(),
+            Json(req),
+        )
+        .await
+        .expect("first login");
+
+        let result = login(
+            State(state),
+            Extension(std::sync::Arc::new(RateLimiter::new())),
+            HeaderMap::new(),
+            Json(reused_req),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::UNAUTHORIZED);
+    }
 }

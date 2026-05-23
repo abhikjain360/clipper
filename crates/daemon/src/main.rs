@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::net::UnixListener;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use clipper_client::engine::SyncEngine;
 
@@ -90,36 +90,18 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Determine server URL: prefer Keychain credentials, fall back to CLI arg
-    let (server_url, auto_login_creds) = match keychain::load_credentials() {
+    // Determine server URL: prefer stored profile, fall back to CLI arg.
+    // The passphrase is intentionally not persisted, so the daemon waits for
+    // the app to provide it after startup.
+    let server_url = match keychain::load_credentials() {
         Ok(Some(creds)) => {
-            info!("Found stored credentials in Keychain");
-            let url = creds.server_url.clone();
-            (url, Some(creds))
+            info!("Found stored server profile in Keychain");
+            creds.server_url
         }
-        _ => (default_server_url, None),
+        _ => default_server_url,
     };
 
     let engine = SyncEngine::new(&server_url);
-
-    // Attempt auto-login from Keychain
-    if let Some(creds) = auto_login_creds {
-        info!("Attempting auto-login from Keychain");
-        match engine.login(&creds.passphrase, &creds.device_name).await {
-            Ok(()) => {
-                info!("Auto-login successful");
-            }
-            Err(e) => {
-                warn!("Auto-login failed: {}. Waiting for app to login.", e);
-                // If auth was rejected (not just network), clear the stored creds
-                let err_str = e.to_string();
-                if err_str.contains("401") || err_str.contains("403") {
-                    warn!("Clearing invalid Keychain credentials");
-                    keychain::clear_credentials().ok();
-                }
-            }
-        }
-    }
 
     let client_mgr = Arc::new(ClientManager::new());
 

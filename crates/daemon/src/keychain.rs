@@ -7,7 +7,6 @@ const ACCOUNT: &str = "credentials";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Credentials {
-    pub passphrase: String,
     pub device_name: String,
     pub server_url: String,
 }
@@ -27,7 +26,12 @@ pub fn load_credentials() -> anyhow::Result<Option<Credentials>> {
     match security_framework::passwords::get_generic_password(SERVICE, ACCOUNT) {
         Ok(data) => {
             let json = String::from_utf8(data)?;
-            let creds: Credentials = serde_json::from_str(&json)?;
+            let value: serde_json::Value = serde_json::from_str(&json)?;
+            let had_legacy_passphrase = value.get("passphrase").is_some();
+            let creds: Credentials = serde_json::from_value(value)?;
+            if had_legacy_passphrase {
+                store_credentials(&creds)?;
+            }
             Ok(Some(creds))
         }
         Err(_) => Ok(None),

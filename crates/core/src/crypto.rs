@@ -3,9 +3,12 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit},
 };
+use hmac::{Hmac, Mac};
 use rand::RngExt;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Argon2id parameters — same structure used for both auth and enc derivation.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -74,6 +77,21 @@ pub fn compute_auth_hash(
     params: &Argon2Params,
 ) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
     derive_key(passphrase, auth_salt, params)
+}
+
+/// Compute the one-time login proof sent to the server.
+///
+/// The proof authenticates possession of the passphrase-derived auth hash
+/// without sending the passphrase or reusable auth hash over the network.
+pub fn compute_login_proof(
+    auth_hash: &[u8; 32],
+    challenge_nonce: &[u8],
+) -> Result<[u8; 32], CryptoError> {
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(auth_hash)
+        .map_err(|e| CryptoError::Mac(e.to_string()))?;
+    mac.update(b"clipper:login-proof:v1");
+    mac.update(challenge_nonce);
+    Ok(mac.finalize().into_bytes().into())
 }
 
 /// Verify passphrase against stored auth hash using constant-time comparison.
@@ -147,6 +165,8 @@ pub enum CryptoError {
     Encrypt(String),
     #[error("decryption error: {0}")]
     Decrypt(String),
+    #[error("MAC error: {0}")]
+    Mac(String),
 }
 
 // ── Associated data constants ──
@@ -196,6 +216,15 @@ mod tests {
         let hash = compute_auth_hash(b"my-passphrase", &salt, &params).unwrap();
         assert!(verify_auth(b"my-passphrase", &salt, &params, &hash).unwrap());
         assert!(!verify_auth(b"wrong-passphrase", &salt, &params, &hash).unwrap());
+    }
+
+    #[test]
+    fn test_login_proof_is_challenge_bound() {
+        let params = Argon2Params::default();
+        let auth_hash = compute_auth_hash(b"my-passphrase", b"0123456789abcdef", &params).unwrap();
+        let proof1 = compute_login_proof(&auth_hash, b"challenge-one").unwrap();
+        let proof2 = compute_login_proof(&auth_hash, b"challenge-two").unwrap();
+        assert_ne!(proof1, proof2);
     }
 
     #[test]

@@ -665,6 +665,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "constant_time_eq",
+ "hmac",
  "rand 0.10.1",
  "serde",
  "serde_json",

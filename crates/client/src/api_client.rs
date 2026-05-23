@@ -3,6 +3,7 @@
 use base64::Engine;
 use reqwest::Client;
 use tracing::{debug, warn};
+use url::Url;
 
 use clipper_core::crypto;
 use clipper_core::models::*;
@@ -61,8 +62,33 @@ impl ApiClient {
         device_name: &str,
         platform: &str,
     ) -> Result<LoginResponse, ClientError> {
+        validate_server_url(&self.base_url)?;
+
+        let challenge_resp: LoginChallengeResponse = self
+            .http
+            .post(self.url("/api/auth/challenge"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let auth_salt = B64
+            .decode(&challenge_resp.auth_salt_b64)
+            .map_err(|e| ClientError::Other(format!("auth_salt decode: {}", e)))?;
+        let challenge_nonce = B64
+            .decode(&challenge_resp.challenge_nonce_b64)
+            .map_err(|e| ClientError::Other(format!("challenge decode: {}", e)))?;
+        let auth_hash = crypto::compute_auth_hash(
+            passphrase.as_bytes(),
+            &auth_salt,
+            &challenge_resp.server.auth_params,
+        )?;
+        let proof = crypto::compute_login_proof(&auth_hash, &challenge_nonce)?;
+
         let req = LoginRequest {
-            passphrase: passphrase.to_string(),
+            challenge_id: challenge_resp.challenge_id,
+            auth_proof_b64: B64.encode(proof),
             device_id: None,
             device_name: Some(device_name.to_string()),
             platform: Some(platform.to_string()),
@@ -336,6 +362,37 @@ impl ApiClient {
     }
 }
 
+fn validate_server_url(base_url: &str) -> Result<(), ClientError> {
+    let url = Url::parse(base_url)
+        .map_err(|e| ClientError::Other(format!("Invalid server URL: {}", e)))?;
+
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ClientError::Other(
+            "Server URL must not include credentials".into(),
+        ));
+    }
+
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_host(&url) => Ok(()),
+        "http" => Err(ClientError::Other(
+            "Plain HTTP is only allowed for localhost servers".into(),
+        )),
+        _ => Err(ClientError::Other(
+            "Server URL must use http or https".into(),
+        )),
+    }
+}
+
+fn is_loopback_host(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
+        Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
+        None => false,
+    }
+}
+
 // ── Encryption helpers ──
 
 /// Encrypt clipboard text for upload. Returns the upload request.
@@ -437,4 +494,27 @@ pub enum ClientError {
     WebSocket(String),
     #[error("{0}")]
     Other(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_url_allows_loopback_http() {
+        assert!(validate_server_url("http://127.0.0.1:8787").is_ok());
+        assert!(validate_server_url("http://[::1]:8787").is_ok());
+        assert!(validate_server_url("http://localhost:8787").is_ok());
+    }
+
+    #[test]
+    fn server_url_rejects_non_loopback_http() {
+        assert!(validate_server_url("http://example.com").is_err());
+        assert!(validate_server_url("http://192.168.1.5:8787").is_err());
+    }
+
+    #[test]
+    fn server_url_rejects_embedded_credentials() {
+        assert!(validate_server_url("https://user:pass@example.com").is_err());
+    }
 }

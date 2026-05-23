@@ -24,7 +24,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _login() async {
-    final passphrase = _passphraseController.text.trim();
+    final passphrase = _passphraseController.text;
     if (passphrase.isEmpty) {
       setState(() => _error = 'Passphrase is required');
       return;

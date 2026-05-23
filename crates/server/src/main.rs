@@ -165,6 +165,7 @@ async fn serve(data_dir: PathBuf, addr: String) -> anyhow::Result<()> {
     // Public routes
     let app = Router::new()
         .route("/api/health", get(routes::health::health))
+        .route("/api/auth/challenge", post(routes::auth::challenge))
         .route("/api/auth/login", post(routes::auth::login))
         .merge(authed)
         .layer(axum::Extension(limiter.clone()))

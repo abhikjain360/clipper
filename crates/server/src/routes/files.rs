@@ -448,6 +448,9 @@ mod tests {
         }
     }
 
+    // This tries to create a pending file with a path-like ID. We test it
+    // because file IDs become blob filenames, and one bad pending record would
+    // put later upload/download/delete operations on an unsafe path.
     #[tokio::test]
     async fn init_rejects_non_uuid_id() {
         let (state, data_dir) = test_state().await;
@@ -463,6 +466,9 @@ mod tests {
         assert!(!data_dir.path().join("files").join("escape.bin").exists());
     }
 
+    // This declares a blob larger than the server limit during init. We test it
+    // here because rejecting before the body upload prevents resource-exhaustion
+    // work from ever starting.
     #[tokio::test]
     async fn init_rejects_files_over_size_limit() {
         let (state, _data_dir) = test_state().await;
@@ -478,6 +484,9 @@ mod tests {
         assert_eq!(result.unwrap_err().0, StatusCode::PAYLOAD_TOO_LARGE);
     }
 
+    // This sends a spoofed source_device_id in the file metadata request. We
+    // test it because file provenance must be derived from the authenticated
+    // session, not from a client-controlled field.
     #[tokio::test]
     async fn init_uses_authenticated_device_as_source() {
         let (state, _data_dir) = test_state().await;
@@ -499,6 +508,9 @@ mod tests {
         assert_eq!(file.source_device_id, "device-auth");
     }
 
+    // This uploads a body whose byte count does not match the init metadata. We
+    // test it because mismatched partial files must be removed before they can
+    // later be completed or served.
     #[tokio::test]
     async fn upload_blob_rejects_body_size_mismatch() {
         let (state, data_dir) = test_state().await;

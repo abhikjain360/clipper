@@ -238,6 +238,9 @@ mod tests {
         }
     }
 
+    // This sends a path-like clipboard ID before any blob write happens. We
+    // test it because object IDs become filenames, so accepting non-UUID IDs
+    // would reopen path traversal bugs in the upload path.
     #[tokio::test]
     async fn upload_rejects_non_uuid_id_before_writing() {
         let (state, data_dir) = test_state().await;
@@ -253,6 +256,9 @@ mod tests {
         assert!(!data_dir.path().join("escape.bin").exists());
     }
 
+    // This sends a spoofed source_device_id in the body while authenticated as a
+    // different device. We test it because provenance must come from the bearer
+    // token, not from client-controlled JSON.
     #[tokio::test]
     async fn upload_uses_authenticated_device_as_source() {
         let (state, _data_dir) = test_state().await;
@@ -274,6 +280,9 @@ mod tests {
         assert_eq!(item.source_device_id, "device-auth");
     }
 
+    // This uploads two clipboard blobs with the same client ID. We test it
+    // because rejecting the duplicate in the database is not enough if the
+    // second write already replaced the ciphertext on disk.
     #[tokio::test]
     async fn upload_rejects_duplicate_id_without_overwriting_blob() {
         let (state, data_dir) = test_state().await;
