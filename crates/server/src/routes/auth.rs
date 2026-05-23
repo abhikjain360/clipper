@@ -1,11 +1,12 @@
 use axum::{
     Json,
-    extract::{Extension, State},
+    extract::{ConnectInfo, Extension, State},
     http::{HeaderMap, StatusCode},
 };
 use base64::Engine;
 use chrono::{Duration, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use std::net::SocketAddr;
 use tracing::info;
 use uuid::Uuid;
 
@@ -16,12 +17,26 @@ use crate::routes::error_response;
 use crate::state::AppState;
 use clipper_core::crypto;
 use clipper_core::models::{
-    ErrorResponse, LoginChallengeResponse, LoginRequest, LoginResponse, OkResponse, ServerInfo,
+    ErrorResponse, LoginChallengeRequest, LoginChallengeResponse, LoginRequest, LoginResponse,
+    OkResponse, ServerInfo,
 };
 
 pub async fn challenge(
     State(state): State<AppState>,
+    Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    Json(req): Json<LoginChallengeRequest>,
 ) -> Result<Json<LoginChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let ip = peer_addr.ip().to_string();
+    if !limiter.check(&ip) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error: "Too many requests".into(),
+            }),
+        ));
+    }
+
     let config = server_config::Entity::find_by_id(1)
         .one(state.db())
         .await
@@ -30,14 +45,22 @@ pub async fn challenge(
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server not initialized")
         })?;
 
-    let (challenge_id, challenge_nonce) = state.create_auth_challenge();
     let b64 = &base64::engine::general_purpose::STANDARD;
+    let credential_request = b64
+        .decode(&req.credential_request_b64)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid credential_request_b64"))?;
+    let (credential_response, server_login_state) = crypto::opaque_server_login_start(
+        &config.auth_salt,
+        &config.auth_hash,
+        &credential_request,
+    )
+    .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid login request"))?;
+    let challenge_id = state.create_auth_challenge(server_login_state);
     let auth_params = crypto::Argon2Params::default();
 
     Ok(Json(LoginChallengeResponse {
         challenge_id,
-        challenge_nonce_b64: b64.encode(challenge_nonce),
-        auth_salt_b64: b64.encode(&config.auth_salt),
+        credential_response_b64: b64.encode(credential_response),
         server: ServerInfo {
             enc_salt_b64: b64.encode(&config.enc_salt),
             auth_params,
@@ -49,16 +72,11 @@ pub async fn challenge(
 pub async fn login(
     State(state): State<AppState>,
     Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
-    // Rate limit by IP
-    let ip = headers
-        .get("cf-connecting-ip")
-        .or_else(|| headers.get("x-forwarded-for"))
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string();
+    let ip = peer_addr.ip().to_string();
 
     if !limiter.check(&ip) {
         return Err((
@@ -90,18 +108,9 @@ pub async fn login(
             )
         })?;
 
-    // Verify challenge proof without receiving the raw passphrase or reusable auth hash.
+    // Finish the OPAQUE login without receiving the raw passphrase or a DB-reusable secret.
     let auth_params = crypto::Argon2Params::default();
-    let auth_hash: [u8; 32] = config.auth_hash.try_into().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Invalid auth hash".into(),
-            }),
-        )
-    })?;
-
-    let challenge_nonce = state
+    let server_login_state = state
         .take_auth_challenge(&req.challenge_id)
         .ok_or_else(|| {
             (
@@ -111,34 +120,27 @@ pub async fn login(
                 }),
             )
         })?;
-    let provided_proof = base64::engine::general_purpose::STANDARD
-        .decode(&req.auth_proof_b64)
+    let credential_finalization = base64::engine::general_purpose::STANDARD
+        .decode(&req.credential_finalization_b64)
         .map_err(|_| {
             (
                 StatusCode::UNAUTHORIZED,
                 Json(ErrorResponse {
-                    error: "Invalid auth proof".into(),
-                }),
-            )
-        })?;
-    let expected_proof =
-        crypto::compute_login_proof(&auth_hash, &challenge_nonce).map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Auth error".into(),
+                    error: "Invalid credential finalization".into(),
                 }),
             )
         })?;
 
-    if !constant_time_eq::constant_time_eq(&expected_proof, &provided_proof) {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "Invalid passphrase".into(),
-            }),
-        ));
-    }
+    crypto::opaque_server_login_finish(&server_login_state, &credential_finalization).map_err(
+        |_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Invalid passphrase".into(),
+                }),
+            )
+        },
+    )?;
 
     // Create or update device
     let now = Utc::now().to_rfc3339();
@@ -264,6 +266,7 @@ mod tests {
     use super::*;
     use sea_orm::{ActiveModelTrait, Database, Set};
     use sea_orm_migration::MigratorTrait;
+    use std::net::{IpAddr, Ipv4Addr};
     use tempfile::TempDir;
 
     use crate::entity::server_config;
@@ -276,17 +279,15 @@ mod tests {
         let db = Database::connect("sqlite::memory:").await.expect("db");
         migration::Migrator::up(&db, None).await.expect("migrate");
 
-        let params = crypto::Argon2Params::default();
-        let auth_salt = crypto::generate_salt();
+        let (opaque_server_setup, opaque_password_file) =
+            crypto::opaque_register(passphrase).expect("opaque register");
         let enc_salt = crypto::generate_salt();
-        let auth_hash =
-            crypto::compute_auth_hash(passphrase, &auth_salt, &params).expect("auth hash");
         let now = Utc::now().to_rfc3339();
 
         server_config::ActiveModel {
             id: Set(1),
-            auth_salt: Set(auth_salt.to_vec()),
-            auth_hash: Set(auth_hash.to_vec()),
+            auth_salt: Set(opaque_server_setup),
+            auth_hash: Set(opaque_password_file),
             enc_salt: Set(enc_salt.to_vec()),
             created_at: Set(now.clone()),
             updated_at: Set(now),
@@ -298,39 +299,65 @@ mod tests {
         (AppState::new(db, data_dir.path().to_path_buf()), data_dir)
     }
 
-    fn login_request(challenge: LoginChallengeResponse, passphrase: &[u8]) -> LoginRequest {
-        let auth_salt = B64.decode(challenge.auth_salt_b64).expect("auth salt");
-        let challenge_nonce = B64
-            .decode(challenge.challenge_nonce_b64)
-            .expect("challenge nonce");
-        let auth_hash =
-            crypto::compute_auth_hash(passphrase, &auth_salt, &challenge.server.auth_params)
-                .expect("auth hash");
-        let proof = crypto::compute_login_proof(&auth_hash, &challenge_nonce).expect("proof");
+    fn peer() -> ConnectInfo<SocketAddr> {
+        ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345))
+    }
+
+    fn challenge_request(passphrase: &[u8]) -> (LoginChallengeRequest, Vec<u8>) {
+        let (credential_request, client_state) =
+            crypto::opaque_client_login_start(passphrase).expect("client login start");
+        (
+            LoginChallengeRequest {
+                credential_request_b64: B64.encode(credential_request),
+            },
+            client_state,
+        )
+    }
+
+    fn login_request(
+        challenge: LoginChallengeResponse,
+        client_state: &[u8],
+        passphrase: &[u8],
+    ) -> LoginRequest {
+        let credential_response = B64
+            .decode(challenge.credential_response_b64)
+            .expect("credential response");
+        let (credential_finalization, _) =
+            crypto::opaque_client_login_finish(client_state, passphrase, &credential_response)
+                .expect("client login finish");
 
         LoginRequest {
             challenge_id: challenge.challenge_id,
-            auth_proof_b64: B64.encode(proof),
+            credential_finalization_b64: B64.encode(credential_finalization),
             device_id: None,
             device_name: Some("test-device".into()),
             platform: Some("test".into()),
         }
     }
 
-    // This exercises the happy path for challenge/proof login. We test it
-    // because clients must prove knowledge of the passphrase-derived auth hash
-    // without sending the raw passphrase or a reusable hash to the server.
+    // This exercises the happy path for OPAQUE login. We test it because
+    // clients must prove knowledge of the passphrase without sending the raw
+    // passphrase or a reusable verifier to the server.
     #[tokio::test]
-    async fn login_accepts_challenge_proof() {
+    async fn login_accepts_opaque_finalization() {
         let passphrase = b"correct horse battery staple";
         let (state, _data_dir) = test_state(passphrase).await;
 
-        let Json(challenge) = challenge(State(state.clone())).await.expect("challenge");
-        let req = login_request(challenge, passphrase);
+        let (challenge_req, client_state) = challenge_request(passphrase);
+        let Json(challenge) = challenge(
+            State(state.clone()),
+            Extension(std::sync::Arc::new(RateLimiter::new())),
+            peer(),
+            Json(challenge_req),
+        )
+        .await
+        .expect("challenge");
+        let req = login_request(challenge, &client_state, passphrase);
 
         let Json(resp) = login(
             State(state),
             Extension(std::sync::Arc::new(RateLimiter::new())),
+            peer(),
             HeaderMap::new(),
             Json(req),
         )
@@ -341,19 +368,27 @@ mod tests {
         assert!(!resp.device_id.is_empty());
     }
 
-    // This reuses a captured login proof against the same challenge. We test it
-    // because challenge proofs must be single-use; replayable proofs would let a
-    // network observer or log leak mint fresh sessions.
+    // This reuses a captured OPAQUE finalization against the same challenge.
+    // We test it because login challenges must be single-use; replayable
+    // finalizations would let a network observer or log leak mint fresh sessions.
     #[tokio::test]
     async fn login_challenge_is_single_use() {
         let passphrase = b"correct horse battery staple";
         let (state, _data_dir) = test_state(passphrase).await;
 
-        let Json(challenge) = challenge(State(state.clone())).await.expect("challenge");
-        let req = login_request(challenge, passphrase);
+        let (challenge_req, client_state) = challenge_request(passphrase);
+        let Json(challenge) = challenge(
+            State(state.clone()),
+            Extension(std::sync::Arc::new(RateLimiter::new())),
+            peer(),
+            Json(challenge_req),
+        )
+        .await
+        .expect("challenge");
+        let req = login_request(challenge, &client_state, passphrase);
         let reused_req = LoginRequest {
             challenge_id: req.challenge_id.clone(),
-            auth_proof_b64: req.auth_proof_b64.clone(),
+            credential_finalization_b64: req.credential_finalization_b64.clone(),
             device_id: None,
             device_name: Some("test-device".into()),
             platform: Some("test".into()),
@@ -362,6 +397,7 @@ mod tests {
         let _ = login(
             State(state.clone()),
             Extension(std::sync::Arc::new(RateLimiter::new())),
+            peer(),
             HeaderMap::new(),
             Json(req),
         )
@@ -371,11 +407,118 @@ mod tests {
         let result = login(
             State(state),
             Extension(std::sync::Arc::new(RateLimiter::new())),
+            peer(),
             HeaderMap::new(),
             Json(reused_req),
         )
         .await;
 
         assert_eq!(result.unwrap_err().0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn login_rejects_wrong_opaque_password() {
+        let passphrase = b"correct horse battery staple";
+        let (state, _data_dir) = test_state(passphrase).await;
+
+        let (challenge_req, client_state) = challenge_request(b"wrong passphrase");
+        let Json(challenge) = challenge(
+            State(state.clone()),
+            Extension(std::sync::Arc::new(RateLimiter::new())),
+            peer(),
+            Json(challenge_req),
+        )
+        .await
+        .expect("challenge");
+        let credential_response = B64
+            .decode(challenge.credential_response_b64)
+            .expect("credential response");
+        let finish = crypto::opaque_client_login_finish(
+            &client_state,
+            b"wrong passphrase",
+            &credential_response,
+        );
+
+        assert!(finish.is_err());
+    }
+
+    #[tokio::test]
+    async fn login_rate_limit_ignores_spoofed_forwarded_headers() {
+        let passphrase = b"correct horse battery staple";
+        let (state, _data_dir) = test_state(passphrase).await;
+        let limiter = std::sync::Arc::new(RateLimiter::new());
+
+        for i in 0..10 {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-forwarded-for",
+                format!("203.0.113.{i}").parse().expect("header"),
+            );
+            let result = login(
+                State(state.clone()),
+                Extension(limiter.clone()),
+                peer(),
+                headers,
+                Json(LoginRequest {
+                    challenge_id: format!("missing-{i}"),
+                    credential_finalization_b64: B64.encode(b"not opaque"),
+                    device_id: None,
+                    device_name: None,
+                    platform: None,
+                }),
+            )
+            .await;
+
+            assert_eq!(result.unwrap_err().0, StatusCode::UNAUTHORIZED);
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "198.51.100.99".parse().expect("header"));
+        let result = login(
+            State(state),
+            Extension(limiter),
+            peer(),
+            headers,
+            Json(LoginRequest {
+                challenge_id: "missing-final".into(),
+                credential_finalization_b64: B64.encode(b"not opaque"),
+                device_id: None,
+                device_name: None,
+                platform: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn challenge_rate_limits_opaque_password_attempts_by_peer() {
+        let passphrase = b"correct horse battery staple";
+        let (state, _data_dir) = test_state(passphrase).await;
+        let limiter = std::sync::Arc::new(RateLimiter::new());
+
+        for _ in 0..10 {
+            let (challenge_req, _client_state) = challenge_request(b"candidate passphrase");
+            let result = challenge(
+                State(state.clone()),
+                Extension(limiter.clone()),
+                peer(),
+                Json(challenge_req),
+            )
+            .await;
+            assert!(result.is_ok());
+        }
+
+        let (challenge_req, _client_state) = challenge_request(b"candidate passphrase");
+        let result = challenge(
+            State(state),
+            Extension(limiter),
+            peer(),
+            Json(challenge_req),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::TOO_MANY_REQUESTS);
     }
 }

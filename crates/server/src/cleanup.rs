@@ -67,11 +67,11 @@ async fn cleanup_old_events(state: &AppState) -> anyhow::Result<()> {
 }
 
 async fn cleanup_orphan_uploads(state: &AppState) -> anyhow::Result<()> {
-    // Delete files stuck in "pending" status for more than 1 hour
+    // Delete incomplete uploads stuck before completion for more than 1 hour.
     let cutoff = (Utc::now() - Duration::hours(1)).to_rfc3339();
 
     let orphans = file::Entity::find()
-        .filter(file::Column::Status.eq("pending"))
+        .filter(file::Column::Status.ne("complete"))
         .filter(file::Column::CreatedAt.lt(&cutoff))
         .all(state.db())
         .await?;
@@ -84,7 +84,7 @@ async fn cleanup_orphan_uploads(state: &AppState) -> anyhow::Result<()> {
 
     if count > 0 {
         file::Entity::delete_many()
-            .filter(file::Column::Status.eq("pending"))
+            .filter(file::Column::Status.ne("complete"))
             .filter(file::Column::CreatedAt.lt(&cutoff))
             .exec(state.db())
             .await?;

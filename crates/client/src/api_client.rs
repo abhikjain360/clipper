@@ -64,31 +64,33 @@ impl ApiClient {
     ) -> Result<LoginResponse, ClientError> {
         validate_server_url(&self.base_url)?;
 
+        let (credential_request, client_login_state) =
+            crypto::opaque_client_login_start(passphrase.as_bytes())?;
+        let challenge_req = LoginChallengeRequest {
+            credential_request_b64: B64.encode(credential_request),
+        };
         let challenge_resp: LoginChallengeResponse = self
             .http
             .post(self.url("/api/auth/challenge"))
+            .json(&challenge_req)
             .send()
             .await?
             .error_for_status()?
             .json()
             .await?;
 
-        let auth_salt = B64
-            .decode(&challenge_resp.auth_salt_b64)
-            .map_err(|e| ClientError::Other(format!("auth_salt decode: {}", e)))?;
-        let challenge_nonce = B64
-            .decode(&challenge_resp.challenge_nonce_b64)
-            .map_err(|e| ClientError::Other(format!("challenge decode: {}", e)))?;
-        let auth_hash = crypto::compute_auth_hash(
+        let credential_response = B64
+            .decode(&challenge_resp.credential_response_b64)
+            .map_err(|e| ClientError::Other(format!("credential response decode: {}", e)))?;
+        let (credential_finalization, _) = crypto::opaque_client_login_finish(
+            &client_login_state,
             passphrase.as_bytes(),
-            &auth_salt,
-            &challenge_resp.server.auth_params,
+            &credential_response,
         )?;
-        let proof = crypto::compute_login_proof(&auth_hash, &challenge_nonce)?;
 
         let req = LoginRequest {
             challenge_id: challenge_resp.challenge_id,
-            auth_proof_b64: B64.encode(proof),
+            credential_finalization_b64: B64.encode(credential_finalization),
             device_id: None,
             device_name: Some(device_name.to_string()),
             platform: Some(platform.to_string()),

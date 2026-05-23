@@ -15,7 +15,7 @@ then send encrypted records and opaque metadata to the server.
   - checks `server_config` exists;
   - wires public routes, authenticated routes, tracing, cleanup, and rate-limit pruning.
 - `crates/server/src/routes/auth.rs`
-  - handles login challenge creation, challenge/proof login, device registration/update, session creation, and logout.
+  - handles OPAQUE login challenge creation/finalization, device registration/update, session creation, and logout.
 - `crates/server/src/auth.rs`
   - validates bearer tokens and injects authenticated `device_id`/`session_id` into request handlers.
 - `crates/server/src/routes/clipboard.rs`
@@ -37,7 +37,8 @@ SQLite stores durable metadata. The filesystem stores larger encrypted blobs:
 
 - `server_config`
   - one row;
-  - stores `auth_salt`, server-side `auth_hash`, and `enc_salt`;
+  - stores OPAQUE server setup, OPAQUE password file/verifier, and `enc_salt`;
+  - the legacy column names are still `auth_salt` for OPAQUE server setup and `auth_hash` for the OPAQUE password file;
   - does not store the raw passphrase.
 - `sessions`
   - stores random session token hashes, not bearer tokens themselves.
@@ -55,17 +56,17 @@ SQLite stores durable metadata. The filesystem stores larger encrypted blobs:
 First-run server setup:
 
 1. Operator runs `clipper-server init`.
-2. Server generates auth and encryption salts.
-3. Server stores the passphrase-derived auth verifier in `server_config`.
+2. Server generates OPAQUE server setup and an encryption salt.
+3. Server stores the OPAQUE server setup and password file/verifier in `server_config`.
 4. Server creates `clipboard/` and `files/` data directories.
 
 Normal client login:
 
-1. Client calls `POST /api/auth/challenge`.
-2. Server returns a random challenge ID, random challenge nonce, auth salt, encryption salt, and KDF parameters.
-3. Client derives the auth hash locally from the passphrase and auth salt.
-4. Client sends `POST /api/auth/login` with challenge ID, HMAC proof, and device info.
-5. Server consumes the single-use challenge, verifies the proof against its stored auth hash, creates/updates the device row, and returns a bearer token.
+1. Client starts OPAQUE locally from the passphrase.
+2. Client calls `POST /api/auth/challenge` with an OPAQUE credential request.
+3. Server starts OPAQUE from the stored password file/verifier, stores short-lived server login state under a random challenge ID, and returns the OPAQUE credential response, encryption salt, and KDF parameters.
+4. Client finishes OPAQUE locally and sends `POST /api/auth/login` with challenge ID, OPAQUE credential finalization, and device info.
+5. Server consumes the single-use challenge, finishes OPAQUE, creates/updates the device row, and returns a bearer token.
 6. Client uses `Authorization: Bearer <token>` on private HTTP routes and WebSocket connections.
 
 Clipboard upload/list flow:
@@ -116,12 +117,12 @@ Cleanup flow:
 Review `routes/auth.rs`, `auth.rs`, `state.rs`, and `rate_limit.rs` first.
 
 - Public auth routes are `POST /api/auth/challenge` and `POST /api/auth/login`.
-- Login must use the challenge/proof flow; raw passphrases and reusable auth hashes must not be sent to the server.
+- Login must use the OPAQUE challenge/finalization flow; raw passphrases and reusable auth hashes must not be sent to the server.
 - Challenge IDs must be random, short-lived, and single-use.
 - Session tokens must be random, stored server-side only as hashes, and required on all private routes.
 - Expired sessions must fail closed.
 - Logout should delete only the authenticated session.
-- Rate limiting must apply to login attempts and must not trust spoofable proxy headers unless deployment config guarantees a trusted proxy.
+- Rate limiting must apply to OPAQUE challenge starts and login finalizations, and must not trust spoofable proxy headers unless deployment config guarantees a trusted proxy.
 
 ## 5. Object And Path Safety
 
@@ -159,9 +160,9 @@ Review `clipper-core` and `clipper-client` when server API shapes change.
 - File metadata and file blobs must be encrypted separately client-side.
 - Nonces must be random and never reused with the same key.
 - Server responses must never include plaintext content.
-- Server-side logs and errors must not include decrypted data, passphrases, auth proofs, or bearer tokens.
-- The server still stores an auth verifier, so weak passphrases remain vulnerable to offline guessing by anyone with DB access. Strong passphrases still matter.
-- TLS is still required in real deployments; the challenge/proof flow avoids sending the raw passphrase but does not make plain HTTP safe for bearer tokens or metadata.
+- Server-side logs and errors must not include decrypted data, passphrases, OPAQUE messages, or bearer tokens.
+- The server still stores an OPAQUE password file/verifier, so weak passphrases remain vulnerable to offline guessing by anyone with DB access. The verifier must not be usable directly as a login secret. Strong passphrases still matter.
+- TLS is still required in real deployments; OPAQUE avoids sending the raw passphrase but does not make plain HTTP safe for bearer tokens or metadata.
 
 ## 9. Sync And Event Replay
 
@@ -182,7 +183,7 @@ Prioritize tests where failure is a security bug:
 - Duplicate IDs do not overwrite existing blobs.
 - Oversized uploads are rejected.
 - Blob size/hash mismatches are rejected and partial files are removed.
-- Login rejects invalid, expired, reused, or malformed challenge proofs.
+- Login rejects invalid, expired, reused, or malformed OPAQUE challenge finalizations.
 - WebSocket replay gap behavior either replays complete history or forces bootstrap.
 
 Avoid broad fixture-heavy tests unless they protect a real invariant.

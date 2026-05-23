@@ -17,7 +17,6 @@ base64 = "0.22.1"
 chrono = { version = "0.4.44", features = ["serde"] }
 clap = { version = "4.5.60", features = ["derive"] }
 clipper-core.workspace = true
-constant_time_eq = "0.4.2"
 futures-util = "0.3.32"
 rand = "0.10.0"
 rpassword = "7.4.0"

@@ -6,7 +6,10 @@ use axum::{
 };
 use base64::Engine;
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, Set,
+    TransactionTrait,
+};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
@@ -113,43 +116,145 @@ pub async fn upload_blob(
     }
 
     let expected_size = validate_blob_size(existing.blob_size)?;
+    let now = Utc::now().to_rfc3339();
+    let claimed = file::Entity::update_many()
+        .col_expr(
+            file::Column::Status,
+            sea_orm::sea_query::Expr::value("uploading"),
+        )
+        .col_expr(
+            file::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(file::Column::Id.eq(&file_id))
+        .filter(file::Column::Status.eq("pending"))
+        .filter(file::Column::SourceDeviceId.eq(&auth.device_id))
+        .exec(state.db())
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+
+    if claimed.rows_affected != 1 {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "File upload in progress",
+        ));
+    }
 
     // Stream body to disk
-    let path = state.files_dir().join(&existing.blob_path);
-    let mut out_file = tokio::fs::File::create(&path)
+    let files_dir = state.files_dir();
+    if tokio::fs::create_dir_all(&files_dir).await.is_err() {
+        reset_file_status(&state, &file_id, "uploading", "pending").await;
+        return Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Storage error",
+        ));
+    }
+    let path = files_dir.join(&existing.blob_path);
+    let tmp_path = files_dir.join(format!(
+        "{}.{}.tmp",
+        existing.blob_path,
+        uuid::Uuid::new_v4()
+    ));
+    let mut out_file = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Storage error"))?;
+    {
+        Ok(file) => file,
+        Err(_) => {
+            reset_file_status(&state, &file_id, "uploading", "pending").await;
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Storage error",
+            ));
+        }
+    };
 
     use futures_util::StreamExt;
     let mut stream = body.into_data_stream();
     let mut total_size = 0_u64;
     while let Some(chunk) = stream.next().await {
-        let data = chunk.map_err(|_| error_response(StatusCode::BAD_REQUEST, "Stream error"))?;
+        let data = match chunk {
+            Ok(data) => data,
+            Err(_) => {
+                drop(out_file);
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                reset_file_status(&state, &file_id, "uploading", "pending").await;
+                return Err(error_response(StatusCode::BAD_REQUEST, "Stream error"));
+            }
+        };
         total_size += data.len() as u64;
         if total_size > expected_size {
             drop(out_file);
-            let _ = tokio::fs::remove_file(&path).await;
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            reset_file_status(&state, &file_id, "uploading", "pending").await;
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
                 "Blob size does not match initialized size",
             ));
         }
-        out_file
-            .write_all(&data)
-            .await
-            .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Write error"))?;
+        if out_file.write_all(&data).await.is_err() {
+            drop(out_file);
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            reset_file_status(&state, &file_id, "uploading", "pending").await;
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Write error",
+            ));
+        }
     }
-    out_file
-        .flush()
-        .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Flush error"))?;
+    if out_file.flush().await.is_err() {
+        drop(out_file);
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        reset_file_status(&state, &file_id, "uploading", "pending").await;
+        return Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Flush error",
+        ));
+    }
     drop(out_file);
 
     if total_size != expected_size {
-        let _ = tokio::fs::remove_file(&path).await;
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        reset_file_status(&state, &file_id, "uploading", "pending").await;
         return Err(error_response(
             StatusCode::BAD_REQUEST,
             "Blob size does not match initialized size",
+        ));
+    }
+
+    let _ = tokio::fs::remove_file(&path).await;
+    if tokio::fs::rename(&tmp_path, &path).await.is_err() {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        reset_file_status(&state, &file_id, "uploading", "pending").await;
+        return Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Storage error",
+        ));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let uploaded = file::Entity::update_many()
+        .col_expr(
+            file::Column::Status,
+            sea_orm::sea_query::Expr::value("uploaded"),
+        )
+        .col_expr(
+            file::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(file::Column::Id.eq(&file_id))
+        .filter(file::Column::Status.eq("uploading"))
+        .exec(state.db())
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+
+    if uploaded.rows_affected != 1 {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "File upload no longer in progress",
         ));
     }
 
@@ -174,10 +279,10 @@ pub async fn complete_upload(
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "File not found"))?;
 
-    if existing.status != "pending" {
+    if existing.status != "uploaded" {
         return Err(error_response(
             StatusCode::CONFLICT,
-            "File already completed",
+            "File blob has not been uploaded",
         ));
     }
 
@@ -200,29 +305,58 @@ pub async fn complete_upload(
     if computed_hash.as_slice() != provided_hash.as_slice() {
         // Delete the corrupt blob
         let _ = tokio::fs::remove_file(&blob_path).await;
+        reset_file_status(&state, &file_id, "uploaded", "pending").await;
         return Err(error_response(StatusCode::BAD_REQUEST, "SHA-256 mismatch"));
     }
 
     let client_size = validate_blob_size(req.blob_size)?;
     if actual_size != expected_size || client_size != expected_size {
         let _ = tokio::fs::remove_file(&blob_path).await;
+        reset_file_status(&state, &file_id, "uploaded", "pending").await;
         return Err(error_response(
             StatusCode::BAD_REQUEST,
             "Blob size does not match initialized size",
         ));
     }
 
-    // Update file record
+    // Update file record and log event atomically.
     let now = Utc::now().to_rfc3339();
-    let mut active: file::ActiveModel = existing.into();
-    active.sha256_ciphertext = Set(computed_hash.to_vec());
-    active.blob_size = Set(actual_size as i64);
-    active.status = Set("complete".into());
-    active.updated_at = Set(now.clone());
-    active
-        .update(state.db())
+    let txn = state
+        .db()
+        .begin()
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+    let updated = file::Entity::update_many()
+        .col_expr(
+            file::Column::Sha256Ciphertext,
+            sea_orm::sea_query::Expr::value(computed_hash.to_vec()),
+        )
+        .col_expr(
+            file::Column::BlobSize,
+            sea_orm::sea_query::Expr::value(actual_size as i64),
+        )
+        .col_expr(
+            file::Column::Status,
+            sea_orm::sea_query::Expr::value("complete"),
+        )
+        .col_expr(
+            file::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now.clone()),
+        )
+        .filter(file::Column::Id.eq(&file_id))
+        .filter(file::Column::Status.eq("uploaded"))
+        .filter(file::Column::SourceDeviceId.eq(&auth.device_id))
+        .exec(&txn)
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+
+    if updated.rows_affected != 1 {
+        let _ = txn.rollback().await;
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "File upload no longer ready to complete",
+        ));
+    }
 
     // Log event
     let event = event_log::ActiveModel {
@@ -232,8 +366,18 @@ pub async fn complete_upload(
         object_id: Set(file_id.clone()),
         created_at: Set(now.clone()),
     };
-    let inserted = event
-        .insert(state.db())
+    let inserted = match event.insert(&txn).await {
+        Ok(inserted) => inserted,
+        Err(_) => {
+            let _ = txn.rollback().await;
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error",
+            ));
+        }
+    };
+
+    txn.commit()
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
 
@@ -339,17 +483,18 @@ pub async fn delete_file(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Delete blob
     let path = state.files_dir().join(&existing.blob_path);
-    let _ = tokio::fs::remove_file(&path).await;
-
-    // Delete DB record
-    file::Entity::delete_by_id(&file_id)
-        .exec(state.db())
+    let txn = state
+        .db()
+        .begin()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Log event
+    // Delete DB record and log event atomically.
+    file::Entity::delete_by_id(&file_id)
+        .exec(&txn)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let now = Utc::now().to_rfc3339();
     let event = event_log::ActiveModel {
         seq: Default::default(),
@@ -358,10 +503,19 @@ pub async fn delete_file(
         object_id: Set(file_id.clone()),
         created_at: Set(now.clone()),
     };
-    let inserted = event
-        .insert(state.db())
+    let inserted = match event.insert(&txn).await {
+        Ok(inserted) => inserted,
+        Err(_) => {
+            let _ = txn.rollback().await;
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    txn.commit()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Delete blob after the durable delete event exists.
+    let _ = tokio::fs::remove_file(&path).await;
 
     let _ = state.ws_tx().send(WsBroadcast {
         seq: inserted.seq,
@@ -374,6 +528,20 @@ pub async fn delete_file(
     info!(device_id = %auth.device_id, file_id = %file_id, "File deleted");
 
     Ok(Json(OkResponse { ok: true }))
+}
+
+async fn reset_file_status(state: &AppState, file_id: &str, from: &str, to: &str) {
+    let now = Utc::now().to_rfc3339();
+    let _ = file::Entity::update_many()
+        .col_expr(file::Column::Status, sea_orm::sea_query::Expr::value(to))
+        .col_expr(
+            file::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(file::Column::Id.eq(file_id))
+        .filter(file::Column::Status.eq(from))
+        .exec(state.db())
+        .await;
 }
 
 fn validate_blob_size(size: i64) -> Result<u64, (StatusCode, Json<ErrorResponse>)> {
@@ -540,5 +708,92 @@ mod tests {
                 .join(format!("{id}.bin"))
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn upload_blob_rejects_duplicate_without_overwriting_blob() {
+        let (state, data_dir) = test_state().await;
+        let id = Uuid::new_v4().to_string();
+
+        let _ = init_upload(
+            State(state.clone()),
+            Extension(auth("device-a")),
+            Json(init_request(id.clone(), 5, "device-a")),
+        )
+        .await
+        .expect("init");
+
+        let _ = upload_blob(
+            State(state.clone()),
+            Extension(auth("device-a")),
+            Path(id.clone()),
+            Body::from("first"),
+        )
+        .await
+        .expect("first upload");
+
+        let result = upload_blob(
+            State(state),
+            Extension(auth("device-a")),
+            Path(id.clone()),
+            Body::from("xxxxx"),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
+        let blob = tokio::fs::read(data_dir.path().join("files").join(format!("{id}.bin")))
+            .await
+            .expect("blob");
+        assert_eq!(blob, b"first");
+    }
+
+    #[tokio::test]
+    async fn complete_upload_marks_file_complete_and_logs_event() {
+        let (state, _data_dir) = test_state().await;
+        let id = Uuid::new_v4().to_string();
+        let blob = b"encrypted blob";
+
+        let _ = init_upload(
+            State(state.clone()),
+            Extension(auth("device-a")),
+            Json(init_request(id.clone(), blob.len() as i64, "device-a")),
+        )
+        .await
+        .expect("init");
+        let _ = upload_blob(
+            State(state.clone()),
+            Extension(auth("device-a")),
+            Path(id.clone()),
+            Body::from(blob.to_vec()),
+        )
+        .await
+        .expect("upload");
+
+        let _ = complete_upload(
+            State(state.clone()),
+            Extension(auth("device-a")),
+            Path(id.clone()),
+            Json(FileCompleteRequest {
+                sha256_ciphertext_b64: B64.encode(clipper_core::crypto::sha256(blob)),
+                blob_size: blob.len() as i64,
+            }),
+        )
+        .await
+        .expect("complete");
+
+        let file = file::Entity::find_by_id(id.clone())
+            .one(state.db())
+            .await
+            .expect("query")
+            .expect("file");
+        assert_eq!(file.status, "complete");
+
+        let events = event_log::Entity::find()
+            .all(state.db())
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "file.created");
+        assert_eq!(events[0].object_id, id);
     }
 }

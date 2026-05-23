@@ -23,7 +23,7 @@ pub struct AppStateInner {
 }
 
 struct AuthChallenge {
-    nonce: [u8; 32],
+    server_login_state: Vec<u8>,
     expires_at: Instant,
 }
 
@@ -56,7 +56,7 @@ impl AppState {
         &self.inner.ws_tx
     }
 
-    pub fn create_auth_challenge(&self) -> (String, [u8; 32]) {
+    pub fn create_auth_challenge(&self, server_login_state: Vec<u8>) -> String {
         let now = Instant::now();
         let mut challenges = self.inner.auth_challenges.lock().expect("lock poisoned");
         challenges.retain(|_, challenge| challenge.expires_at > now);
@@ -70,24 +70,23 @@ impl AppState {
         }
 
         let challenge_id = uuid::Uuid::new_v4().to_string();
-        let nonce = clipper_core::crypto::generate_token();
         challenges.insert(
             challenge_id.clone(),
             AuthChallenge {
-                nonce,
+                server_login_state,
                 expires_at: now + AUTH_CHALLENGE_TTL,
             },
         );
-        (challenge_id, nonce)
+        challenge_id
     }
 
-    pub fn take_auth_challenge(&self, challenge_id: &str) -> Option<[u8; 32]> {
+    pub fn take_auth_challenge(&self, challenge_id: &str) -> Option<Vec<u8>> {
         let now = Instant::now();
         let mut challenges = self.inner.auth_challenges.lock().expect("lock poisoned");
         challenges.retain(|_, challenge| challenge.expires_at > now);
         challenges
             .remove(challenge_id)
             .filter(|challenge| challenge.expires_at > now)
-            .map(|challenge| challenge.nonce)
+            .map(|challenge| challenge.server_login_state)
     }
 }

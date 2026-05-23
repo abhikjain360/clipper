@@ -3,12 +3,19 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit},
 };
-use hmac::{Hmac, Mac};
 use rand::RngExt;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-type HmacSha256 = Hmac<Sha256>;
+const OPAQUE_CREDENTIAL_IDENTIFIER: &[u8] = b"clipper:passphrase:v1";
+
+struct ClipperOpaqueCipherSuite;
+
+impl opaque_ke::CipherSuite for ClipperOpaqueCipherSuite {
+    type OprfCs = opaque_ke::Ristretto255;
+    type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, sha2::Sha512>;
+    type Ksf = opaque_ke::argon2::Argon2<'static>;
+}
 
 /// Argon2id parameters — same structure used for both auth and enc derivation.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -70,42 +77,146 @@ pub fn derive_key(
     Ok(key)
 }
 
-/// Compute the auth hash for storing/verifying the passphrase.
-pub fn compute_auth_hash(
-    passphrase: &[u8],
-    auth_salt: &[u8],
-    params: &Argon2Params,
-) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
-    derive_key(passphrase, auth_salt, params)
-}
-
-/// Compute the one-time login proof sent to the server.
+/// Create the OPAQUE server setup and password file stored by the server.
 ///
-/// The proof authenticates possession of the passphrase-derived auth hash
-/// without sending the passphrase or reusable auth hash over the network.
-pub fn compute_login_proof(
-    auth_hash: &[u8; 32],
-    challenge_nonce: &[u8],
-) -> Result<[u8; 32], CryptoError> {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(auth_hash)
-        .map_err(|e| CryptoError::Mac(e.to_string()))?;
-    mac.update(b"clipper:login-proof:v1");
-    mac.update(challenge_nonce);
-    Ok(mac.finalize().into_bytes().into())
+/// The password file is a verifier: stealing it allows offline guessing, but
+/// does not give an attacker the material needed to complete a login directly.
+pub fn opaque_register(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let server_setup = opaque_ke::ServerSetup::<ClipperOpaqueCipherSuite>::new(&mut rng);
+    let client_start =
+        opaque_ke::ClientRegistration::<ClipperOpaqueCipherSuite>::start(&mut rng, passphrase)
+            .map_err(opaque_error)?;
+    let server_start = opaque_ke::ServerRegistration::<ClipperOpaqueCipherSuite>::start(
+        &server_setup,
+        client_start.message,
+        OPAQUE_CREDENTIAL_IDENTIFIER,
+    )
+    .map_err(opaque_error)?;
+    let client_finish = client_start
+        .state
+        .finish(
+            &mut rng,
+            passphrase,
+            server_start.message,
+            opaque_ke::ClientRegistrationFinishParameters::default(),
+        )
+        .map_err(opaque_error)?;
+    let password_file =
+        opaque_ke::ServerRegistration::<ClipperOpaqueCipherSuite>::finish(client_finish.message);
+
+    Ok((
+        server_setup.serialize().to_vec(),
+        password_file.serialize().to_vec(),
+    ))
 }
 
-/// Verify passphrase against stored auth hash using constant-time comparison.
-pub fn verify_auth(
-    passphrase: &[u8],
-    auth_salt: &[u8],
-    params: &Argon2Params,
-    stored_hash: &[u8; 32],
-) -> Result<bool, CryptoError> {
-    let computed = compute_auth_hash(passphrase, auth_salt, params)?;
-    Ok(constant_time_eq::constant_time_eq(
-        computed.as_ref(),
-        stored_hash,
+/// Start an OPAQUE login on the client.
+///
+/// Returns the credential request to send to the server and serialized client
+/// state that must be kept only until the login is finished.
+pub fn opaque_client_login_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let start = opaque_ke::ClientLogin::<ClipperOpaqueCipherSuite>::start(&mut rng, passphrase)
+        .map_err(opaque_error)?;
+
+    Ok((
+        start.message.serialize().to_vec(),
+        start.state.serialize().to_vec(),
     ))
+}
+
+/// Finish an OPAQUE login on the client.
+///
+/// Returns the credential finalization message to send to the server and the
+/// negotiated session key. The current HTTP API only needs the finalization
+/// message, but returning the key lets tests verify both sides agree.
+pub fn opaque_client_login_finish(
+    client_state: &[u8],
+    passphrase: &[u8],
+    credential_response: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let client_login =
+        opaque_ke::ClientLogin::<ClipperOpaqueCipherSuite>::deserialize(client_state)
+            .map_err(opaque_error)?;
+    let response =
+        opaque_ke::CredentialResponse::<ClipperOpaqueCipherSuite>::deserialize(credential_response)
+            .map_err(opaque_error)?;
+    let finish = client_login
+        .finish(
+            &mut rng,
+            passphrase,
+            response,
+            opaque_ke::ClientLoginFinishParameters::default(),
+        )
+        .map_err(opaque_error)?;
+
+    Ok((
+        finish.message.serialize().to_vec(),
+        finish.session_key.to_vec(),
+    ))
+}
+
+/// Start an OPAQUE login on the server.
+///
+/// Returns the credential response for the client and serialized server state
+/// that must be retained until the finalization request arrives.
+pub fn opaque_server_login_start(
+    server_setup: &[u8],
+    password_file: &[u8],
+    credential_request: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let server_setup =
+        opaque_ke::ServerSetup::<ClipperOpaqueCipherSuite>::deserialize(server_setup)
+            .map_err(opaque_error)?;
+    let password_file =
+        opaque_ke::ServerRegistration::<ClipperOpaqueCipherSuite>::deserialize(password_file)
+            .map_err(opaque_error)?;
+    let request =
+        opaque_ke::CredentialRequest::<ClipperOpaqueCipherSuite>::deserialize(credential_request)
+            .map_err(opaque_error)?;
+    let start = opaque_ke::ServerLogin::<ClipperOpaqueCipherSuite>::start(
+        &mut rng,
+        &server_setup,
+        Some(password_file),
+        request,
+        OPAQUE_CREDENTIAL_IDENTIFIER,
+        opaque_ke::ServerLoginParameters::default(),
+    )
+    .map_err(opaque_error)?;
+
+    Ok((
+        start.message.serialize().to_vec(),
+        start.state.serialize().to_vec(),
+    ))
+}
+
+/// Finish an OPAQUE login on the server.
+///
+/// Returns the negotiated session key. The caller can ignore it when using a
+/// random bearer token after successful password authentication.
+pub fn opaque_server_login_finish(
+    server_state: &[u8],
+    credential_finalization: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let server_login =
+        opaque_ke::ServerLogin::<ClipperOpaqueCipherSuite>::deserialize(server_state)
+            .map_err(opaque_error)?;
+    let finalization = opaque_ke::CredentialFinalization::<ClipperOpaqueCipherSuite>::deserialize(
+        credential_finalization,
+    )
+    .map_err(opaque_error)?;
+    let finish = server_login
+        .finish(finalization, opaque_ke::ServerLoginParameters::default())
+        .map_err(opaque_error)?;
+
+    Ok(finish.session_key.to_vec())
+}
+
+fn opaque_error(error: impl std::fmt::Display) -> CryptoError {
+    CryptoError::Opaque(error.to_string())
 }
 
 /// Encrypt plaintext with XChaCha20-Poly1305.
@@ -165,8 +276,8 @@ pub enum CryptoError {
     Encrypt(String),
     #[error("decryption error: {0}")]
     Decrypt(String),
-    #[error("MAC error: {0}")]
-    Mac(String),
+    #[error("OPAQUE error: {0}")]
+    Opaque(String),
 }
 
 // ── Associated data constants ──
@@ -210,24 +321,6 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_hash_verify() {
-        let params = Argon2Params::default();
-        let salt = generate_salt();
-        let hash = compute_auth_hash(b"my-passphrase", &salt, &params).unwrap();
-        assert!(verify_auth(b"my-passphrase", &salt, &params, &hash).unwrap());
-        assert!(!verify_auth(b"wrong-passphrase", &salt, &params, &hash).unwrap());
-    }
-
-    #[test]
-    fn test_login_proof_is_challenge_bound() {
-        let params = Argon2Params::default();
-        let auth_hash = compute_auth_hash(b"my-passphrase", b"0123456789abcdef", &params).unwrap();
-        let proof1 = compute_login_proof(&auth_hash, b"challenge-one").unwrap();
-        let proof2 = compute_login_proof(&auth_hash, b"challenge-two").unwrap();
-        assert_ne!(proof1, proof2);
-    }
-
-    #[test]
     fn test_sha256() {
         let hash = sha256(b"hello");
         assert_eq!(hash.len(), 32);
@@ -241,5 +334,29 @@ mod tests {
         let key1 = derive_key(b"same-pass", b"salt-for-auth0000", &params).unwrap();
         let key2 = derive_key(b"same-pass", b"salt-for-enc00000", &params).unwrap();
         assert_ne!(&*key1, &*key2);
+    }
+
+    #[test]
+    fn test_opaque_login_roundtrip() {
+        let password = b"correct horse battery staple";
+        let (server_setup, password_file) = opaque_register(password).unwrap();
+        let (request, client_state) = opaque_client_login_start(password).unwrap();
+        let (response, server_state) =
+            opaque_server_login_start(&server_setup, &password_file, &request).unwrap();
+        let (finalization, client_session_key) =
+            opaque_client_login_finish(&client_state, password, &response).unwrap();
+        let server_session_key = opaque_server_login_finish(&server_state, &finalization).unwrap();
+
+        assert_eq!(client_session_key, server_session_key);
+    }
+
+    #[test]
+    fn test_opaque_rejects_wrong_password() {
+        let (server_setup, password_file) = opaque_register(b"correct password").unwrap();
+        let (request, client_state) = opaque_client_login_start(b"wrong password").unwrap();
+        let (response, _server_state) =
+            opaque_server_login_start(&server_setup, &password_file, &request).unwrap();
+
+        assert!(opaque_client_login_finish(&client_state, b"wrong password", &response).is_err());
     }
 }

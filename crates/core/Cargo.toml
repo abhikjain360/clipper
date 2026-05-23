@@ -9,8 +9,7 @@ argon2 = "0.5.3"
 base64 = "0.22.1"
 chacha20poly1305 = "0.10.1"
 chrono = { version = "0.4.44", features = ["serde"] }
-constant_time_eq = "0.4.2"
-hmac = "0.12.1"
+opaque-ke = { version = "4.1.0-pre.2", features = ["argon2", "std"] }
 rand = "0.10.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

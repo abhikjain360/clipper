@@ -7,6 +7,7 @@ mod routes;
 mod state;
 mod ws;
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -93,19 +94,19 @@ async fn init_server(data_dir: PathBuf) -> anyhow::Result<()> {
         anyhow::bail!("Passphrase cannot be empty");
     }
 
-    let params = clipper_core::crypto::Argon2Params::default();
-    let auth_salt = clipper_core::crypto::generate_salt();
+    let (opaque_server_setup, opaque_password_file) =
+        clipper_core::crypto::opaque_register(passphrase.as_bytes())?;
     let enc_salt = clipper_core::crypto::generate_salt();
-    let auth_hash =
-        clipper_core::crypto::compute_auth_hash(passphrase.as_bytes(), &auth_salt, &params)?;
 
     use sea_orm::{ActiveModelTrait, Set};
     let now = chrono::Utc::now().to_rfc3339();
 
     let config = entity::server_config::ActiveModel {
         id: Set(1),
-        auth_salt: Set(auth_salt.to_vec()),
-        auth_hash: Set(auth_hash.to_vec()),
+        // Existing column names are retained for migration compatibility:
+        // auth_salt stores OPAQUE server setup and auth_hash stores the OPAQUE password file.
+        auth_salt: Set(opaque_server_setup),
+        auth_hash: Set(opaque_password_file),
         enc_salt: Set(enc_salt.to_vec()),
         created_at: Set(now.clone()),
         updated_at: Set(now),
@@ -190,9 +191,12 @@ async fn serve(data_dir: PathBuf, addr: String) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("Listening on {}", addr);
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     Ok(())
 }

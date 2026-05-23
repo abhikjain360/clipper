@@ -70,10 +70,35 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: Option<Auth
     }
 
     // Replay missed events
-    if last_seq < latest_seq
-        && let Ok(events) = get_events_since(&state, last_seq).await
-    {
-        if events.is_empty() {
+    if last_seq < latest_seq {
+        if let Ok(events) = get_events_since(&state, last_seq).await {
+            if !replay_is_contiguous(last_seq, &events) {
+                // Gap too large or events pruned — send invalidate
+                let inv = WsServerMessage::Invalidate {
+                    target: "all".to_string(),
+                };
+                let _ = socket
+                    .send(Message::Text(serde_json::to_string(&inv).unwrap().into()))
+                    .await;
+            } else {
+                for evt in events {
+                    let msg = WsServerMessage::Event {
+                        seq: evt.seq,
+                        event_type: evt.event_type,
+                        object_kind: evt.object_kind,
+                        object_id: evt.object_id,
+                        created_at: evt.created_at,
+                    };
+                    if socket
+                        .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        } else {
             // Gap too large or events pruned — send invalidate
             let inv = WsServerMessage::Invalidate {
                 target: "all".to_string(),
@@ -81,23 +106,6 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: Option<Auth
             let _ = socket
                 .send(Message::Text(serde_json::to_string(&inv).unwrap().into()))
                 .await;
-        } else {
-            for evt in events {
-                let msg = WsServerMessage::Event {
-                    seq: evt.seq,
-                    event_type: evt.event_type,
-                    object_kind: evt.object_kind,
-                    object_id: evt.object_id,
-                    created_at: evt.created_at,
-                };
-                if socket
-                    .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
         }
     }
 
@@ -159,4 +167,35 @@ async fn get_events_since(
         .order_by_asc(event_log::Column::Seq)
         .all(state.db())
         .await
+}
+
+fn replay_is_contiguous(last_seq: i64, events: &[event_log::Model]) -> bool {
+    events
+        .first()
+        .is_some_and(|event| event.seq == last_seq.saturating_add(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(seq: i64) -> event_log::Model {
+        event_log::Model {
+            seq,
+            event_type: "file.created".into(),
+            object_kind: "file".into(),
+            object_id: "00000000-0000-0000-0000-000000000000".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn replay_detects_pruned_gap_when_newer_events_exist() {
+        assert!(!replay_is_contiguous(10, &[event(50), event(51)]));
+    }
+
+    #[test]
+    fn replay_accepts_contiguous_history() {
+        assert!(replay_is_contiguous(10, &[event(11), event(12)]));
+    }
 }

@@ -9,8 +9,8 @@
  *   cargo run -p clipper-server -- serve --data-dir /tmp/clipper-test-data --addr 127.0.0.1:8787
  *
  *   # Then run this script:
- *   # Challenge/proof login is implemented in the Rust client because it needs
- *   # Argon2id. This script expects an already-issued token for route testing.
+ *   # OPAQUE login is implemented in the Rust client because it needs the
+ *   # shared Rust crypto stack. This script expects an already-issued token for route testing.
  *   CLIPPER_TOKEN="..." deno run --allow-net --allow-env test-server.ts
  */
 

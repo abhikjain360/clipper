@@ -5,17 +5,21 @@ use crate::crypto::Argon2Params;
 // ── Auth ──
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct LoginChallengeRequest {
+    pub credential_request_b64: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct LoginChallengeResponse {
     pub challenge_id: String,
-    pub challenge_nonce_b64: String,
-    pub auth_salt_b64: String,
+    pub credential_response_b64: String,
     pub server: ServerInfo,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginRequest {
     pub challenge_id: String,
-    pub auth_proof_b64: String,
+    pub credential_finalization_b64: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -5,7 +5,10 @@ use axum::{
 };
 use base64::Engine;
 use chrono::{Duration, Utc};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, Set,
+    TransactionTrait,
+};
 use tokio::io::AsyncWriteExt;
 use tracing::info;
 
@@ -89,6 +92,12 @@ pub async fn upload(
     let now = Utc::now().to_rfc3339();
     let expires = (Utc::now() + Duration::days(7)).to_rfc3339();
 
+    let txn = state
+        .db()
+        .begin()
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+
     let item = clipboard_item::ActiveModel {
         id: Set(req.id.clone()),
         ciphertext_path: Set(filename),
@@ -99,7 +108,8 @@ pub async fn upload(
         expires_at: Set(expires),
         source_device_id: Set(auth.device_id.clone()),
     };
-    if item.insert(state.db()).await.is_err() {
+    if item.insert(&txn).await.is_err() {
+        let _ = txn.rollback().await;
         let _ = tokio::fs::remove_file(&path).await;
         return Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -115,10 +125,25 @@ pub async fn upload(
         object_id: Set(req.id.clone()),
         created_at: Set(now.clone()),
     };
-    let inserted = event
-        .insert(state.db())
-        .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+    let inserted = match event.insert(&txn).await {
+        Ok(inserted) => inserted,
+        Err(_) => {
+            let _ = txn.rollback().await;
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error",
+            ));
+        }
+    };
+
+    if txn.commit().await.is_err() {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error",
+        ));
+    }
 
     // Broadcast to WebSocket clients
     let _ = state.ws_tx().send(WsBroadcast {
