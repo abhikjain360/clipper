@@ -2,7 +2,7 @@
   description = "Clipper development environment";
 
   inputs = {
-    # Use unstable until the latest stable NixOS channel has Dart >= 3.11.1.
+    # Use unstable until the latest stable Nix channel has Dart >= 3.11.1.
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
 
