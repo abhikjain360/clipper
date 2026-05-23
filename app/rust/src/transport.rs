@@ -17,6 +17,30 @@ use tracing::warn;
 
 use crate::daemon_process;
 
+pub(crate) type TransportResult<T> = Result<T, TransportError>;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TransportError {
+    #[error("daemon process launch failed: {0}")]
+    DaemonProcess(#[from] daemon_process::DaemonProcessError),
+    #[error("cannot connect to daemon at {path}: {source}")]
+    Connect {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("not connected to daemon")]
+    NotConnected,
+    #[error("daemon connection lost")]
+    ConnectionLost,
+    #[error("daemon returned error: {0}")]
+    Daemon(String),
+    #[error("daemon request encode failed: {0}")]
+    RequestEncode(#[from] serde_json::Error),
+    #[error("daemon write failed: {0}")]
+    Write(#[source] std::io::Error),
+}
+
 // ── Connection types ──
 
 pub(crate) struct ActiveConnection {
@@ -54,7 +78,7 @@ pub(crate) fn socket_path() -> PathBuf {
 
 /// Connect to the daemon's Unix socket. Spawns a reader task that routes
 /// responses to pending callers and broadcasts state events.
-pub(crate) async fn connect() -> anyhow::Result<()> {
+pub(crate) async fn connect() -> TransportResult<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -77,7 +101,10 @@ pub(crate) async fn connect() -> anyhow::Result<()> {
 
     let stream = tokio::net::UnixStream::connect(&sock)
         .await
-        .map_err(|e| anyhow::anyhow!("Cannot connect to daemon at {}: {}", sock.display(), e))?;
+        .map_err(|source| TransportError::Connect {
+            path: sock.clone(),
+            source,
+        })?;
 
     let (read_half, write_half) = stream.into_split();
 
@@ -130,7 +157,7 @@ pub(crate) async fn connect() -> anyhow::Result<()> {
 /// Send a request to the daemon and await the correlated response.
 pub(crate) async fn send_command(
     command: DaemonCommand,
-) -> anyhow::Result<Option<serde_json::Value>> {
+) -> TransportResult<Option<serde_json::Value>> {
     let id = uuid::Uuid::new_v4().to_string();
     let req = DaemonRequest::new(id.clone(), command);
 
@@ -138,9 +165,7 @@ pub(crate) async fn send_command(
 
     {
         let conn_guard = BRIDGE.conn.read().await;
-        let conn = conn_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not connected to daemon"))?;
+        let conn = conn_guard.as_ref().ok_or(TransportError::NotConnected)?;
 
         conn.pending.lock().await.insert(id.clone(), tx);
 
@@ -149,19 +174,16 @@ pub(crate) async fn send_command(
         if let Err(e) = conn.writer.lock().await.write_all(line.as_bytes()).await {
             // Clean up the pending entry so it doesn't leak.
             conn.pending.lock().await.remove(&id);
-            return Err(e.into());
+            return Err(TransportError::Write(e));
         }
     }
 
-    let resp = rx
-        .await
-        .map_err(|_| anyhow::anyhow!("Daemon connection lost"))?;
+    let resp = rx.await.map_err(|_| TransportError::ConnectionLost)?;
     if resp.ok {
         Ok(resp.result)
     } else {
-        Err(anyhow::anyhow!(
-            "{}",
-            resp.error.unwrap_or_else(|| "Unknown error".into())
+        Err(TransportError::Daemon(
+            resp.error.unwrap_or_else(|| "Unknown error".into()),
         ))
     }
 }

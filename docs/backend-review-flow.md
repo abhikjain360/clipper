@@ -13,7 +13,9 @@ then send encrypted records and opaque metadata to the server.
   - boots the Axum HTTP server;
   - runs migrations;
   - checks `server_config` exists;
-  - wires public routes, authenticated routes, tracing, cleanup, and rate-limit pruning.
+  - wires public routes, authenticated routes, tracing, cleanup, rate-limit pruning, and typed process-level error handling.
+- `crates/server/src/error.rs`
+  - owns server process error variants, display text, and exit-code mapping.
 - `crates/server/src/routes/auth.rs`
   - handles OPAQUE login challenge creation/finalization, device registration/update, session creation, and logout.
 - `crates/server/src/auth.rs`
@@ -203,6 +205,9 @@ Review `clipper-core` and `clipper-client` when server API shapes change.
 - Nonces must be random and never reused with the same key.
 - Server responses must never include plaintext content.
 - Server-side logs and errors must not include decrypted data, passphrases, OPAQUE messages, or bearer tokens.
+- Server process errors should stay typed and composable. Do not add direct
+  `anyhow` usage or forced stderr printing; log through `tracing` and let the
+  entrypoint exit with the mapped error code.
 - The server still stores an OPAQUE password file/verifier, so weak passphrases remain vulnerable to offline guessing by anyone with DB access. The verifier must not be usable directly as a login secret. Strong passphrases still matter.
 - TLS is still required in real deployments; OPAQUE avoids sending the raw passphrase but does not make plain HTTP safe for bearer tokens or metadata.
 

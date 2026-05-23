@@ -3,6 +3,7 @@
 //! Runs as a macOS LaunchAgent, exposes a Unix socket for app control.
 
 mod clients;
+mod error;
 mod handler;
 mod keychain;
 mod protocol;
@@ -11,11 +12,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::net::UnixListener;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use clipper_client::engine::SyncEngine;
 
 use crate::clients::ClientManager;
+use crate::error::DaemonResult;
 use crate::protocol::DaemonEvent;
 
 fn socket_path() -> PathBuf {
@@ -48,7 +50,14 @@ fn parse_args() -> String {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() {
+    if let Err(error) = run().await {
+        error!(%error, "daemon failed");
+        std::process::exit(error.exit_code());
+    }
+}
+
+async fn run() -> DaemonResult<()> {
     let default_server_url = parse_args();
 
     // Init logging
@@ -79,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
     if sock_path.exists() {
         match tokio::net::UnixStream::connect(&sock_path).await {
             Ok(_) => {
-                eprintln!("Daemon already running (socket at {})", sock_path.display());
+                info!("Daemon already running (socket at {})", sock_path.display());
                 std::process::exit(0);
             }
             Err(_) => {
@@ -98,7 +107,11 @@ async fn main() -> anyhow::Result<()> {
             info!("Found stored server profile in Keychain");
             creds.server_url
         }
-        _ => default_server_url,
+        Ok(None) => default_server_url,
+        Err(e) => {
+            warn!("Failed to load server profile from Keychain: {}", e);
+            default_server_url
+        }
     };
 
     let engine = SyncEngine::new_with_data_dir(&server_url, data_dir.join("client"));

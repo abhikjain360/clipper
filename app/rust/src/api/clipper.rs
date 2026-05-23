@@ -7,9 +7,12 @@
 //! conversions so source-state changes fail compilation until this boundary is
 //! updated.
 
+use std::future::Future;
+
 use clipper_app_types as app_types;
 use clipper_daemon_types as daemon;
 
+use crate::error::AppError;
 use crate::runtime;
 
 // ── FRB-facing types (thin wrappers required by codegen) ──
@@ -133,85 +136,113 @@ pub fn init_app() {
     flutter_rust_bridge::setup_default_user_utils();
 }
 
-pub async fn connect_to_daemon() -> anyhow::Result<()> {
-    runtime::connect().await
+async fn bridge_result<T>(future: impl Future<Output = Result<T, AppError>>) -> Result<T, String> {
+    future.await.map_err(|e| e.to_string())
+}
+
+pub async fn connect_to_daemon() -> Result<(), String> {
+    bridge_result(async { Ok(runtime::connect().await?) }).await
 }
 
 pub async fn login(
     passphrase: String,
     device_name: String,
     server_url: String,
-) -> anyhow::Result<()> {
-    runtime::send_command(daemon::DaemonCommand::Login(daemon::LoginParams {
-        passphrase,
-        device_name: Some(device_name),
-        server_url: Some(server_url),
-    }))
-    .await?;
-    Ok(())
+) -> Result<(), String> {
+    bridge_result(async move {
+        runtime::send_command(daemon::DaemonCommand::Login(daemon::LoginParams {
+            passphrase,
+            device_name: Some(device_name),
+            server_url: Some(server_url),
+        }))
+        .await?;
+        Ok(())
+    })
+    .await
 }
 
-pub async fn logout() -> anyhow::Result<()> {
-    runtime::send_command(daemon::DaemonCommand::Logout).await?;
-    Ok(())
+pub async fn logout() -> Result<(), String> {
+    bridge_result(async {
+        runtime::send_command(daemon::DaemonCommand::Logout).await?;
+        Ok(())
+    })
+    .await
 }
 
 pub async fn get_state() -> BridgeAppState {
     runtime::current_state().await.into()
 }
 
-pub async fn send_clipboard(text: String) -> anyhow::Result<()> {
-    runtime::send_command(daemon::DaemonCommand::SendClipboard(
-        daemon::SendClipboardParams { text },
-    ))
-    .await?;
-    Ok(())
+pub async fn send_clipboard(text: String) -> Result<(), String> {
+    bridge_result(async move {
+        runtime::send_command(daemon::DaemonCommand::SendClipboard(
+            daemon::SendClipboardParams { text },
+        ))
+        .await?;
+        Ok(())
+    })
+    .await
 }
 
-pub async fn copy_to_local(id: String) -> anyhow::Result<String> {
-    let result = runtime::send_command(daemon::DaemonCommand::CopyToLocal(
-        daemon::CopyToLocalParams { item_id: id },
-    ))
-    .await?;
-    Ok(serde_json::from_value::<daemon::CopyToLocalResult>(
-        result.ok_or_else(|| anyhow::anyhow!("No text in response"))?,
-    )?
-    .text)
+pub async fn copy_to_local(id: String) -> Result<String, String> {
+    bridge_result(async move {
+        let result = runtime::send_command(daemon::DaemonCommand::CopyToLocal(
+            daemon::CopyToLocalParams { item_id: id },
+        ))
+        .await?;
+        Ok(serde_json::from_value::<daemon::CopyToLocalResult>(
+            result.ok_or_else(|| AppError::missing_daemon_result("text"))?,
+        )?
+        .text)
+    })
+    .await
 }
 
-pub async fn upload_file(file_path: String) -> anyhow::Result<String> {
-    let result = runtime::send_command(daemon::DaemonCommand::UploadFile(
-        daemon::UploadFileParams { file_path },
-    ))
-    .await?;
-    Ok(serde_json::from_value::<daemon::UploadFileResult>(
-        result.ok_or_else(|| anyhow::anyhow!("No file_id in response"))?,
-    )?
-    .file_id)
+pub async fn upload_file(file_path: String) -> Result<String, String> {
+    bridge_result(async move {
+        let result = runtime::send_command(daemon::DaemonCommand::UploadFile(
+            daemon::UploadFileParams { file_path },
+        ))
+        .await?;
+        Ok(serde_json::from_value::<daemon::UploadFileResult>(
+            result.ok_or_else(|| AppError::missing_daemon_result("file_id"))?,
+        )?
+        .file_id)
+    })
+    .await
 }
 
-pub async fn download_file(file_id: String, target_path: String) -> anyhow::Result<()> {
-    runtime::send_command(daemon::DaemonCommand::DownloadFile(
-        daemon::DownloadFileParams {
-            file_id,
-            target_path,
-        },
-    ))
-    .await?;
-    Ok(())
+pub async fn download_file(file_id: String, target_path: String) -> Result<(), String> {
+    bridge_result(async move {
+        runtime::send_command(daemon::DaemonCommand::DownloadFile(
+            daemon::DownloadFileParams {
+                file_id,
+                target_path,
+            },
+        ))
+        .await?;
+        Ok(())
+    })
+    .await
 }
 
-pub async fn delete_file(file_id: String) -> anyhow::Result<()> {
-    runtime::send_command(daemon::DaemonCommand::DeleteFile(
-        daemon::DeleteFileParams { file_id },
-    ))
-    .await?;
-    Ok(())
+pub async fn delete_file(file_id: String) -> Result<(), String> {
+    bridge_result(async move {
+        runtime::send_command(daemon::DaemonCommand::DeleteFile(
+            daemon::DeleteFileParams { file_id },
+        ))
+        .await?;
+        Ok(())
+    })
+    .await
 }
 
-pub async fn refresh() -> anyhow::Result<()> {
-    runtime::send_command(daemon::DaemonCommand::Refresh).await?;
-    Ok(())
+pub async fn refresh() -> Result<(), String> {
+    bridge_result(async {
+        runtime::send_command(daemon::DaemonCommand::Refresh).await?;
+        Ok(())
+    })
+    .await
 }
 
 pub async fn wait_for_state_change() {

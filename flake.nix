@@ -31,10 +31,13 @@
           default = pkgs.mkShell {
             packages =
               (with pkgs; [
+                cargo-edit
                 cmake
+                cocoapods
                 dart
                 deno
                 flutter
+                flutter_rust_bridge_codegen
                 jdk17
                 llvmPackages.clang
                 llvmPackages.libclang
@@ -56,7 +59,7 @@
             };
 
             shellHook = ''
-              export PATH="$HOME/.cargo/bin:$PATH"
+              export PATH="$PATH:$HOME/.cargo/bin"
 
               rust_targets="aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android"
               if command -v rustup >/dev/null 2>&1; then

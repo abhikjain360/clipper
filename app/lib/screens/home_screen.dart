@@ -59,7 +59,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _uploadFile() async {
-    final result = await FilePicker.platform.pickFiles();
+    final result = await FilePicker.pickFiles();
     if (result == null || result.files.isEmpty) return;
 
     final path = result.files.single.path;
@@ -78,7 +78,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _downloadFile(String fileId, String filename) async {
-    final dir = await FilePicker.platform.getDirectoryPath();
+    final dir = await FilePicker.getDirectoryPath();
     if (dir == null) return;
 
     final targetPath = p.join(dir, safeDownloadFilename(filename));

@@ -86,6 +86,8 @@ Rules:
 - Bridge conversions should destructure `clipper-app-types` structs
   exhaustively so app-state schema changes fail compilation until the UI
   boundary is updated.
+- Keep typed Rust errors inside `app/rust`; public Flutter Rust Bridge methods
+  may convert to codegen-compatible error strings only at the bridge boundary.
 
 ## Client Local Store
 

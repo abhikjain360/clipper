@@ -1,6 +1,7 @@
 mod auth;
 mod cleanup;
 mod entity;
+mod error;
 mod migration;
 mod rate_limit;
 mod routes;
@@ -19,9 +20,10 @@ use clap::{Parser, Subcommand};
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
+use crate::error::{ServerError, ServerResult};
 use crate::rate_limit::RateLimiter;
 use crate::state::AppState;
 
@@ -36,12 +38,12 @@ struct Cli {
 enum Command {
     /// Initialize the server with a passphrase
     Init {
-        #[arg(long)]
+        #[arg(long, short = 'd')]
         data_dir: PathBuf,
     },
     /// Run the server
     Serve {
-        #[arg(long)]
+        #[arg(long, short = 'd')]
         data_dir: PathBuf,
         #[arg(long, default_value = "127.0.0.1:8787")]
         addr: String,
@@ -49,13 +51,20 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
+    if let Err(error) = run().await {
+        error!(%error, "server failed");
+        std::process::exit(error.exit_code());
+    }
+}
+
+async fn run() -> ServerResult<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -66,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn init_server(data_dir: PathBuf) -> anyhow::Result<()> {
+async fn init_server(data_dir: PathBuf) -> ServerResult<()> {
     tokio::fs::create_dir_all(&data_dir).await?;
 
     let db = connect_db(&data_dir).await?;
@@ -91,7 +100,7 @@ async fn init_server(data_dir: PathBuf) -> anyhow::Result<()> {
     };
 
     if passphrase.is_empty() {
-        anyhow::bail!("Passphrase cannot be empty");
+        return Err(ServerError::EmptyPassphrase);
     }
 
     let (opaque_server_setup, opaque_password_file) =
@@ -123,7 +132,7 @@ async fn init_server(data_dir: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn serve(data_dir: PathBuf, addr: String) -> anyhow::Result<()> {
+async fn serve(data_dir: PathBuf, addr: String) -> ServerResult<()> {
     let db = connect_db(&data_dir).await?;
     migration::Migrator::up(&db, None).await?;
 
@@ -132,9 +141,7 @@ async fn serve(data_dir: PathBuf, addr: String) -> anyhow::Result<()> {
     entity::server_config::Entity::find_by_id(1)
         .one(&db)
         .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!("Server not initialized. Run `clipper-server init` first.")
-        })?;
+        .ok_or(ServerError::NotInitialized)?;
 
     tokio::fs::create_dir_all(data_dir.join("clipboard")).await?;
     tokio::fs::create_dir_all(data_dir.join("files")).await?;
@@ -201,7 +208,7 @@ async fn serve(data_dir: PathBuf, addr: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn connect_db(data_dir: impl AsRef<Path>) -> anyhow::Result<DatabaseConnection> {
+async fn connect_db(data_dir: impl AsRef<Path>) -> ServerResult<DatabaseConnection> {
     let db_path = data_dir.as_ref().join("clipper.db");
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
     let db = Database::connect(&url).await?;

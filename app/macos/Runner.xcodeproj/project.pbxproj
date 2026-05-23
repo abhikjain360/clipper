@@ -241,7 +241,7 @@
 				33CC110E2044A8840003C045 /* Bundle Framework */,
 				3399D490228B24CF009A79C7 /* ShellScript */,
 				634689A8A3227B71A97C264F /* [CP] Embed Pods Frameworks */,
-				AA14A8C6BE9E32B71D0F9B67 /* Build & Embed clipper-daemon */,
+				B09E9472B7C1D4867B8BCACB /* Build & Embed clipper-daemon */,
 			);
 			buildRules = (
 			);
@@ -401,7 +401,7 @@
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
-		AA14A8C6BE9E32B71D0F9B67 /* Build & Embed clipper-daemon */ = {
+		B09E9472B7C1D4867B8BCACB /* Build & Embed clipper-daemon */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (

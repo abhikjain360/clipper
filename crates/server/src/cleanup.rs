@@ -5,6 +5,14 @@ use tracing::info;
 use crate::entity::{clipboard_items, event_log, files};
 use crate::state::AppState;
 
+type CleanupResult<T> = Result<T, CleanupError>;
+
+#[derive(Debug, thiserror::Error)]
+enum CleanupError {
+    #[error("cleanup database error: {0}")]
+    Database(#[from] sea_orm::DbErr),
+}
+
 /// Run periodic cleanup tasks.
 pub async fn run_cleanup_loop(state: AppState) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // every hour
@@ -23,7 +31,7 @@ pub async fn run_cleanup_loop(state: AppState) {
     }
 }
 
-async fn cleanup_expired_clipboard(state: &AppState) -> anyhow::Result<()> {
+async fn cleanup_expired_clipboard(state: &AppState) -> CleanupResult<()> {
     let now = Utc::now().to_rfc3339();
 
     let expired = clipboard_items::Entity::find()
@@ -48,7 +56,7 @@ async fn cleanup_expired_clipboard(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cleanup_old_events(state: &AppState) -> anyhow::Result<()> {
+async fn cleanup_old_events(state: &AppState) -> CleanupResult<()> {
     let cutoff = (Utc::now() - Duration::days(3)).to_rfc3339();
 
     let result = event_log::Entity::delete_many()
@@ -66,7 +74,7 @@ async fn cleanup_old_events(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cleanup_orphan_uploads(state: &AppState) -> anyhow::Result<()> {
+async fn cleanup_orphan_uploads(state: &AppState) -> CleanupResult<()> {
     // Delete incomplete uploads stuck before completion for more than 1 hour.
     let cutoff = (Utc::now() - Duration::hours(1)).to_rfc3339();
 

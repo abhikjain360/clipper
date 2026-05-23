@@ -4,6 +4,16 @@ use std::path::PathBuf;
 
 const LAUNCHAGENT_LABEL: &str = "com.clipper.daemon";
 
+pub(crate) type DaemonProcessResult<T> = Result<T, DaemonProcessError>;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DaemonProcessError {
+    #[error("clipper-daemon not found in app bundle")]
+    DaemonBinaryNotFound,
+    #[error("LaunchAgent I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+}
+
 /// Find the daemon binary inside the app bundle (<bundle>/Contents/MacOS/clipper-daemon).
 fn daemon_binary_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -52,9 +62,8 @@ fn generate_plist(daemon_path: &std::path::Path) -> String {
 }
 
 /// Ensure the daemon is running. Installs/updates the LaunchAgent if needed.
-pub(crate) fn install_and_start_daemon() -> anyhow::Result<()> {
-    let daemon_path = daemon_binary_path()
-        .ok_or_else(|| anyhow::anyhow!("clipper-daemon not found in app bundle"))?;
+pub(crate) fn install_and_start_daemon() -> DaemonProcessResult<()> {
+    let daemon_path = daemon_binary_path().ok_or(DaemonProcessError::DaemonBinaryNotFound)?;
 
     let plist_path = launchagent_plist_path();
     let new_plist = generate_plist(&daemon_path);

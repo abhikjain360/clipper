@@ -1,10 +1,22 @@
-target
+# Rust
+target/
+*.profraw
+
+# Nix
+result
+result-*
+
+# Local environment
 .direnv/
+.env
+
+# Local data
 *.db
 *.db-shm
 *.db-wal
 data/
-.env
+coverage/
+lcov.info
 
 # Flutter
 app/.dart_tool/
@@ -14,6 +26,11 @@ app/build/
 app/macos/Flutter/ephemeral/
 app/macos/Pods/
 app/pubspec.lock
+app/android/.gradle/
+app/android/.kotlin/
+app/android/build/
+app/android/app/build/
+app/android/local.properties
 
 # Xcode
 *.xcworkspace
@@ -21,6 +38,10 @@ app/pubspec.lock
 *.xcuserdata
 app/macos/Runner.xcodeproj/xcshareddata/
 DerivedData/
+
+# Editors
+.idea/
+.vscode/
 
 # macOS
 .DS_Store

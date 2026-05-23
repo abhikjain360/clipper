@@ -3,20 +3,40 @@
 //! macOS uses the installed daemon over a Unix socket. Android runs the shared
 //! sync engine in-process behind the same FRB-facing API.
 
+pub(crate) type RuntimeResult<T> = Result<T, RuntimeError>;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RuntimeError {
+    #[cfg(target_os = "macos")]
+    #[error(transparent)]
+    Transport(#[from] crate::transport::TransportError),
+    #[cfg(target_os = "android")]
+    #[error(transparent)]
+    Client(#[from] clipper_client::api_client::ClientError),
+    #[cfg(target_os = "android")]
+    #[error("runtime result encode failed: {0}")]
+    ResultEncode(#[from] serde_json::Error),
+    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    #[error("unsupported platform")]
+    UnsupportedPlatform,
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use clipper_daemon_types::AppState;
 
     use crate::transport;
 
-    pub(crate) async fn connect() -> anyhow::Result<()> {
-        transport::connect().await
+    use super::RuntimeResult;
+
+    pub(crate) async fn connect() -> RuntimeResult<()> {
+        Ok(transport::connect().await?)
     }
 
     pub(crate) async fn send_command(
         command: clipper_daemon_types::DaemonCommand,
-    ) -> anyhow::Result<Option<serde_json::Value>> {
-        transport::send_command(command).await
+    ) -> RuntimeResult<Option<serde_json::Value>> {
+        Ok(transport::send_command(command).await?)
     }
 
     pub(crate) async fn current_state() -> AppState {
@@ -36,6 +56,8 @@ mod imp {
     use clipper_client::engine::SyncEngine;
     use clipper_daemon_types::{AppState, CopyToLocalResult, DaemonCommand, UploadFileResult};
 
+    use super::RuntimeResult;
+
     static ENGINE: LazyLock<Arc<SyncEngine>> = LazyLock::new(|| {
         SyncEngine::new_with_data_dir("http://10.0.2.2:8787", android_data_dir().join("client"))
     });
@@ -50,13 +72,13 @@ mod imp {
         Arc::clone(&ENGINE)
     }
 
-    pub(crate) async fn connect() -> anyhow::Result<()> {
+    pub(crate) async fn connect() -> RuntimeResult<()> {
         Ok(())
     }
 
     pub(crate) async fn send_command(
         command: DaemonCommand,
-    ) -> anyhow::Result<Option<serde_json::Value>> {
+    ) -> RuntimeResult<Option<serde_json::Value>> {
         let engine = engine();
 
         match command {
@@ -121,14 +143,16 @@ mod imp {
 mod imp {
     use clipper_daemon_types::{AppState, ConnectionStatus};
 
-    pub(crate) async fn connect() -> anyhow::Result<()> {
-        anyhow::bail!("Unsupported platform")
+    use super::{RuntimeError, RuntimeResult};
+
+    pub(crate) async fn connect() -> RuntimeResult<()> {
+        Err(RuntimeError::UnsupportedPlatform)
     }
 
     pub(crate) async fn send_command(
         _command: clipper_daemon_types::DaemonCommand,
-    ) -> anyhow::Result<Option<serde_json::Value>> {
-        anyhow::bail!("Unsupported platform")
+    ) -> RuntimeResult<Option<serde_json::Value>> {
+        Err(RuntimeError::UnsupportedPlatform)
     }
 
     pub(crate) async fn current_state() -> AppState {

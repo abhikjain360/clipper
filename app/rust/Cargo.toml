@@ -10,15 +10,23 @@ crate-type = ["cdylib", "staticlib"]
 clipper-client.workspace = true
 clipper-app-types.workspace = true
 clipper-daemon-types.workspace = true
-anyhow = "1.0.102"
 dirs = "6.0.0"
-flutter_rust_bridge = "=2.11.1"
+flutter_rust_bridge = { version = "=2.12.0", default-features = false, features = [
+    "dart-opaque",
+    "log",
+    "portable-atomic",
+    "rust-async",
+    "thread-pool",
+    "user-utils",
+    "wasm-start",
+] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-tokio = { version = "1.50.0", features = ["net", "io-util", "sync", "rt", "time", "macros"] }
+serde_json = "1.0.150"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["net", "io-util", "sync", "rt", "time", "macros"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-uuid = { version = "1.22.0", features = ["v4"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.23.1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

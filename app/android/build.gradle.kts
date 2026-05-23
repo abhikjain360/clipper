@@ -18,10 +18,10 @@ subprojects {
 subprojects {
     configurations.configureEach {
         resolutionStrategy.force(
-            "androidx.test.espresso:espresso-core:3.6.1",
-            "androidx.test.espresso:espresso-idling-resource:3.6.1",
-            "androidx.test:rules:1.6.1",
-            "androidx.test:runner:1.6.2",
+            "androidx.test.espresso:espresso-core:3.7.0",
+            "androidx.test.espresso:espresso-idling-resource:3.7.0",
+            "androidx.test:rules:1.7.0",
+            "androidx.test:runner:1.7.0",
         )
     }
 }
