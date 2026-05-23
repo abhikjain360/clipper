@@ -38,6 +38,8 @@ then send encrypted records and opaque metadata to the server.
   - owns client-side auth completion, key derivation, encryption/decryption, HTTP/WebSocket sync, and decrypted in-memory state.
 - `crates/app-types/src/lib.rs`
   - owns decrypted app-visible state shared by the sync engine, daemon state events, and Flutter bridge adapters.
+- `docs/local-store-p2p-roadmap.md`
+  - describes the planned client-side local store, on-demand file cache, signed object envelopes, and explicit-pairing LAN P2P transport.
 - `crates/daemon-types/src/protocol.rs`
   - owns the daemon/app IPC request, response, event, command, parameter, and result shapes.
 - `app/rust/src/runtime.rs`
@@ -121,6 +123,10 @@ File upload/download flow:
 7. Client calls `POST /api/files/{id}/complete` with ciphertext hash and size.
 8. Server hashes the stored ciphertext, validates size/hash, marks the row complete, logs/broadcasts `file.created`, and exposes it to list/download.
 9. Download returns encrypted blob bytes; clients decrypt locally.
+
+Planned client-side local-store behavior keeps this same abstraction: file
+metadata may be cached locally, but file blobs are still downloaded only on user
+request. Future LAN P2P must follow the same on-demand blob rule.
 
 Sync flow:
 

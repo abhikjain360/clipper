@@ -86,3 +86,29 @@ Rules:
 - Bridge conversions should destructure `clipper-app-types` structs
   exhaustively so app-state schema changes fail compilation until the UI
   boundary is updated.
+
+## Client Local Store
+
+Owner:
+
+- TBD, likely a dedicated client-side store module or crate
+
+Consumers:
+
+- `crates/client`
+- `crates/daemon`
+- `app/rust`
+- future LAN P2P transport
+
+Rules:
+
+- The local store owns durable client-side clipboard history, decrypted file
+  metadata cache, downloaded file cache, and any optional encrypted transport
+  cache.
+- `clipper-app-types` should stay a display-state contract, not the durable
+  client repository.
+- Server sync and future P2P sync should both import objects through the same
+  local-store boundary.
+- File blobs stay on-demand for both server and P2P transports.
+
+See `docs/local-store-p2p-roadmap.md` for the planned storage and P2P model.
