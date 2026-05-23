@@ -9,11 +9,7 @@ fn daemon_binary_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let macos_dir = exe.parent()?;
     let daemon = macos_dir.join("clipper-daemon");
-    if daemon.exists() {
-        Some(daemon)
-    } else {
-        None
-    }
+    if daemon.exists() { Some(daemon) } else { None }
 }
 
 fn launchagent_plist_path() -> PathBuf {

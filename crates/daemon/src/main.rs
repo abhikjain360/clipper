@@ -149,9 +149,8 @@ async fn main() -> anyhow::Result<()> {
     // Handle shutdown
     let sock_path_cleanup = sock_path.clone();
     let shutdown = async {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("Failed to register SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to register SIGTERM handler");
         let sigint = tokio::signal::ctrl_c();
 
         tokio::select! {

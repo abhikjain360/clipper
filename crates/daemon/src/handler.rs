@@ -203,9 +203,7 @@ async fn cmd_upload_file(
         None => return DaemonResponse::error(id, "Missing file_path".into()),
     };
     match engine.upload_file(file_path).await {
-        Ok(file_id) => {
-            DaemonResponse::success(id, Some(serde_json::json!({ "file_id": file_id })))
-        }
+        Ok(file_id) => DaemonResponse::success(id, Some(serde_json::json!({ "file_id": file_id }))),
         Err(e) => DaemonResponse::error(id, e.to_string()),
     }
 }

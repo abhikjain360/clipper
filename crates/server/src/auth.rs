@@ -5,7 +5,7 @@ use axum::{
     response::Response,
 };
 use chrono::Utc;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, ActiveModelTrait, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
 use crate::entity::session;
 use crate::state::AppState;
@@ -25,11 +25,8 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let token = extract_bearer(&req).ok_or(StatusCode::UNAUTHORIZED)?;
-    let token_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        &token,
-    )
-    .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let token_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &token)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     let token_hash = sha256(&token_bytes);
     let now = Utc::now().to_rfc3339();

@@ -23,19 +23,14 @@ pub struct DecryptedFileItem {
 }
 
 /// Connection status.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum ConnectionStatus {
+    #[default]
     Disconnected,
     Connecting,
     Connected,
     /// The daemon process is not running (bridge-only state).
     DaemonNotRunning,
-}
-
-impl Default for ConnectionStatus {
-    fn default() -> Self {
-        Self::Disconnected
-    }
 }
 
 /// The full UI state exposed to the app.

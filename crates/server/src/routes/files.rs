@@ -1,25 +1,28 @@
 use axum::{
+    Json,
     body::Body,
     extract::{Extension, Path, Query, State},
     http::StatusCode,
-    Json,
 };
 use base64::Engine;
 use chrono::Utc;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, Set};
-use tokio::io::AsyncWriteExt;
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 use tracing::info;
 
 use crate::auth::AuthInfo;
 use crate::entity::{event_log, file};
+use crate::routes::{error_response, validate_client_id};
 use crate::state::AppState;
 use crate::ws::WsBroadcast;
-use clipper_core::crypto::sha256;
 use clipper_core::models::{
     ErrorResponse, FileCompleteRequest, FileInitRequest, FileInitResponse, FileListItem,
     FileListResponse, OkResponse,
 };
+
+const MAX_FILE_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 
 pub async fn init_upload(
     State(state): State<AppState>,
@@ -29,40 +32,32 @@ pub async fn init_upload(
     let b64 = &base64::engine::general_purpose::STANDARD;
     let now = Utc::now().to_rfc3339();
 
-    let meta_ciphertext = b64.decode(&req.meta_ciphertext_b64).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid meta_ciphertext_b64".into(),
-            }),
-        )
-    })?;
-    let meta_nonce = b64.decode(&req.meta_nonce_b64).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid meta_nonce_b64".into(),
-            }),
-        )
-    })?;
-    let blob_nonce = b64.decode(&req.blob_nonce_b64).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid blob_nonce_b64".into(),
-            }),
-        )
-    })?;
+    validate_client_id(&req.id)?;
+    let blob_size = validate_blob_size(req.blob_size)?;
+
+    if file::Entity::find_by_id(&req.id)
+        .one(state.db())
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+        .is_some()
+    {
+        return Err(error_response(StatusCode::CONFLICT, "File already exists"));
+    }
+
+    let meta_ciphertext = b64
+        .decode(&req.meta_ciphertext_b64)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid meta_ciphertext_b64"))?;
+    let meta_nonce = b64
+        .decode(&req.meta_nonce_b64)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid meta_nonce_b64"))?;
+    let blob_nonce = b64
+        .decode(&req.blob_nonce_b64)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid blob_nonce_b64"))?;
 
     let files_dir = state.files_dir();
-    tokio::fs::create_dir_all(&files_dir).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Storage error".into(),
-            }),
-        )
-    })?;
+    tokio::fs::create_dir_all(&files_dir)
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Storage error"))?;
 
     let blob_filename = format!("{}.bin", req.id);
 
@@ -72,21 +67,17 @@ pub async fn init_upload(
         meta_ciphertext: Set(meta_ciphertext),
         meta_nonce: Set(meta_nonce),
         blob_nonce: Set(blob_nonce),
-        blob_size: Set(req.blob_size),
+        blob_size: Set(blob_size as i64),
         sha256_ciphertext: Set(vec![]), // filled on complete
         created_at: Set(now.clone()),
         updated_at: Set(now),
-        source_device_id: Set(req.source_device_id),
+        source_device_id: Set(auth.device_id.clone()),
         status: Set("pending".into()),
     };
-    new_file.insert(state.db()).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Database error".into(),
-            }),
-        )
-    })?;
+    new_file
+        .insert(state.db())
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
 
     info!(device_id = %auth.device_id, file_id = %req.id, "File upload initiated");
 
@@ -101,75 +92,66 @@ pub async fn upload_blob(
     Path(file_id): Path<String>,
     body: Body,
 ) -> Result<Json<OkResponse>, (StatusCode, Json<ErrorResponse>)> {
+    validate_client_id(&file_id)?;
+
     // Verify file exists and is pending
     let existing = file::Entity::find_by_id(&file_id)
         .one(state.db())
         .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".into(),
-                }),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "File not found".into(),
-                }),
-            )
-        })?;
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "File not found"))?;
 
     if existing.status != "pending" {
-        return Err((
+        return Err(error_response(
             StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: "File already uploaded".into(),
-            }),
+            "File already uploaded",
         ));
     }
 
+    if existing.source_device_id != auth.device_id {
+        return Err(error_response(StatusCode::FORBIDDEN, "Forbidden"));
+    }
+
+    let expected_size = validate_blob_size(existing.blob_size)?;
+
     // Stream body to disk
     let path = state.files_dir().join(&existing.blob_path);
-    let mut out_file = tokio::fs::File::create(&path).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Storage error".into(),
-            }),
-        )
-    })?;
+    let mut out_file = tokio::fs::File::create(&path)
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Storage error"))?;
 
     use futures_util::StreamExt;
     let mut stream = body.into_data_stream();
+    let mut total_size = 0_u64;
     while let Some(chunk) = stream.next().await {
-        let data = chunk.map_err(|_| {
-            (
+        let data = chunk.map_err(|_| error_response(StatusCode::BAD_REQUEST, "Stream error"))?;
+        total_size += data.len() as u64;
+        if total_size > expected_size {
+            drop(out_file);
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(error_response(
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "Stream error".into(),
-                }),
-            )
-        })?;
-        out_file.write_all(&data).await.map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Write error".into(),
-                }),
-            )
-        })?;
+                "Blob size does not match initialized size",
+            ));
+        }
+        out_file
+            .write_all(&data)
+            .await
+            .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Write error"))?;
     }
-    out_file.flush().await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Flush error".into(),
-            }),
-        )
-    })?;
+    out_file
+        .flush()
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Flush error"))?;
+    drop(out_file);
+
+    if total_size != expected_size {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Blob size does not match initialized size",
+        ));
+    }
 
     info!(device_id = %auth.device_id, file_id = %file_id, "File blob uploaded");
 
@@ -184,64 +166,49 @@ pub async fn complete_upload(
 ) -> Result<Json<OkResponse>, (StatusCode, Json<ErrorResponse>)> {
     let b64 = &base64::engine::general_purpose::STANDARD;
 
+    validate_client_id(&file_id)?;
+
     let existing = file::Entity::find_by_id(&file_id)
         .one(state.db())
         .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".into(),
-                }),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "File not found".into(),
-                }),
-            )
-        })?;
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "File not found"))?;
 
     if existing.status != "pending" {
-        return Err((
+        return Err(error_response(
             StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: "File already completed".into(),
-            }),
+            "File already completed",
         ));
     }
 
+    if existing.source_device_id != auth.device_id {
+        return Err(error_response(StatusCode::FORBIDDEN, "Forbidden"));
+    }
+
+    let expected_size = validate_blob_size(existing.blob_size)?;
+
     // Verify the blob exists and compute hash
     let blob_path = state.files_dir().join(&existing.blob_path);
-    let blob_data = tokio::fs::read(&blob_path).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Blob not found".into(),
-            }),
-        )
-    })?;
+    let (computed_hash, actual_size) = sha256_file(&blob_path)
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Blob not found"))?;
 
-    let computed_hash = sha256(&blob_data);
-    let provided_hash = b64.decode(&req.sha256_ciphertext_b64).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid sha256_ciphertext_b64".into(),
-            }),
-        )
-    })?;
+    let provided_hash = b64
+        .decode(&req.sha256_ciphertext_b64)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid sha256_ciphertext_b64"))?;
 
     if computed_hash.as_slice() != provided_hash.as_slice() {
         // Delete the corrupt blob
         let _ = tokio::fs::remove_file(&blob_path).await;
-        return Err((
+        return Err(error_response(StatusCode::BAD_REQUEST, "SHA-256 mismatch"));
+    }
+
+    let client_size = validate_blob_size(req.blob_size)?;
+    if actual_size != expected_size || client_size != expected_size {
+        let _ = tokio::fs::remove_file(&blob_path).await;
+        return Err(error_response(
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "SHA-256 mismatch".into(),
-            }),
+            "Blob size does not match initialized size",
         ));
     }
 
@@ -249,17 +216,13 @@ pub async fn complete_upload(
     let now = Utc::now().to_rfc3339();
     let mut active: file::ActiveModel = existing.into();
     active.sha256_ciphertext = Set(computed_hash.to_vec());
-    active.blob_size = Set(req.blob_size);
+    active.blob_size = Set(actual_size as i64);
     active.status = Set("complete".into());
     active.updated_at = Set(now.clone());
-    active.update(state.db()).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Database error".into(),
-            }),
-        )
-    })?;
+    active
+        .update(state.db())
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
 
     // Log event
     let event = event_log::ActiveModel {
@@ -269,14 +232,10 @@ pub async fn complete_upload(
         object_id: Set(file_id.clone()),
         created_at: Set(now.clone()),
     };
-    let inserted = event.insert(state.db()).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Database error".into(),
-            }),
-        )
-    })?;
+    let inserted = event
+        .insert(state.db())
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
 
     let _ = state.ws_tx().send(WsBroadcast {
         seq: inserted.seq,
@@ -349,6 +308,8 @@ pub async fn download_blob(
     State(state): State<AppState>,
     Path(file_id): Path<String>,
 ) -> Result<Body, StatusCode> {
+    validate_client_id(&file_id).map_err(|(status, _)| status)?;
+
     let existing = file::Entity::find_by_id(&file_id)
         .filter(file::Column::Status.eq("complete"))
         .one(state.db())
@@ -370,6 +331,8 @@ pub async fn delete_file(
     Extension(auth): Extension<AuthInfo>,
     Path(file_id): Path<String>,
 ) -> Result<Json<OkResponse>, StatusCode> {
+    validate_client_id(&file_id).map_err(|(status, _)| status)?;
+
     let existing = file::Entity::find_by_id(&file_id)
         .one(state.db())
         .await
@@ -411,4 +374,159 @@ pub async fn delete_file(
     info!(device_id = %auth.device_id, file_id = %file_id, "File deleted");
 
     Ok(Json(OkResponse { ok: true }))
+}
+
+fn validate_blob_size(size: i64) -> Result<u64, (StatusCode, Json<ErrorResponse>)> {
+    if size < 0 {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Invalid blob_size"));
+    }
+
+    let size = size as u64;
+    if size > MAX_FILE_BLOB_BYTES {
+        return Err(error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "File exceeds maximum size",
+        ));
+    }
+
+    Ok(size)
+}
+
+async fn sha256_file(path: &std::path::Path) -> std::io::Result<([u8; 32], u64)> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0_u8; 16 * 1024];
+    let mut size = 0_u64;
+
+    loop {
+        let read = file.read(&mut buf).await?;
+        if read == 0 {
+            break;
+        }
+        size += read as u64;
+        hasher.update(&buf[..read]);
+    }
+
+    Ok((hasher.finalize().into(), size))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use sea_orm::{Database, EntityTrait};
+    use sea_orm_migration::MigratorTrait;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    use crate::migration;
+
+    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+    async fn test_state() -> (AppState, TempDir) {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::connect("sqlite::memory:").await.expect("db");
+        migration::Migrator::up(&db, None).await.expect("migrate");
+        (AppState::new(db, data_dir.path().to_path_buf()), data_dir)
+    }
+
+    fn auth(device_id: &str) -> AuthInfo {
+        AuthInfo {
+            session_id: "session-id".into(),
+            device_id: device_id.into(),
+        }
+    }
+
+    fn init_request(id: String, blob_size: i64, source_device_id: &str) -> FileInitRequest {
+        FileInitRequest {
+            id,
+            meta_nonce_b64: B64.encode([1_u8; 12]),
+            meta_ciphertext_b64: B64.encode(b"encrypted metadata"),
+            blob_nonce_b64: B64.encode([2_u8; 12]),
+            blob_size,
+            source_device_id: source_device_id.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn init_rejects_non_uuid_id() {
+        let (state, data_dir) = test_state().await;
+
+        let result = init_upload(
+            State(state),
+            Extension(auth("device-a")),
+            Json(init_request("../escape".into(), 3, "device-a")),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert!(!data_dir.path().join("files").join("escape.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn init_rejects_files_over_size_limit() {
+        let (state, _data_dir) = test_state().await;
+        let id = Uuid::new_v4().to_string();
+
+        let result = init_upload(
+            State(state),
+            Extension(auth("device-a")),
+            Json(init_request(id, MAX_FILE_BLOB_BYTES as i64 + 1, "device-a")),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn init_uses_authenticated_device_as_source() {
+        let (state, _data_dir) = test_state().await;
+        let id = Uuid::new_v4().to_string();
+
+        let _ = init_upload(
+            State(state.clone()),
+            Extension(auth("device-auth")),
+            Json(init_request(id.clone(), 3, "device-spoof")),
+        )
+        .await
+        .expect("init");
+
+        let file = file::Entity::find_by_id(id)
+            .one(state.db())
+            .await
+            .expect("query")
+            .expect("file");
+        assert_eq!(file.source_device_id, "device-auth");
+    }
+
+    #[tokio::test]
+    async fn upload_blob_rejects_body_size_mismatch() {
+        let (state, data_dir) = test_state().await;
+        let id = Uuid::new_v4().to_string();
+
+        let _ = init_upload(
+            State(state.clone()),
+            Extension(auth("device-a")),
+            Json(init_request(id.clone(), 2, "device-a")),
+        )
+        .await
+        .expect("init");
+
+        let result = upload_blob(
+            State(state),
+            Extension(auth("device-a")),
+            Path(id.clone()),
+            Body::from(vec![1_u8, 2, 3]),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert!(
+            !data_dir
+                .path()
+                .join("files")
+                .join(format!("{id}.bin"))
+                .exists()
+        );
+    }
 }

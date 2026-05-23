@@ -14,7 +14,9 @@ use crate::api_client::{
 };
 use clipper_core::crypto;
 use clipper_core::models::*;
-pub use clipper_daemon_types::{AppState, ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem};
+pub use clipper_daemon_types::{
+    AppState, ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem,
+};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 

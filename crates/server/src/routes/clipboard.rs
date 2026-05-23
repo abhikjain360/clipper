@@ -1,15 +1,17 @@
 use axum::{
+    Json,
     extract::{Extension, Query, State},
     http::StatusCode,
-    Json,
 };
 use base64::Engine;
 use chrono::{Duration, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, Set};
+use tokio::io::AsyncWriteExt;
 use tracing::info;
 
 use crate::auth::AuthInfo;
 use crate::entity::{clipboard_item, event_log};
+use crate::routes::{error_response, validate_client_id};
 use crate::state::AppState;
 use crate::ws::WsBroadcast;
 use clipper_core::crypto::sha256;
@@ -24,65 +26,65 @@ pub async fn upload(
 ) -> Result<Json<OkResponse>, (StatusCode, Json<ErrorResponse>)> {
     let b64 = &base64::engine::general_purpose::STANDARD;
 
-    let ciphertext = b64.decode(&req.ciphertext_b64).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid ciphertext_b64".into(),
-            }),
-        )
-    })?;
+    validate_client_id(&req.id)?;
 
-    let nonce = b64.decode(&req.nonce_b64).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid nonce_b64".into(),
-            }),
-        )
-    })?;
+    let ciphertext = b64
+        .decode(&req.ciphertext_b64)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid ciphertext_b64"))?;
 
-    let provided_hash = b64.decode(&req.ciphertext_sha256_b64).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid ciphertext_sha256_b64".into(),
-            }),
-        )
-    })?;
+    let nonce = b64
+        .decode(&req.nonce_b64)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid nonce_b64"))?;
+
+    let provided_hash = b64
+        .decode(&req.ciphertext_sha256_b64)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid ciphertext_sha256_b64"))?;
 
     // Verify hash
     let computed_hash = sha256(&ciphertext);
     if computed_hash.as_slice() != provided_hash.as_slice() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "SHA-256 mismatch".into(),
-            }),
+        return Err(error_response(StatusCode::BAD_REQUEST, "SHA-256 mismatch"));
+    }
+
+    if clipboard_item::Entity::find_by_id(&req.id)
+        .one(state.db())
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+        .is_some()
+    {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "Clipboard item already exists",
         ));
     }
 
     // Write ciphertext to disk
     let clip_dir = state.clipboard_dir();
-    tokio::fs::create_dir_all(&clip_dir).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Storage error".into(),
-            }),
-        )
-    })?;
+    tokio::fs::create_dir_all(&clip_dir)
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Storage error"))?;
 
     let filename = format!("{}.bin", req.id);
     let path = clip_dir.join(&filename);
-    tokio::fs::write(&path, &ciphertext).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Storage error".into(),
-            }),
-        )
-    })?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                error_response(StatusCode::CONFLICT, "Clipboard item already exists")
+            } else {
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Storage error")
+            }
+        })?;
+    file.write_all(&ciphertext)
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Storage error"))?;
+    file.flush()
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Storage error"))?;
+    drop(file);
 
     let now = Utc::now().to_rfc3339();
     let expires = (Utc::now() + Duration::days(7)).to_rfc3339();
@@ -95,16 +97,15 @@ pub async fn upload(
         sha256_ciphertext: Set(computed_hash.to_vec()),
         created_at: Set(now.clone()),
         expires_at: Set(expires),
-        source_device_id: Set(req.source_device_id.clone()),
+        source_device_id: Set(auth.device_id.clone()),
     };
-    item.insert(state.db()).await.map_err(|_| {
-        (
+    if item.insert(state.db()).await.is_err() {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Database error".into(),
-            }),
-        )
-    })?;
+            "Database error",
+        ));
+    }
 
     // Log event
     let event = event_log::ActiveModel {
@@ -114,14 +115,10 @@ pub async fn upload(
         object_id: Set(req.id.clone()),
         created_at: Set(now.clone()),
     };
-    let inserted = event.insert(state.db()).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Database error".into(),
-            }),
-        )
-    })?;
+    let inserted = event
+        .insert(state.db())
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
 
     // Broadcast to WebSocket clients
     let _ = state.ws_tx().send(WsBroadcast {
@@ -150,8 +147,8 @@ pub async fn list(
     let b64 = &base64::engine::general_purpose::STANDARD;
     let limit = query.limit.unwrap_or(100).min(500);
 
-    let mut q = clipboard_item::Entity::find()
-        .order_by(clipboard_item::Column::CreatedAt, Order::Desc);
+    let mut q =
+        clipboard_item::Entity::find().order_by(clipboard_item::Column::CreatedAt, Order::Desc);
 
     if let Some(before) = &query.before {
         q = q.filter(clipboard_item::Column::CreatedAt.lt(before.clone()));
@@ -193,4 +190,122 @@ pub async fn list(
         items: result_items,
         next_before,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use sea_orm::{Database, EntityTrait};
+    use sea_orm_migration::MigratorTrait;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    use crate::migration;
+
+    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+    async fn test_state() -> (AppState, TempDir) {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::connect("sqlite::memory:").await.expect("db");
+        migration::Migrator::up(&db, None).await.expect("migrate");
+        (AppState::new(db, data_dir.path().to_path_buf()), data_dir)
+    }
+
+    fn auth(device_id: &str) -> AuthInfo {
+        AuthInfo {
+            session_id: "session-id".into(),
+            device_id: device_id.into(),
+        }
+    }
+
+    fn upload_request(id: String, source_device_id: &str) -> ClipboardUploadRequest {
+        upload_request_with_ciphertext(id, source_device_id, b"encrypted clipboard")
+    }
+
+    fn upload_request_with_ciphertext(
+        id: String,
+        source_device_id: &str,
+        ciphertext: &[u8],
+    ) -> ClipboardUploadRequest {
+        ClipboardUploadRequest {
+            id,
+            nonce_b64: B64.encode([1_u8; 12]),
+            ciphertext_sha256_b64: B64.encode(sha256(ciphertext)),
+            ciphertext_b64: B64.encode(ciphertext),
+            source_device_id: source_device_id.into(),
+            client_created_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_non_uuid_id_before_writing() {
+        let (state, data_dir) = test_state().await;
+
+        let result = upload(
+            State(state),
+            Extension(auth("device-a")),
+            Json(upload_request("../escape".into(), "device-a")),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert!(!data_dir.path().join("escape.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn upload_uses_authenticated_device_as_source() {
+        let (state, _data_dir) = test_state().await;
+        let id = Uuid::new_v4().to_string();
+
+        let _ = upload(
+            State(state.clone()),
+            Extension(auth("device-auth")),
+            Json(upload_request(id.clone(), "device-spoof")),
+        )
+        .await
+        .expect("upload");
+
+        let item = clipboard_item::Entity::find_by_id(id)
+            .one(state.db())
+            .await
+            .expect("query")
+            .expect("item");
+        assert_eq!(item.source_device_id, "device-auth");
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_duplicate_id_without_overwriting_blob() {
+        let (state, data_dir) = test_state().await;
+        let id = Uuid::new_v4().to_string();
+
+        let _ = upload(
+            State(state.clone()),
+            Extension(auth("device-a")),
+            Json(upload_request_with_ciphertext(
+                id.clone(),
+                "device-a",
+                b"first encrypted clipboard",
+            )),
+        )
+        .await
+        .expect("first upload");
+
+        let result = upload(
+            State(state),
+            Extension(auth("device-a")),
+            Json(upload_request_with_ciphertext(
+                id.clone(),
+                "device-a",
+                b"second encrypted clipboard",
+            )),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
+        let blob = tokio::fs::read(data_dir.path().join("clipboard").join(format!("{id}.bin")))
+            .await
+            .expect("blob");
+        assert_eq!(blob, b"first encrypted clipboard");
+    }
 }

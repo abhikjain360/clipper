@@ -57,7 +57,10 @@ async fn cleanup_old_events(state: &AppState) -> anyhow::Result<()> {
         .await?;
 
     if result.rows_affected > 0 {
-        info!(count = result.rows_affected, "Cleaned up old event log entries");
+        info!(
+            count = result.rows_affected,
+            "Cleaned up old event log entries"
+        );
     }
 
     Ok(())

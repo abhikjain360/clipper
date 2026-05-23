@@ -5,7 +5,7 @@
 
 use clipper_daemon_types as dt;
 
-use crate::transport;
+use crate::runtime;
 
 // ── FRB-facing types (thin wrappers required by codegen) ──
 
@@ -106,7 +106,7 @@ pub fn init_app() {
 }
 
 pub async fn connect_to_daemon() -> anyhow::Result<()> {
-    transport::connect().await
+    runtime::connect().await
 }
 
 pub async fn login(
@@ -114,7 +114,7 @@ pub async fn login(
     device_name: String,
     server_url: String,
 ) -> anyhow::Result<()> {
-    transport::send_request(
+    runtime::send_request(
         "login",
         Some(serde_json::json!({
             "passphrase": passphrase,
@@ -127,23 +127,22 @@ pub async fn login(
 }
 
 pub async fn logout() -> anyhow::Result<()> {
-    transport::send_request("logout", None).await?;
+    runtime::send_request("logout", None).await?;
     Ok(())
 }
 
 pub async fn get_state() -> BridgeAppState {
-    transport::current_state().into()
+    runtime::current_state().into()
 }
 
 pub async fn send_clipboard(text: String) -> anyhow::Result<()> {
-    transport::send_request("send_clipboard", Some(serde_json::json!({ "text": text }))).await?;
+    runtime::send_request("send_clipboard", Some(serde_json::json!({ "text": text }))).await?;
     Ok(())
 }
 
 pub async fn copy_to_local(id: String) -> anyhow::Result<String> {
     let result =
-        transport::send_request("copy_to_local", Some(serde_json::json!({ "item_id": id })))
-            .await?;
+        runtime::send_request("copy_to_local", Some(serde_json::json!({ "item_id": id }))).await?;
     let text = result
         .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
         .ok_or_else(|| anyhow::anyhow!("No text in response"))?;
@@ -151,7 +150,7 @@ pub async fn copy_to_local(id: String) -> anyhow::Result<String> {
 }
 
 pub async fn upload_file(file_path: String) -> anyhow::Result<String> {
-    let result = transport::send_request(
+    let result = runtime::send_request(
         "upload_file",
         Some(serde_json::json!({ "file_path": file_path })),
     )
@@ -163,7 +162,7 @@ pub async fn upload_file(file_path: String) -> anyhow::Result<String> {
 }
 
 pub async fn download_file(file_id: String, target_path: String) -> anyhow::Result<()> {
-    transport::send_request(
+    runtime::send_request(
         "download_file",
         Some(serde_json::json!({ "file_id": file_id, "target_path": target_path })),
     )
@@ -172,7 +171,7 @@ pub async fn download_file(file_id: String, target_path: String) -> anyhow::Resu
 }
 
 pub async fn delete_file(file_id: String) -> anyhow::Result<()> {
-    transport::send_request(
+    runtime::send_request(
         "delete_file",
         Some(serde_json::json!({ "file_id": file_id })),
     )
@@ -181,10 +180,10 @@ pub async fn delete_file(file_id: String) -> anyhow::Result<()> {
 }
 
 pub async fn refresh() -> anyhow::Result<()> {
-    transport::send_request("refresh", None).await?;
+    runtime::send_request("refresh", None).await?;
     Ok(())
 }
 
 pub async fn wait_for_state_change() {
-    transport::wait_for_change().await;
+    runtime::wait_for_change().await;
 }

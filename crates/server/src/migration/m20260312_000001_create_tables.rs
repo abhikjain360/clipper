@@ -99,12 +99,17 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
-        db.execute_unprepared("DROP TABLE IF EXISTS event_log").await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS devices").await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS event_log")
+            .await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS devices")
+            .await?;
         db.execute_unprepared("DROP TABLE IF EXISTS files").await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS clipboard_items").await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS sessions").await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS server_config").await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS clipboard_items")
+            .await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS sessions")
+            .await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS server_config")
+            .await?;
         Ok(())
     }
 }
