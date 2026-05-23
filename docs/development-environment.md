@@ -33,3 +33,11 @@ Useful checks:
 nix develop . -c cargo test
 nix develop . -c cargo check -p rust_lib_clipper_app --target aarch64-linux-android
 ```
+
+Direnv can print a long environment diff for Nix shells. To hide only that diff,
+put this in `~/.config/direnv/direnv.toml`:
+
+```toml
+[global]
+hide_env_diff = true
+```
