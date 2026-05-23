@@ -1,3 +1,8 @@
 //! IPC protocol types — re-exported from clipper-daemon-types.
 
-pub use clipper_daemon_types::{DaemonEvent, DaemonRequest, DaemonResponse};
+#[allow(unused_imports)]
+pub use clipper_daemon_types::{
+    CopyToLocalParams, CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonEventKind, DaemonLine,
+    DaemonRequest, DaemonResponse, DeleteFileParams, DownloadFileParams, LoginParams,
+    SendClipboardParams, UploadFileParams, UploadFileResult,
+};

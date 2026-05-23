@@ -13,11 +13,10 @@ mod imp {
         transport::connect().await
     }
 
-    pub(crate) async fn send_request(
-        cmd: &str,
-        params: Option<serde_json::Value>,
+    pub(crate) async fn send_command(
+        command: clipper_daemon_types::DaemonCommand,
     ) -> anyhow::Result<Option<serde_json::Value>> {
-        transport::send_request(cmd, params).await
+        transport::send_command(command).await
     }
 
     pub(crate) async fn current_state() -> AppState {
@@ -34,7 +33,7 @@ mod imp {
     use std::sync::{Arc, LazyLock};
 
     use clipper_client::engine::SyncEngine;
-    use clipper_daemon_types::AppState;
+    use clipper_daemon_types::{AppState, CopyToLocalResult, DaemonCommand, UploadFileResult};
 
     static ENGINE: LazyLock<Arc<SyncEngine>> =
         LazyLock::new(|| SyncEngine::new("http://10.0.2.2:8787"));
@@ -43,72 +42,60 @@ mod imp {
         Arc::clone(&ENGINE)
     }
 
-    fn required_string(params: &Option<serde_json::Value>, key: &str) -> anyhow::Result<String> {
-        params
-            .as_ref()
-            .and_then(|p| p.get(key))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-            .ok_or_else(|| anyhow::anyhow!("Missing string parameter: {}", key))
-    }
-
     pub(crate) async fn connect() -> anyhow::Result<()> {
         Ok(())
     }
 
-    pub(crate) async fn send_request(
-        cmd: &str,
-        params: Option<serde_json::Value>,
+    pub(crate) async fn send_command(
+        command: DaemonCommand,
     ) -> anyhow::Result<Option<serde_json::Value>> {
         let engine = engine();
 
-        match cmd {
-            "login" => {
-                let passphrase = required_string(&params, "passphrase")?;
-                let device_name = required_string(&params, "device_name")?;
-                let server_url = required_string(&params, "server_url")?;
-
-                engine.set_base_url(&server_url).await;
+        match command {
+            DaemonCommand::Login(params) => {
+                if let Some(server_url) = params.server_url {
+                    engine.set_base_url(&server_url).await;
+                }
                 engine
-                    .login_with_platform(&passphrase, &device_name, "android")
+                    .login_with_platform(
+                        &params.passphrase,
+                        params.device_name.as_deref().unwrap_or("Android"),
+                        "android",
+                    )
                     .await?;
                 Ok(None)
             }
-            "logout" => {
+            DaemonCommand::Logout => {
                 engine.logout().await?;
                 Ok(None)
             }
-            "send_clipboard" => {
-                let text = required_string(&params, "text")?;
-                engine.send_clipboard(&text).await?;
+            DaemonCommand::SendClipboard(params) => {
+                engine.send_clipboard(&params.text).await?;
                 Ok(None)
             }
-            "copy_to_local" => {
-                let item_id = required_string(&params, "item_id")?;
-                let text = engine.copy_to_local(&item_id).await?;
-                Ok(Some(serde_json::json!({ "text": text })))
+            DaemonCommand::CopyToLocal(params) => {
+                let text = engine.copy_to_local(&params.item_id).await?;
+                Ok(Some(serde_json::to_value(CopyToLocalResult { text })?))
             }
-            "upload_file" => {
-                let file_path = required_string(&params, "file_path")?;
-                let file_id = engine.upload_file(&file_path).await?;
-                Ok(Some(serde_json::json!({ "file_id": file_id })))
+            DaemonCommand::UploadFile(params) => {
+                let file_id = engine.upload_file(&params.file_path).await?;
+                Ok(Some(serde_json::to_value(UploadFileResult { file_id })?))
             }
-            "download_file" => {
-                let file_id = required_string(&params, "file_id")?;
-                let target_path = required_string(&params, "target_path")?;
-                engine.download_file(&file_id, &target_path).await?;
+            DaemonCommand::DownloadFile(params) => {
+                engine
+                    .download_file(&params.file_id, &params.target_path)
+                    .await?;
                 Ok(None)
             }
-            "delete_file" => {
-                let file_id = required_string(&params, "file_id")?;
-                engine.delete_file(&file_id).await?;
+            DaemonCommand::DeleteFile(params) => {
+                engine.delete_file(&params.file_id).await?;
                 Ok(None)
             }
-            "refresh" => {
+            DaemonCommand::Refresh => {
                 engine.refresh().await?;
                 Ok(None)
             }
-            _ => anyhow::bail!("Unknown command: {}", cmd),
+            DaemonCommand::GetState => Ok(Some(serde_json::to_value(engine.get_state().await)?)),
         }
     }
 
@@ -130,9 +117,8 @@ mod imp {
         anyhow::bail!("Unsupported platform")
     }
 
-    pub(crate) async fn send_request(
-        _cmd: &str,
-        _params: Option<serde_json::Value>,
+    pub(crate) async fn send_command(
+        _command: clipper_daemon_types::DaemonCommand,
     ) -> anyhow::Result<Option<serde_json::Value>> {
         anyhow::bail!("Unsupported platform")
     }

@@ -1,5 +1,14 @@
 [workspace]
-members = ["crates/core", "crates/server", "crates/client", "crates/daemon", "crates/daemon-types", "app/rust"]
+members = [
+    "crates/api-types",
+    "crates/app-types",
+    "crates/core",
+    "crates/server",
+    "crates/client",
+    "crates/daemon",
+    "crates/daemon-types",
+    "app/rust",
+]
 resolver = "3"
 
 [workspace.package]
@@ -9,5 +18,7 @@ edition = "2024"
 [workspace.dependencies]
 # clipper crates
 clipper-core = { path = "crates/core" }
+clipper-api-types = { path = "crates/api-types" }
+clipper-app-types = { path = "crates/app-types" }
 clipper-client = { path = "crates/client" }
 clipper-daemon-types = { path = "crates/daemon-types" }

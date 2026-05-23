@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+clipper-api-types.workspace = true
 anyhow = "1.0.102"
 argon2 = "0.5.3"
 base64 = "0.22.1"

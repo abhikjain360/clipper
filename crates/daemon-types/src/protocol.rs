@@ -1,18 +1,84 @@
 //! IPC protocol types for daemon <-> app communication.
 //!
 //! Newline-delimited JSON over Unix socket.
+//!
+//! This crate is the single source of truth for the daemon IPC wire format.
+//! The Flutter bridge and the macOS daemon both use these types; Android uses
+//! the same command enum in-process so it cannot drift from the daemon command
+//! surface.
 
+use clipper_app_types::AppState;
 use serde::{Deserialize, Serialize};
 
-use crate::AppState;
-
 /// Request from app to daemon.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonRequest {
     pub id: String,
-    pub cmd: String,
-    #[serde(default)]
-    pub params: serde_json::Value,
+    #[serde(flatten)]
+    pub command: DaemonCommand,
+}
+
+impl DaemonRequest {
+    pub fn new(id: String, command: DaemonCommand) -> Self {
+        Self { id, command }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "cmd", content = "params", rename_all = "snake_case")]
+pub enum DaemonCommand {
+    Login(LoginParams),
+    Logout,
+    GetState,
+    SendClipboard(SendClipboardParams),
+    CopyToLocal(CopyToLocalParams),
+    UploadFile(UploadFileParams),
+    DownloadFile(DownloadFileParams),
+    DeleteFile(DeleteFileParams),
+    Refresh,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoginParams {
+    pub passphrase: String,
+    pub device_name: Option<String>,
+    pub server_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendClipboardParams {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopyToLocalParams {
+    pub item_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadFileParams {
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadFileParams {
+    pub file_id: String,
+    pub target_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteFileParams {
+    pub file_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopyToLocalResult {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadFileResult {
+    pub file_id: String,
 }
 
 /// Response from daemon to app.
@@ -46,18 +112,31 @@ impl DaemonResponse {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DaemonLine {
+    Response(DaemonResponse),
+    Event(DaemonEvent),
+}
+
 /// Event pushed from daemon to app.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DaemonEvent {
-    pub event: String,
+    pub event: DaemonEventKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<AppState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonEventKind {
+    StateChanged,
 }
 
 impl DaemonEvent {
     pub fn state_changed(state: AppState) -> Self {
         Self {
-            event: "state_changed".into(),
+            event: DaemonEventKind::StateChanged,
             state: Some(state),
         }
     }
@@ -71,21 +150,26 @@ mod tests {
     fn request_roundtrip() {
         let req = DaemonRequest {
             id: "abc-123".into(),
-            cmd: "login".into(),
-            params: serde_json::json!({"passphrase": "secret"}),
+            command: DaemonCommand::Login(LoginParams {
+                passphrase: "secret".into(),
+                device_name: None,
+                server_url: None,
+            }),
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, "abc-123");
-        assert_eq!(parsed.cmd, "login");
-        assert_eq!(parsed.params["passphrase"], "secret");
+        match parsed.command {
+            DaemonCommand::Login(params) => assert_eq!(params.passphrase, "secret"),
+            _ => panic!("expected login"),
+        }
     }
 
     #[test]
-    fn request_missing_params_defaults_to_null() {
+    fn unit_request_roundtrips_without_params() {
         let json = r#"{"id":"1","cmd":"logout"}"#;
         let req: DaemonRequest = serde_json::from_str(json).unwrap();
-        assert!(req.params.is_null());
+        assert!(matches!(req.command, DaemonCommand::Logout));
     }
 
     #[test]
@@ -128,15 +212,15 @@ mod tests {
         let event = DaemonEvent::state_changed(state);
         let json = serde_json::to_string(&event).unwrap();
         let parsed: DaemonEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.event, "state_changed");
+        assert_eq!(parsed.event, DaemonEventKind::StateChanged);
         let s = parsed.state.unwrap();
         assert!(s.logged_in);
         assert_eq!(s.device_id.unwrap(), "dev1");
         assert_eq!(s.connection_status, crate::ConnectionStatus::Connected);
     }
 
-    /// Verify that the bridge-side DaemonMessage shape (which uses Option fields)
-    /// can parse both responses and events from the same JSON stream.
+    /// Verify that the shared line union can parse both responses and events
+    /// from the same JSON stream.
     #[test]
     fn bridge_can_distinguish_response_from_event() {
         // A response has "id"
@@ -150,5 +234,8 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(event_json).unwrap();
         assert!(v.get("id").is_none());
         assert_eq!(v["event"], "state_changed");
+
+        let parsed: DaemonLine = serde_json::from_str(event_json).unwrap();
+        assert!(matches!(parsed, DaemonLine::Event(_)));
     }
 }

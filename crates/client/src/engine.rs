@@ -12,11 +12,11 @@ use crate::api_client::{
     ApiClient, ClientError, decrypt_clipboard, decrypt_file_blob, decrypt_file_meta,
     encrypt_clipboard, encrypt_file_blob, encrypt_file_meta,
 };
-use clipper_core::crypto;
-use clipper_core::models::*;
-pub use clipper_daemon_types::{
+pub use clipper_app_types::{
     AppState, ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem,
 };
+use clipper_core::crypto;
+use clipper_core::models::*;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 

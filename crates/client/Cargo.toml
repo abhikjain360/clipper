@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 clipper-core.workspace = true
+clipper-app-types.workspace = true
 clipper-daemon-types.workspace = true
 anyhow = "1.0.102"
 base64 = "0.22.1"

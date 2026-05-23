@@ -28,12 +28,18 @@ then send encrypted records and opaque metadata to the server.
   - owns shared DB connection, data directories, WebSocket broadcast channel, and in-memory auth challenges.
 - `crates/server/src/cleanup.rs`
   - removes expired clipboard items, old event-log rows, and abandoned pending file uploads.
+- `crates/api-types/src/lib.rs`
+  - owns the HTTP/WebSocket API contracts shared by server and clients.
 - `crates/core/src/models.rs`
-  - defines the HTTP/WebSocket API contracts shared by server and clients.
+  - compatibility re-exports `clipper-api-types` for existing imports.
 - `crates/client/src/api_client.rs`
   - is the reference client implementation and should be checked when route models or crypto flow change.
 - `crates/client/src/engine.rs`
   - owns client-side auth completion, key derivation, encryption/decryption, HTTP/WebSocket sync, and decrypted in-memory state.
+- `crates/app-types/src/lib.rs`
+  - owns decrypted app-visible state shared by the sync engine, daemon state events, and Flutter bridge adapters.
+- `crates/daemon-types/src/protocol.rs`
+  - owns the daemon/app IPC request, response, event, command, parameter, and result shapes.
 - `app/rust/src/runtime.rs`
   - selects the Flutter bridge runtime:
     - macOS talks to the local `clipper-daemon` over a Unix socket;
@@ -65,6 +71,11 @@ SQLite stores durable metadata. The filesystem stores larger encrypted blobs:
   - stores encrypted metadata, blob nonce/path, ciphertext size/hash, source device, and upload status.
 - `event_log`
   - stores ordered object events used by bootstrap/WebSocket replay.
+
+Database schema source of truth lives in
+`crates/server/src/migration/m20260312_000001_create_tables.rs`; SeaORM entity
+files under `crates/server/src/entity/` are generated from that schema and
+should not be treated as the schema owner.
 
 ## 2. Expected Application Flow
 

@@ -637,12 +637,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "clipper-api-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "clipper-app-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "clipper-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
  "chrono",
+ "clipper-app-types",
  "clipper-core",
  "clipper-daemon-types",
  "futures-util",
@@ -670,6 +685,7 @@ dependencies = [
  "base64",
  "chacha20poly1305",
  "chrono",
+ "clipper-api-types",
  "opaque-ke",
  "rand 0.10.1",
  "serde",
@@ -703,6 +719,7 @@ dependencies = [
 name = "clipper-daemon-types"
 version = "0.1.0"
 dependencies = [
+ "clipper-app-types",
  "serde",
  "serde_json",
 ]
@@ -3133,6 +3150,7 @@ name = "rust_lib_clipper_app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clipper-app-types",
  "clipper-client",
  "clipper-daemon-types",
  "dirs",

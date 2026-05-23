@@ -9,24 +9,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use clipper_daemon_types as dt;
-use clipper_daemon_types::{DaemonRequest, DaemonResponse};
+use clipper_daemon_types::{DaemonCommand, DaemonRequest, DaemonResponse};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::{Mutex, RwLock, oneshot, watch};
 use tracing::warn;
 
 use crate::daemon_process;
-
-/// An event or response line from the daemon (union of both shapes).
-#[derive(serde::Deserialize)]
-struct DaemonMessage {
-    id: Option<String>,
-    ok: Option<bool>,
-    result: Option<serde_json::Value>,
-    error: Option<String>,
-    event: Option<String>,
-    state: Option<serde_json::Value>,
-}
 
 // ── Connection types ──
 
@@ -123,35 +112,7 @@ pub(crate) async fn connect() -> anyhow::Result<()> {
                     if trimmed.is_empty() {
                         continue;
                     }
-                    match serde_json::from_str::<DaemonMessage>(trimmed) {
-                        Ok(msg) => {
-                            if let Some(id) = msg.id {
-                                let resp = DaemonResponse {
-                                    id: id.clone(),
-                                    ok: msg.ok.unwrap_or(false),
-                                    result: msg.result,
-                                    error: msg.error,
-                                };
-                                if let Some(tx) = pending.lock().await.remove(&id) {
-                                    let _ = tx.send(resp);
-                                }
-                            } else if msg.event.as_deref() == Some("state_changed")
-                                && let Some(state_val) = msg.state
-                            {
-                                match serde_json::from_value::<dt::AppState>(state_val) {
-                                    Ok(state) => {
-                                        let _ = state_tx.send(state);
-                                    }
-                                    Err(e) => {
-                                        warn!("Failed to parse state event: {}", e);
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to parse daemon message: {}", e);
-                        }
-                    }
+                    route_daemon_line(trimmed, &pending, &state_tx).await;
                 }
                 Err(e) => {
                     warn!("Daemon read error: {}", e);
@@ -167,16 +128,11 @@ pub(crate) async fn connect() -> anyhow::Result<()> {
 }
 
 /// Send a request to the daemon and await the correlated response.
-pub(crate) async fn send_request(
-    cmd: &str,
-    params: Option<serde_json::Value>,
+pub(crate) async fn send_command(
+    command: DaemonCommand,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let id = uuid::Uuid::new_v4().to_string();
-    let req = DaemonRequest {
-        id: id.clone(),
-        cmd: cmd.into(),
-        params: params.unwrap_or(serde_json::Value::Null),
-    };
+    let req = DaemonRequest::new(id.clone(), command);
 
     let (tx, rx) = oneshot::channel();
 
@@ -235,6 +191,33 @@ async fn drain_pending(
             result: None,
             error: Some(reason.into()),
         });
+    }
+}
+
+async fn route_daemon_line(
+    line: &str,
+    pending: &Arc<Mutex<HashMap<String, oneshot::Sender<DaemonResponse>>>>,
+    state_tx: &watch::Sender<dt::AppState>,
+) {
+    match serde_json::from_str::<dt::DaemonLine>(line) {
+        Ok(dt::DaemonLine::Response(resp)) => {
+            let id = resp.id.clone();
+            if let Some(tx) = pending.lock().await.remove(&id) {
+                let _ = tx.send(resp);
+            }
+        }
+        Ok(dt::DaemonLine::Event(event)) => match event.event {
+            dt::DaemonEventKind::StateChanged => {
+                if let Some(state) = event.state {
+                    let _ = state_tx.send(state);
+                } else {
+                    warn!("State change event did not include state");
+                }
+            }
+        },
+        Err(e) => {
+            warn!("Failed to parse daemon message: {}", e);
+        }
     }
 }
 
@@ -329,7 +312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_request_cleans_up_pending_on_write_failure() {
+    async fn send_command_cleans_up_pending_on_write_failure() {
         // Set up a real connection via BRIDGE, then close the server side to
         // make the next write fail. We can't easily use BRIDGE (it's global/
         // shared across tests), so test the cleanup logic directly.
@@ -343,7 +326,7 @@ mod tests {
         // Verify entry exists.
         assert!(pending.lock().await.contains_key(&id));
 
-        // Simulate what send_request does on write failure: remove the entry.
+        // Simulate what send_command does on write failure: remove the entry.
         pending.lock().await.remove(&id);
         assert!(!pending.lock().await.contains_key(&id));
     }
@@ -373,24 +356,7 @@ mod tests {
                         if trimmed.is_empty() {
                             continue;
                         }
-                        if let Ok(msg) = serde_json::from_str::<DaemonMessage>(trimmed) {
-                            if let Some(id) = msg.id {
-                                let resp = DaemonResponse {
-                                    id: id.clone(),
-                                    ok: msg.ok.unwrap_or(false),
-                                    result: msg.result,
-                                    error: msg.error,
-                                };
-                                if let Some(tx) = pending2.lock().await.remove(&id) {
-                                    let _ = tx.send(resp);
-                                }
-                            } else if msg.event.as_deref() == Some("state_changed")
-                                && let Some(state_val) = msg.state
-                                && let Ok(state) = serde_json::from_value::<dt::AppState>(state_val)
-                            {
-                                let _ = state_tx.send(state);
-                            }
-                        }
+                        route_daemon_line(trimmed, &pending2, &state_tx).await;
                     }
                     Err(_) => break,
                 }
@@ -403,25 +369,24 @@ mod tests {
             let mut line = String::new();
             while server_reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                 let req: DaemonRequest = serde_json::from_str(line.trim()).unwrap();
-                let resp =
-                    DaemonResponse::success(req.id, Some(serde_json::json!({"echo": req.cmd})));
+                let echo = match req.command {
+                    DaemonCommand::Refresh => "refresh",
+                    _ => "other",
+                };
+                let resp = DaemonResponse::success(req.id, Some(serde_json::json!({"echo": echo})));
                 let resp_line = format!("{}\n", serde_json::to_string(&resp).unwrap());
                 server_write.write_all(resp_line.as_bytes()).await.unwrap();
                 line.clear();
             }
         });
 
-        // Now simulate send_request by hand (can't use the real one since
+        // Now simulate send_command by hand (can't use the real one since
         // it uses BRIDGE's writer, not our test writer).
         let (tx, rx) = oneshot::channel();
         let req_id = "req-1".to_string();
         pending.lock().await.insert(req_id.clone(), tx);
 
-        let req = DaemonRequest {
-            id: req_id,
-            cmd: "ping".into(),
-            params: serde_json::Value::Null,
-        };
+        let req = DaemonRequest::new(req_id, DaemonCommand::Refresh);
         let req_line = format!("{}\n", serde_json::to_string(&req).unwrap());
 
         let writer = Mutex::new(client_write);
@@ -434,7 +399,7 @@ mod tests {
 
         let resp = rx.await.unwrap();
         assert!(resp.ok);
-        assert_eq!(resp.result.unwrap()["echo"], "ping");
+        assert_eq!(resp.result.unwrap()["echo"], "refresh");
     }
 
     #[tokio::test]
@@ -463,24 +428,7 @@ mod tests {
                         if trimmed.is_empty() {
                             continue;
                         }
-                        if let Ok(msg) = serde_json::from_str::<DaemonMessage>(trimmed) {
-                            if let Some(id) = msg.id {
-                                let resp = DaemonResponse {
-                                    id: id.clone(),
-                                    ok: msg.ok.unwrap_or(false),
-                                    result: msg.result,
-                                    error: msg.error,
-                                };
-                                if let Some(tx) = pending2.lock().await.remove(&id) {
-                                    let _ = tx.send(resp);
-                                }
-                            } else if msg.event.as_deref() == Some("state_changed")
-                                && let Some(state_val) = msg.state
-                                && let Ok(state) = serde_json::from_value::<dt::AppState>(state_val)
-                            {
-                                let _ = state_tx2.send(state);
-                            }
-                        }
+                        route_daemon_line(trimmed, &pending2, &state_tx2).await;
                     }
                     Err(_) => break,
                 }
@@ -489,14 +437,10 @@ mod tests {
 
         // Server sends a state_changed event.
         let (_server_read, mut server_write) = server.into_split();
-        let event = serde_json::json!({
-            "event": "state_changed",
-            "state": {
-                "logged_in": true,
-                "connection_status": "Connected",
-                "clipboard_items": [],
-                "files": []
-            }
+        let event = dt::DaemonEvent::state_changed(dt::AppState {
+            logged_in: true,
+            connection_status: dt::ConnectionStatus::Connected,
+            ..Default::default()
         });
         let event_line = format!("{}\n", serde_json::to_string(&event).unwrap());
         server_write.write_all(event_line.as_bytes()).await.unwrap();

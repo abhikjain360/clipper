@@ -11,7 +11,10 @@ use clipper_client::engine::SyncEngine;
 
 use crate::clients::ClientManager;
 use crate::keychain::{self, Credentials};
-use crate::protocol::{DaemonEvent, DaemonRequest, DaemonResponse};
+use crate::protocol::{
+    CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, LoginParams,
+    UploadFileResult,
+};
 
 /// Handle a single client connection.
 pub async fn handle_connection(
@@ -91,41 +94,30 @@ pub async fn handle_connection(
 
 async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> DaemonResponse {
     let id = req.id.clone();
-    match req.cmd.as_str() {
-        "login" => cmd_login(id, &req.params, engine).await,
-        "logout" => cmd_logout(id, engine).await,
-        "get_state" => cmd_get_state(id, engine).await,
-        "send_clipboard" => cmd_send_clipboard(id, &req.params, engine).await,
-        "copy_to_local" => cmd_copy_to_local(id, &req.params, engine).await,
-        "upload_file" => cmd_upload_file(id, &req.params, engine).await,
-        "download_file" => cmd_download_file(id, &req.params, engine).await,
-        "delete_file" => cmd_delete_file(id, &req.params, engine).await,
-        "refresh" => cmd_refresh(id, engine).await,
-        _ => DaemonResponse::error(id, format!("Unknown command: {}", req.cmd)),
+    match req.command {
+        DaemonCommand::Login(params) => cmd_login(id, params, engine).await,
+        DaemonCommand::Logout => cmd_logout(id, engine).await,
+        DaemonCommand::GetState => cmd_get_state(id, engine).await,
+        DaemonCommand::SendClipboard(params) => cmd_send_clipboard(id, params.text, engine).await,
+        DaemonCommand::CopyToLocal(params) => cmd_copy_to_local(id, params.item_id, engine).await,
+        DaemonCommand::UploadFile(params) => cmd_upload_file(id, params.file_path, engine).await,
+        DaemonCommand::DownloadFile(params) => {
+            cmd_download_file(id, params.file_id, params.target_path, engine).await
+        }
+        DaemonCommand::DeleteFile(params) => cmd_delete_file(id, params.file_id, engine).await,
+        DaemonCommand::Refresh => cmd_refresh(id, engine).await,
     }
 }
 
-async fn cmd_login(
-    id: String,
-    params: &serde_json::Value,
-    engine: &Arc<SyncEngine>,
-) -> DaemonResponse {
-    let passphrase = match params.get("passphrase").and_then(|v| v.as_str()) {
-        Some(p) => p,
-        None => return DaemonResponse::error(id, "Missing passphrase".into()),
-    };
-    let device_name = params
-        .get("device_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("macOS");
-    let server_url = params.get("server_url").and_then(|v| v.as_str());
+async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) -> DaemonResponse {
+    let device_name = params.device_name.as_deref().unwrap_or("macOS");
 
     // If server_url is provided, reconfigure the engine
-    if let Some(url) = server_url {
+    if let Some(url) = params.server_url.as_deref() {
         engine.set_base_url(url).await;
     }
 
-    match engine.login(passphrase, device_name).await {
+    match engine.login(&params.passphrase, device_name).await {
         Ok(()) => {
             // Store credentials in Keychain
             let url = engine.base_url().await;
@@ -156,22 +148,11 @@ async fn cmd_logout(id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
 
 async fn cmd_get_state(id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
     let state = engine.get_state().await;
-    match serde_json::to_value(state) {
-        Ok(v) => DaemonResponse::success(id, Some(v)),
-        Err(e) => DaemonResponse::error(id, e.to_string()),
-    }
+    json_success(id, state)
 }
 
-async fn cmd_send_clipboard(
-    id: String,
-    params: &serde_json::Value,
-    engine: &Arc<SyncEngine>,
-) -> DaemonResponse {
-    let text = match params.get("text").and_then(|v| v.as_str()) {
-        Some(t) => t,
-        None => return DaemonResponse::error(id, "Missing text".into()),
-    };
-    match engine.send_clipboard(text).await {
+async fn cmd_send_clipboard(id: String, text: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
+    match engine.send_clipboard(&text).await {
         Ok(()) => DaemonResponse::success(id, None),
         Err(e) => DaemonResponse::error(id, e.to_string()),
     }
@@ -179,63 +160,40 @@ async fn cmd_send_clipboard(
 
 async fn cmd_copy_to_local(
     id: String,
-    params: &serde_json::Value,
+    item_id: String,
     engine: &Arc<SyncEngine>,
 ) -> DaemonResponse {
-    let item_id = match params.get("item_id").and_then(|v| v.as_str()) {
-        Some(i) => i,
-        None => return DaemonResponse::error(id, "Missing item_id".into()),
-    };
-    match engine.copy_to_local(item_id).await {
-        Ok(text) => DaemonResponse::success(id, Some(serde_json::json!({ "text": text }))),
+    match engine.copy_to_local(&item_id).await {
+        Ok(text) => json_success(id, CopyToLocalResult { text }),
         Err(e) => DaemonResponse::error(id, e.to_string()),
     }
 }
 
 async fn cmd_upload_file(
     id: String,
-    params: &serde_json::Value,
+    file_path: String,
     engine: &Arc<SyncEngine>,
 ) -> DaemonResponse {
-    let file_path = match params.get("file_path").and_then(|v| v.as_str()) {
-        Some(p) => p,
-        None => return DaemonResponse::error(id, "Missing file_path".into()),
-    };
-    match engine.upload_file(file_path).await {
-        Ok(file_id) => DaemonResponse::success(id, Some(serde_json::json!({ "file_id": file_id }))),
+    match engine.upload_file(&file_path).await {
+        Ok(file_id) => json_success(id, UploadFileResult { file_id }),
         Err(e) => DaemonResponse::error(id, e.to_string()),
     }
 }
 
 async fn cmd_download_file(
     id: String,
-    params: &serde_json::Value,
+    file_id: String,
+    target_path: String,
     engine: &Arc<SyncEngine>,
 ) -> DaemonResponse {
-    let file_id = match params.get("file_id").and_then(|v| v.as_str()) {
-        Some(f) => f,
-        None => return DaemonResponse::error(id, "Missing file_id".into()),
-    };
-    let target_path = match params.get("target_path").and_then(|v| v.as_str()) {
-        Some(p) => p,
-        None => return DaemonResponse::error(id, "Missing target_path".into()),
-    };
-    match engine.download_file(file_id, target_path).await {
+    match engine.download_file(&file_id, &target_path).await {
         Ok(()) => DaemonResponse::success(id, None),
         Err(e) => DaemonResponse::error(id, e.to_string()),
     }
 }
 
-async fn cmd_delete_file(
-    id: String,
-    params: &serde_json::Value,
-    engine: &Arc<SyncEngine>,
-) -> DaemonResponse {
-    let file_id = match params.get("file_id").and_then(|v| v.as_str()) {
-        Some(f) => f,
-        None => return DaemonResponse::error(id, "Missing file_id".into()),
-    };
-    match engine.delete_file(file_id).await {
+async fn cmd_delete_file(id: String, file_id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
+    match engine.delete_file(&file_id).await {
         Ok(()) => DaemonResponse::success(id, None),
         Err(e) => DaemonResponse::error(id, e.to_string()),
     }
@@ -244,6 +202,13 @@ async fn cmd_delete_file(
 async fn cmd_refresh(id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
     match engine.refresh().await {
         Ok(()) => DaemonResponse::success(id, None),
+        Err(e) => DaemonResponse::error(id, e.to_string()),
+    }
+}
+
+fn json_success<T: serde::Serialize>(id: String, value: T) -> DaemonResponse {
+    match serde_json::to_value(value) {
+        Ok(value) => DaemonResponse::success(id, Some(value)),
         Err(e) => DaemonResponse::error(id, e.to_string()),
     }
 }

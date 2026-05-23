@@ -7,6 +7,8 @@ use rand::RngExt;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+pub use clipper_api_types::Argon2Params;
+
 const OPAQUE_CREDENTIAL_IDENTIFIER: &[u8] = b"clipper:passphrase:v1";
 
 struct ClipperOpaqueCipherSuite;
@@ -15,24 +17,6 @@ impl opaque_ke::CipherSuite for ClipperOpaqueCipherSuite {
     type OprfCs = opaque_ke::Ristretto255;
     type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, sha2::Sha512>;
     type Ksf = opaque_ke::argon2::Argon2<'static>;
-}
-
-/// Argon2id parameters — same structure used for both auth and enc derivation.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-pub struct Argon2Params {
-    pub m_cost: u32,
-    pub t_cost: u32,
-    pub p_cost: u32,
-}
-
-impl Default for Argon2Params {
-    fn default() -> Self {
-        Self {
-            m_cost: 65536, // 64 MiB
-            t_cost: 3,
-            p_cost: 1,
-        }
-    }
 }
 
 /// Generate a random 16-byte salt.

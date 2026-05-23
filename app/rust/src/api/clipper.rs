@@ -2,8 +2,13 @@
 //!
 //! All transport and daemon lifecycle logic lives in sibling modules;
 //! this file is intentionally kept thin so FRB codegen has a clean target.
+//! `clipper-app-types` owns app-visible state. The `Bridge*` structs below are
+//! codegen adapters for Dart and use exhaustive destructuring in `From`
+//! conversions so source-state changes fail compilation until this boundary is
+//! updated.
 
-use clipper_daemon_types as dt;
+use clipper_app_types as app_types;
+use clipper_daemon_types as daemon;
 
 use crate::runtime;
 
@@ -47,53 +52,76 @@ pub struct BridgeAppState {
     pub error: Option<String>,
 }
 
-// ── From conversions (daemon-types → bridge types) ──
+// ── From conversions (app-types → bridge types) ──
 
-impl From<dt::AppState> for BridgeAppState {
-    fn from(s: dt::AppState) -> Self {
+impl From<app_types::AppState> for BridgeAppState {
+    fn from(s: app_types::AppState) -> Self {
+        let app_types::AppState {
+            logged_in,
+            device_id,
+            device_name,
+            connection_status,
+            clipboard_items,
+            files,
+            error,
+        } = s;
         Self {
-            logged_in: s.logged_in,
-            device_id: s.device_id,
-            device_name: s.device_name,
-            connection_status: s.connection_status.into(),
-            clipboard_items: s.clipboard_items.into_iter().map(Into::into).collect(),
-            files: s.files.into_iter().map(Into::into).collect(),
-            error: s.error,
+            logged_in,
+            device_id,
+            device_name,
+            connection_status: connection_status.into(),
+            clipboard_items: clipboard_items.into_iter().map(Into::into).collect(),
+            files: files.into_iter().map(Into::into).collect(),
+            error,
         }
     }
 }
 
-impl From<dt::ConnectionStatus> for BridgeConnectionStatus {
-    fn from(s: dt::ConnectionStatus) -> Self {
+impl From<app_types::ConnectionStatus> for BridgeConnectionStatus {
+    fn from(s: app_types::ConnectionStatus) -> Self {
         match s {
-            dt::ConnectionStatus::Disconnected => Self::Disconnected,
-            dt::ConnectionStatus::Connecting => Self::Connecting,
-            dt::ConnectionStatus::Connected => Self::Connected,
-            dt::ConnectionStatus::DaemonNotRunning => Self::DaemonNotRunning,
+            app_types::ConnectionStatus::Disconnected => Self::Disconnected,
+            app_types::ConnectionStatus::Connecting => Self::Connecting,
+            app_types::ConnectionStatus::Connected => Self::Connected,
+            app_types::ConnectionStatus::DaemonNotRunning => Self::DaemonNotRunning,
         }
     }
 }
 
-impl From<dt::DecryptedClipboardItem> for BridgeClipboardItem {
-    fn from(i: dt::DecryptedClipboardItem) -> Self {
+impl From<app_types::DecryptedClipboardItem> for BridgeClipboardItem {
+    fn from(i: app_types::DecryptedClipboardItem) -> Self {
+        let app_types::DecryptedClipboardItem {
+            id,
+            text,
+            created_at,
+            source_device_id,
+        } = i;
         Self {
-            id: i.id,
-            text: i.text,
-            created_at: i.created_at,
-            source_device_id: i.source_device_id,
+            id,
+            text,
+            created_at,
+            source_device_id,
         }
     }
 }
 
-impl From<dt::DecryptedFileItem> for BridgeFileItem {
-    fn from(f: dt::DecryptedFileItem) -> Self {
+impl From<app_types::DecryptedFileItem> for BridgeFileItem {
+    fn from(f: app_types::DecryptedFileItem) -> Self {
+        let app_types::DecryptedFileItem {
+            id,
+            filename,
+            mime_type,
+            blob_size,
+            created_at,
+            source_device_id,
+        } = f;
         Self {
-            id: f.id,
-            filename: f.filename,
-            mime_type: f.mime_type,
-            blob_size: f.blob_size,
-            created_at: f.created_at,
-            source_device_id: f.source_device_id,
+            id,
+            filename,
+            mime_type,
+            blob_size,
+            created_at,
+            source_device_id,
         }
     }
 }
@@ -114,20 +142,17 @@ pub async fn login(
     device_name: String,
     server_url: String,
 ) -> anyhow::Result<()> {
-    runtime::send_request(
-        "login",
-        Some(serde_json::json!({
-            "passphrase": passphrase,
-            "device_name": device_name,
-            "server_url": server_url,
-        })),
-    )
+    runtime::send_command(daemon::DaemonCommand::Login(daemon::LoginParams {
+        passphrase,
+        device_name: Some(device_name),
+        server_url: Some(server_url),
+    }))
     .await?;
     Ok(())
 }
 
 pub async fn logout() -> anyhow::Result<()> {
-    runtime::send_request("logout", None).await?;
+    runtime::send_command(daemon::DaemonCommand::Logout).await?;
     Ok(())
 }
 
@@ -136,51 +161,56 @@ pub async fn get_state() -> BridgeAppState {
 }
 
 pub async fn send_clipboard(text: String) -> anyhow::Result<()> {
-    runtime::send_request("send_clipboard", Some(serde_json::json!({ "text": text }))).await?;
+    runtime::send_command(daemon::DaemonCommand::SendClipboard(
+        daemon::SendClipboardParams { text },
+    ))
+    .await?;
     Ok(())
 }
 
 pub async fn copy_to_local(id: String) -> anyhow::Result<String> {
-    let result =
-        runtime::send_request("copy_to_local", Some(serde_json::json!({ "item_id": id }))).await?;
-    let text = result
-        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
-        .ok_or_else(|| anyhow::anyhow!("No text in response"))?;
-    Ok(text)
+    let result = runtime::send_command(daemon::DaemonCommand::CopyToLocal(
+        daemon::CopyToLocalParams { item_id: id },
+    ))
+    .await?;
+    Ok(serde_json::from_value::<daemon::CopyToLocalResult>(
+        result.ok_or_else(|| anyhow::anyhow!("No text in response"))?,
+    )?
+    .text)
 }
 
 pub async fn upload_file(file_path: String) -> anyhow::Result<String> {
-    let result = runtime::send_request(
-        "upload_file",
-        Some(serde_json::json!({ "file_path": file_path })),
-    )
+    let result = runtime::send_command(daemon::DaemonCommand::UploadFile(
+        daemon::UploadFileParams { file_path },
+    ))
     .await?;
-    let file_id = result
-        .and_then(|v| v.get("file_id").and_then(|f| f.as_str()).map(String::from))
-        .ok_or_else(|| anyhow::anyhow!("No file_id in response"))?;
-    Ok(file_id)
+    Ok(serde_json::from_value::<daemon::UploadFileResult>(
+        result.ok_or_else(|| anyhow::anyhow!("No file_id in response"))?,
+    )?
+    .file_id)
 }
 
 pub async fn download_file(file_id: String, target_path: String) -> anyhow::Result<()> {
-    runtime::send_request(
-        "download_file",
-        Some(serde_json::json!({ "file_id": file_id, "target_path": target_path })),
-    )
+    runtime::send_command(daemon::DaemonCommand::DownloadFile(
+        daemon::DownloadFileParams {
+            file_id,
+            target_path,
+        },
+    ))
     .await?;
     Ok(())
 }
 
 pub async fn delete_file(file_id: String) -> anyhow::Result<()> {
-    runtime::send_request(
-        "delete_file",
-        Some(serde_json::json!({ "file_id": file_id })),
-    )
+    runtime::send_command(daemon::DaemonCommand::DeleteFile(
+        daemon::DeleteFileParams { file_id },
+    ))
     .await?;
     Ok(())
 }
 
 pub async fn refresh() -> anyhow::Result<()> {
-    runtime::send_request("refresh", None).await?;
+    runtime::send_command(daemon::DaemonCommand::Refresh).await?;
     Ok(())
 }
 
