@@ -135,15 +135,15 @@ pub(crate) async fn connect() -> anyhow::Result<()> {
                                 if let Some(tx) = pending.lock().await.remove(&id) {
                                     let _ = tx.send(resp);
                                 }
-                            } else if msg.event.as_deref() == Some("state_changed") {
-                                if let Some(state_val) = msg.state {
-                                    match serde_json::from_value::<dt::AppState>(state_val) {
-                                        Ok(state) => {
-                                            let _ = state_tx.send(state);
-                                        }
-                                        Err(e) => {
-                                            warn!("Failed to parse state event: {}", e);
-                                        }
+                            } else if msg.event.as_deref() == Some("state_changed")
+                                && let Some(state_val) = msg.state
+                            {
+                                match serde_json::from_value::<dt::AppState>(state_val) {
+                                    Ok(state) => {
+                                        let _ = state_tx.send(state);
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to parse state event: {}", e);
                                     }
                                 }
                             }
@@ -305,10 +305,7 @@ mod tests {
 
         // A stale reader (gen 3) should NOT publish.
         send_terminal_state_if_current(3, &state_tx);
-        assert!(
-            state_rx.has_changed().is_err() == false,
-            "rx should not have errored"
-        );
+        assert!(state_rx.has_changed().is_ok(), "rx should not have errored");
         // No change should have been sent — borrow should still show default (Disconnected).
         assert_eq!(
             state_tx.borrow().connection_status,
@@ -387,14 +384,11 @@ mod tests {
                                 if let Some(tx) = pending2.lock().await.remove(&id) {
                                     let _ = tx.send(resp);
                                 }
-                            } else if msg.event.as_deref() == Some("state_changed") {
-                                if let Some(state_val) = msg.state {
-                                    if let Ok(state) =
-                                        serde_json::from_value::<dt::AppState>(state_val)
-                                    {
-                                        let _ = state_tx.send(state);
-                                    }
-                                }
+                            } else if msg.event.as_deref() == Some("state_changed")
+                                && let Some(state_val) = msg.state
+                                && let Ok(state) = serde_json::from_value::<dt::AppState>(state_val)
+                            {
+                                let _ = state_tx.send(state);
                             }
                         }
                     }
@@ -409,15 +403,10 @@ mod tests {
             let mut line = String::new();
             while server_reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                 let req: DaemonRequest = serde_json::from_str(line.trim()).unwrap();
-                let resp = DaemonResponse::success(
-                    req.id,
-                    Some(serde_json::json!({"echo": req.cmd})),
-                );
+                let resp =
+                    DaemonResponse::success(req.id, Some(serde_json::json!({"echo": req.cmd})));
                 let resp_line = format!("{}\n", serde_json::to_string(&resp).unwrap());
-                server_write
-                    .write_all(resp_line.as_bytes())
-                    .await
-                    .unwrap();
+                server_write.write_all(resp_line.as_bytes()).await.unwrap();
                 line.clear();
             }
         });
@@ -485,14 +474,11 @@ mod tests {
                                 if let Some(tx) = pending2.lock().await.remove(&id) {
                                     let _ = tx.send(resp);
                                 }
-                            } else if msg.event.as_deref() == Some("state_changed") {
-                                if let Some(state_val) = msg.state {
-                                    if let Ok(state) =
-                                        serde_json::from_value::<dt::AppState>(state_val)
-                                    {
-                                        let _ = state_tx2.send(state);
-                                    }
-                                }
+                            } else if msg.event.as_deref() == Some("state_changed")
+                                && let Some(state_val) = msg.state
+                                && let Ok(state) = serde_json::from_value::<dt::AppState>(state_val)
+                            {
+                                let _ = state_tx2.send(state);
                             }
                         }
                     }
@@ -513,10 +499,7 @@ mod tests {
             }
         });
         let event_line = format!("{}\n", serde_json::to_string(&event).unwrap());
-        server_write
-            .write_all(event_line.as_bytes())
-            .await
-            .unwrap();
+        server_write.write_all(event_line.as_bytes()).await.unwrap();
 
         // Subscriber should receive the state change.
         state_rx.changed().await.unwrap();

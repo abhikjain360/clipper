@@ -27,18 +27,13 @@ pub struct BridgeFileItem {
     pub source_device_id: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum BridgeConnectionStatus {
     Disconnected,
     Connecting,
     Connected,
+    #[default]
     DaemonNotRunning,
-}
-
-impl Default for BridgeConnectionStatus {
-    fn default() -> Self {
-        Self::DaemonNotRunning
-    }
 }
 
 #[derive(Clone, Default)]
