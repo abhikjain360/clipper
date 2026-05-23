@@ -55,3 +55,75 @@ impl ClientManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn register_returns_unique_ids() {
+        let mgr = ClientManager::new();
+        let (id1, _rx1) = mgr.register().await;
+        let (id2, _rx2) = mgr.register().await;
+        assert_ne!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn broadcast_reaches_all_clients() {
+        let mgr = ClientManager::new();
+        let (_id1, mut rx1) = mgr.register().await;
+        let (_id2, mut rx2) = mgr.register().await;
+
+        mgr.broadcast(r#"{"event":"test"}"#).await;
+
+        let msg1 = rx1.recv().await.unwrap();
+        let msg2 = rx2.recv().await.unwrap();
+        assert_eq!(msg1, r#"{"event":"test"}"#);
+        assert_eq!(msg2, r#"{"event":"test"}"#);
+    }
+
+    #[tokio::test]
+    async fn unregister_stops_delivery() {
+        let mgr = ClientManager::new();
+        let (id1, mut rx1) = mgr.register().await;
+        let (_id2, mut rx2) = mgr.register().await;
+
+        mgr.unregister(id1).await;
+        mgr.broadcast(r#"{"event":"after"}"#).await;
+
+        // rx1 should get nothing (channel closed)
+        assert!(rx1.try_recv().is_err());
+
+        // rx2 should still get it
+        let msg = rx2.recv().await.unwrap();
+        assert_eq!(msg, r#"{"event":"after"}"#);
+    }
+
+    #[tokio::test]
+    async fn broadcast_removes_dead_clients() {
+        let mgr = ClientManager::new();
+        let (_id1, rx1) = mgr.register().await;
+        let (_id2, mut rx2) = mgr.register().await;
+
+        // Drop rx1 to simulate a dead client
+        drop(rx1);
+
+        mgr.broadcast(r#"{"event":"ping"}"#).await;
+
+        // Dead client should be cleaned up
+        let clients = mgr.clients.read().await;
+        assert_eq!(clients.len(), 1);
+        drop(clients);
+
+        // Live client still receives
+        let msg = rx2.recv().await.unwrap();
+        assert_eq!(msg, r#"{"event":"ping"}"#);
+    }
+
+    #[tokio::test]
+    async fn broadcast_to_empty_is_noop() {
+        let mgr = ClientManager::new();
+        mgr.broadcast(r#"{"event":"nobody_home"}"#).await;
+        // Should not panic
+    }
+}

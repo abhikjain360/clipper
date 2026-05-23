@@ -45,70 +45,64 @@ class AppRoot extends StatefulWidget {
 }
 
 class _AppRootState extends State<AppRoot> {
-  bool _connected = false;
-  bool _loggedIn = false;
+  BridgeAppState? _state;
   String? _connectError;
 
   @override
   void initState() {
     super.initState();
-    _connectToDaemon();
+    _run();
   }
 
-  Future<void> _connectToDaemon() async {
-    try {
-      await connectToDaemon();
-      setState(() {
-        _connected = true;
-        _connectError = null;
-      });
-      _watchState();
-    } catch (e) {
-      setState(() {
-        _connected = false;
-        _connectError = e.toString();
-      });
-    }
-  }
-
-  Future<void> _watchState() async {
+  /// Single long-lived loop: connect, watch state, reconnect on failure.
+  /// Started exactly once from initState().
+  Future<void> _run() async {
     while (mounted) {
-      final state = await getState();
-      if (!mounted) return;
-
-      final wasLoggedIn = _loggedIn;
-      final newLoggedIn = state.loggedIn;
-
-      if (state.connectionStatus == 'daemon_not_running') {
+      // Attempt connection
+      try {
+        setState(() => _connectError = null);
+        await connectToDaemon();
+        final state = await getState();
+        if (!mounted) return;
+        setState(() => _state = state);
+      } catch (e) {
+        if (!mounted) return;
         setState(() {
-          _connected = false;
-          _connectError = 'Daemon stopped';
+          _state = null;
+          _connectError = e.toString();
         });
-        // Try to reconnect after a delay
+        // Wait before retrying
         await Future.delayed(const Duration(seconds: 2));
-        if (mounted) _connectToDaemon();
-        return;
+        continue;
       }
 
-      if (wasLoggedIn != newLoggedIn) {
-        setState(() => _loggedIn = newLoggedIn);
-      }
+      // Watch for state changes until daemon disconnects
+      while (mounted) {
+        await waitForStateChange();
+        if (!mounted) return;
+        final state = await getState();
+        if (!mounted) return;
 
-      await waitForStateChange();
+        if (state.connectionStatus ==
+            BridgeConnectionStatus.daemonNotRunning) {
+          setState(() {
+            _state = null;
+            _connectError = 'Daemon stopped';
+          });
+          await Future.delayed(const Duration(seconds: 2));
+          break; // Back to outer loop to reconnect
+        }
+
+        setState(() => _state = state);
+      }
     }
   }
 
-  void _onLoginSuccess() {
-    setState(() => _loggedIn = true);
-  }
-
-  void _onLogout() {
-    setState(() => _loggedIn = false);
-  }
+  bool get _isDaemonConnected => _state != null;
 
   @override
   Widget build(BuildContext context) {
-    if (!_connected) {
+    if (!_isDaemonConnected) {
       return Scaffold(
         body: Center(
           child: Column(
@@ -129,10 +123,15 @@ class _AppRootState extends State<AppRoot> {
                 ),
               ],
               const SizedBox(height: 24),
-              ElevatedButton.icon(
-                onPressed: _connectToDaemon,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Retry'),
+              const SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Reconnecting...',
+                style: TextStyle(color: Colors.grey, fontSize: 12),
               ),
             ],
           ),
@@ -140,9 +139,9 @@ class _AppRootState extends State<AppRoot> {
       );
     }
 
-    if (_loggedIn) {
-      return HomeScreen(onLogout: _onLogout);
+    if (_state!.loggedIn) {
+      return HomeScreen(state: _state!);
     }
-    return LoginScreen(onLoginSuccess: _onLoginSuccess);
+    return const LoginScreen();
   }
 }

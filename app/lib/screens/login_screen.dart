@@ -2,9 +2,7 @@ import 'package:flutter/material.dart';
 import '../src/rust/api/clipper.dart';
 
 class LoginScreen extends StatefulWidget {
-  final VoidCallback onLoginSuccess;
-
-  const LoginScreen({super.key, required this.onLoginSuccess});
+  const LoginScreen({super.key});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -44,7 +42,7 @@ class _LoginScreenState extends State<LoginScreen> {
         deviceName: _deviceName(),
         serverUrl: url.isNotEmpty ? url : 'http://127.0.0.1:8787',
       );
-      widget.onLoginSuccess();
+      // State change will be picked up by AppRoot's watcher
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {
@@ -55,7 +53,6 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   String _deviceName() {
-    // Simple device name based on platform
     return 'macOS-Clipper';
   }
 

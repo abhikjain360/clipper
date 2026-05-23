@@ -4,44 +4,21 @@ import 'package:file_picker/file_picker.dart';
 import '../src/rust/api/clipper.dart';
 
 class HomeScreen extends StatefulWidget {
-  final VoidCallback onLogout;
+  final BridgeAppState state;
 
-  const HomeScreen({super.key, required this.onLogout});
+  const HomeScreen({super.key, required this.state});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  BridgeAppState? _state;
   bool _refreshing = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadState();
-    _startStateWatcher();
-  }
-
-  Future<void> _loadState() async {
-    final state = await getState();
-    if (mounted) {
-      setState(() => _state = state);
-    }
-  }
-
-  Future<void> _startStateWatcher() async {
-    while (mounted) {
-      await waitForStateChange();
-      if (mounted) await _loadState();
-    }
-  }
 
   Future<void> _refresh() async {
     setState(() => _refreshing = true);
     try {
       await refresh();
-      await _loadState();
     } catch (e) {
       _showError(e.toString());
     } finally {
@@ -53,7 +30,7 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       await logout();
     } catch (_) {}
-    widget.onLogout();
+    // State change will be picked up by AppRoot's watcher
   }
 
   Future<void> _copyToClipboard(String id) async {
@@ -82,7 +59,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
     try {
       await uploadFile(filePath: path);
-      await _loadState();
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -135,7 +111,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
     try {
       await deleteFile(fileId: fileId);
-      await _loadState();
     } catch (e) {
       _showError(e.toString());
     }
@@ -150,7 +125,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final state = _state;
+    final state = widget.state;
 
     return DefaultTabController(
       length: 2,
@@ -162,7 +137,7 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(width: 8),
               const Text('Clipper'),
               const SizedBox(width: 12),
-              _connectionBadge(state?.connectionStatus),
+              _connectionBadge(state.connectionStatus),
             ],
           ),
           actions: [
@@ -197,18 +172,16 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _connectionBadge(String? status) {
+  Widget _connectionBadge(BridgeConnectionStatus status) {
     Color color;
     String label;
     switch (status) {
-      case 'connected':
+      case BridgeConnectionStatus.connected:
         color = Colors.green;
         label = 'Connected';
-        break;
-      case 'connecting':
+      case BridgeConnectionStatus.connecting:
         color = Colors.orange;
         label = 'Connecting...';
-        break;
       default:
         color = Colors.red;
         label = 'Disconnected';
@@ -224,11 +197,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildClipboardTab(BridgeAppState? state) {
-    if (state == null) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
+  Widget _buildClipboardTab(BridgeAppState state) {
     final items = state.clipboardItems;
     if (items.isEmpty) {
       return const Center(
@@ -276,11 +245,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildFilesTab(BridgeAppState? state) {
-    if (state == null) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
+  Widget _buildFilesTab(BridgeAppState state) {
     final files = state.files;
 
     return Column(

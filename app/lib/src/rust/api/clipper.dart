@@ -6,9 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `conn`, `daemon_binary_path`, `generate_plist`, `install_and_start_daemon`, `launchagent_plist_path`, `send_request`, `socket_path`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DaemonConnection`, `DaemonMessage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `from`, `from`, `from`, `from`
 
 Future<void> connectToDaemon() =>
     RustLib.instance.api.crateApiClipperConnectToDaemon();
@@ -57,7 +55,7 @@ class BridgeAppState {
   final bool loggedIn;
   final String? deviceId;
   final String? deviceName;
-  final String connectionStatus;
+  final BridgeConnectionStatus connectionStatus;
   final List<BridgeClipboardItem> clipboardItems;
   final List<BridgeFileItem> files;
   final String? error;
@@ -131,6 +129,16 @@ class BridgeClipboardItem {
           text == other.text &&
           createdAt == other.createdAt &&
           sourceDeviceId == other.sourceDeviceId;
+}
+
+enum BridgeConnectionStatus {
+  disconnected,
+  connecting,
+  connected,
+  daemonNotRunning;
+
+  static Future<BridgeConnectionStatus> default_() =>
+      RustLib.instance.api.crateApiClipperBridgeConnectionStatusDefault();
 }
 
 class BridgeFileItem {
