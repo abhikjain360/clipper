@@ -1,0 +1,174 @@
+use serde::{Deserialize, Serialize};
+
+use crate::crypto::Argon2Params;
+
+// ── Auth ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LoginRequest {
+    pub passphrase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LoginResponse {
+    pub token: String,
+    pub device_id: String,
+    pub server: ServerInfo,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ServerInfo {
+    pub enc_salt_b64: String,
+    pub auth_params: Argon2Params,
+    pub enc_params: Argon2Params,
+}
+
+// ── Clipboard ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClipboardUploadRequest {
+    pub id: String,
+    pub nonce_b64: String,
+    pub ciphertext_b64: String,
+    pub ciphertext_sha256_b64: String,
+    pub source_device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_created_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClipboardItem {
+    pub id: String,
+    pub nonce_b64: String,
+    pub ciphertext_b64: String,
+    pub created_at: String,
+    pub source_device_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClipboardListResponse {
+    pub items: Vec<ClipboardItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<String>,
+}
+
+// ── Files ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileInitRequest {
+    pub id: String,
+    pub meta_nonce_b64: String,
+    pub meta_ciphertext_b64: String,
+    pub blob_nonce_b64: String,
+    pub blob_size: i64,
+    pub source_device_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileInitResponse {
+    pub upload_url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileCompleteRequest {
+    pub sha256_ciphertext_b64: String,
+    pub blob_size: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileListItem {
+    pub id: String,
+    pub meta_nonce_b64: String,
+    pub meta_ciphertext_b64: String,
+    pub blob_nonce_b64: String,
+    pub blob_size: i64,
+    pub created_at: String,
+    pub source_device_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileListResponse {
+    pub items: Vec<FileListItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<String>,
+}
+
+// ── WebSocket ──
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum WsClientMessage {
+    #[serde(rename = "hello")]
+    Hello { last_seq: i64 },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum WsServerMessage {
+    #[serde(rename = "hello_ack")]
+    HelloAck {
+        server_time: String,
+        latest_seq: i64,
+    },
+    #[serde(rename = "event")]
+    Event {
+        seq: i64,
+        event_type: String,
+        object_kind: String,
+        object_id: String,
+        created_at: String,
+    },
+    #[serde(rename = "invalidate")]
+    Invalidate { target: String },
+}
+
+// ── Sync ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BootstrapResponse {
+    pub device: DeviceInfo,
+    pub clipboard_items: Vec<ClipboardItem>,
+    pub files: Vec<FileListItem>,
+    pub latest_seq: i64,
+    pub server: ServerInfo,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub platform: String,
+}
+
+// ── Generic ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OkResponse {
+    pub ok: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub ok: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ErrorResponse {
+    pub error: String,
+}
+
+// ── File metadata (encrypted) ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileMeta {
+    pub filename: String,
+    pub mime_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<i64>,
+}

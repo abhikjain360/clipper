@@ -1,0 +1,36 @@
+[package]
+name = "clipper-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "clipper-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.102"
+argon2 = "0.5.3"
+async-trait = "0.1.89"
+axum = { version = "0.8.8", features = ["ws", "macros"] }
+axum-extra = { version = "0.12.5", features = ["typed-header"] }
+base64 = "0.22.1"
+chrono = { version = "0.4.44", features = ["serde"] }
+clap = { version = "4.5.60", features = ["derive"] }
+clipper-core.workspace = true
+constant_time_eq = "0.4.2"
+futures-util = "0.3.32"
+rand = "0.10.0"
+rpassword = "7.4.0"
+sea-orm = { version = "1.1.19", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
+sea-orm-migration = { version = "1.1.19", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+thiserror = "2.0.18"
+tokio = { version = "1.50.0", features = ["full"] }
+tokio-util = { version = "0.7.18", features = ["io"] }
+tower = "0.5.3"
+tower-http = { version = "0.6.8", features = ["trace", "limit", "cors"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
+uuid = { version = "1.22.0", features = ["v4", "v7", "serde"] }
