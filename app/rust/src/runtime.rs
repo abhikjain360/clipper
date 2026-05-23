@@ -30,13 +30,21 @@ mod imp {
 
 #[cfg(target_os = "android")]
 mod imp {
+    use std::path::PathBuf;
     use std::sync::{Arc, LazyLock};
 
     use clipper_client::engine::SyncEngine;
     use clipper_daemon_types::{AppState, CopyToLocalResult, DaemonCommand, UploadFileResult};
 
-    static ENGINE: LazyLock<Arc<SyncEngine>> =
-        LazyLock::new(|| SyncEngine::new("http://10.0.2.2:8787"));
+    static ENGINE: LazyLock<Arc<SyncEngine>> = LazyLock::new(|| {
+        SyncEngine::new_with_data_dir("http://10.0.2.2:8787", android_data_dir().join("client"))
+    });
+
+    fn android_data_dir() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Clipper")
+    }
 
     fn engine() -> Arc<SyncEngine> {
         Arc::clone(&ENGINE)

@@ -503,8 +503,16 @@ pub enum ClientError {
     Crypto(#[from] crypto::CryptoError),
     #[error("WebSocket error: {0}")]
     WebSocket(String),
+    #[error("Local store error: {0}")]
+    LocalStore(String),
     #[error("{0}")]
     Other(String),
+}
+
+impl From<crate::local_store::LocalStoreError> for ClientError {
+    fn from(error: crate::local_store::LocalStoreError) -> Self {
+        Self::LocalStore(error.to_string())
+    }
 }
 
 #[cfg(test)]

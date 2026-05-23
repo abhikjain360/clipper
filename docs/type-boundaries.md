@@ -91,7 +91,7 @@ Rules:
 
 Owner:
 
-- TBD, likely a dedicated client-side store module or crate
+- `crates/client/src/local_store.rs`
 
 Consumers:
 

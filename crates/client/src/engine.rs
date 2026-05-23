@@ -1,5 +1,6 @@
 //! Sync engine: manages client state, WebSocket connection, and clipboard/file operations.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,6 +13,7 @@ use crate::api_client::{
     ApiClient, ClientError, decrypt_clipboard, decrypt_file_blob, decrypt_file_meta,
     encrypt_clipboard, encrypt_file_blob, encrypt_file_meta,
 };
+use crate::local_store::LocalStore;
 pub use clipper_app_types::{
     AppState, ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem,
 };
@@ -19,10 +21,12 @@ use clipper_core::crypto;
 use clipper_core::models::*;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+const RECENT_CLIPBOARD_LIMIT: usize = 100;
 
 /// The sync engine that owns all client state.
 pub struct SyncEngine {
     api: Mutex<ApiClient>,
+    local_store: LocalStore,
     enc_key: RwLock<Option<Zeroizing<[u8; 32]>>>,
     state: RwLock<AppState>,
     state_tx: watch::Sender<u64>,
@@ -34,9 +38,14 @@ pub struct SyncEngine {
 
 impl SyncEngine {
     pub fn new(base_url: &str) -> Arc<Self> {
+        Self::new_with_data_dir(base_url, default_data_dir())
+    }
+
+    pub fn new_with_data_dir(base_url: &str, data_dir: impl Into<PathBuf>) -> Arc<Self> {
         let (tx, rx) = watch::channel(0u64);
         Arc::new(Self {
             api: Mutex::new(ApiClient::new(base_url)),
+            local_store: LocalStore::new(data_dir),
             enc_key: RwLock::new(None),
             state: RwLock::new(AppState::default()),
             state_tx: tx,
@@ -98,6 +107,8 @@ impl SyncEngine {
         let enc_salt = B64
             .decode(&login_resp.server.enc_salt_b64)
             .map_err(|e| ClientError::Other(format!("enc_salt decode: {}", e)))?;
+        self.local_store
+            .set_profile(profile_id_from_enc_salt(&enc_salt));
         let enc_key = crypto::derive_key(
             passphrase.as_bytes(),
             &enc_salt,
@@ -173,11 +184,6 @@ impl SyncEngine {
             }
         }
 
-        let enc_key = self.enc_key.read().await;
-        let enc_key = enc_key
-            .as_ref()
-            .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
-
         let device_id = {
             let state = self.state.read().await;
             state
@@ -186,24 +192,34 @@ impl SyncEngine {
                 .ok_or_else(|| ClientError::Other("No device_id".into()))?
         };
 
-        let req = encrypt_clipboard(text, enc_key, &device_id)?;
+        let req = {
+            let enc_key = self.enc_key.read().await;
+            let enc_key = enc_key
+                .as_ref()
+                .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
+            encrypt_clipboard(text, enc_key, &device_id)?
+        };
 
         {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
             api.upload_clipboard(&req).await?;
         }
 
+        let item = DecryptedClipboardItem {
+            id: req.id,
+            text: text.to_string(),
+            created_at: req.client_created_at.unwrap_or_default(),
+            source_device_id: device_id,
+        };
+        self.local_store.persist_clipboard_item(&item).await?;
+        let clipboard_items = self
+            .local_store
+            .recent_clipboard_items(RECENT_CLIPBOARD_LIMIT)
+            .await?;
+
         {
             let mut state = self.state.write().await;
-            state.clipboard_items.insert(
-                0,
-                DecryptedClipboardItem {
-                    id: req.id,
-                    text: text.to_string(),
-                    created_at: req.client_created_at.unwrap_or_default(),
-                    source_device_id: device_id,
-                },
-            );
+            state.clipboard_items = clipboard_items;
         }
         self.bump_version();
         debug!("Clipboard text uploaded");
@@ -213,12 +229,20 @@ impl SyncEngine {
     pub async fn copy_to_local(&self, id: &str) -> Result<String, ClientError> {
         let text = {
             let state = self.state.read().await;
-            let item = state
+            state
                 .clipboard_items
                 .iter()
                 .find(|i| i.id == id)
-                .ok_or_else(|| ClientError::Other("Item not found".into()))?;
-            item.text.clone()
+                .map(|item| item.text.clone())
+        };
+
+        let text = match text {
+            Some(text) => text,
+            None => self
+                .local_store
+                .clipboard_text(id)
+                .await?
+                .ok_or_else(|| ClientError::Other("Item not found".into()))?,
         };
 
         *self.suppressed_text.write().await = Some((text.clone(), std::time::Instant::now()));
@@ -359,46 +383,58 @@ impl SyncEngine {
             api.bootstrap().await?
         };
 
-        let enc_key = self.enc_key.read().await;
-        let enc_key = enc_key
-            .as_ref()
-            .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
+        let (clipboard_items, files) = {
+            let enc_key = self.enc_key.read().await;
+            let enc_key = enc_key
+                .as_ref()
+                .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
 
-        let mut clipboard_items = Vec::new();
-        for item in &bootstrap.clipboard_items {
-            match decrypt_clipboard(item, enc_key) {
-                Ok(text) => {
-                    clipboard_items.push(DecryptedClipboardItem {
-                        id: item.id.clone(),
-                        text,
-                        created_at: item.created_at.clone(),
-                        source_device_id: item.source_device_id.clone(),
-                    });
-                }
-                Err(e) => {
-                    warn!(id = %item.id, "Failed to decrypt clipboard item: {}", e);
+            let mut clipboard_items = Vec::new();
+            for item in &bootstrap.clipboard_items {
+                match decrypt_clipboard(item, enc_key) {
+                    Ok(text) => {
+                        clipboard_items.push(DecryptedClipboardItem {
+                            id: item.id.clone(),
+                            text,
+                            created_at: item.created_at.clone(),
+                            source_device_id: item.source_device_id.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        warn!(id = %item.id, "Failed to decrypt clipboard item: {}", e);
+                    }
                 }
             }
-        }
 
-        let mut files = Vec::new();
-        for file in &bootstrap.files {
-            match decrypt_file_meta(&file.meta_nonce_b64, &file.meta_ciphertext_b64, enc_key) {
-                Ok(meta) => {
-                    files.push(DecryptedFileItem {
-                        id: file.id.clone(),
-                        filename: meta.filename,
-                        mime_type: meta.mime_type,
-                        blob_size: file.blob_size,
-                        created_at: file.created_at.clone(),
-                        source_device_id: file.source_device_id.clone(),
-                    });
-                }
-                Err(e) => {
-                    warn!(id = %file.id, "Failed to decrypt file meta: {}", e);
+            let mut files = Vec::new();
+            for file in &bootstrap.files {
+                match decrypt_file_meta(&file.meta_nonce_b64, &file.meta_ciphertext_b64, enc_key) {
+                    Ok(meta) => {
+                        files.push(DecryptedFileItem {
+                            id: file.id.clone(),
+                            filename: meta.filename,
+                            mime_type: meta.mime_type,
+                            blob_size: file.blob_size,
+                            created_at: file.created_at.clone(),
+                            source_device_id: file.source_device_id.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        warn!(id = %file.id, "Failed to decrypt file meta: {}", e);
+                    }
                 }
             }
-        }
+
+            (clipboard_items, files)
+        };
+
+        self.local_store
+            .persist_clipboard_items(&clipboard_items)
+            .await?;
+        let clipboard_items = self
+            .local_store
+            .recent_clipboard_items(RECENT_CLIPBOARD_LIMIT)
+            .await?;
 
         *self.last_seq.write().await = bootstrap.latest_seq;
 
@@ -420,11 +456,6 @@ impl SyncEngine {
     }
 
     pub async fn refresh(&self) -> Result<(), ClientError> {
-        let enc_key = self.enc_key.read().await;
-        let enc_key = enc_key
-            .as_ref()
-            .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
-
         let (clipboard_resp, files_resp) = {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
             let c = api.list_clipboard(Some(100), None).await?;
@@ -432,41 +463,58 @@ impl SyncEngine {
             (c, f)
         };
 
-        let mut clipboard_items = Vec::new();
-        for item in &clipboard_resp.items {
-            match decrypt_clipboard(item, enc_key) {
-                Ok(text) => {
-                    clipboard_items.push(DecryptedClipboardItem {
-                        id: item.id.clone(),
-                        text,
-                        created_at: item.created_at.clone(),
-                        source_device_id: item.source_device_id.clone(),
-                    });
-                }
-                Err(e) => {
-                    warn!(id = %item.id, "Failed to decrypt: {}", e);
-                }
-            }
-        }
+        let (clipboard_items, files) = {
+            let enc_key = self.enc_key.read().await;
+            let enc_key = enc_key
+                .as_ref()
+                .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
 
-        let mut files = Vec::new();
-        for file in &files_resp.items {
-            match decrypt_file_meta(&file.meta_nonce_b64, &file.meta_ciphertext_b64, enc_key) {
-                Ok(meta) => {
-                    files.push(DecryptedFileItem {
-                        id: file.id.clone(),
-                        filename: meta.filename,
-                        mime_type: meta.mime_type,
-                        blob_size: file.blob_size,
-                        created_at: file.created_at.clone(),
-                        source_device_id: file.source_device_id.clone(),
-                    });
-                }
-                Err(e) => {
-                    warn!(id = %file.id, "Failed to decrypt file meta: {}", e);
+            let mut clipboard_items = Vec::new();
+            for item in &clipboard_resp.items {
+                match decrypt_clipboard(item, enc_key) {
+                    Ok(text) => {
+                        clipboard_items.push(DecryptedClipboardItem {
+                            id: item.id.clone(),
+                            text,
+                            created_at: item.created_at.clone(),
+                            source_device_id: item.source_device_id.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        warn!(id = %item.id, "Failed to decrypt: {}", e);
+                    }
                 }
             }
-        }
+
+            let mut files = Vec::new();
+            for file in &files_resp.items {
+                match decrypt_file_meta(&file.meta_nonce_b64, &file.meta_ciphertext_b64, enc_key) {
+                    Ok(meta) => {
+                        files.push(DecryptedFileItem {
+                            id: file.id.clone(),
+                            filename: meta.filename,
+                            mime_type: meta.mime_type,
+                            blob_size: file.blob_size,
+                            created_at: file.created_at.clone(),
+                            source_device_id: file.source_device_id.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        warn!(id = %file.id, "Failed to decrypt file meta: {}", e);
+                    }
+                }
+            }
+
+            (clipboard_items, files)
+        };
+
+        self.local_store
+            .persist_clipboard_items(&clipboard_items)
+            .await?;
+        let clipboard_items = self
+            .local_store
+            .recent_clipboard_items(RECENT_CLIPBOARD_LIMIT)
+            .await?;
 
         {
             let mut state = self.state.write().await;
@@ -657,4 +705,24 @@ fn mime_guess_from_filename(filename: &str) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
+}
+
+fn default_data_dir() -> PathBuf {
+    std::env::var_os("CLIPPER_CLIENT_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("clipper-client"))
+}
+
+fn profile_id_from_enc_salt(enc_salt: &[u8]) -> String {
+    hex_string(&crypto::sha256(enc_salt))
+}
+
+fn hex_string(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }

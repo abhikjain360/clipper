@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
         _ => default_server_url,
     };
 
-    let engine = SyncEngine::new(&server_url);
+    let engine = SyncEngine::new_with_data_dir(&server_url, data_dir.join("client"));
 
     let client_mgr = Arc::new(ClientManager::new());
 

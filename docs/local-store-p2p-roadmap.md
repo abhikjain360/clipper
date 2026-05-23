@@ -45,9 +45,10 @@ Recommended local layout:
 
 ```text
 Clipper/
-  client.db
+  client.db or metadata sidecar files
   clipboard/
     <clipboard_id>.txt
+    <clipboard_id>.json
   files/
     <file_id>/
       meta.json
@@ -57,6 +58,7 @@ Clipper/
 The exact filenames can change, but the separation matters:
 
 - plaintext files are the default local representation;
+- small sidecar metadata is fine when it avoids adding a database too early;
 - ciphertext files are optional opportunistic caches, not required durable data;
 - metadata can be listed without downloading file blobs;
 - file blobs remain on-demand.
