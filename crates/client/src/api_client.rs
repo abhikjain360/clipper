@@ -67,6 +67,7 @@ impl ApiClient {
         let (credential_request, client_login_state) =
             crypto::opaque_client_login_start(passphrase.as_bytes())?;
         let challenge_req = LoginChallengeRequest {
+            user_id: None,
             credential_request_b64: B64.encode(credential_request),
         };
         let challenge_resp: LoginChallengeResponse = self

@@ -100,6 +100,7 @@ pub async fn upload(
 
     let item = clipboard_items::ActiveModel {
         id: Set(item_id),
+        user_id: Set(auth.user_id),
         ciphertext_path: Set(filename),
         nonce: Set(nonce),
         ciphertext_size: Set(ciphertext.len() as i64),
@@ -120,6 +121,7 @@ pub async fn upload(
     // Log event
     let event = event_log::ActiveModel {
         seq: Default::default(),
+        user_id: Set(auth.user_id),
         event_type: Set("clipboard.created".into()),
         object_kind: Set("clipboard".into()),
         object_id: Set(item_id),
@@ -147,6 +149,7 @@ pub async fn upload(
 
     // Broadcast to WebSocket clients
     let _ = state.ws_tx().send(WsBroadcast {
+        user_id: auth.user_id,
         seq: i64::from(inserted.seq),
         event_type: "clipboard.created".into(),
         object_kind: "clipboard".into(),
@@ -167,13 +170,15 @@ pub struct ListQuery {
 
 pub async fn list(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<ClipboardListResponse>, StatusCode> {
     let b64 = &base64::engine::general_purpose::STANDARD;
     let limit = query.limit.unwrap_or(100).min(500);
 
-    let mut q =
-        clipboard_items::Entity::find().order_by(clipboard_items::Column::CreatedAt, Order::Desc);
+    let mut q = clipboard_items::Entity::find()
+        .filter(clipboard_items::Column::UserId.eq(auth.user_id))
+        .order_by(clipboard_items::Column::CreatedAt, Order::Desc);
 
     if let Some(before) = &query.before {
         q = q.filter(clipboard_items::Column::CreatedAt.lt(before.clone()));
@@ -226,7 +231,7 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
-    use crate::entity::devices;
+    use crate::entity::{access_keys, devices, users};
     use crate::migration;
 
     const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -238,17 +243,48 @@ mod tests {
         (AppState::new(db, data_dir.path().to_path_buf()), data_dir)
     }
 
-    fn auth(device_id: Uuid) -> AuthInfo {
+    fn auth(user_id: Uuid, device_id: Uuid) -> AuthInfo {
         AuthInfo {
             session_id: Uuid::new_v4(),
+            user_id,
             device_id,
         }
     }
 
-    async fn insert_device(state: &AppState, id: Uuid) {
+    async fn insert_user(state: &AppState) -> Uuid {
+        let now = Utc::now().to_rfc3339();
+        let user_id = Uuid::new_v4();
+        let access_key_hash = Uuid::new_v4().to_string();
+        access_keys::ActiveModel {
+            key_hash: Set(access_key_hash.clone()),
+            created_at: Set(now.clone()),
+            expires_at: Set(None),
+            used_at: Set(Some(now.clone())),
+            used_by_user_id: Set(Some(user_id)),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert access key");
+        users::ActiveModel {
+            id: Set(user_id),
+            opaque_server_setup: Set(vec![1]),
+            opaque_password_file: Set(vec![2]),
+            encryption_salt: Set(vec![3]),
+            access_key_hash: Set(access_key_hash),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert user");
+        user_id
+    }
+
+    async fn insert_device(state: &AppState, user_id: Uuid, id: Uuid) {
         let now = Utc::now().to_rfc3339();
         devices::ActiveModel {
             id: Set(id),
+            user_id: Set(user_id),
             name: Set("test-device".into()),
             platform: Set("test".into()),
             created_at: Set(now.clone()),
@@ -288,7 +324,7 @@ mod tests {
 
         let result = upload(
             State(state),
-            Extension(auth(Uuid::new_v4())),
+            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
             Json(upload_request("../escape".into(), "device-a")),
         )
         .await;
@@ -303,13 +339,14 @@ mod tests {
     #[tokio::test]
     async fn upload_uses_authenticated_device_as_source() {
         let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
         let device_auth = Uuid::new_v4();
-        insert_device(&state, device_auth).await;
+        insert_device(&state, user_id, device_auth).await;
         let id = Uuid::new_v4();
 
         let _ = upload(
             State(state.clone()),
-            Extension(auth(device_auth)),
+            Extension(auth(user_id, device_auth)),
             Json(upload_request(id.to_string(), "device-spoof")),
         )
         .await
@@ -329,13 +366,14 @@ mod tests {
     #[tokio::test]
     async fn upload_rejects_duplicate_id_without_overwriting_blob() {
         let (state, data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
         let device_a = Uuid::new_v4();
-        insert_device(&state, device_a).await;
+        insert_device(&state, user_id, device_a).await;
         let id = Uuid::new_v4().to_string();
 
         let _ = upload(
             State(state.clone()),
-            Extension(auth(device_a)),
+            Extension(auth(user_id, device_a)),
             Json(upload_request_with_ciphertext(
                 id.clone(),
                 "device-a",
@@ -347,7 +385,7 @@ mod tests {
 
         let result = upload(
             State(state),
-            Extension(auth(device_a)),
+            Extension(auth(user_id, device_a)),
             Json(upload_request_with_ciphertext(
                 id.clone(),
                 "device-a",
@@ -361,5 +399,55 @@ mod tests {
             .await
             .expect("blob");
         assert_eq!(blob, b"first encrypted clipboard");
+    }
+
+    #[tokio::test]
+    async fn list_only_returns_items_for_authenticated_user() {
+        let (state, _data_dir) = test_state().await;
+        let user_a = insert_user(&state).await;
+        let user_b = insert_user(&state).await;
+        let device_a = Uuid::new_v4();
+        let device_b = Uuid::new_v4();
+        insert_device(&state, user_a, device_a).await;
+        insert_device(&state, user_b, device_b).await;
+        let item_a = Uuid::new_v4().to_string();
+        let item_b = Uuid::new_v4().to_string();
+
+        let _ = upload(
+            State(state.clone()),
+            Extension(auth(user_a, device_a)),
+            Json(upload_request_with_ciphertext(
+                item_a.clone(),
+                "device-a",
+                b"user a encrypted clipboard",
+            )),
+        )
+        .await
+        .expect("upload a");
+        let _ = upload(
+            State(state.clone()),
+            Extension(auth(user_b, device_b)),
+            Json(upload_request_with_ciphertext(
+                item_b,
+                "device-b",
+                b"user b encrypted clipboard",
+            )),
+        )
+        .await
+        .expect("upload b");
+
+        let Json(resp) = list(
+            State(state),
+            Extension(auth(user_a, device_a)),
+            Query(ListQuery {
+                limit: None,
+                before: None,
+            }),
+        )
+        .await
+        .expect("list");
+
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].id, item_a);
     }
 }

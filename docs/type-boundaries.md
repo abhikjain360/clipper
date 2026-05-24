@@ -8,7 +8,7 @@ working.
 
 Owner:
 
-- `crates/server/src/migration/m20260312_000001_create_tables.rs`
+- `crates/server/src/migration/*.rs`
 
 Generated/derived:
 
@@ -16,7 +16,9 @@ Generated/derived:
 
 Rules:
 
-- Change table, column, relation, and constraint definitions in the migration.
+- Change table, column, relation, and constraint definitions in migrations.
+- This codebase is not deployed yet, so prefer keeping the initial schema
+  coherent over adding compatibility migrations for abandoned local databases.
 - Regenerate SeaORM entities from a migrated SQLite database.
 - Do not make entity files the source of truth for schema decisions.
 
@@ -42,6 +44,9 @@ Rules:
   in this crate.
 - `Argon2Params` lives here because the server sends encryption KDF parameters
   to clients and `clipper-core` uses the same type for key derivation.
+- Auth payloads must preserve the boundary between invite-key authorization,
+  OPAQUE registration/login messages, bearer sessions, and client-side
+  encryption keys.
 
 ## Daemon <-> Client IPC
 

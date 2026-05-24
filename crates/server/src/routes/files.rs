@@ -66,6 +66,7 @@ pub async fn init_upload(
 
     let new_file = files::ActiveModel {
         id: Set(file_uuid),
+        user_id: Set(auth.user_id),
         blob_path: Set(blob_filename),
         meta_ciphertext: Set(meta_ciphertext),
         meta_nonce: Set(meta_nonce),
@@ -99,6 +100,7 @@ pub async fn upload_blob(
 
     // Verify file exists and is pending
     let existing = files::Entity::find_by_id(file_uuid)
+        .filter(files::Column::UserId.eq(auth.user_id))
         .one(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
@@ -127,6 +129,7 @@ pub async fn upload_blob(
             sea_orm::sea_query::Expr::value(now),
         )
         .filter(files::Column::Id.eq(file_uuid))
+        .filter(files::Column::UserId.eq(auth.user_id))
         .filter(files::Column::Status.eq("pending"))
         .filter(files::Column::SourceDeviceId.eq(auth.device_id))
         .exec(state.db())
@@ -245,6 +248,7 @@ pub async fn upload_blob(
             sea_orm::sea_query::Expr::value(now),
         )
         .filter(files::Column::Id.eq(file_uuid))
+        .filter(files::Column::UserId.eq(auth.user_id))
         .filter(files::Column::Status.eq("uploading"))
         .exec(state.db())
         .await
@@ -274,6 +278,7 @@ pub async fn complete_upload(
     let file_uuid = validate_client_id(&file_id)?;
 
     let existing = files::Entity::find_by_id(file_uuid)
+        .filter(files::Column::UserId.eq(auth.user_id))
         .one(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
@@ -344,6 +349,7 @@ pub async fn complete_upload(
             sea_orm::sea_query::Expr::value(now.clone()),
         )
         .filter(files::Column::Id.eq(file_uuid))
+        .filter(files::Column::UserId.eq(auth.user_id))
         .filter(files::Column::Status.eq("uploaded"))
         .filter(files::Column::SourceDeviceId.eq(auth.device_id))
         .exec(&txn)
@@ -361,6 +367,7 @@ pub async fn complete_upload(
     // Log event
     let event = event_log::ActiveModel {
         seq: Default::default(),
+        user_id: Set(auth.user_id),
         event_type: Set("file.created".into()),
         object_kind: Set("file".into()),
         object_id: Set(file_uuid),
@@ -382,6 +389,7 @@ pub async fn complete_upload(
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
 
     let _ = state.ws_tx().send(WsBroadcast {
+        user_id: auth.user_id,
         seq: i64::from(inserted.seq),
         event_type: "file.created".into(),
         object_kind: "file".into(),
@@ -402,12 +410,14 @@ pub struct FileListQuery {
 
 pub async fn list_files(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
     Query(query): Query<FileListQuery>,
 ) -> Result<Json<FileListResponse>, StatusCode> {
     let b64 = &base64::engine::general_purpose::STANDARD;
     let limit = query.limit.unwrap_or(100).min(500);
 
     let mut q = files::Entity::find()
+        .filter(files::Column::UserId.eq(auth.user_id))
         .filter(files::Column::Status.eq("complete"))
         .order_by(files::Column::CreatedAt, Order::Desc);
 
@@ -450,11 +460,13 @@ pub async fn list_files(
 
 pub async fn download_blob(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
     Path(file_id): Path<String>,
 ) -> Result<Body, StatusCode> {
     let file_uuid = validate_client_id(&file_id).map_err(|(status, _)| status)?;
 
     let existing = files::Entity::find_by_id(file_uuid)
+        .filter(files::Column::UserId.eq(auth.user_id))
         .filter(files::Column::Status.eq("complete"))
         .one(state.db())
         .await
@@ -478,6 +490,7 @@ pub async fn delete_file(
     let file_uuid = validate_client_id(&file_id).map_err(|(status, _)| status)?;
 
     let existing = files::Entity::find_by_id(file_uuid)
+        .filter(files::Column::UserId.eq(auth.user_id))
         .one(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -498,6 +511,7 @@ pub async fn delete_file(
     let now = Utc::now().to_rfc3339();
     let event = event_log::ActiveModel {
         seq: Default::default(),
+        user_id: Set(auth.user_id),
         event_type: Set("file.deleted".into()),
         object_kind: Set("file".into()),
         object_id: Set(file_uuid),
@@ -518,6 +532,7 @@ pub async fn delete_file(
     let _ = tokio::fs::remove_file(&path).await;
 
     let _ = state.ws_tx().send(WsBroadcast {
+        user_id: auth.user_id,
         seq: i64::from(inserted.seq),
         event_type: "file.deleted".into(),
         object_kind: "file".into(),
@@ -587,7 +602,7 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
-    use crate::entity::devices;
+    use crate::entity::{access_keys, devices, users};
     use crate::migration;
 
     const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -599,17 +614,48 @@ mod tests {
         (AppState::new(db, data_dir.path().to_path_buf()), data_dir)
     }
 
-    fn auth(device_id: Uuid) -> AuthInfo {
+    fn auth(user_id: Uuid, device_id: Uuid) -> AuthInfo {
         AuthInfo {
             session_id: Uuid::new_v4(),
+            user_id,
             device_id,
         }
     }
 
-    async fn insert_device(state: &AppState, id: Uuid) {
+    async fn insert_user(state: &AppState) -> Uuid {
+        let now = Utc::now().to_rfc3339();
+        let user_id = Uuid::new_v4();
+        let access_key_hash = Uuid::new_v4().to_string();
+        access_keys::ActiveModel {
+            key_hash: Set(access_key_hash.clone()),
+            created_at: Set(now.clone()),
+            expires_at: Set(None),
+            used_at: Set(Some(now.clone())),
+            used_by_user_id: Set(Some(user_id)),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert access key");
+        users::ActiveModel {
+            id: Set(user_id),
+            opaque_server_setup: Set(vec![1]),
+            opaque_password_file: Set(vec![2]),
+            encryption_salt: Set(vec![3]),
+            access_key_hash: Set(access_key_hash),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert user");
+        user_id
+    }
+
+    async fn insert_device(state: &AppState, user_id: Uuid, id: Uuid) {
         let now = Utc::now().to_rfc3339();
         devices::ActiveModel {
             id: Set(id),
+            user_id: Set(user_id),
             name: Set("test-device".into()),
             platform: Set("test".into()),
             created_at: Set(now.clone()),
@@ -641,7 +687,7 @@ mod tests {
 
         let result = init_upload(
             State(state),
-            Extension(auth(Uuid::new_v4())),
+            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
             Json(init_request("../escape".into(), 3, "device-a")),
         )
         .await;
@@ -660,7 +706,7 @@ mod tests {
 
         let result = init_upload(
             State(state),
-            Extension(auth(Uuid::new_v4())),
+            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
             Json(init_request(id, MAX_FILE_BLOB_BYTES as i64 + 1, "device-a")),
         )
         .await;
@@ -674,13 +720,14 @@ mod tests {
     #[tokio::test]
     async fn init_uses_authenticated_device_as_source() {
         let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
         let device_auth = Uuid::new_v4();
-        insert_device(&state, device_auth).await;
+        insert_device(&state, user_id, device_auth).await;
         let id = Uuid::new_v4();
 
         let _ = init_upload(
             State(state.clone()),
-            Extension(auth(device_auth)),
+            Extension(auth(user_id, device_auth)),
             Json(init_request(id.to_string(), 3, "device-spoof")),
         )
         .await
@@ -700,13 +747,14 @@ mod tests {
     #[tokio::test]
     async fn upload_blob_rejects_body_size_mismatch() {
         let (state, data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
         let device_a = Uuid::new_v4();
-        insert_device(&state, device_a).await;
+        insert_device(&state, user_id, device_a).await;
         let id = Uuid::new_v4().to_string();
 
         let _ = init_upload(
             State(state.clone()),
-            Extension(auth(device_a)),
+            Extension(auth(user_id, device_a)),
             Json(init_request(id.clone(), 2, "device-a")),
         )
         .await
@@ -714,7 +762,7 @@ mod tests {
 
         let result = upload_blob(
             State(state),
-            Extension(auth(device_a)),
+            Extension(auth(user_id, device_a)),
             Path(id.clone()),
             Body::from(vec![1_u8, 2, 3]),
         )
@@ -733,13 +781,14 @@ mod tests {
     #[tokio::test]
     async fn upload_blob_rejects_duplicate_without_overwriting_blob() {
         let (state, data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
         let device_a = Uuid::new_v4();
-        insert_device(&state, device_a).await;
+        insert_device(&state, user_id, device_a).await;
         let id = Uuid::new_v4().to_string();
 
         let _ = init_upload(
             State(state.clone()),
-            Extension(auth(device_a)),
+            Extension(auth(user_id, device_a)),
             Json(init_request(id.clone(), 5, "device-a")),
         )
         .await
@@ -747,7 +796,7 @@ mod tests {
 
         let _ = upload_blob(
             State(state.clone()),
-            Extension(auth(device_a)),
+            Extension(auth(user_id, device_a)),
             Path(id.clone()),
             Body::from("first"),
         )
@@ -756,7 +805,7 @@ mod tests {
 
         let result = upload_blob(
             State(state),
-            Extension(auth(device_a)),
+            Extension(auth(user_id, device_a)),
             Path(id.clone()),
             Body::from("xxxxx"),
         )
@@ -772,15 +821,16 @@ mod tests {
     #[tokio::test]
     async fn complete_upload_marks_file_complete_and_logs_event() {
         let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
         let device_a = Uuid::new_v4();
-        insert_device(&state, device_a).await;
+        insert_device(&state, user_id, device_a).await;
         let id = Uuid::new_v4();
         let id_string = id.to_string();
         let blob = b"encrypted blob";
 
         let _ = init_upload(
             State(state.clone()),
-            Extension(auth(device_a)),
+            Extension(auth(user_id, device_a)),
             Json(init_request(
                 id_string.clone(),
                 blob.len() as i64,
@@ -791,7 +841,7 @@ mod tests {
         .expect("init");
         let _ = upload_blob(
             State(state.clone()),
-            Extension(auth(device_a)),
+            Extension(auth(user_id, device_a)),
             Path(id_string.clone()),
             Body::from(blob.to_vec()),
         )
@@ -800,7 +850,7 @@ mod tests {
 
         let _ = complete_upload(
             State(state.clone()),
-            Extension(auth(device_a)),
+            Extension(auth(user_id, device_a)),
             Path(id_string.clone()),
             Json(FileCompleteRequest {
                 sha256_ciphertext_b64: B64.encode(clipper_core::crypto::sha256(blob)),

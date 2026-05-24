@@ -7,6 +7,7 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
+    pub user_id: Uuid,
     #[sea_orm(column_type = "Text", unique)]
     pub ciphertext_path: String,
     #[sea_orm(column_type = "Blob")]
@@ -24,6 +25,14 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
     #[sea_orm(
+        belongs_to = "super::users::Entity",
+        from = "Column::UserId",
+        to = "super::users::Column::Id",
+        on_update = "Cascade",
+        on_delete = "Cascade"
+    )]
+    Users,
+    #[sea_orm(
         belongs_to = "super::devices::Entity",
         from = "Column::SourceDeviceId",
         to = "super::devices::Column::Id",
@@ -31,6 +40,12 @@ pub enum Relation {
         on_delete = "Restrict"
     )]
     Devices,
+}
+
+impl Related<super::users::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Users.def()
+    }
 }
 
 impl Related<super::devices::Entity> for Entity {

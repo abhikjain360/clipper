@@ -60,3 +60,8 @@
 - Flutter Rust Bridge types in `app/rust/src/api/clipper.rs` are adapter types
   only. Keep conversions exhaustive so state schema changes fail at compile
   time.
+- Server schema changes live in `crates/server/src/migration/*.rs`; keep
+  SeaORM entities aligned but do not treat entity files as the schema owner.
+- Auth is multi-user: access keys are one-time registration invites stored as
+  hashes, while user passphrases must only flow through OPAQUE registration and
+  login. Server handlers must scope private data by authenticated `user_id`.

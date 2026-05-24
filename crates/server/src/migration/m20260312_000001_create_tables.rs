@@ -42,14 +42,71 @@ impl MigrationTrait for Migration {
         manager
             .create_table(
                 Table::create()
+                    .table(AccessKeys::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(AccessKeys::KeyHash)
+                            .text()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(AccessKeys::CreatedAt).text().not_null())
+                    .col(ColumnDef::new(AccessKeys::ExpiresAt).text())
+                    .col(ColumnDef::new(AccessKeys::UsedAt).text())
+                    .col(ColumnDef::new(AccessKeys::UsedByUserId).uuid())
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(Users::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(Users::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(Users::OpaqueServerSetup).blob().not_null())
+                    .col(ColumnDef::new(Users::OpaquePasswordFile).blob().not_null())
+                    .col(ColumnDef::new(Users::EncryptionSalt).blob().not_null())
+                    .col(
+                        ColumnDef::new(Users::AccessKeyHash)
+                            .text()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(ColumnDef::new(Users::CreatedAt).text().not_null())
+                    .col(ColumnDef::new(Users::UpdatedAt).text().not_null())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_users_access_key_hash")
+                            .from(Users::Table, Users::AccessKeyHash)
+                            .to(AccessKeys::Table, AccessKeys::KeyHash)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
                     .table(Devices::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Devices::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(Devices::UserId).uuid().not_null())
                     .col(ColumnDef::new(Devices::Name).text().not_null())
                     .col(ColumnDef::new(Devices::Platform).text().not_null())
                     .col(ColumnDef::new(Devices::CreatedAt).text().not_null())
                     .col(ColumnDef::new(Devices::UpdatedAt).text().not_null())
                     .col(ColumnDef::new(Devices::LastSeenAt).text().not_null())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_devices_user_id")
+                            .from(Devices::Table, Devices::UserId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -66,6 +123,7 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .unique_key(),
                     )
+                    .col(ColumnDef::new(Sessions::UserId).uuid().not_null())
                     .col(ColumnDef::new(Sessions::DeviceId).uuid().not_null())
                     .col(ColumnDef::new(Sessions::CreatedAt).text().not_null())
                     .col(ColumnDef::new(Sessions::ExpiresAt).text().not_null())
@@ -77,6 +135,14 @@ impl MigrationTrait for Migration {
                             .name("fk_sessions_device_id")
                             .from(Sessions::Table, Sessions::DeviceId)
                             .to(Devices::Table, Devices::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_sessions_user_id")
+                            .from(Sessions::Table, Sessions::UserId)
+                            .to(Users::Table, Users::Id)
                             .on_delete(ForeignKeyAction::Cascade)
                             .on_update(ForeignKeyAction::Cascade),
                     )
@@ -95,6 +161,7 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
+                    .col(ColumnDef::new(ClipboardItems::UserId).uuid().not_null())
                     .col(
                         ColumnDef::new(ClipboardItems::CiphertextPath)
                             .text()
@@ -128,6 +195,14 @@ impl MigrationTrait for Migration {
                             .on_delete(ForeignKeyAction::Restrict)
                             .on_update(ForeignKeyAction::Cascade),
                     )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_clipboard_items_user_id")
+                            .from(ClipboardItems::Table, ClipboardItems::UserId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -138,6 +213,7 @@ impl MigrationTrait for Migration {
                     .table(Files::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Files::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(Files::UserId).uuid().not_null())
                     .col(
                         ColumnDef::new(Files::BlobPath)
                             .text()
@@ -177,6 +253,14 @@ impl MigrationTrait for Migration {
                             .on_delete(ForeignKeyAction::Restrict)
                             .on_update(ForeignKeyAction::Cascade),
                     )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_files_user_id")
+                            .from(Files::Table, Files::UserId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -193,6 +277,7 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
+                    .col(ColumnDef::new(EventLog::UserId).uuid().not_null())
                     .col(ColumnDef::new(EventLog::EventType).text().not_null())
                     .col(
                         ColumnDef::new(EventLog::ObjectKind)
@@ -220,6 +305,14 @@ impl MigrationTrait for Migration {
                                     .add(Expr::col(EventLog::ObjectKind).eq("file")),
                             )
                             .into(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_event_log_user_id")
+                            .from(EventLog::Table, EventLog::UserId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_update(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
             )
@@ -250,6 +343,17 @@ impl MigrationTrait for Migration {
             .drop_table(Table::drop().table(Devices::Table).if_exists().to_owned())
             .await?;
         manager
+            .drop_table(Table::drop().table(Users::Table).if_exists().to_owned())
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(AccessKeys::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
             .drop_table(
                 Table::drop()
                     .table(ServerConfig::Table)
@@ -273,10 +377,33 @@ enum ServerConfig {
 }
 
 #[derive(DeriveIden)]
+enum AccessKeys {
+    Table,
+    KeyHash,
+    CreatedAt,
+    ExpiresAt,
+    UsedAt,
+    UsedByUserId,
+}
+
+#[derive(DeriveIden)]
+enum Users {
+    Table,
+    Id,
+    OpaqueServerSetup,
+    OpaquePasswordFile,
+    EncryptionSalt,
+    AccessKeyHash,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
 enum Sessions {
     Table,
     Id,
     TokenHash,
+    UserId,
     DeviceId,
     CreatedAt,
     ExpiresAt,
@@ -289,6 +416,7 @@ enum Sessions {
 enum ClipboardItems {
     Table,
     Id,
+    UserId,
     CiphertextPath,
     Nonce,
     CiphertextSize,
@@ -302,6 +430,7 @@ enum ClipboardItems {
 enum Files {
     Table,
     Id,
+    UserId,
     BlobPath,
     MetaCiphertext,
     MetaNonce,
@@ -318,6 +447,7 @@ enum Files {
 enum Devices {
     Table,
     Id,
+    UserId,
     Name,
     Platform,
     CreatedAt,
@@ -329,6 +459,7 @@ enum Devices {
 enum EventLog {
     Table,
     Seq,
+    UserId,
     EventType,
     ObjectKind,
     ObjectId,

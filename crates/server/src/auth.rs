@@ -52,6 +52,7 @@ pub async fn auth_middleware(
     // Inject device_id and session_id into request extensions
     req.extensions_mut().insert(AuthInfo {
         session_id: sess.id,
+        user_id: sess.user_id,
         device_id: sess.device_id,
     });
 
@@ -61,5 +62,6 @@ pub async fn auth_middleware(
 #[derive(Clone, Debug)]
 pub struct AuthInfo {
     pub session_id: Uuid,
+    pub user_id: Uuid,
     pub device_id: Uuid,
 }

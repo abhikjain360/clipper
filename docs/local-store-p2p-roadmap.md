@@ -121,7 +121,7 @@ but trust must come from explicit pairing.
 
 Pairing should establish:
 
-- the shared Clipper group/server identity;
+- the shared Clipper user/server identity;
 - each device identity public key;
 - a pinned peer identity for future connections.
 

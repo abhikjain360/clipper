@@ -36,7 +36,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Initialize the server with a passphrase
+    /// Initialize the server database
     Init {
         #[arg(long, short = 'd')]
         data_dir: PathBuf,
@@ -92,29 +92,14 @@ async fn init_server(data_dir: PathBuf) -> ServerResult<()> {
         return Ok(());
     }
 
-    // Read passphrase
-    let passphrase = if let Ok(p) = std::env::var("CLIPPER_PASSPHRASE") {
-        p
-    } else {
-        rpassword::prompt_password("Enter passphrase: ")?
-    };
-
-    if passphrase.is_empty() {
-        return Err(ServerError::EmptyPassphrase);
-    }
-
-    let (opaque_server_setup, opaque_password_file) =
-        clipper_core::crypto::opaque_register(passphrase.as_bytes())?;
-    let encryption_salt = clipper_core::crypto::generate_encryption_salt();
-
     use sea_orm::{ActiveModelTrait, Set};
     let now = chrono::Utc::now().to_rfc3339();
 
     let config = entity::server_config::ActiveModel {
         id: Set(1),
-        opaque_server_setup: Set(opaque_server_setup),
-        opaque_password_file: Set(opaque_password_file),
-        encryption_salt: Set(encryption_salt.to_vec()),
+        opaque_server_setup: Set(Vec::new()),
+        opaque_password_file: Set(Vec::new()),
+        encryption_salt: Set(Vec::new()),
         created_at: Set(now.clone()),
         updated_at: Set(now),
     };
@@ -171,6 +156,14 @@ async fn serve(data_dir: PathBuf, addr: String) -> ServerResult<()> {
     // Public routes
     let app = Router::new()
         .route("/api/health", get(routes::health::health))
+        .route(
+            "/api/auth/register/start",
+            post(routes::auth::register_start),
+        )
+        .route(
+            "/api/auth/register/finish",
+            post(routes::auth::register_finish),
+        )
         .route("/api/auth/challenge", post(routes::auth::challenge))
         .route("/api/auth/login", post(routes::auth::login))
         .merge(authed)

@@ -66,33 +66,105 @@ pub fn derive_key(
 /// The password file is a verifier: stealing it allows offline guessing, but
 /// does not give an attacker the material needed to complete a login directly.
 pub fn opaque_register(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+    let server_setup = opaque_new_server_setup();
+    let (registration_request, client_state) = opaque_client_register_start(passphrase)?;
+    let registration_response = opaque_server_register_start(
+        &server_setup,
+        &registration_request,
+        OPAQUE_CREDENTIAL_IDENTIFIER,
+    )?;
+    let registration_upload =
+        opaque_client_register_finish(&client_state, passphrase, &registration_response)?;
+    let password_file = opaque_server_register_finish(&registration_upload)?;
+
+    Ok((server_setup, password_file))
+}
+
+/// Generate a new serialized OPAQUE server setup.
+pub fn opaque_new_server_setup() -> Vec<u8> {
     let mut rng = opaque_ke::rand::rngs::OsRng;
-    let server_setup = opaque_ke::ServerSetup::<ClipperOpaqueCipherSuite>::new(&mut rng);
-    let client_start =
+    opaque_ke::ServerSetup::<ClipperOpaqueCipherSuite>::new(&mut rng)
+        .serialize()
+        .to_vec()
+}
+
+/// Start an OPAQUE registration on the client.
+///
+/// Returns the registration request to send to the server and serialized client
+/// state that must be kept only until registration is finished.
+pub fn opaque_client_register_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let start =
         opaque_ke::ClientRegistration::<ClipperOpaqueCipherSuite>::start(&mut rng, passphrase)
             .map_err(opaque_error)?;
-    let server_start = opaque_ke::ServerRegistration::<ClipperOpaqueCipherSuite>::start(
-        &server_setup,
-        client_start.message,
-        OPAQUE_CREDENTIAL_IDENTIFIER,
+
+    Ok((
+        start.message.serialize().to_vec(),
+        start.state.serialize().to_vec(),
+    ))
+}
+
+/// Finish an OPAQUE registration on the client.
+///
+/// Returns the registration upload to send to the server. The upload is a
+/// password-derived verifier payload, not the raw password.
+pub fn opaque_client_register_finish(
+    client_state: &[u8],
+    passphrase: &[u8],
+    registration_response: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let client_registration =
+        opaque_ke::ClientRegistration::<ClipperOpaqueCipherSuite>::deserialize(client_state)
+            .map_err(opaque_error)?;
+    let response = opaque_ke::RegistrationResponse::<ClipperOpaqueCipherSuite>::deserialize(
+        registration_response,
     )
     .map_err(opaque_error)?;
-    let client_finish = client_start
-        .state
+    let finish = client_registration
         .finish(
             &mut rng,
             passphrase,
-            server_start.message,
+            response,
             opaque_ke::ClientRegistrationFinishParameters::default(),
         )
         .map_err(opaque_error)?;
-    let password_file =
-        opaque_ke::ServerRegistration::<ClipperOpaqueCipherSuite>::finish(client_finish.message);
 
-    Ok((
-        server_setup.serialize().to_vec(),
-        password_file.serialize().to_vec(),
-    ))
+    Ok(finish.message.serialize().to_vec())
+}
+
+/// Start an OPAQUE registration on the server.
+pub fn opaque_server_register_start(
+    server_setup: &[u8],
+    registration_request: &[u8],
+    credential_identifier: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let server_setup =
+        opaque_ke::ServerSetup::<ClipperOpaqueCipherSuite>::deserialize(server_setup)
+            .map_err(opaque_error)?;
+    let request = opaque_ke::RegistrationRequest::<ClipperOpaqueCipherSuite>::deserialize(
+        registration_request,
+    )
+    .map_err(opaque_error)?;
+    let start = opaque_ke::ServerRegistration::<ClipperOpaqueCipherSuite>::start(
+        &server_setup,
+        request,
+        credential_identifier,
+    )
+    .map_err(opaque_error)?;
+
+    Ok(start.message.serialize().to_vec())
+}
+
+/// Finish an OPAQUE registration on the server and return the serialized
+/// password file/verifier to store for future logins.
+pub fn opaque_server_register_finish(registration_upload: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let upload =
+        opaque_ke::RegistrationUpload::<ClipperOpaqueCipherSuite>::deserialize(registration_upload)
+            .map_err(opaque_error)?;
+    let password_file = opaque_ke::ServerRegistration::<ClipperOpaqueCipherSuite>::finish(upload);
+
+    Ok(password_file.serialize().to_vec())
 }
 
 /// Start an OPAQUE login on the client.
@@ -151,6 +223,21 @@ pub fn opaque_server_login_start(
     password_file: &[u8],
     credential_request: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+    opaque_server_login_start_with_identifier(
+        server_setup,
+        password_file,
+        credential_request,
+        OPAQUE_CREDENTIAL_IDENTIFIER,
+    )
+}
+
+/// Start an OPAQUE login on the server with an explicit credential identifier.
+pub fn opaque_server_login_start_with_identifier(
+    server_setup: &[u8],
+    password_file: &[u8],
+    credential_request: &[u8],
+    credential_identifier: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     let mut rng = opaque_ke::rand::rngs::OsRng;
     let server_setup =
         opaque_ke::ServerSetup::<ClipperOpaqueCipherSuite>::deserialize(server_setup)
@@ -166,7 +253,7 @@ pub fn opaque_server_login_start(
         &server_setup,
         Some(password_file),
         request,
-        OPAQUE_CREDENTIAL_IDENTIFIER,
+        credential_identifier,
         opaque_ke::ServerLoginParameters::default(),
     )
     .map_err(opaque_error)?;

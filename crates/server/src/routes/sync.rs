@@ -7,7 +7,7 @@ use base64::Engine;
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
 
 use crate::auth::AuthInfo;
-use crate::entity::{clipboard_items, devices, event_log, files, server_config};
+use crate::entity::{clipboard_items, devices, event_log, files, users};
 use crate::state::AppState;
 use clipper_core::crypto::Argon2Params;
 use clipper_core::models::{
@@ -27,8 +27,8 @@ pub async fn bootstrap(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Get server config
-    let config = server_config::Entity::find_by_id(1)
+    // Get user crypto info
+    let user = users::Entity::find_by_id(auth.user_id)
         .one(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -36,6 +36,7 @@ pub async fn bootstrap(
 
     // Recent clipboard items (last 100)
     let clips = clipboard_items::Entity::find()
+        .filter(clipboard_items::Column::UserId.eq(auth.user_id))
         .order_by(clipboard_items::Column::CreatedAt, Order::Desc)
         .all(state.db())
         .await
@@ -59,6 +60,7 @@ pub async fn bootstrap(
 
     // Recent files (last 100)
     let files = files::Entity::find()
+        .filter(files::Column::UserId.eq(auth.user_id))
         .filter(files::Column::Status.eq("complete"))
         .order_by(files::Column::CreatedAt, Order::Desc)
         .all(state.db())
@@ -81,6 +83,7 @@ pub async fn bootstrap(
 
     // Latest event seq
     let latest_seq = event_log::Entity::find()
+        .filter(event_log::Column::UserId.eq(auth.user_id))
         .order_by(event_log::Column::Seq, Order::Desc)
         .one(state.db())
         .await
@@ -98,7 +101,7 @@ pub async fn bootstrap(
         files: file_items,
         latest_seq,
         server: ServerInfo {
-            encryption_salt_b64: b64.encode(&config.encryption_salt),
+            encryption_salt_b64: b64.encode(&user.encryption_salt),
             encryption_params: Argon2Params::default(),
         },
     }))

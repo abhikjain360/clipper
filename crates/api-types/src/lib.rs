@@ -28,6 +28,8 @@ impl Default for Argon2Params {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginChallengeRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
     pub credential_request_b64: String,
 }
 
@@ -53,6 +55,7 @@ pub struct LoginRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginResponse {
     pub token: String,
+    pub user_id: String,
     pub device_id: String,
     pub server: ServerInfo,
 }
@@ -61,6 +64,40 @@ pub struct LoginResponse {
 pub struct ServerInfo {
     pub encryption_salt_b64: String,
     pub encryption_params: Argon2Params,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterStartRequest {
+    pub access_key: String,
+    pub registration_request_b64: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterStartResponse {
+    pub registration_id: String,
+    pub user_id: String,
+    pub registration_response_b64: String,
+    pub server: ServerInfo,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterFinishRequest {
+    pub registration_id: String,
+    pub registration_upload_b64: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterFinishResponse {
+    pub token: String,
+    pub user_id: String,
+    pub device_id: String,
+    pub server: ServerInfo,
 }
 
 // -- Clipboard --
