@@ -11,7 +11,7 @@ maps to the host machine.
 Run through the repository flake:
 
 ```sh
-nix develop --command bash -c 'cd app && flutter run -d android'
+flutter run -d android
 ```
 
 If direnv has already loaded the flake shell, `flutter run -d android` from

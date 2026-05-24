@@ -32,8 +32,8 @@ Android runs the same Rust sync engine in-process behind the Flutter bridge.
 The emulator default server URL is `http://10.0.2.2:8787`.
 
 ```sh
-nix develop --command bash -c 'cd app && flutter run -d macos'
-nix develop --command bash -c 'cd app && flutter run -d android'
+cd app && flutter run -d macos
+cd app && flutter run -d android
 ```
 
 ## Development
@@ -48,8 +48,8 @@ One-off checks:
 
 ```sh
 nix run .#fmt
-nix develop --command bash -c 'cargo test --workspace'
-nix develop --command bash -c 'cd app && flutter analyze && flutter test'
+cargo test --workspace
+cd app && flutter analyze && flutter test
 nix run .#wasm-check
 ```
 
@@ -75,8 +75,8 @@ page or startup error.
 ## Local Server
 
 ```sh
-nix develop --command bash -c 'cargo run -p clipper-server -- init --data-dir .clipper-server'
-nix develop --command bash -c 'cargo run -p clipper-server -- serve --data-dir .clipper-server'
+cargo run -p clipper-server -- init --data-dir .clipper-server
+cargo run -p clipper-server -- serve --data-dir .clipper-server
 ```
 
 The app defaults to `http://127.0.0.1:8787`.
@@ -109,7 +109,7 @@ Server deploy is the Rust binary plus a durable data directory. There are no
 service files in this repo yet.
 
 ```sh
-nix develop --command bash -c 'cargo build --release -p clipper-server'
+cargo build --release -p clipper-server
 target/release/clipper-server init --data-dir /var/lib/clipper
 target/release/clipper-server serve --data-dir /var/lib/clipper --addr 127.0.0.1:8787
 ```
