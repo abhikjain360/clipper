@@ -23,6 +23,7 @@
         "x86_64-linux-android"
       ];
       wasmRustTarget = "wasm32-unknown-unknown";
+      wasmPackRustflags = "-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--max-memory=1073741824 -C link-arg=--export=__heap_base -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base";
       stableRustTargets = androidRustTargets ++ [ wasmRustTarget ];
       stableRustTargetsString = nixpkgs.lib.concatStringsSep " " stableRustTargets;
       mkPkgs = system: import nixpkgs { inherit system; };
@@ -36,6 +37,7 @@
             flutter_rust_bridge_codegen
             git
             nixfmt
+            python3
             rustup
             wasm-pack
           ];
@@ -46,6 +48,7 @@
           rustupSetup = ''
             export PATH="$PATH:$HOME/.cargo/bin"
             export CLIPPER_RUST_NIGHTLY="${rustNightlyToolchain}"
+            export CLIPPER_WASM_PACK_RUSTFLAGS="${wasmPackRustflags}"
 
             ensure_rustup_toolchain() {
               local toolchain="$1"
@@ -132,6 +135,7 @@
               cd app
               flutter_rust_bridge_codegen build-web \
                 --wasm-pack-rustup-toolchain "$CLIPPER_RUST_NIGHTLY" \
+                --wasm-pack-rustflags "$CLIPPER_WASM_PACK_RUSTFLAGS" \
                 "$@"
             '';
           };
@@ -147,8 +151,78 @@
               cd app
               flutter pub get
               flutter_rust_bridge_codegen build-web \
-                --wasm-pack-rustup-toolchain "$CLIPPER_RUST_NIGHTLY"
+                --wasm-pack-rustup-toolchain "$CLIPPER_RUST_NIGHTLY" \
+                --wasm-pack-rustflags "$CLIPPER_WASM_PACK_RUSTFLAGS"
               flutter build web --no-pub --no-wasm-dry-run "$@"
+            '';
+          };
+
+          web-serve = pkgs.writeShellApplication {
+            name = "clipper-web-serve";
+            runtimeInputs = commonRuntimeInputs;
+            text = ''
+              ${repoRoot}
+
+              root="''${CLIPPER_WEB_ROOT:-app/build/web}"
+              preferred_port="''${1:-53880}"
+
+              if [ ! -f "$root/index.html" ]; then
+                echo "missing $root/index.html; run nix run .#web-build first" >&2
+                exit 1
+              fi
+
+              python3 - "$root" "$preferred_port" <<'PY'
+              import errno
+              import functools
+              import http.server
+              import socket
+              import socketserver
+              import sys
+
+              root = sys.argv[1]
+              preferred_port = int(sys.argv[2])
+
+
+              class Handler(http.server.SimpleHTTPRequestHandler):
+                  def end_headers(self):
+                      self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+                      self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
+                      self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+                      super().end_headers()
+
+                  def guess_type(self, path):
+                      if path.endswith(".wasm"):
+                          return "application/wasm"
+                      return super().guess_type(path)
+
+
+              class Server(socketserver.TCPServer):
+                  allow_reuse_address = True
+
+
+              handler = functools.partial(Handler, directory=root)
+              server = None
+              last_error = None
+
+              for port in range(preferred_port, preferred_port + 100):
+                  try:
+                      server = Server(("127.0.0.1", port), handler)
+                      break
+                  except OSError as error:
+                      if error.errno != errno.EADDRINUSE:
+                          raise
+                      last_error = error
+
+              if server is None:
+                  raise last_error or RuntimeError("could not bind local web server")
+
+              with server:
+                  _, port = server.server_address
+                  print(f"Serving {root} at http://127.0.0.1:{port}/")
+                  print("Sending COOP/COEP headers required by the Rust wasm worker.")
+                  sys.stdout.flush()
+                  server.serve_forever()
+              PY
             '';
           };
         };
@@ -187,6 +261,7 @@
                 nixfmt
                 openssl
                 pkg-config
+                python3
                 rust-analyzer
                 rustup
                 sea-orm-cli
@@ -197,6 +272,7 @@
 
             env = {
               CLIPPER_RUST_NIGHTLY = rustNightlyToolchain;
+              CLIPPER_WASM_PACK_RUSTFLAGS = wasmPackRustflags;
               COCOAPODS_DISABLE_STATS = "1";
               FLUTTER_ROOT = "${pkgs.flutter}";
               JAVA_HOME = "${pkgs.jdk17.home}";
@@ -351,6 +427,9 @@
             mkApp scripts.frb-build-web "clipper-frb-build-web"
               "Build Flutter Rust Bridge wasm artifacts";
           web-build = mkApp scripts.web-build "clipper-web-build" "Build the Flutter web application";
+          web-serve =
+            mkApp scripts.web-serve "clipper-web-serve"
+              "Serve the Flutter web build with required cross-origin isolation headers";
         }
       );
 

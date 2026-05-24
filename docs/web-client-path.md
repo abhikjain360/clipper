@@ -46,6 +46,22 @@ Browser limitations are product constraints, not implementation bugs:
 - browser WebSockets cannot set arbitrary `Authorization` headers;
 - durable local storage is IndexedDB/localStorage, not a filesystem path.
 
+## Web Hosting Requirement
+
+The Flutter web build must be served from a cross-origin isolated page. Flutter
+Rust Bridge starts a Rust wasm worker and shares wasm memory with that worker;
+browsers require both a shared-memory wasm build and these response headers for
+that path:
+
+- `Cross-Origin-Opener-Policy: same-origin`
+- `Cross-Origin-Embedder-Policy: require-corp`
+
+For local development, use `nix run .#web-build` and then
+`nix run .#web-serve`. The build wrapper passes the shared-memory wasm linker
+flags, and the serve wrapper sends the isolation headers. Generic static file
+servers, including `python -m http.server`, do not send these headers and will
+prevent the Rust wasm worker from starting.
+
 ## Preferred Architecture
 
 Do not create a separate web client crate that duplicates auth, crypto, and sync

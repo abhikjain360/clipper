@@ -34,7 +34,9 @@ linker variables for:
 
 The browser client additionally uses the stable `wasm32-unknown-unknown` Rust
 target and the pinned nightly's `rust-src` component for FRB's `build-std`
-WASM build.
+WASM build. Use `nix run .#frb-build-web` or `nix run .#web-build` for web
+artifacts; the wrappers pass the shared-memory wasm linker flags that FRB's
+worker pool needs.
 
 Android SDK/NDK installation, physical devices, emulators, Xcode, signing, and
 other OS-tied platform setup remain host setup. The flake discovers those where
@@ -71,7 +73,14 @@ Build the web bridge package and Flutter web client:
 ```sh
 nix run .#frb-build-web
 nix run .#web-build
+nix run .#web-serve
 ```
+
+The web client must be served with `Cross-Origin-Opener-Policy: same-origin`
+and `Cross-Origin-Embedder-Policy: require-corp`. Flutter Rust Bridge uses a
+Rust wasm worker with shared memory, and browsers only allow that in a
+cross-origin isolated page. The `web-serve` wrapper serves `app/build/web` with
+the required headers for local development; generic static file servers do not.
 
 Regenerate SeaORM entities after server schema changes. Server migrations are
 the schema owner; generated entity files should not be hand-edited as the final

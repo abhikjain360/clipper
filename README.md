@@ -63,7 +63,14 @@ Web build:
 
 ```sh
 nix run .#web-build
+nix run .#web-serve
 ```
+
+The web build must use the flake wrapper and be served with cross-origin
+isolation headers because Flutter Rust Bridge starts a shared-memory Rust wasm
+worker. `nix run .#web-serve` serves `app/build/web` with those headers; a
+generic static file server such as `python -m http.server` will show a blank
+page or startup error.
 
 ## Local Server
 

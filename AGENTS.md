@@ -35,6 +35,10 @@
 
 - Rebuild the Flutter Rust Bridge web package: `nix run .#frb-build-web`
 - Build the Flutter web client: `nix run .#web-build`
+- Serve the Flutter web client locally: `nix run .#web-serve`
+  - Flutter Rust Bridge requires shared-memory wasm and cross-origin isolation
+    for the wasm worker. Use these wrappers instead of generic build or static
+    file server commands.
 
 - Regenerate SeaORM entities after server schema changes:
 

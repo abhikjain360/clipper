@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'platform/web_runtime.dart';
 import 'src/rust/api/clipper.dart';
 import 'src/rust/frb_generated.dart';
 import 'screens/login_screen.dart';
@@ -7,13 +8,24 @@ import 'widgets/app_status.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await RustLib.init();
 
-  runApp(const ClipperApp());
+  final startupError = validateWebRuntime();
+  if (startupError == null) {
+    try {
+      await RustLib.init();
+    } catch (error) {
+      runApp(ClipperApp(startupError: 'Rust runtime failed to start: $error'));
+      return;
+    }
+  }
+
+  runApp(ClipperApp(startupError: startupError));
 }
 
 class ClipperApp extends StatelessWidget {
-  const ClipperApp({super.key});
+  final String? startupError;
+
+  const ClipperApp({super.key, this.startupError});
 
   @override
   Widget build(BuildContext context) {
@@ -31,7 +43,28 @@ class ClipperApp extends StatelessWidget {
           elevation: 0,
         ),
       ),
-      home: const AppRoot(),
+      home: startupError == null
+          ? const AppRoot()
+          : StartupErrorScreen(message: startupError!),
+    );
+  }
+}
+
+class StartupErrorScreen extends StatelessWidget {
+  final String message;
+
+  const StartupErrorScreen({super.key, required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: AppStatus(
+        icon: Icons.error_outline,
+        iconColor: Colors.redAccent,
+        title: 'Cannot start Clipper',
+        titleStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        message: message,
+      ),
     );
   }
 }
