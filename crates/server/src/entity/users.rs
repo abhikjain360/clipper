@@ -39,6 +39,8 @@ pub enum Relation {
     EventLog,
     #[sea_orm(has_many = "super::files::Entity")]
     Files,
+    #[sea_orm(has_many = "super::objects::Entity")]
+    Objects,
     #[sea_orm(has_many = "super::sessions::Entity")]
     Sessions,
 }
@@ -70,6 +72,12 @@ impl Related<super::event_log::Entity> for Entity {
 impl Related<super::files::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Files.def()
+    }
+}
+
+impl Related<super::objects::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Objects.def()
     }
 }
 

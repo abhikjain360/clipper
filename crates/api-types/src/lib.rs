@@ -6,6 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Binary request/response body format used by Rust-only object endpoints.
+pub const POSTCARD_CONTENT_TYPE: &str = "application/vnd.clipper.postcard";
+
 /// Argon2id parameters used for client-side encryption key derivation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Argon2Params {
@@ -103,6 +106,12 @@ pub struct RegisterFinishResponse {
 // -- Clipboard --
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct ClipboardMeta {
+    pub mime_type: String,
+    pub size: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ClipboardUploadRequest {
     pub id: String,
     pub nonce_b64: String,
@@ -166,6 +175,92 @@ pub struct FileListItem {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileListResponse {
     pub items: Vec<FileListItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<String>,
+}
+
+// -- Objects --
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObjectKind {
+    Clipboard,
+    File,
+}
+
+impl ObjectKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clipboard => "clipboard",
+            Self::File => "file",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ObjectPayloadInit {
+    pub id: String,
+    pub nonce: Vec<u8>,
+    pub ciphertext_size: i64,
+    pub sha256_ciphertext: Vec<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_ciphertext: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ObjectInitRequest {
+    pub id: String,
+    pub kind: ObjectKind,
+    pub meta_nonce: Vec<u8>,
+    pub meta_ciphertext: Vec<u8>,
+    pub payloads: Vec<ObjectPayloadInit>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ObjectPayloadUpload {
+    pub id: String,
+    pub upload_url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ObjectInitResponse {
+    pub upload_urls: Vec<ObjectPayloadUpload>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ObjectPayloadComplete {
+    pub id: String,
+    pub ciphertext_size: i64,
+    pub sha256_ciphertext: Vec<u8>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ObjectCompleteRequest {
+    pub payloads: Vec<ObjectPayloadComplete>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ObjectPayloadDescriptor {
+    pub id: String,
+    pub nonce: Vec<u8>,
+    pub ciphertext_size: i64,
+    pub sha256_ciphertext: Vec<u8>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ObjectListItem {
+    pub id: String,
+    pub kind: ObjectKind,
+    pub meta_nonce: Vec<u8>,
+    pub meta_ciphertext: Vec<u8>,
+    pub payloads: Vec<ObjectPayloadDescriptor>,
+    pub created_at: String,
+    pub source_device_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ObjectListResponse {
+    pub items: Vec<ObjectListItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_before: Option<String>,
 }

@@ -48,6 +48,8 @@ impl LocalStore {
 
         let metadata = ClipboardMetadata {
             id: item.id.clone(),
+            mime_type: item.mime_type.clone(),
+            payload_size: item.payload_size,
             created_at: item.created_at.clone(),
             source_device_id: item.source_device_id.clone(),
         };
@@ -144,6 +146,8 @@ impl LocalStore {
         Ok(Some(DecryptedClipboardItem {
             id: metadata.id,
             text,
+            mime_type: metadata.mime_type,
+            payload_size: metadata.payload_size,
             created_at: metadata.created_at,
             source_device_id: metadata.source_device_id,
         }))
@@ -153,8 +157,16 @@ impl LocalStore {
 #[derive(Debug, Serialize, Deserialize)]
 struct ClipboardMetadata {
     id: String,
+    #[serde(default = "default_clipboard_mime_type")]
+    mime_type: String,
+    #[serde(default)]
+    payload_size: i64,
     created_at: String,
     source_device_id: String,
+}
+
+fn default_clipboard_mime_type() -> String {
+    "text/plain".into()
 }
 
 async fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), LocalStoreError> {
@@ -192,6 +204,8 @@ mod tests {
         DecryptedClipboardItem {
             id: id.into(),
             text: text.into(),
+            mime_type: "text/plain".into(),
+            payload_size: text.len() as i64,
             created_at: created_at.into(),
             source_device_id: "device-a".into(),
         }

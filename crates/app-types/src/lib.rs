@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub struct DecryptedClipboardItem {
     pub id: String,
     pub text: String,
+    pub mime_type: String,
+    pub payload_size: i64,
     pub created_at: String,
     pub source_device_id: String,
 }

@@ -21,6 +21,8 @@ use crate::runtime;
 pub struct BridgeClipboardItem {
     pub id: String,
     pub text: String,
+    pub mime_type: String,
+    pub payload_size: i64,
     pub created_at: String,
     pub source_device_id: String,
 }
@@ -99,12 +101,16 @@ impl From<app_types::DecryptedClipboardItem> for BridgeClipboardItem {
         let app_types::DecryptedClipboardItem {
             id,
             text,
+            mime_type,
+            payload_size,
             created_at,
             source_device_id,
         } = i;
         Self {
             id,
             text,
+            mime_type,
+            payload_size,
             created_at,
             source_device_id,
         }

@@ -10,8 +10,9 @@ use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
 use crate::api_client::{
-    ApiClient, ClientError, decrypt_clipboard, decrypt_file_blob, decrypt_file_meta,
-    encrypt_clipboard, encrypt_file_blob, encrypt_file_meta,
+    ApiClient, ClientError, decrypt_clipboard_meta, decrypt_clipboard_payload,
+    decrypt_file_blob_bytes, decrypt_file_meta_bytes, encrypt_clipboard_meta,
+    encrypt_clipboard_payload, encrypt_file_blob_bytes, encrypt_file_meta_bytes,
 };
 use crate::local_store::LocalStore;
 pub use clipper_app_types::{
@@ -21,7 +22,9 @@ use clipper_core::crypto;
 use clipper_core::models::*;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+const INLINE_OBJECT_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 const RECENT_CLIPBOARD_LIMIT: usize = 100;
+const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
 
 /// The sync engine that owns all client state.
 pub struct SyncEngine {

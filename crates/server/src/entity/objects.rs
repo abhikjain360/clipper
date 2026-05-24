@@ -3,33 +3,38 @@
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
-#[sea_orm(table_name = "devices")]
+#[sea_orm(table_name = "objects")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
     pub user_id: Uuid,
     #[sea_orm(column_type = "Text")]
-    pub name: String,
-    #[sea_orm(column_type = "Text")]
-    pub platform: String,
+    pub kind: String,
+    #[sea_orm(column_type = "Blob")]
+    pub meta_ciphertext: Vec<u8>,
+    #[sea_orm(column_type = "Blob")]
+    pub meta_nonce: Vec<u8>,
     #[sea_orm(column_type = "Text")]
     pub created_at: String,
     #[sea_orm(column_type = "Text")]
     pub updated_at: String,
+    pub source_device_id: Uuid,
     #[sea_orm(column_type = "Text")]
-    pub last_seen_at: String,
+    pub status: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_many = "super::clipboard_items::Entity")]
-    ClipboardItems,
-    #[sea_orm(has_many = "super::files::Entity")]
-    Files,
-    #[sea_orm(has_many = "super::objects::Entity")]
-    Objects,
-    #[sea_orm(has_many = "super::sessions::Entity")]
-    Sessions,
+    #[sea_orm(
+        belongs_to = "super::devices::Entity",
+        from = "Column::SourceDeviceId",
+        to = "super::devices::Column::Id",
+        on_update = "Cascade",
+        on_delete = "Restrict"
+    )]
+    Devices,
+    #[sea_orm(has_many = "super::object_payloads::Entity")]
+    ObjectPayloads,
     #[sea_orm(
         belongs_to = "super::users::Entity",
         from = "Column::UserId",
@@ -40,27 +45,15 @@ pub enum Relation {
     Users,
 }
 
-impl Related<super::clipboard_items::Entity> for Entity {
+impl Related<super::devices::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::ClipboardItems.def()
+        Relation::Devices.def()
     }
 }
 
-impl Related<super::files::Entity> for Entity {
+impl Related<super::object_payloads::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Files.def()
-    }
-}
-
-impl Related<super::objects::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Objects.def()
-    }
-}
-
-impl Related<super::sessions::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Sessions.def()
+        Relation::ObjectPayloads.def()
     }
 }
 

@@ -364,6 +364,8 @@ pub enum CryptoError {
 
 // ── Associated data constants ──
 pub const AAD_CLIPBOARD_V1: &[u8] = b"clipper:clipboard:v1";
+pub const AAD_CLIPBOARD_META_V1: &[u8] = b"clipper:clipboard-meta:v1";
+pub const AAD_CLIPBOARD_PAYLOAD_V1: &[u8] = b"clipper:clipboard-payload:v1";
 pub const AAD_FILE_META_V1: &[u8] = b"clipper:file-meta:v1";
 pub const AAD_FILE_BLOB_V1: &[u8] = b"clipper:file-blob:v1";
 

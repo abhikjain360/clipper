@@ -128,6 +128,17 @@ async fn serve(data_dir: PathBuf, addr: String) -> ServerResult<()> {
         .route("/api/files", get(routes::files::list_files))
         .route("/api/files/{id}/blob", get(routes::files::download_blob))
         .route("/api/files/{id}", delete(routes::files::delete_file))
+        .route("/api/objects/init", post(routes::objects::init_object))
+        .route(
+            "/api/objects/{id}/payloads/{payload_id}",
+            get(routes::objects::download_payload).put(routes::objects::upload_payload),
+        )
+        .route(
+            "/api/objects/{id}/complete",
+            post(routes::objects::complete_object),
+        )
+        .route("/api/objects/{id}", delete(routes::objects::delete_object))
+        .route("/api/objects", get(routes::objects::list_objects))
         .route("/api/sync/bootstrap", get(routes::sync::bootstrap))
         .route("/api/ws", get(ws::ws_handler))
         .layer(middleware::from_fn_with_state(

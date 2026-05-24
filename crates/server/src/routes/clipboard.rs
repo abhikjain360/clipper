@@ -14,17 +14,13 @@ use tracing::info;
 
 use crate::auth::AuthInfo;
 use crate::entity::{clipboard_items, event_log};
-use crate::routes::{
-    error_response, validate_client_id, validate_exact_byte_len, validate_max_byte_len,
-};
+use crate::routes::{error_response, validate_client_id, validate_exact_byte_len};
 use crate::state::AppState;
 use crate::ws::WsBroadcast;
 use clipper_core::crypto::{SHA256_BYTES, XCHACHA20_NONCE_BYTES, sha256};
 use clipper_core::models::{
     ClipboardItem, ClipboardListResponse, ClipboardUploadRequest, ErrorResponse, OkResponse,
 };
-
-const MAX_CLIPBOARD_CIPHERTEXT_BYTES: usize = 1024 * 1024;
 
 pub async fn upload(
     State(state): State<AppState>,
@@ -38,11 +34,6 @@ pub async fn upload(
     let ciphertext = b64
         .decode(&req.ciphertext_b64)
         .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid ciphertext_b64"))?;
-    validate_max_byte_len(
-        &ciphertext,
-        MAX_CLIPBOARD_CIPHERTEXT_BYTES,
-        "Clipboard ciphertext exceeds maximum size",
-    )?;
 
     let nonce = b64
         .decode(&req.nonce_b64)
@@ -391,34 +382,6 @@ mod tests {
         .await;
 
         assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
-        assert!(
-            !data_dir
-                .path()
-                .join("clipboard")
-                .join(format!("{id}.bin"))
-                .exists()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn upload_rejects_clipboard_ciphertext_over_size_limit() -> TestResult {
-        let (state, data_dir) = test_state().await?;
-        let id = Uuid::new_v4().to_string();
-        let ciphertext = vec![7_u8; MAX_CLIPBOARD_CIPHERTEXT_BYTES + 1];
-
-        let result = upload(
-            State(state),
-            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
-            Json(upload_request_with_ciphertext(
-                id.clone(),
-                "device-a",
-                &ciphertext,
-            )),
-        )
-        .await;
-
-        assert_eq!(result.unwrap_err().0, StatusCode::PAYLOAD_TOO_LARGE);
         assert!(
             !data_dir
                 .path()
