@@ -17,15 +17,19 @@ use tracing::info;
 
 use crate::auth::AuthInfo;
 use crate::entity::{event_log, files};
-use crate::routes::{error_response, validate_client_id};
+use crate::routes::{
+    error_response, validate_client_id, validate_exact_byte_len, validate_max_byte_len,
+};
 use crate::state::AppState;
 use crate::ws::WsBroadcast;
+use clipper_core::crypto::{SHA256_BYTES, XCHACHA20_NONCE_BYTES};
 use clipper_core::models::{
     ErrorResponse, FileCompleteRequest, FileInitRequest, FileInitResponse, FileListItem,
     FileListResponse, OkResponse,
 };
 
 const MAX_FILE_BLOB_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_FILE_META_CIPHERTEXT_BYTES: usize = 64 * 1024;
 
 pub async fn init_upload(
     State(state): State<AppState>,
@@ -38,6 +42,23 @@ pub async fn init_upload(
     let file_uuid = validate_client_id(&req.id)?;
     let blob_size = validate_blob_size(req.blob_size)?;
 
+    let meta_ciphertext = b64
+        .decode(&req.meta_ciphertext_b64)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid meta_ciphertext_b64"))?;
+    validate_max_byte_len(
+        &meta_ciphertext,
+        MAX_FILE_META_CIPHERTEXT_BYTES,
+        "File metadata ciphertext exceeds maximum size",
+    )?;
+    let meta_nonce = b64
+        .decode(&req.meta_nonce_b64)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid meta_nonce_b64"))?;
+    validate_exact_byte_len(&meta_nonce, XCHACHA20_NONCE_BYTES, "meta_nonce_b64")?;
+    let blob_nonce = b64
+        .decode(&req.blob_nonce_b64)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid blob_nonce_b64"))?;
+    validate_exact_byte_len(&blob_nonce, XCHACHA20_NONCE_BYTES, "blob_nonce_b64")?;
+
     if files::Entity::find_by_id(file_uuid)
         .one(state.db())
         .await
@@ -46,16 +67,6 @@ pub async fn init_upload(
     {
         return Err(error_response(StatusCode::CONFLICT, "File already exists"));
     }
-
-    let meta_ciphertext = b64
-        .decode(&req.meta_ciphertext_b64)
-        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid meta_ciphertext_b64"))?;
-    let meta_nonce = b64
-        .decode(&req.meta_nonce_b64)
-        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid meta_nonce_b64"))?;
-    let blob_nonce = b64
-        .decode(&req.blob_nonce_b64)
-        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid blob_nonce_b64"))?;
 
     let blob_filename = format!("{}.bin", req.id);
 
@@ -285,15 +296,18 @@ pub async fn complete_upload(
 
     let expected_size = validate_blob_size(existing.blob_size)?;
 
+    let provided_hash = b64
+        .decode(&req.sha256_ciphertext_b64)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid sha256_ciphertext_b64"))?;
+    validate_exact_byte_len(&provided_hash, SHA256_BYTES, "sha256_ciphertext_b64")?;
+
+    let client_size = validate_blob_size(req.blob_size)?;
+
     // Verify the blob exists and compute hash
     let blob_path = state.files_dir().join(&existing.blob_path);
     let (computed_hash, actual_size) = sha256_file(&blob_path)
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Blob not found"))?;
-
-    let provided_hash = b64
-        .decode(&req.sha256_ciphertext_b64)
-        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid sha256_ciphertext_b64"))?;
 
     if computed_hash.as_slice() != provided_hash.as_slice() {
         // Delete the corrupt blob
@@ -302,7 +316,6 @@ pub async fn complete_upload(
         return Err(error_response(StatusCode::BAD_REQUEST, "SHA-256 mismatch"));
     }
 
-    let client_size = validate_blob_size(req.blob_size)?;
     if actual_size != expected_size || client_size != expected_size {
         let _ = tokio::fs::remove_file(&blob_path).await;
         reset_file_status(&state, file_uuid, "uploaded", "pending").await;
@@ -668,9 +681,9 @@ mod tests {
     fn init_request(id: String, blob_size: i64, source_device_id: &str) -> FileInitRequest {
         FileInitRequest {
             id,
-            meta_nonce_b64: B64.encode([1_u8; 12]),
+            meta_nonce_b64: B64.encode([1_u8; XCHACHA20_NONCE_BYTES]),
             meta_ciphertext_b64: B64.encode(b"encrypted metadata"),
-            blob_nonce_b64: B64.encode([2_u8; 12]),
+            blob_nonce_b64: B64.encode([2_u8; XCHACHA20_NONCE_BYTES]),
             blob_size,
             source_device_id: source_device_id.into(),
         }
@@ -707,6 +720,57 @@ mod tests {
             State(state),
             Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
             Json(init_request(id, MAX_FILE_BLOB_BYTES as i64 + 1, "device-a")),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::PAYLOAD_TOO_LARGE);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn init_rejects_wrong_meta_nonce_length() -> TestResult {
+        let (state, _data_dir) = test_state().await?;
+        let mut req = init_request(Uuid::new_v4().to_string(), 3, "device-a");
+        req.meta_nonce_b64 = B64.encode([1_u8; 12]);
+
+        let result = init_upload(
+            State(state),
+            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
+            Json(req),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn init_rejects_wrong_blob_nonce_length() -> TestResult {
+        let (state, _data_dir) = test_state().await?;
+        let mut req = init_request(Uuid::new_v4().to_string(), 3, "device-a");
+        req.blob_nonce_b64 = B64.encode([2_u8; 12]);
+
+        let result = init_upload(
+            State(state),
+            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
+            Json(req),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn init_rejects_metadata_ciphertext_over_size_limit() -> TestResult {
+        let (state, _data_dir) = test_state().await?;
+        let mut req = init_request(Uuid::new_v4().to_string(), 3, "device-a");
+        req.meta_ciphertext_b64 = B64.encode(vec![9_u8; MAX_FILE_META_CIPHERTEXT_BYTES + 1]);
+
+        let result = init_upload(
+            State(state),
+            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
+            Json(req),
         )
         .await;
 
@@ -818,6 +882,53 @@ mod tests {
             .await
             .expect("blob");
         assert_eq!(blob, b"first");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn complete_upload_rejects_wrong_sha256_length_without_deleting_blob() -> TestResult {
+        let (state, data_dir) = test_state().await?;
+        let user_id = insert_user(&state).await;
+        let device_a = Uuid::new_v4();
+        insert_device(&state, user_id, device_a).await;
+        let id = Uuid::new_v4().to_string();
+        let blob = b"encrypted blob";
+
+        let _ = init_upload(
+            State(state.clone()),
+            Extension(auth(user_id, device_a)),
+            Json(init_request(id.clone(), blob.len() as i64, "device-a")),
+        )
+        .await
+        .expect("init");
+        let _ = upload_blob(
+            State(state.clone()),
+            Extension(auth(user_id, device_a)),
+            Path(id.clone()),
+            Body::from(blob.to_vec()),
+        )
+        .await
+        .expect("upload");
+
+        let result = complete_upload(
+            State(state),
+            Extension(auth(user_id, device_a)),
+            Path(id.clone()),
+            Json(FileCompleteRequest {
+                sha256_ciphertext_b64: B64.encode([1_u8; SHA256_BYTES - 1]),
+                blob_size: blob.len() as i64,
+            }),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert!(
+            data_dir
+                .path()
+                .join("files")
+                .join(format!("{id}.bin"))
+                .exists()
+        );
         Ok(())
     }
 

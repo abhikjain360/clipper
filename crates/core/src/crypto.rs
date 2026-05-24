@@ -1,15 +1,18 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
-    aead::{Aead, KeyInit},
+    aead::{Aead, AeadCore, KeyInit, generic_array::typenum::Unsigned},
 };
 use rand::RngExt;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, digest::OutputSizeUser};
 use zeroize::Zeroizing;
 
 pub use clipper_api_types::Argon2Params;
 
 const OPAQUE_CREDENTIAL_IDENTIFIER: &[u8] = b"clipper:passphrase:v1";
+pub const XCHACHA20_NONCE_BYTES: usize =
+    <<XChaCha20Poly1305 as AeadCore>::NonceSize as Unsigned>::USIZE;
+pub const SHA256_BYTES: usize = <<Sha256 as OutputSizeUser>::OutputSize as Unsigned>::USIZE;
 
 struct ClipperOpaqueCipherSuite;
 
@@ -25,7 +28,7 @@ pub fn generate_encryption_salt() -> [u8; 16] {
 }
 
 /// Generate a random 24-byte nonce for XChaCha20-Poly1305.
-pub fn generate_nonce() -> [u8; 24] {
+pub fn generate_nonce() -> [u8; XCHACHA20_NONCE_BYTES] {
     rand::rng().random()
 }
 
@@ -35,7 +38,7 @@ pub fn generate_token() -> [u8; 32] {
 }
 
 /// SHA-256 hash.
-pub fn sha256(data: &[u8]) -> [u8; 32] {
+pub fn sha256(data: &[u8]) -> [u8; SHA256_BYTES] {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().into()
@@ -322,6 +325,14 @@ pub fn decrypt(
     ciphertext: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
+    if nonce.len() != XCHACHA20_NONCE_BYTES {
+        return Err(CryptoError::Decrypt(format!(
+            "invalid nonce length: expected {} bytes, got {}",
+            XCHACHA20_NONCE_BYTES,
+            nonce.len()
+        )));
+    }
+
     let nonce = XNonce::from_slice(nonce);
     let cipher = XChaCha20Poly1305::new(key.into());
 
@@ -389,6 +400,18 @@ mod tests {
         let key = derive_key(b"pass", b"0123456789abcdef", &Argon2Params::default()).unwrap();
         let (nonce, ct) = encrypt(&key, b"secret", AAD_CLIPBOARD_V1).unwrap();
         assert!(decrypt(&key, &nonce, &ct, AAD_FILE_META_V1).is_err());
+    }
+
+    #[test]
+    fn test_decrypt_rejects_malformed_nonce_length() {
+        let key = derive_key(b"pass", b"0123456789abcdef", &Argon2Params::default()).unwrap();
+        let (_, ct) = encrypt(&key, b"secret", AAD_CLIPBOARD_V1).unwrap();
+        let err = decrypt(&key, &[0_u8; 12], &ct, AAD_CLIPBOARD_V1).unwrap_err();
+
+        assert!(matches!(
+            err,
+            CryptoError::Decrypt(message) if message.contains("invalid nonce length")
+        ));
     }
 
     #[test]

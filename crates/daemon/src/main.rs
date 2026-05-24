@@ -8,7 +8,8 @@ mod handler;
 mod keychain;
 mod protocol;
 
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::net::UnixListener;
@@ -17,20 +18,37 @@ use tracing::{error, info, warn};
 use clipper_client::engine::SyncEngine;
 
 use crate::clients::ClientManager;
-use crate::error::DaemonResult;
+use crate::error::{DaemonError, DaemonResult};
 use crate::protocol::DaemonEvent;
 
-fn socket_path() -> PathBuf {
-    let base = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("Clipper");
-    base.join("daemon.sock")
+const PRIVATE_DIR_MODE: u32 = 0o700;
+const SOCKET_FILE_MODE: u32 = 0o600;
+
+fn app_data_dir() -> DaemonResult<PathBuf> {
+    dirs::data_dir()
+        .map(|base| base.join("Clipper"))
+        .ok_or(DaemonError::DataDirUnavailable)
 }
 
-fn data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("Clipper")
+fn socket_path() -> DaemonResult<PathBuf> {
+    Ok(app_data_dir()?.join("daemon.sock"))
+}
+
+fn data_dir() -> DaemonResult<PathBuf> {
+    app_data_dir()
+}
+
+fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a directory", path.display()),
+        ));
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))?;
+    Ok(())
 }
 
 fn parse_args() -> String {
@@ -80,9 +98,9 @@ async fn run() -> DaemonResult<()> {
         .try_init()
         .ok();
 
-    let sock_path = socket_path();
-    let data_dir = data_dir();
-    std::fs::create_dir_all(&data_dir)?;
+    let sock_path = socket_path()?;
+    let data_dir = data_dir()?;
+    ensure_private_dir(&data_dir)?;
 
     // Check for existing daemon
     if sock_path.exists() {
@@ -148,6 +166,10 @@ async fn run() -> DaemonResult<()> {
 
     // Bind Unix socket
     let listener = UnixListener::bind(&sock_path)?;
+    std::fs::set_permissions(
+        &sock_path,
+        std::fs::Permissions::from_mode(SOCKET_FILE_MODE),
+    )?;
     info!("Daemon listening on {}", sock_path.display());
 
     // Handle shutdown

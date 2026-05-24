@@ -94,15 +94,18 @@ pub(crate) fn install_and_start_daemon() -> DaemonProcessResult<()> {
             tracing::warn!("launchctl load warning: {}", stderr);
         }
     } else {
-        let sock = crate::transport::socket_path();
-        if !sock.exists() {
-            let output = std::process::Command::new("launchctl")
-                .args(["start", LAUNCHAGENT_LABEL])
-                .output()?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                tracing::warn!("launchctl start warning: {}", stderr);
+        match crate::transport::socket_path() {
+            Ok(sock) if !sock.exists() => {
+                let output = std::process::Command::new("launchctl")
+                    .args(["start", LAUNCHAGENT_LABEL])
+                    .output()?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    tracing::warn!("launchctl start warning: {}", stderr);
+                }
             }
+            Ok(_) => {}
+            Err(error) => tracing::warn!("cannot locate daemon socket: {}", error),
         }
     }
 

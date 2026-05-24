@@ -6,12 +6,14 @@ pub enum DaemonError {
     Io(#[from] std::io::Error),
     #[error("keychain error: {0}")]
     Keychain(#[from] crate::keychain::KeychainError),
+    #[error("daemon data directory is unavailable")]
+    DataDirUnavailable,
 }
 
 impl DaemonError {
     pub fn exit_code(&self) -> i32 {
         match self {
-            DaemonError::Io(_) | DaemonError::Keychain(_) => 1,
+            DaemonError::Io(_) | DaemonError::Keychain(_) | DaemonError::DataDirUnavailable => 1,
         }
     }
 }

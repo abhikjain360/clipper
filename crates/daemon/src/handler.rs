@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
@@ -15,6 +15,8 @@ use crate::protocol::{
     CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, LoginParams,
     RegisterParams, RegisterResult, UploadFileResult,
 };
+
+const MAX_IPC_REQUEST_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Handle a single client connection.
 pub async fn handle_connection(
@@ -45,17 +47,15 @@ pub async fn handle_connection(
     // Run read loop and broadcast loop concurrently
     tokio::select! {
         _ = async {
-            let mut line = String::new();
+            let mut line = Vec::new();
             loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {
-                        let trimmed = line.trim();
+                match read_limited_line(&mut reader, &mut line).await {
+                    Ok(None) => break,
+                    Ok(Some(trimmed)) => {
                         if trimmed.is_empty() {
                             continue;
                         }
-                        let response = match serde_json::from_str::<DaemonRequest>(trimmed) {
+                        let response = match serde_json::from_str::<DaemonRequest>(&trimmed) {
                             Ok(req) => dispatch_command(req, &engine).await,
                             Err(e) => DaemonResponse::error(
                                 String::new(),
@@ -70,7 +70,33 @@ pub async fn handle_connection(
                             }
                         }
                     }
-                    Err(e) => {
+                    Err(RequestLineError::TooLong) => {
+                        warn!(client_id, max_bytes = MAX_IPC_REQUEST_LINE_BYTES, "IPC request line too large");
+                        let response = DaemonResponse::error(
+                            String::new(),
+                            "Request line too large".into(),
+                        );
+                        if let Ok(json) = serde_json::to_string(&response) {
+                            let mut w = writer.lock().await;
+                            let resp_line = format!("{}\n", json);
+                            let _ = w.write_all(resp_line.as_bytes()).await;
+                        }
+                        break;
+                    }
+                    Err(RequestLineError::Utf8) => {
+                        let response = DaemonResponse::error(
+                            String::new(),
+                            "Invalid request: request line is not UTF-8".into(),
+                        );
+                        if let Ok(json) = serde_json::to_string(&response) {
+                            let mut w = writer.lock().await;
+                            let resp_line = format!("{}\n", json);
+                            if w.write_all(resp_line.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(RequestLineError::Io(e)) => {
                         warn!(client_id, "Read error: {}", e);
                         break;
                     }
@@ -90,6 +116,53 @@ pub async fn handle_connection(
 
     client_mgr.unregister(client_id).await;
     debug!(client_id, "Client disconnected");
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RequestLineError {
+    #[error("request line exceeds maximum size")]
+    TooLong,
+    #[error("request line is not UTF-8")]
+    Utf8,
+    #[error("request line read failed: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+async fn read_limited_line<R>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+) -> Result<Option<String>, RequestLineError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    line.clear();
+
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |pos| pos + 1);
+        if line.len() + take > MAX_IPC_REQUEST_LINE_BYTES {
+            return Err(RequestLineError::TooLong);
+        }
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
+
+        if line.ends_with(b"\n") {
+            break;
+        }
+    }
+
+    let text = std::str::from_utf8(line).map_err(|_| RequestLineError::Utf8)?;
+    Ok(Some(text.trim().to_string()))
 }
 
 async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> DaemonResponse {
@@ -252,5 +325,40 @@ fn json_success<T: serde::Serialize>(id: String, value: T) -> DaemonResponse {
     match serde_json::to_value(value) {
         Ok(value) => DaemonResponse::success(id, Some(value)),
         Err(e) => DaemonResponse::error(id, e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn read_limited_line_accepts_normal_line() {
+        let mut reader = BufReader::new(
+            br#"{"id":"1","cmd":"refresh"}
+"# as &[u8],
+        );
+        let mut line = Vec::new();
+
+        let line = read_limited_line(&mut reader, &mut line)
+            .await
+            .expect("read line")
+            .expect("line");
+
+        assert_eq!(line, r#"{"id":"1","cmd":"refresh"}"#);
+    }
+
+    #[tokio::test]
+    async fn read_limited_line_rejects_oversized_line() {
+        let mut input = vec![b'a'; MAX_IPC_REQUEST_LINE_BYTES + 1];
+        input.push(b'\n');
+        let mut reader = BufReader::new(input.as_slice());
+        let mut line = Vec::new();
+
+        let error = read_limited_line(&mut reader, &mut line)
+            .await
+            .expect_err("oversized line should fail");
+
+        assert!(matches!(error, RequestLineError::TooLong));
     }
 }
