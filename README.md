@@ -47,14 +47,22 @@ direnv allow
 One-off checks:
 
 ```sh
+nix run .#fmt
 nix develop --command bash -c 'cargo test --workspace'
 nix develop --command bash -c 'cd app && flutter analyze && flutter test'
+nix run .#wasm-check
 ```
 
 After Rust bridge API changes:
 
 ```sh
-nix develop --command bash -c 'cd app && flutter_rust_bridge_codegen generate'
+nix run .#frb-generate
+```
+
+Web build:
+
+```sh
+nix run .#web-build
 ```
 
 ## Local Server

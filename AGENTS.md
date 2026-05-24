@@ -8,9 +8,10 @@
   wrap routine commands in `nix develop`.
 - The flake provides Flutter, Dart, Java, Android helper environment, C/C++
   toolchain pieces, `cargo-edit`, `flutter_rust_bridge_codegen`, CocoaPods,
-  `sea-orm-cli`, and `rustup`. Rust itself is intentionally the rustup
-  `stable` toolchain under `~/.rustup`, installed/configured by the flake shell
-  hook.
+  `sea-orm-cli`, `wasm-pack`, `nixfmt`, and `rustup`. Rust itself is
+  intentionally managed by rustup under `~/.rustup`: stable is the default
+  project toolchain, while the flake installs a pinned nightly for rustfmt and
+  Flutter Rust Bridge web builds.
 - The intent is not to make every mobile platform detail pure Nix. Use the
   flake for CLI, codegen, dependency, and build tooling. Emulators, Xcode, host
   Android SDK/NDK installs, signing, and other OS-tied platform setup can come
@@ -20,15 +21,20 @@
 
 ## Common Commands
 
+- Format everything: `nix run .#fmt`
 - Rust workspace check: `cargo check --workspace`
 - Rust tests: `cargo test --workspace`
+- WASM bridge check: `nix run .#wasm-check`
 - Flutter dependencies: `cd app && flutter pub get`
 - Flutter analysis/tests: `cd app && flutter analyze && flutter test`
 - Regenerate Flutter Rust Bridge after Rust API changes:
 
   ```sh
-  cd app && flutter_rust_bridge_codegen generate
+  nix run .#frb-generate
   ```
+
+- Rebuild the Flutter Rust Bridge web package: `nix run .#frb-build-web`
+- Build the Flutter web client: `nix run .#web-build`
 
 - Regenerate SeaORM entities after server schema changes:
 
