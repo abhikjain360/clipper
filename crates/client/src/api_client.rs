@@ -409,11 +409,11 @@ fn is_android_emulator_host(url: &Url) -> bool {
 /// Encrypt clipboard text for upload. Returns the upload request.
 pub fn encrypt_clipboard(
     text: &str,
-    enc_key: &[u8; 32],
+    encryption_key: &[u8; 32],
     device_id: &str,
 ) -> Result<ClipboardUploadRequest, crypto::CryptoError> {
     let plaintext = text.as_bytes();
-    let (nonce, ciphertext) = crypto::encrypt(enc_key, plaintext, crypto::AAD_CLIPBOARD_V1)?;
+    let (nonce, ciphertext) = crypto::encrypt(encryption_key, plaintext, crypto::AAD_CLIPBOARD_V1)?;
     let hash = crypto::sha256(&ciphertext);
 
     Ok(ClipboardUploadRequest {
@@ -429,7 +429,7 @@ pub fn encrypt_clipboard(
 /// Decrypt a clipboard item. Returns the plaintext string.
 pub fn decrypt_clipboard(
     item: &ClipboardItem,
-    enc_key: &[u8; 32],
+    encryption_key: &[u8; 32],
 ) -> Result<String, crypto::CryptoError> {
     let nonce = B64
         .decode(&item.nonce_b64)
@@ -438,18 +438,23 @@ pub fn decrypt_clipboard(
         .decode(&item.ciphertext_b64)
         .map_err(|e| crypto::CryptoError::Decrypt(format!("ciphertext decode: {}", e)))?;
 
-    let plaintext = crypto::decrypt(enc_key, &nonce, &ciphertext, crypto::AAD_CLIPBOARD_V1)?;
+    let plaintext = crypto::decrypt(
+        encryption_key,
+        &nonce,
+        &ciphertext,
+        crypto::AAD_CLIPBOARD_V1,
+    )?;
     String::from_utf8(plaintext).map_err(|e| crypto::CryptoError::Decrypt(format!("utf8: {}", e)))
 }
 
 /// Encrypt file metadata for upload.
 pub fn encrypt_file_meta(
     meta: &FileMeta,
-    enc_key: &[u8; 32],
+    encryption_key: &[u8; 32],
 ) -> Result<(String, String), crypto::CryptoError> {
     let json = serde_json::to_vec(meta)
         .map_err(|e| crypto::CryptoError::Encrypt(format!("json: {}", e)))?;
-    let (nonce, ciphertext) = crypto::encrypt(enc_key, &json, crypto::AAD_FILE_META_V1)?;
+    let (nonce, ciphertext) = crypto::encrypt(encryption_key, &json, crypto::AAD_FILE_META_V1)?;
     Ok((B64.encode(&nonce), B64.encode(&ciphertext)))
 }
 
@@ -457,7 +462,7 @@ pub fn encrypt_file_meta(
 pub fn decrypt_file_meta(
     nonce_b64: &str,
     ciphertext_b64: &str,
-    enc_key: &[u8; 32],
+    encryption_key: &[u8; 32],
 ) -> Result<FileMeta, crypto::CryptoError> {
     let nonce = B64
         .decode(nonce_b64)
@@ -465,7 +470,12 @@ pub fn decrypt_file_meta(
     let ciphertext = B64
         .decode(ciphertext_b64)
         .map_err(|e| crypto::CryptoError::Decrypt(format!("ciphertext decode: {}", e)))?;
-    let plaintext = crypto::decrypt(enc_key, &nonce, &ciphertext, crypto::AAD_FILE_META_V1)?;
+    let plaintext = crypto::decrypt(
+        encryption_key,
+        &nonce,
+        &ciphertext,
+        crypto::AAD_FILE_META_V1,
+    )?;
     serde_json::from_slice(&plaintext)
         .map_err(|e| crypto::CryptoError::Decrypt(format!("json: {}", e)))
 }
@@ -473,9 +483,9 @@ pub fn decrypt_file_meta(
 /// Encrypt file blob data.
 pub fn encrypt_file_blob(
     data: &[u8],
-    enc_key: &[u8; 32],
+    encryption_key: &[u8; 32],
 ) -> Result<(String, Vec<u8>), crypto::CryptoError> {
-    let (nonce, ciphertext) = crypto::encrypt(enc_key, data, crypto::AAD_FILE_BLOB_V1)?;
+    let (nonce, ciphertext) = crypto::encrypt(encryption_key, data, crypto::AAD_FILE_BLOB_V1)?;
     Ok((B64.encode(&nonce), ciphertext))
 }
 
@@ -483,12 +493,12 @@ pub fn encrypt_file_blob(
 pub fn decrypt_file_blob(
     nonce_b64: &str,
     ciphertext: &[u8],
-    enc_key: &[u8; 32],
+    encryption_key: &[u8; 32],
 ) -> Result<Vec<u8>, crypto::CryptoError> {
     let nonce = B64
         .decode(nonce_b64)
         .map_err(|e| crypto::CryptoError::Decrypt(format!("nonce decode: {}", e)))?;
-    crypto::decrypt(enc_key, &nonce, ciphertext, crypto::AAD_FILE_BLOB_V1)
+    crypto::decrypt(encryption_key, &nonce, ciphertext, crypto::AAD_FILE_BLOB_V1)
 }
 
 // ── Errors ──

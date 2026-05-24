@@ -244,7 +244,10 @@ console.log("\n=== 10. Sync bootstrap ===");
   assert(Array.isArray(json.clipboard_items), "has clipboard_items");
   assert(Array.isArray(json.files), "has files");
   assert(typeof json.latest_seq === "number", "has latest_seq");
-  assert(typeof json.server.enc_salt_b64 === "string", "has enc_salt_b64");
+  assert(
+    typeof json.server.encryption_salt_b64 === "string",
+    "has encryption_salt_b64",
+  );
 }
 
 console.log("\n=== 11. Logout ===");

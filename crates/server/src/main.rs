@@ -105,18 +105,16 @@ async fn init_server(data_dir: PathBuf) -> ServerResult<()> {
 
     let (opaque_server_setup, opaque_password_file) =
         clipper_core::crypto::opaque_register(passphrase.as_bytes())?;
-    let enc_salt = clipper_core::crypto::generate_salt();
+    let encryption_salt = clipper_core::crypto::generate_encryption_salt();
 
     use sea_orm::{ActiveModelTrait, Set};
     let now = chrono::Utc::now().to_rfc3339();
 
     let config = entity::server_config::ActiveModel {
         id: Set(1),
-        // Existing column names are retained for migration compatibility:
-        // auth_salt stores OPAQUE server setup and auth_hash stores the OPAQUE password file.
-        auth_salt: Set(opaque_server_setup),
-        auth_hash: Set(opaque_password_file),
-        enc_salt: Set(enc_salt.to_vec()),
+        opaque_server_setup: Set(opaque_server_setup),
+        opaque_password_file: Set(opaque_password_file),
+        encryption_salt: Set(encryption_salt.to_vec()),
         created_at: Set(now.clone()),
         updated_at: Set(now),
     };

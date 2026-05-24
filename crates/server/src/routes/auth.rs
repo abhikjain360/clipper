@@ -50,21 +50,19 @@ pub async fn challenge(
         .decode(&req.credential_request_b64)
         .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid credential_request_b64"))?;
     let (credential_response, server_login_state) = crypto::opaque_server_login_start(
-        &config.auth_salt,
-        &config.auth_hash,
+        &config.opaque_server_setup,
+        &config.opaque_password_file,
         &credential_request,
     )
     .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid login request"))?;
     let challenge_id = state.create_auth_challenge(server_login_state);
-    let auth_params = crypto::Argon2Params::default();
 
     Ok(Json(LoginChallengeResponse {
         challenge_id,
         credential_response_b64: b64.encode(credential_response),
         server: ServerInfo {
-            enc_salt_b64: b64.encode(&config.enc_salt),
-            auth_params,
-            enc_params: crypto::Argon2Params::default(),
+            encryption_salt_b64: b64.encode(&config.encryption_salt),
+            encryption_params: crypto::Argon2Params::default(),
         },
     }))
 }
@@ -109,7 +107,6 @@ pub async fn login(
         })?;
 
     // Finish the OPAQUE login without receiving the raw passphrase or a DB-reusable secret.
-    let auth_params = crypto::Argon2Params::default();
     let server_login_state = state
         .take_auth_challenge(&req.challenge_id)
         .ok_or_else(|| {
@@ -236,7 +233,8 @@ pub async fn login(
         )
     })?;
 
-    let enc_salt_b64 = base64::engine::general_purpose::STANDARD.encode(&config.enc_salt);
+    let encryption_salt_b64 =
+        base64::engine::general_purpose::STANDARD.encode(&config.encryption_salt);
 
     info!(device_id = %device_id, "Login successful");
 
@@ -244,9 +242,8 @@ pub async fn login(
         token: token_b64,
         device_id: device_id_for_response,
         server: ServerInfo {
-            enc_salt_b64,
-            auth_params,
-            enc_params: crypto::Argon2Params::default(),
+            encryption_salt_b64,
+            encryption_params: crypto::Argon2Params::default(),
         },
     }))
 }
@@ -285,14 +282,14 @@ mod tests {
 
         let (opaque_server_setup, opaque_password_file) =
             crypto::opaque_register(passphrase).expect("opaque register");
-        let enc_salt = crypto::generate_salt();
+        let encryption_salt = crypto::generate_encryption_salt();
         let now = Utc::now().to_rfc3339();
 
         server_config::ActiveModel {
             id: Set(1),
-            auth_salt: Set(opaque_server_setup),
-            auth_hash: Set(opaque_password_file),
-            enc_salt: Set(enc_salt.to_vec()),
+            opaque_server_setup: Set(opaque_server_setup),
+            opaque_password_file: Set(opaque_password_file),
+            encryption_salt: Set(encryption_salt.to_vec()),
             created_at: Set(now.clone()),
             updated_at: Set(now),
         }

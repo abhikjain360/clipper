@@ -7,7 +7,7 @@ should be treated as untrusted clients.
 ## 1. Architecture Map
 
 The backend is the coordination and storage service. Clients do crypto locally,
-then send encrypted records and opaque metadata to the server.
+then send encrypted records and non-decrypted metadata to the server.
 
 - `crates/server/src/main.rs`
   - boots the Axum HTTP server;
@@ -62,8 +62,7 @@ SQLite stores durable metadata. The filesystem stores larger encrypted blobs:
 
 - `server_config`
   - one row;
-  - stores OPAQUE server setup, OPAQUE password file/verifier, and `enc_salt`;
-  - the legacy column names are still `auth_salt` for OPAQUE server setup and `auth_hash` for the OPAQUE password file;
+  - stores `opaque_server_setup`, `opaque_password_file`, and `encryption_salt`;
   - does not store the raw passphrase.
 - `sessions`
   - stores random session token hashes, not bearer tokens themselves.
@@ -86,15 +85,15 @@ should not be treated as the schema owner.
 First-run server setup:
 
 1. Operator runs `clipper-server init`.
-2. Server generates OPAQUE server setup and an encryption salt.
-3. Server stores the OPAQUE server setup and password file/verifier in `server_config`.
+2. Server generates OPAQUE server setup, an OPAQUE password file/verifier, and an encryption salt.
+3. Server stores them in `server_config`.
 4. Server creates `clipboard/` and `files/` data directories.
 
 Normal client login:
 
 1. Client starts OPAQUE locally from the passphrase.
 2. Client calls `POST /api/auth/challenge` with an OPAQUE credential request.
-3. Server starts OPAQUE from the stored password file/verifier, stores short-lived server login state under a random challenge ID, and returns the OPAQUE credential response, encryption salt, and KDF parameters.
+3. Server starts OPAQUE from the stored password file/verifier, stores short-lived server login state under a random challenge ID, and returns the OPAQUE credential response plus the encryption salt and KDF parameters.
 4. Client finishes OPAQUE locally and sends `POST /api/auth/login` with challenge ID, OPAQUE credential finalization, and device info.
 5. Server consumes the single-use challenge, finishes OPAQUE, creates/updates the device row, and returns a bearer token.
 6. Client uses `Authorization: Bearer <token>` on private HTTP routes and WebSocket connections.
@@ -108,7 +107,7 @@ Client runtime notes:
 
 Clipboard upload/list flow:
 
-1. Client encrypts clipboard text locally using the encryption key derived from the passphrase and `enc_salt`.
+1. Client encrypts clipboard text locally using the encryption key derived from the passphrase and `encryption_salt`.
 2. Client sends `POST /api/clipboard` with a UUID ID, nonce, ciphertext, ciphertext hash, and source-device field.
 3. Server validates the UUID, ignores spoofable provenance, writes ciphertext to `clipboard/<id>.bin`, stores metadata, writes an event, and broadcasts it.
 4. Other clients learn about the item through WebSocket events or bootstrap/list endpoints.
@@ -133,7 +132,7 @@ request. Future LAN P2P must follow the same on-demand blob rule.
 Sync flow:
 
 1. Client calls `GET /api/sync/bootstrap` after login or when event replay is uncertain.
-2. Server returns recent encrypted clipboard items, complete encrypted file metadata, latest event sequence, device info, and server crypto parameters.
+2. Server returns recent encrypted clipboard items, complete encrypted file metadata, latest event sequence, device info, and encryption parameters.
 3. Client opens `GET /api/ws` with bearer auth.
 4. Client sends `hello { last_seq }`.
 5. Server either replays events after `last_seq`, sends `invalidate` if the gap is too old, or continues broadcasting new events.
@@ -160,7 +159,7 @@ Cleanup flow:
 Review `routes/auth.rs`, `auth.rs`, `state.rs`, and `rate_limit.rs` first.
 
 - Public auth routes are `POST /api/auth/challenge` and `POST /api/auth/login`.
-- Login must use the OPAQUE challenge/finalization flow; raw passphrases and reusable auth hashes must not be sent to the server.
+- Login must use the OPAQUE challenge/finalization flow; raw passphrases and reusable authentication secrets must not be sent to the server.
 - Challenge IDs must be random, short-lived, and single-use.
 - Session tokens must be random, stored server-side only as hashes, and required on all private routes.
 - Expired sessions must fail closed.

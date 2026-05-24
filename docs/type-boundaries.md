@@ -40,8 +40,8 @@ Rules:
 - HTTP and WebSocket JSON payloads live in `clipper-api-types`.
 - Database entities, decrypted UI state, and daemon IPC commands do not belong
   in this crate.
-- `Argon2Params` lives here because it is sent in server API responses and also
-  drives client/server crypto helpers.
+- `Argon2Params` lives here because the server sends encryption KDF parameters
+  to clients and `clipper-core` uses the same type for key derivation.
 
 ## Daemon <-> Client IPC
 

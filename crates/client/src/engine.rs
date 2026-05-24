@@ -27,7 +27,7 @@ const RECENT_CLIPBOARD_LIMIT: usize = 100;
 pub struct SyncEngine {
     api: Mutex<ApiClient>,
     local_store: LocalStore,
-    enc_key: RwLock<Option<Zeroizing<[u8; 32]>>>,
+    encryption_key: RwLock<Option<Zeroizing<[u8; 32]>>>,
     state: RwLock<AppState>,
     state_tx: watch::Sender<u64>,
     state_rx: watch::Receiver<u64>,
@@ -46,7 +46,7 @@ impl SyncEngine {
         Arc::new(Self {
             api: Mutex::new(ApiClient::new(base_url)),
             local_store: LocalStore::new(data_dir),
-            enc_key: RwLock::new(None),
+            encryption_key: RwLock::new(None),
             state: RwLock::new(AppState::default()),
             state_tx: tx,
             state_rx: rx,
@@ -104,19 +104,19 @@ impl SyncEngine {
             api.login(passphrase, device_name, platform).await?
         };
 
-        let enc_salt = B64
-            .decode(&login_resp.server.enc_salt_b64)
-            .map_err(|e| ClientError::Other(format!("enc_salt decode: {}", e)))?;
+        let encryption_salt = B64
+            .decode(&login_resp.server.encryption_salt_b64)
+            .map_err(|e| ClientError::Other(format!("encryption_salt decode: {}", e)))?;
         self.local_store
-            .set_profile(profile_id_from_enc_salt(&enc_salt));
-        let enc_key = crypto::derive_key(
+            .set_profile(profile_id_from_encryption_salt(&encryption_salt));
+        let encryption_key = crypto::derive_key(
             passphrase.as_bytes(),
-            &enc_salt,
-            &login_resp.server.enc_params,
+            &encryption_salt,
+            &login_resp.server.encryption_params,
         )
         .map_err(ClientError::Crypto)?;
 
-        *self.enc_key.write().await = Some(enc_key);
+        *self.encryption_key.write().await = Some(encryption_key);
 
         {
             let mut state = self.state.write().await;
@@ -150,7 +150,7 @@ impl SyncEngine {
             let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
             api.logout().await?;
         }
-        *self.enc_key.write().await = None;
+        *self.encryption_key.write().await = None;
         {
             let mut state = self.state.write().await;
             *state = AppState::default();
@@ -193,11 +193,11 @@ impl SyncEngine {
         };
 
         let req = {
-            let enc_key = self.enc_key.read().await;
-            let enc_key = enc_key
+            let encryption_key = self.encryption_key.read().await;
+            let encryption_key = encryption_key
                 .as_ref()
                 .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
-            encrypt_clipboard(text, enc_key, &device_id)?
+            encrypt_clipboard(text, encryption_key, &device_id)?
         };
 
         {
@@ -264,8 +264,8 @@ impl SyncEngine {
 
         let mime_type = mime_guess_from_filename(&filename);
 
-        let enc_key = self.enc_key.read().await;
-        let enc_key = enc_key
+        let encryption_key = self.encryption_key.read().await;
+        let encryption_key = encryption_key
             .as_ref()
             .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
 
@@ -283,8 +283,8 @@ impl SyncEngine {
             size: Some(data.len() as i64),
         };
 
-        let (meta_nonce_b64, meta_ciphertext_b64) = encrypt_file_meta(&meta, enc_key)?;
-        let (blob_nonce_b64, encrypted_blob) = encrypt_file_blob(&data, enc_key)?;
+        let (meta_nonce_b64, meta_ciphertext_b64) = encrypt_file_meta(&meta, encryption_key)?;
+        let (blob_nonce_b64, encrypted_blob) = encrypt_file_blob(&data, encryption_key)?;
 
         let file_id = uuid::Uuid::new_v4().to_string();
         let blob_hash = crypto::sha256(&encrypted_blob);
@@ -333,8 +333,8 @@ impl SyncEngine {
     }
 
     pub async fn download_file(&self, file_id: &str, target_path: &str) -> Result<(), ClientError> {
-        let enc_key = self.enc_key.read().await;
-        let enc_key = enc_key
+        let encryption_key = self.encryption_key.read().await;
+        let encryption_key = encryption_key
             .as_ref()
             .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
 
@@ -351,7 +351,7 @@ impl SyncEngine {
             (nonce, blob)
         };
 
-        let plaintext = decrypt_file_blob(&blob_nonce_b64, &encrypted_blob, enc_key)?;
+        let plaintext = decrypt_file_blob(&blob_nonce_b64, &encrypted_blob, encryption_key)?;
         tokio::fs::write(std::path::Path::new(target_path), &plaintext)
             .await
             .map_err(|e| ClientError::Other(format!("write file: {}", e)))?;
@@ -384,14 +384,14 @@ impl SyncEngine {
         };
 
         let (clipboard_items, files) = {
-            let enc_key = self.enc_key.read().await;
-            let enc_key = enc_key
+            let encryption_key = self.encryption_key.read().await;
+            let encryption_key = encryption_key
                 .as_ref()
                 .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
 
             let mut clipboard_items = Vec::new();
             for item in &bootstrap.clipboard_items {
-                match decrypt_clipboard(item, enc_key) {
+                match decrypt_clipboard(item, encryption_key) {
                     Ok(text) => {
                         clipboard_items.push(DecryptedClipboardItem {
                             id: item.id.clone(),
@@ -408,7 +408,11 @@ impl SyncEngine {
 
             let mut files = Vec::new();
             for file in &bootstrap.files {
-                match decrypt_file_meta(&file.meta_nonce_b64, &file.meta_ciphertext_b64, enc_key) {
+                match decrypt_file_meta(
+                    &file.meta_nonce_b64,
+                    &file.meta_ciphertext_b64,
+                    encryption_key,
+                ) {
                     Ok(meta) => {
                         files.push(DecryptedFileItem {
                             id: file.id.clone(),
@@ -464,14 +468,14 @@ impl SyncEngine {
         };
 
         let (clipboard_items, files) = {
-            let enc_key = self.enc_key.read().await;
-            let enc_key = enc_key
+            let encryption_key = self.encryption_key.read().await;
+            let encryption_key = encryption_key
                 .as_ref()
                 .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
 
             let mut clipboard_items = Vec::new();
             for item in &clipboard_resp.items {
-                match decrypt_clipboard(item, enc_key) {
+                match decrypt_clipboard(item, encryption_key) {
                     Ok(text) => {
                         clipboard_items.push(DecryptedClipboardItem {
                             id: item.id.clone(),
@@ -488,7 +492,11 @@ impl SyncEngine {
 
             let mut files = Vec::new();
             for file in &files_resp.items {
-                match decrypt_file_meta(&file.meta_nonce_b64, &file.meta_ciphertext_b64, enc_key) {
+                match decrypt_file_meta(
+                    &file.meta_nonce_b64,
+                    &file.meta_ciphertext_b64,
+                    encryption_key,
+                ) {
                     Ok(meta) => {
                         files.push(DecryptedFileItem {
                             id: file.id.clone(),
@@ -713,8 +721,8 @@ fn default_data_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("clipper-client"))
 }
 
-fn profile_id_from_enc_salt(enc_salt: &[u8]) -> String {
-    hex_string(&crypto::sha256(enc_salt))
+fn profile_id_from_encryption_salt(encryption_salt: &[u8]) -> String {
+    hex_string(&crypto::sha256(encryption_salt))
 }
 
 fn hex_string(bytes: &[u8]) -> String {

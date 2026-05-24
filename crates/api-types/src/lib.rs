@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Argon2id parameters used in both auth and encryption key derivation.
+/// Argon2id parameters used for client-side encryption key derivation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Argon2Params {
     pub m_cost: u32,
@@ -59,9 +59,8 @@ pub struct LoginResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ServerInfo {
-    pub enc_salt_b64: String,
-    pub auth_params: Argon2Params,
-    pub enc_params: Argon2Params,
+    pub encryption_salt_b64: String,
+    pub encryption_params: Argon2Params,
 }
 
 // -- Clipboard --

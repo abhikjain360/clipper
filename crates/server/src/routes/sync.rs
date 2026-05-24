@@ -98,9 +98,8 @@ pub async fn bootstrap(
         files: file_items,
         latest_seq,
         server: ServerInfo {
-            enc_salt_b64: b64.encode(&config.enc_salt),
-            auth_params: Argon2Params::default(),
-            enc_params: Argon2Params::default(),
+            encryption_salt_b64: b64.encode(&config.encryption_salt),
+            encryption_params: Argon2Params::default(),
         },
     }))
 }

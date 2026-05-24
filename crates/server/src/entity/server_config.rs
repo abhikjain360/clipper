@@ -8,11 +8,11 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: i32,
     #[sea_orm(column_type = "Blob")]
-    pub auth_salt: Vec<u8>,
+    pub opaque_server_setup: Vec<u8>,
     #[sea_orm(column_type = "Blob")]
-    pub auth_hash: Vec<u8>,
+    pub opaque_password_file: Vec<u8>,
     #[sea_orm(column_type = "Blob")]
-    pub enc_salt: Vec<u8>,
+    pub encryption_salt: Vec<u8>,
     #[sea_orm(column_type = "Text")]
     pub created_at: String,
     #[sea_orm(column_type = "Text")]

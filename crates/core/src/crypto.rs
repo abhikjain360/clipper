@@ -19,8 +19,8 @@ impl opaque_ke::CipherSuite for ClipperOpaqueCipherSuite {
     type Ksf = opaque_ke::argon2::Argon2<'static>;
 }
 
-/// Generate a random 16-byte salt.
-pub fn generate_salt() -> [u8; 16] {
+/// Generate a random 16-byte salt for client-side encryption key derivation.
+pub fn generate_encryption_salt() -> [u8; 16] {
     rand::rng().random()
 }
 
@@ -315,8 +315,8 @@ mod tests {
     #[test]
     fn test_separate_salts_produce_different_keys() {
         let params = Argon2Params::default();
-        let key1 = derive_key(b"same-pass", b"salt-for-auth0000", &params).unwrap();
-        let key2 = derive_key(b"same-pass", b"salt-for-enc00000", &params).unwrap();
+        let key1 = derive_key(b"same-pass", b"salt-for-profile1", &params).unwrap();
+        let key2 = derive_key(b"same-pass", b"salt-for-profile2", &params).unwrap();
         assert_ne!(&*key1, &*key2);
     }
 
