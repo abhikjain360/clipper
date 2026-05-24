@@ -9,8 +9,8 @@ use axum::{
 };
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, Set,
-    QuerySelect, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set,
+    TransactionTrait,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,7 +26,8 @@ use crate::ws::WsBroadcast;
 use clipper_core::crypto::{SHA256_BYTES, XCHACHA20_NONCE_BYTES};
 use clipper_core::models::{
     ErrorResponse, ObjectCompleteRequest, ObjectInitRequest, ObjectInitResponse, ObjectKind,
-    ObjectListItem, ObjectListResponse, ObjectPayloadDescriptor, ObjectPayloadUpload, OkResponse,
+    ObjectListItem, ObjectListResponse, ObjectPayloadComplete, ObjectPayloadDescriptor,
+    ObjectPayloadInit, ObjectPayloadUpload, OkResponse,
 };
 
 const MAX_OBJECT_META_CIPHERTEXT_BYTES: usize = 64 * 1024;
@@ -44,7 +45,10 @@ pub async fn init_object(
         "Object metadata ciphertext exceeds maximum size",
     )?;
     if req.payloads.is_empty() {
-        return Err(error_response(StatusCode::BAD_REQUEST, "Missing object payloads"));
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Missing object payloads",
+        ));
     }
 
     if objects::Entity::find_by_id(object_id)
@@ -53,7 +57,10 @@ pub async fn init_object(
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
         .is_some()
     {
-        return Err(error_response(StatusCode::CONFLICT, "Object already exists"));
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "Object already exists",
+        ));
     }
 
     let mut seen_payload_ids = HashSet::new();
@@ -90,12 +97,21 @@ pub async fn init_object(
 
     let all_inline = req.payloads.iter().all(|p| p.inline_ciphertext.is_some());
     let mut written_paths = Vec::new();
-    for payload in req.payloads.iter().filter(|p| p.inline_ciphertext.is_some()) {
+    for payload in req
+        .payloads
+        .iter()
+        .filter(|p| p.inline_ciphertext.is_some())
+    {
         let path = object_payload_path(&state, &req.id, &payload.id);
         let inline = payload.inline_ciphertext.as_ref().expect("inline exists");
-        write_payload_bytes_create_new(&path, inline).await.map_err(|_| {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Object payload storage error")
-        })?;
+        write_payload_bytes_create_new(&path, inline)
+            .await
+            .map_err(|_| {
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Object payload storage error",
+                )
+            })?;
         written_paths.push(path);
     }
 
@@ -170,7 +186,14 @@ pub async fn init_object(
     }
 
     if let Some(inserted) = inserted_event {
-        broadcast_created(&state, auth.user_id, i64::from(inserted.seq), req.kind, &req.id, &now);
+        broadcast_created(
+            &state,
+            auth.user_id,
+            i64::from(inserted.seq),
+            req.kind,
+            &req.id,
+            &now,
+        );
     }
 
     let upload_urls = req
@@ -311,7 +334,10 @@ pub async fn complete_object(
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
 
     if payloads.is_empty() {
-        return Err(error_response(StatusCode::BAD_REQUEST, "Missing object payloads"));
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Missing object payloads",
+        ));
     }
 
     let mut completion_by_id = HashMap::new();
@@ -488,7 +514,8 @@ pub async fn list_objects(
 
         items.push(ObjectListItem {
             id: object.id.to_string(),
-            kind: object_kind_from_db(&object.kind).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            kind: object_kind_from_db(&object.kind)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
             meta_nonce: object.meta_nonce.clone(),
             meta_ciphertext: object.meta_ciphertext.clone(),
             payloads: payloads
@@ -691,13 +718,14 @@ fn object_kind_from_db(kind: &str) -> Result<ObjectKind, (StatusCode, axum::Json
     match kind {
         "clipboard" => Ok(ObjectKind::Clipboard),
         "file" => Ok(ObjectKind::File),
-        _ => Err(error_response(StatusCode::BAD_REQUEST, "Invalid object kind")),
+        _ => Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Invalid object kind",
+        )),
     }
 }
 
-fn validate_object_payload_size(
-    size: i64,
-) -> Result<u64, (StatusCode, axum::Json<ErrorResponse>)> {
+fn validate_object_payload_size(size: i64) -> Result<u64, (StatusCode, axum::Json<ErrorResponse>)> {
     if size < 0 {
         return Err(error_response(
             StatusCode::BAD_REQUEST,
@@ -832,5 +860,321 @@ async fn sha256_file(path: &std::path::Path) -> std::io::Result<([u8; SHA256_BYT
 async fn remove_paths(paths: Vec<std::path::PathBuf>) {
     for path in paths {
         let _ = tokio::fs::remove_file(path).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use sea_orm::Database;
+    use tempfile::TempDir;
+
+    use crate::entity::{access_keys, devices, users};
+    use clipper_core::crypto::sha256;
+
+    async fn test_state() -> (AppState, TempDir) {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::connect("sqlite::memory:").await.expect("db");
+        let state = AppState::open_with_db(db, data_dir.path().to_path_buf())
+            .await
+            .expect("state");
+        (state, data_dir)
+    }
+
+    fn auth(user_id: Uuid, device_id: Uuid) -> AuthInfo {
+        AuthInfo {
+            session_id: Uuid::new_v4(),
+            user_id,
+            device_id,
+        }
+    }
+
+    async fn insert_user(state: &AppState) -> Uuid {
+        let now = Utc::now().to_rfc3339();
+        let user_id = Uuid::new_v4();
+        let access_key_hash = Uuid::new_v4().to_string();
+        access_keys::ActiveModel {
+            key_hash: Set(access_key_hash.clone()),
+            created_at: Set(now.clone()),
+            expires_at: Set(None),
+            used_at: Set(Some(now.clone())),
+            used_by_user_id: Set(Some(user_id)),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert access key");
+        users::ActiveModel {
+            id: Set(user_id),
+            opaque_server_setup: Set(vec![1]),
+            opaque_password_file: Set(vec![2]),
+            encryption_salt: Set(vec![3]),
+            access_key_hash: Set(access_key_hash),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert user");
+        user_id
+    }
+
+    async fn insert_device(state: &AppState, user_id: Uuid, id: Uuid) {
+        let now = Utc::now().to_rfc3339();
+        devices::ActiveModel {
+            id: Set(id),
+            user_id: Set(user_id),
+            name: Set("test-device".into()),
+            platform: Set("test".into()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            last_seen_at: Set(now),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert device");
+    }
+
+    fn init_request(
+        object_id: String,
+        payload_id: String,
+        kind: ObjectKind,
+        ciphertext: &[u8],
+        inline: bool,
+    ) -> ObjectInitRequest {
+        ObjectInitRequest {
+            id: object_id,
+            kind,
+            meta_nonce: vec![1_u8; XCHACHA20_NONCE_BYTES],
+            meta_ciphertext: b"encrypted metadata".to_vec(),
+            payloads: vec![ObjectPayloadInit {
+                id: payload_id,
+                nonce: vec![2_u8; XCHACHA20_NONCE_BYTES],
+                ciphertext_size: ciphertext.len() as i64,
+                sha256_ciphertext: sha256(ciphertext).to_vec(),
+                inline_ciphertext: inline.then(|| ciphertext.to_vec()),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn init_rejects_wrong_payload_nonce_length_before_writing() {
+        let (state, data_dir) = test_state().await;
+        let object_id = Uuid::new_v4().to_string();
+        let payload_id = Uuid::new_v4().to_string();
+        let mut req = init_request(
+            object_id.clone(),
+            payload_id.clone(),
+            ObjectKind::Clipboard,
+            b"payload",
+            true,
+        );
+        req.payloads[0].nonce = vec![2_u8; 12];
+
+        let result = init_object(
+            State(state),
+            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
+            Postcard(req),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert!(
+            !data_dir
+                .path()
+                .join("objects")
+                .join(object_payload_filename(&object_id, &payload_id))
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn init_rejects_wrong_payload_sha256_length_before_writing() {
+        let (state, data_dir) = test_state().await;
+        let object_id = Uuid::new_v4().to_string();
+        let payload_id = Uuid::new_v4().to_string();
+        let mut req = init_request(
+            object_id.clone(),
+            payload_id.clone(),
+            ObjectKind::Clipboard,
+            b"payload",
+            true,
+        );
+        req.payloads[0].sha256_ciphertext = vec![3_u8; SHA256_BYTES - 1];
+
+        let result = init_object(
+            State(state),
+            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
+            Postcard(req),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert!(
+            !data_dir
+                .path()
+                .join("objects")
+                .join(object_payload_filename(&object_id, &payload_id))
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_init_completes_lists_and_downloads_object() {
+        let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::new_v4();
+        insert_device(&state, user_id, device_id).await;
+        let object_id = Uuid::new_v4().to_string();
+        let payload_id = Uuid::new_v4().to_string();
+        let ciphertext = b"encrypted clipboard payload";
+
+        let Postcard(resp) = init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Postcard(init_request(
+                object_id.clone(),
+                payload_id.clone(),
+                ObjectKind::Clipboard,
+                ciphertext,
+                true,
+            )),
+        )
+        .await
+        .expect("init");
+
+        assert!(resp.complete);
+        assert!(resp.upload_urls.is_empty());
+
+        let Postcard(list) = list_objects(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Query(ObjectListQuery {
+                kind: Some("clipboard".into()),
+                limit: None,
+                before: None,
+            }),
+        )
+        .await
+        .expect("list");
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].id, object_id);
+
+        let body = download_payload(
+            State(state),
+            Extension(auth(user_id, device_id)),
+            Path((object_id, payload_id)),
+        )
+        .await
+        .expect("download");
+        let bytes = to_bytes(body, usize::MAX).await.expect("bytes");
+        assert_eq!(&bytes[..], ciphertext);
+    }
+
+    #[tokio::test]
+    async fn streaming_upload_completes_after_exact_size_and_hash_check() {
+        let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::new_v4();
+        insert_device(&state, user_id, device_id).await;
+        let object_id = Uuid::new_v4().to_string();
+        let payload_id = Uuid::new_v4().to_string();
+        let ciphertext = b"encrypted file payload";
+
+        let Postcard(resp) = init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Postcard(init_request(
+                object_id.clone(),
+                payload_id.clone(),
+                ObjectKind::File,
+                ciphertext,
+                false,
+            )),
+        )
+        .await
+        .expect("init");
+
+        assert!(!resp.complete);
+        assert_eq!(resp.upload_urls.len(), 1);
+
+        upload_payload(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path((object_id.clone(), payload_id.clone())),
+            Body::from(ciphertext.to_vec()),
+        )
+        .await
+        .expect("upload");
+
+        complete_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path(object_id.clone()),
+            Postcard(ObjectCompleteRequest {
+                payloads: vec![ObjectPayloadComplete {
+                    id: payload_id,
+                    ciphertext_size: ciphertext.len() as i64,
+                    sha256_ciphertext: sha256(ciphertext).to_vec(),
+                }],
+            }),
+        )
+        .await
+        .expect("complete");
+
+        let Postcard(list) = list_objects(
+            State(state),
+            Extension(auth(user_id, device_id)),
+            Query(ObjectListQuery {
+                kind: Some("file".into()),
+                limit: None,
+                before: None,
+            }),
+        )
+        .await
+        .expect("list");
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].id, object_id);
+    }
+
+    #[tokio::test]
+    async fn streaming_upload_rejects_size_mismatch_without_final_file() {
+        let (state, data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::new_v4();
+        insert_device(&state, user_id, device_id).await;
+        let object_id = Uuid::new_v4().to_string();
+        let payload_id = Uuid::new_v4().to_string();
+
+        init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Postcard(init_request(
+                object_id.clone(),
+                payload_id.clone(),
+                ObjectKind::Clipboard,
+                b"ok",
+                false,
+            )),
+        )
+        .await
+        .expect("init");
+
+        let result = upload_payload(
+            State(state),
+            Extension(auth(user_id, device_id)),
+            Path((object_id.clone(), payload_id.clone())),
+            Body::from(b"too long".to_vec()),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert!(
+            !data_dir
+                .path()
+                .join("objects")
+                .join(object_payload_filename(&object_id, &payload_id))
+                .exists()
+        );
     }
 }

@@ -183,6 +183,8 @@ class _HomeScreenState extends State<HomeScreen> {
       itemCount: items.length,
       itemBuilder: (context, index) {
         final item = items[index];
+        final mime = item.mimeType.toLowerCase().split(';').first.trim();
+        final isText = mime.startsWith('text/');
         return SyncListTileCard(
           title: Text(
             item.text,
@@ -191,15 +193,17 @@ class _HomeScreenState extends State<HomeScreen> {
             style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
           ),
           subtitle: Text(
-            formatRelativeTimestamp(item.createdAt),
+            '${item.mimeType} - ${formatRelativeTimestamp(item.createdAt)}',
             style: const TextStyle(fontSize: 11, color: Colors.white38),
           ),
-          trailing: IconButton(
-            icon: const Icon(Icons.copy, size: 20),
-            onPressed: () => _copyToClipboard(item.id),
-            tooltip: 'Copy to clipboard',
-          ),
-          onTap: () => _copyToClipboard(item.id),
+          trailing: isText
+              ? IconButton(
+                  icon: const Icon(Icons.copy, size: 20),
+                  onPressed: () => _copyToClipboard(item.id),
+                  tooltip: 'Copy to clipboard',
+                )
+              : const Icon(Icons.image, size: 20, color: Colors.white54),
+          onTap: isText ? () => _copyToClipboard(item.id) : null,
         );
       },
     );

@@ -713,11 +713,15 @@ impl SseDecode for crate::api::clipper::BridgeClipboardItem {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_id = <String>::sse_decode(deserializer);
         let mut var_text = <String>::sse_decode(deserializer);
+        let mut var_mimeType = <String>::sse_decode(deserializer);
+        let mut var_payloadSize = <i64>::sse_decode(deserializer);
         let mut var_createdAt = <String>::sse_decode(deserializer);
         let mut var_sourceDeviceId = <String>::sse_decode(deserializer);
         return crate::api::clipper::BridgeClipboardItem {
             id: var_id,
             text: var_text,
+            mime_type: var_mimeType,
+            payload_size: var_payloadSize,
             created_at: var_createdAt,
             source_device_id: var_sourceDeviceId,
         };
@@ -934,6 +938,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::clipper::BridgeClipboardItem 
         [
             self.id.into_into_dart().into_dart(),
             self.text.into_into_dart().into_dart(),
+            self.mime_type.into_into_dart().into_dart(),
+            self.payload_size.into_into_dart().into_dart(),
             self.created_at.into_into_dart().into_dart(),
             self.source_device_id.into_into_dart().into_dart(),
         ]
@@ -1039,6 +1045,8 @@ impl SseEncode for crate::api::clipper::BridgeClipboardItem {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.id, serializer);
         <String>::sse_encode(self.text, serializer);
+        <String>::sse_encode(self.mime_type, serializer);
+        <i64>::sse_encode(self.payload_size, serializer);
         <String>::sse_encode(self.created_at, serializer);
         <String>::sse_encode(self.source_device_id, serializer);
     }

@@ -668,13 +668,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   BridgeClipboardItem dco_decode_bridge_clipboard_item(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return BridgeClipboardItem(
       id: dco_decode_String(arr[0]),
       text: dco_decode_String(arr[1]),
-      createdAt: dco_decode_String(arr[2]),
-      sourceDeviceId: dco_decode_String(arr[3]),
+      mimeType: dco_decode_String(arr[2]),
+      payloadSize: dco_decode_i_64(arr[3]),
+      createdAt: dco_decode_String(arr[4]),
+      sourceDeviceId: dco_decode_String(arr[5]),
     );
   }
 
@@ -797,11 +799,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_id = sse_decode_String(deserializer);
     var var_text = sse_decode_String(deserializer);
+    var var_mimeType = sse_decode_String(deserializer);
+    var var_payloadSize = sse_decode_i_64(deserializer);
     var var_createdAt = sse_decode_String(deserializer);
     var var_sourceDeviceId = sse_decode_String(deserializer);
     return BridgeClipboardItem(
       id: var_id,
       text: var_text,
+      mimeType: var_mimeType,
+      payloadSize: var_payloadSize,
       createdAt: var_createdAt,
       sourceDeviceId: var_sourceDeviceId,
     );
@@ -940,6 +946,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.id, serializer);
     sse_encode_String(self.text, serializer);
+    sse_encode_String(self.mimeType, serializer);
+    sse_encode_i_64(self.payloadSize, serializer);
     sse_encode_String(self.createdAt, serializer);
     sse_encode_String(self.sourceDeviceId, serializer);
   }

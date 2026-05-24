@@ -268,6 +268,24 @@ impl SyncEngine {
             }
         }
 
+        let _ = self
+            .send_clipboard_payload(TEXT_CLIPBOARD_MIME_TYPE, text.as_bytes())
+            .await?;
+        debug!("Clipboard text uploaded");
+        Ok(())
+    }
+
+    pub async fn send_clipboard_payload(
+        &self,
+        mime_type: &str,
+        data: &[u8],
+    ) -> Result<String, ClientError> {
+        if !is_supported_clipboard_mime_type(mime_type) {
+            return Err(ClientError::Other(format!(
+                "Unsupported clipboard MIME type: {mime_type}"
+            )));
+        }
+
         let device_id = {
             let state = self.state.read().await;
             state
@@ -276,23 +294,62 @@ impl SyncEngine {
                 .ok_or_else(|| ClientError::Other("No device_id".into()))?
         };
 
-        let req = {
+        let object_id = uuid::Uuid::new_v4().to_string();
+        let payload_id = uuid::Uuid::new_v4().to_string();
+        let plaintext_size = data.len() as i64;
+        let (meta_nonce, meta_ciphertext, payload_nonce, encrypted_payload) = {
             let encryption_key = self.encryption_key.read().await;
             let encryption_key = encryption_key
                 .as_ref()
                 .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
-            encrypt_clipboard(text, encryption_key, &device_id)?
+            let meta = ClipboardMeta {
+                mime_type: mime_type.to_string(),
+                size: Some(plaintext_size),
+            };
+            let (meta_nonce, meta_ciphertext) = encrypt_clipboard_meta(&meta, encryption_key)?;
+            let (payload_nonce, encrypted_payload) =
+                encrypt_clipboard_payload(data, encryption_key)?;
+            (
+                meta_nonce,
+                meta_ciphertext,
+                payload_nonce,
+                encrypted_payload,
+            )
         };
 
-        {
-            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.upload_clipboard(&req).await?;
-        }
+        let payload_hash = crypto::sha256(&encrypted_payload).to_vec();
+        let payload_size = encrypted_payload.len() as i64;
+        let init_req = ObjectInitRequest {
+            id: object_id.clone(),
+            kind: ObjectKind::Clipboard,
+            meta_nonce,
+            meta_ciphertext,
+            payloads: vec![ObjectPayloadInit {
+                id: payload_id.clone(),
+                nonce: payload_nonce,
+                ciphertext_size: payload_size,
+                sha256_ciphertext: payload_hash.clone(),
+                inline_ciphertext: inline_ciphertext(&encrypted_payload),
+            }],
+        };
 
+        self.submit_single_payload_object(
+            &object_id,
+            &payload_id,
+            &init_req,
+            encrypted_payload,
+            payload_size,
+            payload_hash,
+        )
+        .await?;
+
+        let created_at = chrono::Utc::now().to_rfc3339();
         let item = DecryptedClipboardItem {
-            id: req.id,
-            text: text.to_string(),
-            created_at: req.client_created_at.unwrap_or_default(),
+            id: object_id.clone(),
+            text: clipboard_display_text(mime_type, data),
+            mime_type: mime_type.to_string(),
+            payload_size: plaintext_size,
+            created_at,
             source_device_id: device_id,
         };
         self.local_store.persist_clipboard_item(&item).await?;
@@ -306,22 +363,28 @@ impl SyncEngine {
             state.clipboard_items = clipboard_items;
         }
         self.bump_version();
-        debug!("Clipboard text uploaded");
-        Ok(())
+        Ok(object_id)
     }
 
     pub async fn copy_to_local(&self, id: &str) -> Result<String, ClientError> {
-        let text = {
+        let state_item = {
             let state = self.state.read().await;
             state
                 .clipboard_items
                 .iter()
                 .find(|i| i.id == id)
-                .map(|item| item.text.clone())
+                .map(|item| (item.text.clone(), item.mime_type.clone()))
         };
 
-        let text = match text {
-            Some(text) => text,
+        let text = match state_item {
+            Some((text, mime_type)) => {
+                if !is_text_mime_type(&mime_type) {
+                    return Err(ClientError::Other(format!(
+                        "Clipboard item is {mime_type}; copying non-text clipboard payloads is not wired to the OS clipboard yet"
+                    )));
+                }
+                text
+            }
             None => self
                 .local_store
                 .clipboard_text(id)
@@ -331,6 +394,47 @@ impl SyncEngine {
 
         *self.suppressed_text.write().await = Some((text.clone(), std::time::Instant::now()));
         Ok(text)
+    }
+
+    async fn submit_single_payload_object(
+        &self,
+        object_id: &str,
+        payload_id: &str,
+        init_req: &ObjectInitRequest,
+        encrypted_payload: Vec<u8>,
+        payload_size: i64,
+        payload_hash: Vec<u8>,
+    ) -> Result<(), ClientError> {
+        let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
+        let init_resp = api.object_init(init_req).await?;
+        if init_resp.complete {
+            return Ok(());
+        }
+
+        if !init_resp
+            .upload_urls
+            .iter()
+            .any(|upload| upload.id == payload_id)
+        {
+            return Err(ClientError::Other(
+                "Object payload upload URL missing".into(),
+            ));
+        }
+
+        api.object_upload_payload(object_id, payload_id, encrypted_payload)
+            .await?;
+        api.object_complete(
+            object_id,
+            &ObjectCompleteRequest {
+                payloads: vec![ObjectPayloadComplete {
+                    id: payload_id.to_string(),
+                    ciphertext_size: payload_size,
+                    sha256_ciphertext: payload_hash,
+                }],
+            },
+        )
+        .await?;
+        Ok(())
     }
 
     // ── Files ──
@@ -348,11 +452,6 @@ impl SyncEngine {
 
         let mime_type = mime_guess_from_filename(&filename);
 
-        let encryption_key = self.encryption_key.read().await;
-        let encryption_key = encryption_key
-            .as_ref()
-            .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
-
         let device_id = {
             let state = self.state.read().await;
             state
@@ -367,35 +466,44 @@ impl SyncEngine {
             size: Some(data.len() as i64),
         };
 
-        let (meta_nonce_b64, meta_ciphertext_b64) = encrypt_file_meta(&meta, encryption_key)?;
-        let (blob_nonce_b64, encrypted_blob) = encrypt_file_blob(&data, encryption_key)?;
-
         let file_id = uuid::Uuid::new_v4().to_string();
-        let blob_hash = crypto::sha256(&encrypted_blob);
-        let blob_size = encrypted_blob.len() as i64;
-
-        let init_req = FileInitRequest {
-            id: file_id.clone(),
-            meta_nonce_b64,
-            meta_ciphertext_b64,
-            blob_nonce_b64,
-            blob_size,
-            source_device_id: device_id.clone(),
+        let payload_id = uuid::Uuid::new_v4().to_string();
+        let (meta_nonce, meta_ciphertext, blob_nonce, encrypted_blob) = {
+            let encryption_key = self.encryption_key.read().await;
+            let encryption_key = encryption_key
+                .as_ref()
+                .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
+            let (meta_nonce, meta_ciphertext) = encrypt_file_meta_bytes(&meta, encryption_key)?;
+            let (blob_nonce, encrypted_blob) = encrypt_file_blob_bytes(&data, encryption_key)?;
+            (meta_nonce, meta_ciphertext, blob_nonce, encrypted_blob)
         };
 
-        {
-            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.file_init(&init_req).await?;
-            api.file_upload_blob(&file_id, encrypted_blob).await?;
-            api.file_complete(
-                &file_id,
-                &FileCompleteRequest {
-                    sha256_ciphertext_b64: B64.encode(blob_hash),
-                    blob_size,
-                },
-            )
-            .await?;
-        }
+        let blob_hash = crypto::sha256(&encrypted_blob).to_vec();
+        let blob_size = encrypted_blob.len() as i64;
+
+        let init_req = ObjectInitRequest {
+            id: file_id.clone(),
+            kind: ObjectKind::File,
+            meta_nonce,
+            meta_ciphertext,
+            payloads: vec![ObjectPayloadInit {
+                id: payload_id.clone(),
+                nonce: blob_nonce,
+                ciphertext_size: blob_size,
+                sha256_ciphertext: blob_hash.clone(),
+                inline_ciphertext: inline_ciphertext(&encrypted_blob),
+            }],
+        };
+
+        self.submit_single_payload_object(
+            &file_id,
+            &payload_id,
+            &init_req,
+            encrypted_blob,
+            blob_size,
+            blob_hash,
+        )
+        .await?;
 
         {
             let mut state = self.state.write().await;
@@ -417,25 +525,29 @@ impl SyncEngine {
     }
 
     pub async fn download_file(&self, file_id: &str, target_path: &str) -> Result<(), ClientError> {
-        let encryption_key = self.encryption_key.read().await;
-        let encryption_key = encryption_key
-            .as_ref()
-            .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
-
-        let (blob_nonce_b64, encrypted_blob) = {
+        let (blob_nonce, encrypted_blob) = {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            let files_resp = api.list_files(Some(500), None).await?;
+            let files_resp = api
+                .list_objects(Some(ObjectKind::File), Some(500), None)
+                .await?;
             let file_item = files_resp
                 .items
                 .iter()
                 .find(|f| f.id == file_id)
                 .ok_or_else(|| ClientError::Other("File not found on server".into()))?;
-            let nonce = file_item.blob_nonce_b64.clone();
-            let blob = api.download_file_blob(file_id).await?;
+            let payload = single_payload(file_item)?;
+            let nonce = payload.nonce.clone();
+            let blob = api.download_object_payload(file_id, &payload.id).await?;
             (nonce, blob)
         };
 
-        let plaintext = decrypt_file_blob(&blob_nonce_b64, &encrypted_blob, encryption_key)?;
+        let plaintext = {
+            let encryption_key = self.encryption_key.read().await;
+            let encryption_key = encryption_key
+                .as_ref()
+                .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
+            decrypt_file_blob_bytes(&blob_nonce, &encrypted_blob, encryption_key)?
+        };
         tokio::fs::write(std::path::Path::new(target_path), &plaintext)
             .await
             .map_err(|e| ClientError::Other(format!("write file: {}", e)))?;
@@ -447,7 +559,7 @@ impl SyncEngine {
     pub async fn delete_file(&self, file_id: &str) -> Result<(), ClientError> {
         {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.delete_file(file_id).await?;
+            api.delete_object(file_id).await?;
         }
 
         {
@@ -467,54 +579,7 @@ impl SyncEngine {
             api.bootstrap().await?
         };
 
-        let (clipboard_items, files) = {
-            let encryption_key = self.encryption_key.read().await;
-            let encryption_key = encryption_key
-                .as_ref()
-                .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
-
-            let mut clipboard_items = Vec::new();
-            for item in &bootstrap.clipboard_items {
-                match decrypt_clipboard(item, encryption_key) {
-                    Ok(text) => {
-                        clipboard_items.push(DecryptedClipboardItem {
-                            id: item.id.clone(),
-                            text,
-                            created_at: item.created_at.clone(),
-                            source_device_id: item.source_device_id.clone(),
-                        });
-                    }
-                    Err(e) => {
-                        warn!(id = %item.id, "Failed to decrypt clipboard item: {}", e);
-                    }
-                }
-            }
-
-            let mut files = Vec::new();
-            for file in &bootstrap.files {
-                match decrypt_file_meta(
-                    &file.meta_nonce_b64,
-                    &file.meta_ciphertext_b64,
-                    encryption_key,
-                ) {
-                    Ok(meta) => {
-                        files.push(DecryptedFileItem {
-                            id: file.id.clone(),
-                            filename: meta.filename,
-                            mime_type: meta.mime_type,
-                            blob_size: file.blob_size,
-                            created_at: file.created_at.clone(),
-                            source_device_id: file.source_device_id.clone(),
-                        });
-                    }
-                    Err(e) => {
-                        warn!(id = %file.id, "Failed to decrypt file meta: {}", e);
-                    }
-                }
-            }
-
-            (clipboard_items, files)
-        };
+        let (clipboard_items, files) = self.fetch_object_state(100).await?;
 
         self.local_store
             .persist_clipboard_items(&clipboard_items)
@@ -523,6 +588,8 @@ impl SyncEngine {
             .local_store
             .recent_clipboard_items(RECENT_CLIPBOARD_LIMIT)
             .await?;
+        let clipboard_count = clipboard_items.len();
+        let file_count = files.len();
 
         *self.last_seq.write().await = bootstrap.latest_seq;
 
@@ -536,69 +603,13 @@ impl SyncEngine {
 
         debug!(
             "Bootstrap complete: {} clipboard, {} files, seq={}",
-            bootstrap.clipboard_items.len(),
-            bootstrap.files.len(),
-            bootstrap.latest_seq,
+            clipboard_count, file_count, bootstrap.latest_seq,
         );
         Ok(())
     }
 
     pub async fn refresh(&self) -> Result<(), ClientError> {
-        let (clipboard_resp, files_resp) = {
-            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            let c = api.list_clipboard(Some(100), None).await?;
-            let f = api.list_files(Some(100), None).await?;
-            (c, f)
-        };
-
-        let (clipboard_items, files) = {
-            let encryption_key = self.encryption_key.read().await;
-            let encryption_key = encryption_key
-                .as_ref()
-                .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
-
-            let mut clipboard_items = Vec::new();
-            for item in &clipboard_resp.items {
-                match decrypt_clipboard(item, encryption_key) {
-                    Ok(text) => {
-                        clipboard_items.push(DecryptedClipboardItem {
-                            id: item.id.clone(),
-                            text,
-                            created_at: item.created_at.clone(),
-                            source_device_id: item.source_device_id.clone(),
-                        });
-                    }
-                    Err(e) => {
-                        warn!(id = %item.id, "Failed to decrypt: {}", e);
-                    }
-                }
-            }
-
-            let mut files = Vec::new();
-            for file in &files_resp.items {
-                match decrypt_file_meta(
-                    &file.meta_nonce_b64,
-                    &file.meta_ciphertext_b64,
-                    encryption_key,
-                ) {
-                    Ok(meta) => {
-                        files.push(DecryptedFileItem {
-                            id: file.id.clone(),
-                            filename: meta.filename,
-                            mime_type: meta.mime_type,
-                            blob_size: file.blob_size,
-                            created_at: file.created_at.clone(),
-                            source_device_id: file.source_device_id.clone(),
-                        });
-                    }
-                    Err(e) => {
-                        warn!(id = %file.id, "Failed to decrypt file meta: {}", e);
-                    }
-                }
-            }
-
-            (clipboard_items, files)
-        };
+        let (clipboard_items, files) = self.fetch_object_state(100).await?;
 
         self.local_store
             .persist_clipboard_items(&clipboard_items)
@@ -615,6 +626,85 @@ impl SyncEngine {
         }
         self.bump_version();
         Ok(())
+    }
+
+    async fn fetch_object_state(
+        &self,
+        limit: u64,
+    ) -> Result<(Vec<DecryptedClipboardItem>, Vec<DecryptedFileItem>), ClientError> {
+        let (clipboard_resp, files_resp) = {
+            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
+            let clipboard = api
+                .list_objects(Some(ObjectKind::Clipboard), Some(limit), None)
+                .await?;
+            let files = api
+                .list_objects(Some(ObjectKind::File), Some(limit), None)
+                .await?;
+            (clipboard, files)
+        };
+
+        let encryption_key = {
+            let encryption_key = self.encryption_key.read().await;
+            **encryption_key
+                .as_ref()
+                .ok_or_else(|| ClientError::Other("Not logged in".into()))?
+        };
+
+        let mut clipboard_items = Vec::new();
+        for item in &clipboard_resp.items {
+            match self
+                .decrypt_clipboard_object_item(item, &encryption_key)
+                .await
+            {
+                Ok(item) => clipboard_items.push(item),
+                Err(e) => {
+                    warn!(id = %item.id, "Failed to load clipboard object: {}", e);
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        for item in &files_resp.items {
+            match decrypt_file_object_item(item, &encryption_key) {
+                Ok(item) => files.push(item),
+                Err(e) => {
+                    warn!(id = %item.id, "Failed to decrypt file object: {}", e);
+                }
+            }
+        }
+
+        Ok((clipboard_items, files))
+    }
+
+    async fn decrypt_clipboard_object_item(
+        &self,
+        item: &ObjectListItem,
+        encryption_key: &[u8; 32],
+    ) -> Result<DecryptedClipboardItem, ClientError> {
+        let meta = decrypt_clipboard_meta(&item.meta_nonce, &item.meta_ciphertext, encryption_key)?;
+        let payload = single_payload(item)?;
+        let payload_size = meta.size.unwrap_or(payload.ciphertext_size);
+        let text = if is_text_mime_type(&meta.mime_type) {
+            let encrypted_payload = {
+                let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
+                api.download_object_payload(&item.id, &payload.id).await?
+            };
+            let plaintext =
+                decrypt_clipboard_payload(&payload.nonce, &encrypted_payload, encryption_key)?;
+            String::from_utf8(plaintext)
+                .map_err(|e| ClientError::Other(format!("clipboard text utf8: {}", e)))?
+        } else {
+            clipboard_display_label(&meta.mime_type, payload_size)
+        };
+
+        Ok(DecryptedClipboardItem {
+            id: item.id.clone(),
+            text,
+            mime_type: meta.mime_type,
+            payload_size,
+            created_at: item.created_at.clone(),
+            source_device_id: item.source_device_id.clone(),
+        })
     }
 
     // ── WebSocket ──
@@ -797,6 +887,70 @@ fn mime_guess_from_filename(filename: &str) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
+}
+
+fn inline_ciphertext(ciphertext: &[u8]) -> Option<Vec<u8>> {
+    (ciphertext.len() <= INLINE_OBJECT_PAYLOAD_MAX_BYTES).then(|| ciphertext.to_vec())
+}
+
+fn single_payload(item: &ObjectListItem) -> Result<&ObjectPayloadDescriptor, ClientError> {
+    if item.payloads.len() != 1 {
+        return Err(ClientError::Other(format!(
+            "Object {} has {} payloads; exactly one is supported by this client",
+            item.id,
+            item.payloads.len()
+        )));
+    }
+
+    Ok(&item.payloads[0])
+}
+
+fn decrypt_file_object_item(
+    item: &ObjectListItem,
+    encryption_key: &[u8; 32],
+) -> Result<DecryptedFileItem, ClientError> {
+    let meta = decrypt_file_meta_bytes(&item.meta_nonce, &item.meta_ciphertext, encryption_key)?;
+    let payload = single_payload(item)?;
+    Ok(DecryptedFileItem {
+        id: item.id.clone(),
+        filename: meta.filename,
+        mime_type: meta.mime_type,
+        blob_size: meta.size.unwrap_or(payload.ciphertext_size),
+        created_at: item.created_at.clone(),
+        source_device_id: item.source_device_id.clone(),
+    })
+}
+
+fn clipboard_display_text(mime_type: &str, data: &[u8]) -> String {
+    if is_text_mime_type(mime_type) {
+        String::from_utf8_lossy(data).into_owned()
+    } else {
+        clipboard_display_label(mime_type, data.len() as i64)
+    }
+}
+
+fn clipboard_display_label(mime_type: &str, size: i64) -> String {
+    format!("{mime_type} clipboard payload ({size} bytes)")
+}
+
+fn is_supported_clipboard_mime_type(mime_type: &str) -> bool {
+    is_text_mime_type(mime_type) || top_level_mime_type(mime_type) == "image"
+}
+
+fn is_text_mime_type(mime_type: &str) -> bool {
+    top_level_mime_type(mime_type) == "text"
+}
+
+fn top_level_mime_type(mime_type: &str) -> String {
+    mime_type
+        .split(';')
+        .next()
+        .unwrap_or(mime_type)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
 }
 
 fn default_data_dir() -> PathBuf {

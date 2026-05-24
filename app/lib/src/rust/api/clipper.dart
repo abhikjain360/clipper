@@ -119,12 +119,16 @@ class BridgeAppState {
 class BridgeClipboardItem {
   final String id;
   final String text;
+  final String mimeType;
+  final PlatformInt64 payloadSize;
   final String createdAt;
   final String sourceDeviceId;
 
   const BridgeClipboardItem({
     required this.id,
     required this.text,
+    required this.mimeType,
+    required this.payloadSize,
     required this.createdAt,
     required this.sourceDeviceId,
   });
@@ -136,6 +140,8 @@ class BridgeClipboardItem {
   int get hashCode =>
       id.hashCode ^
       text.hashCode ^
+      mimeType.hashCode ^
+      payloadSize.hashCode ^
       createdAt.hashCode ^
       sourceDeviceId.hashCode;
 
@@ -146,6 +152,8 @@ class BridgeClipboardItem {
           runtimeType == other.runtimeType &&
           id == other.id &&
           text == other.text &&
+          mimeType == other.mimeType &&
+          payloadSize == other.payloadSize &&
           createdAt == other.createdAt &&
           sourceDeviceId == other.sourceDeviceId;
 }

@@ -16,6 +16,7 @@ pub mod health;
 pub mod objects;
 pub mod sync;
 
+#[derive(Debug)]
 pub struct Postcard<T>(pub T);
 
 impl<S, T> FromRequest<S> for Postcard<T>
