@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::Instant;
+use std::{collections::HashMap, sync::Mutex, time::Instant};
 
 const WINDOW_SECS: u64 = 60;
 const MAX_ATTEMPTS: usize = 10;

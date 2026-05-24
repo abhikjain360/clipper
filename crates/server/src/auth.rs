@@ -5,12 +5,11 @@ use axum::{
     response::Response,
 };
 use chrono::Utc;
+use clipper_core::crypto::sha256;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use uuid::Uuid;
 
-use crate::entity::sessions;
-use crate::state::AppState;
-use clipper_core::crypto::sha256;
+use crate::{entity::sessions, state::AppState};
 
 /// Extract bearer token from Authorization header.
 fn extract_bearer(req: &Request) -> Option<String> {

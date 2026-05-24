@@ -1,15 +1,16 @@
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
 use sea_orm::{Database, DatabaseConnection};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use sea_orm_migration::MigratorTrait;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::error::ServerResult;
-use crate::migration;
-use crate::ws::WsBroadcast;
-use sea_orm_migration::MigratorTrait;
+use crate::{error::ServerResult, migration, ws::WsBroadcast};
 
 const AUTH_CHALLENGE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_AUTH_CHALLENGES: usize = 4096;

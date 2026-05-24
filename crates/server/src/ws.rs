@@ -6,14 +6,12 @@ use axum::{
     response::Response,
 };
 use chrono::Utc;
+use clipper_core::models::{WsClientMessage, WsServerMessage};
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::auth::AuthInfo;
-use crate::entity::event_log;
-use crate::state::AppState;
-use clipper_core::models::{WsClientMessage, WsServerMessage};
+use crate::{auth::AuthInfo, entity::event_log, state::AppState};
 
 /// A broadcast message sent to all connected WebSocket clients.
 #[derive(Clone, Debug)]

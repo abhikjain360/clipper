@@ -3,16 +3,22 @@
 //! Manages the single global connection, request/response correlation,
 //! and state broadcasting via a `watch` channel.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use clipper_daemon_types as dt;
 use clipper_daemon_types::{DaemonCommand, DaemonRequest, DaemonResponse};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::OwnedWriteHalf;
-use tokio::sync::{Mutex, RwLock, oneshot, watch};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::unix::OwnedWriteHalf,
+    sync::{Mutex, RwLock, oneshot, watch},
+};
 use tracing::warn;
 
 use crate::daemon_process;
@@ -263,8 +269,9 @@ fn send_terminal_state_if_current(conn_gen: u64, state_tx: &watch::Sender<dt::Ap
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tokio::net::UnixListener;
+
+    use super::*;
 
     /// Helper: create a temporary Unix socket pair via a listener, returning
     /// (client_stream, server_stream).

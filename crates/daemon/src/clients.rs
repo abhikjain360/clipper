@@ -1,7 +1,9 @@
 //! Multi-client broadcast manager.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use tokio::sync::{RwLock, mpsc};
 use tracing::debug;

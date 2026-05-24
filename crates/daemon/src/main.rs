@@ -8,18 +8,21 @@ mod handler;
 mod keychain;
 mod protocol;
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::{
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use clipper_client::engine::SyncEngine;
 use tokio::net::UnixListener;
 use tracing::{error, info, warn};
 
-use clipper_client::engine::SyncEngine;
-
-use crate::clients::ClientManager;
-use crate::error::{DaemonError, DaemonResult};
-use crate::protocol::DaemonEvent;
+use crate::{
+    clients::ClientManager,
+    error::{DaemonError, DaemonResult},
+    protocol::DaemonEvent,
+};
 
 const PRIVATE_DIR_MODE: u32 = 0o700;
 const SOCKET_FILE_MODE: u32 = 0o600;

@@ -152,12 +152,11 @@
             '';
           };
         };
-      mkApp =
-        drv: program:
-        {
-          type = "app";
-          program = "${drv}/bin/${program}";
-        };
+      mkApp = drv: program: description: {
+        type = "app";
+        program = "${drv}/bin/${program}";
+        meta.description = description;
+      };
     in
     {
       devShells = forAllSystems (
@@ -220,15 +219,15 @@
                   if ! rustup toolchain list | grep -Eq "^$toolchain(-| )"; then
                     rustup toolchain install "$toolchain" \
                       --profile minimal \
-                      --component "$components" \
-                      --target $targets \
                       --no-self-update
                   fi
 
                   rustup component add --toolchain "$toolchain" $component_args >/dev/null 2>&1 \
                     || echo "warning: failed to install Rust components for $toolchain"
-                  rustup target add --toolchain "$toolchain" $targets >/dev/null 2>&1 \
-                    || echo "warning: failed to install Rust targets for $toolchain"
+                  if [ -n "$targets" ]; then
+                    rustup target add --toolchain "$toolchain" $targets >/dev/null 2>&1 \
+                      || echo "warning: failed to install Rust targets for $toolchain"
+                  fi
                 }
 
                 ensure_rustup_toolchain stable "rustfmt,clippy,rust-src" "$rust_targets"
@@ -337,19 +336,24 @@
           scripts = mkCommandScripts (mkPkgs system);
         in
         {
-          default = mkApp scripts.fmt "clipper-fmt";
-          fmt = mkApp scripts.fmt "clipper-fmt";
-          rustfmt = mkApp scripts.rustfmt "clipper-rustfmt";
-          wasm-check = mkApp scripts.wasm-check "clipper-wasm-check";
-          frb-generate = mkApp scripts.frb-generate "clipper-frb-generate";
-          frb-build-web = mkApp scripts.frb-build-web "clipper-frb-build-web";
-          web-build = mkApp scripts.web-build "clipper-web-build";
+          default = mkApp scripts.fmt "clipper-fmt" "Format all Clipper sources";
+          fmt = mkApp scripts.fmt "clipper-fmt" "Format all Clipper sources";
+          rustfmt =
+            mkApp scripts.rustfmt "clipper-rustfmt"
+              "Format Rust sources with the pinned nightly toolchain";
+          wasm-check =
+            mkApp scripts.wasm-check "clipper-wasm-check"
+              "Check the Rust app crate for wasm32-unknown-unknown";
+          frb-generate =
+            mkApp scripts.frb-generate "clipper-frb-generate"
+              "Regenerate Flutter Rust Bridge bindings";
+          frb-build-web =
+            mkApp scripts.frb-build-web "clipper-frb-build-web"
+              "Build Flutter Rust Bridge wasm artifacts";
+          web-build = mkApp scripts.web-build "clipper-web-build" "Build the Flutter web application";
         }
       );
 
-      formatter = forAllSystems (
-        system:
-        (mkCommandScripts (mkPkgs system)).fmt
-      );
+      formatter = forAllSystems (system: (mkCommandScripts (mkPkgs system)).fmt);
     };
 }

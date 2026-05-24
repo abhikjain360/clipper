@@ -3,8 +3,7 @@
 //! Polls NSPasteboard.generalPasteboard every 500ms for changes.
 //! Uses the changeCount property to detect new clipboard content.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use objc2_app_kit::NSPasteboard;
 use objc2_foundation::NSString;

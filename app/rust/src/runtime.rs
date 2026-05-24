@@ -27,9 +27,8 @@ pub(crate) enum RuntimeError {
 mod imp {
     use clipper_daemon_types::AppState;
 
-    use crate::transport;
-
     use super::{RuntimeError, RuntimeResult};
+    use crate::transport;
 
     pub(crate) async fn connect() -> RuntimeResult<()> {
         Ok(transport::connect().await?)
@@ -68,8 +67,10 @@ mod imp {
 
 #[cfg(any(target_os = "android", target_family = "wasm"))]
 mod imp {
-    use std::path::PathBuf;
-    use std::sync::{Arc, LazyLock};
+    use std::{
+        path::PathBuf,
+        sync::{Arc, LazyLock},
+    };
 
     use clipper_client::engine::SyncEngine;
     #[cfg(not(target_family = "wasm"))]

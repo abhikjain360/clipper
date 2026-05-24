@@ -3,11 +3,10 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, AeadCore, KeyInit, generic_array::typenum::Unsigned},
 };
+pub use clipper_api_types::Argon2Params;
 use rand::RngExt;
 use sha2::{Digest, Sha256, digest::OutputSizeUser};
 use zeroize::Zeroizing;
-
-pub use clipper_api_types::Argon2Params;
 
 const OPAQUE_CREDENTIAL_IDENTIFIER: &[u8] = b"clipper:passphrase:v1";
 pub const XCHACHA20_NONCE_BYTES: usize =

@@ -5,8 +5,7 @@
 
 #[cfg(not(target_family = "wasm"))]
 use std::path::Path;
-use std::path::PathBuf;
-use std::sync::RwLock;
+use std::{path::PathBuf, sync::RwLock};
 
 use clipper_app_types::DecryptedClipboardItem;
 #[cfg(not(target_family = "wasm"))]

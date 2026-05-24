@@ -1,13 +1,11 @@
 //! HTTP + WebSocket client for the Clipper server.
 
 use base64::Engine;
+use clipper_core::{crypto, models::*};
 use reqwest::Client;
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::{debug, warn};
 use url::Url;
-
-use clipper_core::crypto;
-use clipper_core::models::*;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 

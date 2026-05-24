@@ -2,8 +2,10 @@ use chrono::{Duration, Utc};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tracing::info;
 
-use crate::entity::{clipboard_items, event_log, files};
-use crate::state::AppState;
+use crate::{
+    entity::{clipboard_items, event_log, files},
+    state::AppState,
+};
 
 type CleanupResult<T> = Result<T, CleanupError>;
 

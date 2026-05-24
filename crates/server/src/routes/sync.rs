@@ -4,14 +4,16 @@ use axum::{
     http::StatusCode,
 };
 use base64::Engine;
+use clipper_core::{
+    crypto::Argon2Params,
+    models::{BootstrapResponse, ClipboardItem, DeviceInfo, FileListItem, ServerInfo},
+};
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
 
-use crate::auth::AuthInfo;
-use crate::entity::{clipboard_items, devices, event_log, files, users};
-use crate::state::AppState;
-use clipper_core::crypto::Argon2Params;
-use clipper_core::models::{
-    BootstrapResponse, ClipboardItem, DeviceInfo, FileListItem, ServerInfo,
+use crate::{
+    auth::AuthInfo,
+    entity::{clipboard_items, devices, event_log, files, users},
+    state::AppState,
 };
 
 pub async fn bootstrap(

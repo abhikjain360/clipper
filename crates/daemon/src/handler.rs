@@ -2,18 +2,21 @@
 
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::Mutex;
+use clipper_client::engine::SyncEngine;
+use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::unix::{OwnedReadHalf, OwnedWriteHalf},
+    sync::Mutex,
+};
 use tracing::{debug, warn};
 
-use clipper_client::engine::SyncEngine;
-
-use crate::clients::ClientManager;
-use crate::keychain::{self, Credentials};
-use crate::protocol::{
-    CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, LoginParams,
-    RegisterParams, RegisterResult, UploadFileResult,
+use crate::{
+    clients::ClientManager,
+    keychain::{self, Credentials},
+    protocol::{
+        CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, LoginParams,
+        RegisterParams, RegisterResult, UploadFileResult,
+    },
 };
 
 const MAX_IPC_REQUEST_LINE_BYTES: usize = 4 * 1024 * 1024;

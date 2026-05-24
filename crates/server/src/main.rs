@@ -8,9 +8,7 @@ mod routes;
 mod state;
 mod ws;
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::{
     Router,
@@ -26,9 +24,11 @@ use tower_http::{
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-use crate::error::{ServerError, ServerResult};
-use crate::rate_limit::RateLimiter;
-use crate::state::AppState;
+use crate::{
+    error::{ServerError, ServerResult},
+    rate_limit::RateLimiter,
+    state::AppState,
+};
 
 #[derive(Parser)]
 #[command(name = "clipper-server")]

@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use axum::{
     Json,
     extract::{ConnectInfo, Extension, State},
@@ -5,24 +7,27 @@ use axum::{
 };
 use base64::Engine;
 use chrono::{Duration, Utc};
+use clipper_core::{
+    crypto,
+    models::{
+        ErrorResponse, LoginChallengeRequest, LoginChallengeResponse, LoginRequest, LoginResponse,
+        OkResponse, RegisterFinishRequest, RegisterFinishResponse, RegisterStartRequest,
+        RegisterStartResponse, ServerInfo,
+    },
+};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, Set,
     TransactionTrait,
 };
-use std::net::SocketAddr;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::auth::AuthInfo;
-use crate::entity::{access_keys, devices, sessions, users};
-use crate::rate_limit::RateLimiter;
-use crate::routes::{error_response, validate_client_id};
-use crate::state::AppState;
-use clipper_core::crypto;
-use clipper_core::models::{
-    ErrorResponse, LoginChallengeRequest, LoginChallengeResponse, LoginRequest, LoginResponse,
-    OkResponse, RegisterFinishRequest, RegisterFinishResponse, RegisterStartRequest,
-    RegisterStartResponse, ServerInfo,
+use crate::{
+    auth::AuthInfo,
+    entity::{access_keys, devices, sessions, users},
+    rate_limit::RateLimiter,
+    routes::{error_response, validate_client_id},
+    state::AppState,
 };
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -469,11 +474,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use sea_orm::{ActiveModelTrait, Database, Set};
     use std::net::{IpAddr, Ipv4Addr};
+
+    use sea_orm::{ActiveModelTrait, Database, Set};
     use tempfile::TempDir;
 
+    use super::*;
     use crate::entity::access_keys;
 
     const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;

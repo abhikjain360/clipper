@@ -12,8 +12,7 @@ use std::future::Future;
 use clipper_app_types as app_types;
 use clipper_daemon_types as daemon;
 
-use crate::error::AppError;
-use crate::runtime;
+use crate::{error::AppError, runtime};
 
 // ── FRB-facing types (thin wrappers required by codegen) ──
 
