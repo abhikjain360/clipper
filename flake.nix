@@ -4,10 +4,14 @@
   inputs = {
     # Use unstable until the latest stable Nix channel has Dart >= 3.11.1.
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { nixpkgs, ... }:
+    { nixpkgs, fenix, ... }:
     let
       systems = [
         "aarch64-darwin"
@@ -15,7 +19,10 @@
         "x86_64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-      rustNightlyToolchain = "nightly-2026-05-24";
+      rustStableDate = "2026-04-16";
+      rustStableManifestSha256 = "sha256-gh/xTkxKHL4eiRXzWv8KP7vfjSk61Iq48x47BEDFgfk=";
+      rustNightlyDate = "2026-05-24";
+      rustNightlyManifestSha256 = "sha256-gARSjceSEFY+8IYGJFhN8O+oqKPN/eyMFW+aqGVu9hk=";
       androidRustTargets = [
         "aarch64-linux-android"
         "armv7-linux-androideabi"
@@ -23,13 +30,51 @@
         "x86_64-linux-android"
       ];
       wasmRustTarget = "wasm32-unknown-unknown";
-      wasmPackRustflags = "-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--max-memory=1073741824 -C link-arg=--export=__heap_base -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base";
-      stableRustTargets = androidRustTargets ++ [ wasmRustTarget ];
-      stableRustTargetsString = nixpkgs.lib.concatStringsSep " " stableRustTargets;
       mkPkgs = system: import nixpkgs { inherit system; };
-      mkCommandScripts =
-        pkgs:
+      mkRustToolchains =
+        system:
         let
+          fenixPkgs = fenix.packages.${system};
+          stableArgs = {
+            channel = "stable";
+            date = rustStableDate;
+            sha256 = rustStableManifestSha256;
+          };
+          stableChannel = fenixPkgs.toolchainOf stableArgs;
+          nightlyArgs = {
+            channel = "nightly";
+            date = rustNightlyDate;
+            sha256 = rustNightlyManifestSha256;
+          };
+          nightlyChannel = fenixPkgs.toolchainOf nightlyArgs;
+        in
+        {
+          stable = fenixPkgs.combine (
+            [
+              stableChannel.cargo
+              stableChannel.rustc
+              stableChannel.rustfmt
+              stableChannel.clippy
+              stableChannel.rust-src
+              stableChannel.rust-analyzer
+            ]
+            ++ map (
+              t: (fenixPkgs.targets.${t}.toolchainOf stableArgs).rust-std
+            ) (androidRustTargets ++ [ wasmRustTarget ])
+          );
+          nightly = fenixPkgs.combine [
+            nightlyChannel.cargo
+            nightlyChannel.rustc
+            nightlyChannel.rustfmt
+            nightlyChannel.rust-src
+            (fenixPkgs.targets.${wasmRustTarget}.toolchainOf nightlyArgs).rust-std
+          ];
+        };
+      mkCommandScripts =
+        system:
+        let
+          pkgs = mkPkgs system;
+          toolchains = mkRustToolchains system;
           commonRuntimeInputs = with pkgs; [
             coreutils
             dart
@@ -38,42 +83,12 @@
             git
             nixfmt
             python3
-            rustup
+            toolchains.stable
             wasm-pack
           ];
           repoRoot = ''
             repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
             cd "$repo_root"
-          '';
-          rustupSetup = ''
-            export PATH="$PATH:$HOME/.cargo/bin"
-            export CLIPPER_RUST_NIGHTLY="${rustNightlyToolchain}"
-            export CLIPPER_WASM_PACK_RUSTFLAGS="${wasmPackRustflags}"
-
-            ensure_rustup_toolchain() {
-              local toolchain="$1"
-              local components="$2"
-              local targets="$3"
-              local component_args=()
-              local target_args=()
-
-              IFS=',' read -r -a component_args <<< "$components"
-              read -r -a target_args <<< "$targets"
-
-              if ! rustup toolchain list | grep -Eq "^$toolchain(-| )"; then
-                rustup toolchain install "$toolchain" \
-                  --profile minimal \
-                  --no-self-update
-              fi
-
-              rustup component add --toolchain "$toolchain" "''${component_args[@]}"
-              if [ "''${#target_args[@]}" -gt 0 ]; then
-                rustup target add --toolchain "$toolchain" "''${target_args[@]}"
-              fi
-            }
-
-            ensure_rustup_toolchain stable "rustfmt,clippy,rust-src" "${stableRustTargetsString}"
-            ensure_rustup_toolchain "$CLIPPER_RUST_NIGHTLY" "rustfmt,rust-src" "${wasmRustTarget}"
           '';
         in
         {
@@ -82,10 +97,9 @@
             runtimeInputs = commonRuntimeInputs;
             text = ''
               ${repoRoot}
-              ${rustupSetup}
 
               nixfmt flake.nix
-              rustup run "$CLIPPER_RUST_NIGHTLY" cargo fmt --all
+              ${toolchains.nightly}/bin/cargo fmt --all
               dart format app/lib app/test app/integration_test app/test_driver
             '';
           };
@@ -95,9 +109,8 @@
             runtimeInputs = commonRuntimeInputs;
             text = ''
               ${repoRoot}
-              ${rustupSetup}
 
-              rustup run "$CLIPPER_RUST_NIGHTLY" cargo fmt --all "$@"
+              ${toolchains.nightly}/bin/cargo fmt --all "$@"
             '';
           };
 
@@ -106,7 +119,6 @@
             runtimeInputs = commonRuntimeInputs;
             text = ''
               ${repoRoot}
-              ${rustupSetup}
 
               cargo check -p rust_lib_clipper_app --target ${wasmRustTarget} "$@"
             '';
@@ -129,14 +141,11 @@
             runtimeInputs = commonRuntimeInputs;
             text = ''
               ${repoRoot}
-              ${rustupSetup}
 
+              export PATH="${toolchains.nightly}/bin:$PATH"
               export FLUTTER_ROOT="${pkgs.flutter}"
               cd app
-              flutter_rust_bridge_codegen build-web \
-                --wasm-pack-rustup-toolchain "$CLIPPER_RUST_NIGHTLY" \
-                --wasm-pack-rustflags "$CLIPPER_WASM_PACK_RUSTFLAGS" \
-                "$@"
+              flutter_rust_bridge_codegen build-web "$@"
             '';
           };
 
@@ -145,14 +154,12 @@
             runtimeInputs = commonRuntimeInputs;
             text = ''
               ${repoRoot}
-              ${rustupSetup}
 
+              export PATH="${toolchains.nightly}/bin:$PATH"
               export FLUTTER_ROOT="${pkgs.flutter}"
               cd app
               flutter pub get
-              flutter_rust_bridge_codegen build-web \
-                --wasm-pack-rustup-toolchain "$CLIPPER_RUST_NIGHTLY" \
-                --wasm-pack-rustflags "$CLIPPER_WASM_PACK_RUSTFLAGS"
+              flutter_rust_bridge_codegen build-web
               flutter build web --no-pub --no-wasm-dry-run "$@"
             '';
           };
@@ -238,6 +245,7 @@
         let
           pkgs = mkPkgs system;
           lib = pkgs.lib;
+          toolchains = mkRustToolchains system;
           darwinInputs = lib.optionals pkgs.stdenv.isDarwin [
             pkgs.apple-sdk_15
             pkgs.libiconv
@@ -262,56 +270,28 @@
                 openssl
                 pkg-config
                 python3
-                rust-analyzer
-                rustup
                 sea-orm-cli
                 sqlite
                 wasm-pack
               ])
+              ++ [
+                toolchains.stable
+              ]
               ++ darwinInputs;
 
             env = {
-              CLIPPER_RUST_NIGHTLY = rustNightlyToolchain;
-              CLIPPER_WASM_PACK_RUSTFLAGS = wasmPackRustflags;
+              CARGOKIT_CARGO = "${toolchains.stable}/bin/cargo";
+              CARGOKIT_RUSTC = "${toolchains.stable}/bin/rustc";
+              CLIPPER_RUST_NIGHTLY_BIN = "${toolchains.nightly}/bin";
               COCOAPODS_DISABLE_STATS = "1";
               FLUTTER_ROOT = "${pkgs.flutter}";
               JAVA_HOME = "${pkgs.jdk17.home}";
               LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
               RUST_BACKTRACE = "1";
+              RUST_SRC_PATH = "${toolchains.stable}/lib/rustlib/src/rust/library";
             };
 
             shellHook = ''
-              export PATH="$PATH:$HOME/.cargo/bin"
-
-              rust_targets="${stableRustTargetsString}"
-              wasm_target="${wasmRustTarget}"
-              if command -v rustup >/dev/null 2>&1; then
-                ensure_rustup_toolchain() {
-                  toolchain="$1"
-                  components="$2"
-                  targets="$3"
-                  component_args="$(printf '%s' "$components" | tr ',' ' ')"
-
-                  if ! rustup toolchain list | grep -Eq "^$toolchain(-| )"; then
-                    rustup toolchain install "$toolchain" \
-                      --profile minimal \
-                      --no-self-update
-                  fi
-
-                  rustup component add --toolchain "$toolchain" $component_args >/dev/null 2>&1 \
-                    || echo "warning: failed to install Rust components for $toolchain"
-                  if [ -n "$targets" ]; then
-                    rustup target add --toolchain "$toolchain" $targets >/dev/null 2>&1 \
-                      || echo "warning: failed to install Rust targets for $toolchain"
-                  fi
-                }
-
-                ensure_rustup_toolchain stable "rustfmt,clippy,rust-src" "$rust_targets"
-                ensure_rustup_toolchain "$CLIPPER_RUST_NIGHTLY" "rustfmt,rust-src" "$wasm_target"
-
-                export RUST_SRC_PATH="$(rustup run stable rustc --print sysroot)/lib/rustlib/src/rust/library"
-              fi
-
               if [ -z "''${ANDROID_HOME:-}" ]; then
                 if [ -d "$HOME/Library/Android/sdk" ]; then
                   export ANDROID_HOME="$HOME/Library/Android/sdk"
@@ -380,8 +360,8 @@
               fi
 
               echo "clipper dev shell"
-              echo "  rust: $(rustup run stable rustc --version)"
-              echo "  rust nightly: $(rustup run "$CLIPPER_RUST_NIGHTLY" rustc --version)"
+              echo "  rust stable: $(rustc --version)"
+              echo "  rust nightly: $(${toolchains.nightly}/bin/rustc --version)"
               echo "  flutter: $(flutter --version | sed -n '1p')"
               echo "  sea-orm-cli: $(sea-orm-cli --version)"
               if [ -n "''${ANDROID_HOME:-}" ]; then
@@ -401,7 +381,7 @@
       packages = forAllSystems (
         system:
         let
-          scripts = mkCommandScripts (mkPkgs system);
+          scripts = mkCommandScripts system;
         in
         scripts // { default = scripts.fmt; }
       );
@@ -409,7 +389,7 @@
       apps = forAllSystems (
         system:
         let
-          scripts = mkCommandScripts (mkPkgs system);
+          scripts = mkCommandScripts system;
         in
         {
           default = mkApp scripts.fmt "clipper-fmt" "Format all Clipper sources";
@@ -433,6 +413,6 @@
         }
       );
 
-      formatter = forAllSystems (system: (mkCommandScripts (mkPkgs system)).fmt);
+      formatter = forAllSystems (system: (mkCommandScripts system).fmt);
     };
 }

@@ -1,6 +1,8 @@
 /// This is copied from Cargokit (which is the official way to use it currently)
 /// Details: https://fzyzcjy.github.io/flutter_rust_bridge/manual/integrate/builtin
 
+import 'dart:io';
+
 import 'package:collection/collection.dart';
 import 'package:logging/logging.dart';
 import 'package:path/path.dart' as path;
@@ -118,6 +120,12 @@ class RustBuilder {
   void prepare(
     Rustup rustup,
   ) {
+    // Local patch: when CARGOKIT_CARGO is set, the toolchain comes from Nix
+    // (fenix) and is already provisioned with every required component and
+    // target, so the rustup-driven install dance is unnecessary.
+    if (Platform.environment['CARGOKIT_CARGO'] != null) {
+      return;
+    }
     final toolchain = _toolchain;
     if (rustup.installedTargets(toolchain) == null) {
       rustup.installToolchain(toolchain);
@@ -140,33 +148,42 @@ class RustBuilder {
     final extraArgs = _buildOptions?.flags ?? [];
     final manifestPath = path.join(environment.manifestDir, 'Cargo.toml');
     final buildEnvironment = await _buildEnvironment();
-    final rustcPath = runCommand(
-      'rustup',
-      ['which', '--toolchain', _toolchain, 'rustc'],
-    ).stdout.toString().trim();
-    if (rustcPath.isNotEmpty) {
-      buildEnvironment['RUSTC'] = rustcPath;
+    // Local patch: prefer a Nix-provided cargo/rustc over rustup when
+    // CARGOKIT_CARGO is set. The flake selects the matching toolchain.
+    final cargokitCargo = Platform.environment['CARGOKIT_CARGO'];
+    final cargokitRustc = Platform.environment['CARGOKIT_RUSTC'];
+    final cargoArgs = [
+      'build',
+      ...extraArgs,
+      '--manifest-path',
+      manifestPath,
+      '-p',
+      environment.crateInfo.packageName,
+      if (!environment.configuration.isDebug) '--release',
+      '--target',
+      target.rust,
+      '--target-dir',
+      environment.targetTempDir,
+    ];
+    if (cargokitCargo != null) {
+      if (cargokitRustc != null) {
+        buildEnvironment['RUSTC'] = cargokitRustc;
+      }
+      runCommand(cargokitCargo, cargoArgs, environment: buildEnvironment);
+    } else {
+      final rustcPath = runCommand(
+        'rustup',
+        ['which', '--toolchain', _toolchain, 'rustc'],
+      ).stdout.toString().trim();
+      if (rustcPath.isNotEmpty) {
+        buildEnvironment['RUSTC'] = rustcPath;
+      }
+      runCommand(
+        'rustup',
+        ['run', _toolchain, 'cargo', ...cargoArgs],
+        environment: buildEnvironment,
+      );
     }
-    runCommand(
-      'rustup',
-      [
-        'run',
-        _toolchain,
-        'cargo',
-        'build',
-        ...extraArgs,
-        '--manifest-path',
-        manifestPath,
-        '-p',
-        environment.crateInfo.packageName,
-        if (!environment.configuration.isDebug) '--release',
-        '--target',
-        target.rust,
-        '--target-dir',
-        environment.targetTempDir,
-      ],
-      environment: buildEnvironment,
-    );
     return path.join(
       environment.targetTempDir,
       target.rust,

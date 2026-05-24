@@ -46,9 +46,15 @@ class Rustup {
     _installedTargets(toolchain)?.add(target);
   }
 
-  final List<_Toolchain> _installedToolchains;
+  // Local patch: lazy so constructing a Rustup() does not shell out.
+  // Callers that have a fenix-provided cargo (via CARGOKIT_CARGO) skip
+  // every Rustup method and so never trigger the install-query.
+  List<_Toolchain>? _installedToolchainsCache;
 
-  Rustup() : _installedToolchains = _getInstalledToolchains();
+  List<_Toolchain> get _installedToolchains =>
+      _installedToolchainsCache ??= _getInstalledToolchains();
+
+  Rustup();
 
   List<String>? _installedTargets(String toolchain) => _installedToolchains
       .firstWhereOrNull(

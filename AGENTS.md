@@ -8,10 +8,18 @@
   wrap routine commands in `nix develop`.
 - The flake provides Flutter, Dart, Java, Android helper environment, C/C++
   toolchain pieces, `cargo-edit`, `flutter_rust_bridge_codegen`, CocoaPods,
-  `sea-orm-cli`, `wasm-pack`, `nixfmt`, and `rustup`. Rust itself is
-  intentionally managed by rustup under `~/.rustup`: stable is the default
-  project toolchain, while the flake installs a pinned nightly for rustfmt and
-  Flutter Rust Bridge web builds.
+  `sea-orm-cli`, `wasm-pack`, and `nixfmt`. Rust comes from
+  [fenix](https://github.com/nix-community/fenix): the stable channel (the
+  default toolchain on `$PATH`, with `rustfmt`, `clippy`, `rust-src`,
+  `rust-analyzer`, and the Android + `wasm32-unknown-unknown` `rust-std`
+  targets) and a pinned nightly (exposed at `$CLIPPER_RUST_NIGHTLY_BIN`) for
+  unstable rustfmt options and Flutter Rust Bridge web builds. Bump either
+  toolchain by editing `rustStableDate` / `rustNightlyDate` in `flake.nix`
+  and supplying the new `nix-prefetch-url` manifest hash.
+- Cargokit's Android plugin build (`app/rust_builder/cargokit`) is patched to
+  prefer the fenix toolchain via `CARGOKIT_CARGO` / `CARGOKIT_RUSTC` instead
+  of calling `rustup`. If you re-vendor cargokit, reapply that patch — see
+  `app/rust_builder/cargokit/PATCHES.md`.
 - The intent is not to make every mobile platform detail pure Nix. Use the
   flake for CLI, codegen, dependency, and build tooling. Emulators, Xcode, host
   Android SDK/NDK installs, signing, and other OS-tied platform setup can come
