@@ -13,11 +13,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
-    Router, middleware,
+    Router,
+    http::{Method, header},
+    middleware,
     routing::{delete, get, post, put},
 };
 use clap::{Parser, Subcommand};
-use tower_http::trace::TraceLayer;
+use tower_http::{
+    cors::{Any, CorsLayer},
+    trace::TraceLayer,
+};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -113,6 +118,16 @@ async fn serve(data_dir: PathBuf, addr: String) -> ServerResult<()> {
         .ok_or(ServerError::NotInitialized)?;
 
     let limiter = Arc::new(RateLimiter::new());
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([
+            Method::DELETE,
+            Method::GET,
+            Method::OPTIONS,
+            Method::POST,
+            Method::PUT,
+        ])
+        .allow_headers([header::ACCEPT, header::AUTHORIZATION, header::CONTENT_TYPE]);
 
     // private routes
     let authed = Router::new()
@@ -161,6 +176,7 @@ async fn serve(data_dir: PathBuf, addr: String) -> ServerResult<()> {
         .route("/api/auth/login", post(routes::auth::login))
         .merge(authed)
         .layer(axum::Extension(limiter.clone()))
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 

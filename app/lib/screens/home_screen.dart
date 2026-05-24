@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import '../services/secure_clipboard.dart';
 import '../src/rust/api/clipper.dart';
+import '../utils/browser_download.dart' as browser_download;
 import '../utils/file_helpers.dart';
 import '../utils/formatters.dart';
 import '../widgets/app_status.dart';
@@ -59,14 +61,24 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _uploadFile() async {
-    final result = await FilePicker.pickFiles();
+    final result = await FilePicker.pickFiles(withData: kIsWeb);
     if (result == null || result.files.isEmpty) return;
 
-    final path = result.files.single.path;
-    if (path == null) return;
+    final file = result.files.single;
 
     try {
-      await uploadFile(filePath: path);
+      if (kIsWeb) {
+        final bytes = file.bytes;
+        if (bytes == null) {
+          _showError('Could not read selected file');
+          return;
+        }
+        await uploadFileBytes(filename: file.name, mimeType: '', bytes: bytes);
+      } else {
+        final path = file.path;
+        if (path == null) return;
+        await uploadFile(filePath: path);
+      }
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -78,10 +90,27 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _downloadFile(String fileId, String filename) async {
+    final downloadName = safeDownloadFilename(filename);
+
+    if (kIsWeb) {
+      try {
+        final bytes = await downloadFileBytes(fileId: fileId);
+        await browser_download.downloadBytes(downloadName, bytes);
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('Download started')));
+        }
+      } catch (e) {
+        _showError(e.toString());
+      }
+      return;
+    }
+
     final dir = await FilePicker.getDirectoryPath();
     if (dir == null) return;
 
-    final targetPath = p.join(dir, safeDownloadFilename(filename));
+    final targetPath = p.join(dir, downloadName);
     try {
       await downloadFile(fileId: fileId, targetPath: targetPath);
       if (mounted) {

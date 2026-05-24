@@ -1,10 +1,19 @@
-String formatByteSize(int bytes) {
-  if (bytes < 1024) return '$bytes B';
-  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-  if (bytes < 1024 * 1024 * 1024) {
-    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+String formatByteSize(Object bytes) {
+  final byteCount = switch (bytes) {
+    final int value => value,
+    final BigInt value => value.toInt(),
+    _ => 0,
+  };
+
+  final bytesValue = byteCount < 0 ? 0 : byteCount;
+  if (bytesValue < 1024) return '$bytesValue B';
+  if (bytesValue < 1024 * 1024) {
+    return '${(bytesValue / 1024).toStringAsFixed(1)} KB';
   }
-  return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  if (bytesValue < 1024 * 1024 * 1024) {
+    return '${(bytesValue / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  return '${(bytesValue / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
 }
 
 String formatRelativeTimestamp(String rfc3339, {DateTime? now}) {

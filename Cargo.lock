@@ -669,6 +669,7 @@ dependencies = [
  "clipper-core",
  "clipper-daemon-types",
  "futures-util",
+ "getrandom 0.4.2",
  "objc2-app-kit",
  "objc2-foundation",
  "postcard",
@@ -683,6 +684,8 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "wasm-bindgen",
+ "web-sys",
  "zeroize",
 ]
 
@@ -695,6 +698,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "clipper-api-types",
+ "getrandom 0.4.2",
  "opaque-ke",
  "rand 0.10.1",
  "serde",
@@ -1540,11 +1544,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasip2",
  "wasip3",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -3225,6 +3231,7 @@ dependencies = [
  "clipper-daemon-types",
  "dirs",
  "flutter_rust_bridge",
+ "getrandom 0.4.2",
  "serde",
  "serde_json",
  "tempfile",

@@ -246,6 +246,17 @@ pub async fn upload_file(file_path: String) -> Result<String, String> {
     .await
 }
 
+pub async fn upload_file_bytes(
+    filename: String,
+    mime_type: String,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    bridge_result(
+        async move { Ok(runtime::upload_file_bytes(&filename, &mime_type, bytes).await?) },
+    )
+    .await
+}
+
 pub async fn download_file(file_id: String, target_path: String) -> Result<(), String> {
     bridge_result(async move {
         runtime::send_command(daemon::DaemonCommand::DownloadFile(
@@ -258,6 +269,10 @@ pub async fn download_file(file_id: String, target_path: String) -> Result<(), S
         Ok(())
     })
     .await
+}
+
+pub async fn download_file_bytes(file_id: String) -> Result<Vec<u8>, String> {
+    bridge_result(async move { Ok(runtime::download_file_bytes(&file_id).await?) }).await
 }
 
 pub async fn delete_file(file_id: String) -> Result<(), String> {

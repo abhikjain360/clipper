@@ -1,0 +1,4 @@
+# Import grouping and per-crate merging are currently unstable rustfmt options.
+# They are applied by `cargo +nightly fmt`; stable `cargo fmt` ignores them.
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"

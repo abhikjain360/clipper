@@ -214,10 +214,13 @@ impl SyncEngine {
 
         self.sync_bootstrap().await?;
 
-        let engine = Arc::clone(self);
-        tokio::spawn(async move {
-            engine.ws_loop().await;
-        });
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let engine = Arc::clone(self);
+            tokio::spawn(async move {
+                engine.ws_loop().await;
+            });
+        }
 
         // Start clipboard watcher on macOS
         #[cfg(target_os = "macos")]
@@ -439,6 +442,7 @@ impl SyncEngine {
 
     // ── Files ──
 
+    #[cfg(not(target_family = "wasm"))]
     pub async fn upload_file(&self, file_path: &str) -> Result<String, ClientError> {
         let path = std::path::Path::new(file_path);
         let filename = path
@@ -449,8 +453,25 @@ impl SyncEngine {
         let data = tokio::fs::read(path)
             .await
             .map_err(|e| ClientError::Other(format!("read file: {}", e)))?;
+        self.upload_file_bytes(&filename, None, &data).await
+    }
 
-        let mime_type = mime_guess_from_filename(&filename);
+    #[cfg(target_family = "wasm")]
+    pub async fn upload_file(&self, _file_path: &str) -> Result<String, ClientError> {
+        Err(ClientError::Other(
+            "Path-based file upload is not available on web".into(),
+        ))
+    }
+
+    pub async fn upload_file_bytes(
+        &self,
+        filename: &str,
+        mime_type: Option<&str>,
+        data: &[u8],
+    ) -> Result<String, ClientError> {
+        let filename = safe_object_filename(filename);
+        let mime_type =
+            normalized_mime_type(mime_type).unwrap_or_else(|| mime_guess_from_filename(&filename));
 
         let device_id = {
             let state = self.state.read().await;
@@ -511,8 +532,8 @@ impl SyncEngine {
                 0,
                 DecryptedFileItem {
                     id: file_id.clone(),
-                    filename,
-                    mime_type,
+                    filename: filename.clone(),
+                    mime_type: mime_type.clone(),
                     blob_size: data.len() as i64,
                     created_at: chrono::Utc::now().to_rfc3339(),
                     source_device_id: device_id,
@@ -520,11 +541,11 @@ impl SyncEngine {
             );
         }
         self.bump_version();
-        info!(file_id = %file_id, "File uploaded");
+        info!(file_id = %file_id, filename = %filename, "File uploaded");
         Ok(file_id)
     }
 
-    pub async fn download_file(&self, file_id: &str, target_path: &str) -> Result<(), ClientError> {
+    pub async fn download_file_bytes(&self, file_id: &str) -> Result<Vec<u8>, ClientError> {
         let (blob_nonce, encrypted_blob) = {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
             let files_resp = api
@@ -548,12 +569,30 @@ impl SyncEngine {
                 .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
             decrypt_file_blob_bytes(&blob_nonce, &encrypted_blob, encryption_key)?
         };
+        info!(file_id = %file_id, "File downloaded");
+        Ok(plaintext)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn download_file(&self, file_id: &str, target_path: &str) -> Result<(), ClientError> {
+        let plaintext = self.download_file_bytes(file_id).await?;
         tokio::fs::write(std::path::Path::new(target_path), &plaintext)
             .await
             .map_err(|e| ClientError::Other(format!("write file: {}", e)))?;
 
         info!(file_id = %file_id, path = %target_path, "File downloaded");
         Ok(())
+    }
+
+    #[cfg(target_family = "wasm")]
+    pub async fn download_file(
+        &self,
+        _file_id: &str,
+        _target_path: &str,
+    ) -> Result<(), ClientError> {
+        Err(ClientError::Other(
+            "Path-based file download is not available on web".into(),
+        ))
     }
 
     pub async fn delete_file(&self, file_id: &str) -> Result<(), ClientError> {
@@ -709,6 +748,7 @@ impl SyncEngine {
 
     // ── WebSocket ──
 
+    #[cfg(not(target_family = "wasm"))]
     async fn ws_loop(self: &Arc<Self>) {
         let mut backoff = Duration::from_secs(1);
         let max_backoff = Duration::from_secs(60);
@@ -754,6 +794,7 @@ impl SyncEngine {
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     async fn ws_connect(&self) -> Result<(), ClientError> {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite;
@@ -889,6 +930,26 @@ fn mime_guess_from_filename(filename: &str) -> String {
     .to_string()
 }
 
+fn normalized_mime_type(mime_type: Option<&str>) -> Option<String> {
+    mime_type
+        .map(str::trim)
+        .filter(|mime_type| !mime_type.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn safe_object_filename(filename: &str) -> String {
+    let filename = filename
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(filename)
+        .trim();
+    if filename.is_empty() || filename == "." || filename == ".." {
+        "unknown".to_string()
+    } else {
+        filename.to_string()
+    }
+}
+
 fn inline_ciphertext(ciphertext: &[u8]) -> Option<Vec<u8>> {
     (ciphertext.len() <= INLINE_OBJECT_PAYLOAD_MAX_BYTES).then(|| ciphertext.to_vec())
 }
@@ -953,10 +1014,16 @@ fn top_level_mime_type(mime_type: &str) -> String {
         .to_ascii_lowercase()
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn default_data_dir() -> PathBuf {
     std::env::var_os("CLIPPER_CLIENT_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("clipper-client"))
+}
+
+#[cfg(target_family = "wasm")]
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("web")
 }
 
 fn profile_id_from_encryption_salt(encryption_salt: &[u8]) -> String {

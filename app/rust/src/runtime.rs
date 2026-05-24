@@ -10,13 +10,15 @@ pub(crate) enum RuntimeError {
     #[cfg(target_os = "macos")]
     #[error(transparent)]
     Transport(#[from] crate::transport::TransportError),
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_family = "wasm"))]
     #[error(transparent)]
     Client(#[from] clipper_client::api_client::ClientError),
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_family = "wasm"))]
     #[error("runtime result encode failed: {0}")]
     ResultEncode(#[from] serde_json::Error),
-    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    #[error("unsupported operation: {0}")]
+    UnsupportedOperation(&'static str),
+    #[cfg(not(any(target_os = "macos", target_os = "android", target_family = "wasm")))]
     #[error("unsupported platform")]
     UnsupportedPlatform,
 }
@@ -27,7 +29,7 @@ mod imp {
 
     use crate::transport;
 
-    use super::RuntimeResult;
+    use super::{RuntimeError, RuntimeResult};
 
     pub(crate) async fn connect() -> RuntimeResult<()> {
         Ok(transport::connect().await?)
@@ -46,28 +48,84 @@ mod imp {
     pub(crate) async fn wait_for_change() {
         transport::wait_for_change().await;
     }
+
+    pub(crate) async fn upload_file_bytes(
+        _filename: &str,
+        _mime_type: &str,
+        _bytes: Vec<u8>,
+    ) -> RuntimeResult<String> {
+        Err(RuntimeError::UnsupportedOperation(
+            "byte-based file upload is only available in-process",
+        ))
+    }
+
+    pub(crate) async fn download_file_bytes(_file_id: &str) -> RuntimeResult<Vec<u8>> {
+        Err(RuntimeError::UnsupportedOperation(
+            "byte-based file download is only available in-process",
+        ))
+    }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_family = "wasm"))]
 mod imp {
     use std::path::PathBuf;
     use std::sync::{Arc, LazyLock};
 
     use clipper_client::engine::SyncEngine;
-    use clipper_daemon_types::{
-        AppState, CopyToLocalResult, DaemonCommand, RegisterResult, UploadFileResult,
-    };
+    #[cfg(not(target_family = "wasm"))]
+    use clipper_daemon_types::UploadFileResult;
+    use clipper_daemon_types::{AppState, CopyToLocalResult, DaemonCommand, RegisterResult};
 
     use super::RuntimeResult;
 
-    static ENGINE: LazyLock<Arc<SyncEngine>> = LazyLock::new(|| {
-        SyncEngine::new_with_data_dir("http://10.0.2.2:8787", android_data_dir().join("client"))
-    });
+    static ENGINE: LazyLock<Arc<SyncEngine>> =
+        LazyLock::new(|| SyncEngine::new_with_data_dir(default_base_url(), client_data_dir()));
 
+    #[cfg(target_os = "android")]
+    fn default_base_url() -> &'static str {
+        "http://10.0.2.2:8787"
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn default_base_url() -> &'static str {
+        "http://127.0.0.1:8787"
+    }
+
+    #[cfg(target_os = "android")]
+    fn default_device_name() -> &'static str {
+        "Android"
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn default_device_name() -> &'static str {
+        "Web"
+    }
+
+    #[cfg(target_os = "android")]
+    fn platform() -> &'static str {
+        "android"
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn platform() -> &'static str {
+        "web"
+    }
+
+    #[cfg(target_os = "android")]
     fn android_data_dir() -> PathBuf {
         dirs::data_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("Clipper")
+    }
+
+    #[cfg(target_os = "android")]
+    fn client_data_dir() -> PathBuf {
+        android_data_dir().join("client")
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn client_data_dir() -> PathBuf {
+        PathBuf::from("web")
     }
 
     fn engine() -> Arc<SyncEngine> {
@@ -92,8 +150,11 @@ mod imp {
                     .login_with_platform_and_user(
                         &params.passphrase,
                         params.user_id.as_deref(),
-                        params.device_name.as_deref().unwrap_or("Android"),
-                        "android",
+                        params
+                            .device_name
+                            .as_deref()
+                            .unwrap_or(default_device_name()),
+                        platform(),
                     )
                     .await?;
                 Ok(None)
@@ -106,8 +167,11 @@ mod imp {
                     .register_with_platform(
                         &params.access_key,
                         &params.passphrase,
-                        params.device_name.as_deref().unwrap_or("Android"),
-                        "android",
+                        params
+                            .device_name
+                            .as_deref()
+                            .unwrap_or(default_device_name()),
+                        platform(),
                     )
                     .await?;
                 Ok(Some(serde_json::to_value(RegisterResult { user_id })?))
@@ -125,14 +189,36 @@ mod imp {
                 Ok(Some(serde_json::to_value(CopyToLocalResult { text })?))
             }
             DaemonCommand::UploadFile(params) => {
-                let file_id = engine.upload_file(&params.file_path).await?;
-                Ok(Some(serde_json::to_value(UploadFileResult { file_id })?))
+                #[cfg(target_family = "wasm")]
+                {
+                    let _ = params;
+                    Err(super::RuntimeError::UnsupportedOperation(
+                        "path-based file upload",
+                    ))
+                }
+
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    let file_id = engine.upload_file(&params.file_path).await?;
+                    Ok(Some(serde_json::to_value(UploadFileResult { file_id })?))
+                }
             }
             DaemonCommand::DownloadFile(params) => {
-                engine
-                    .download_file(&params.file_id, &params.target_path)
-                    .await?;
-                Ok(None)
+                #[cfg(target_family = "wasm")]
+                {
+                    let _ = params;
+                    Err(super::RuntimeError::UnsupportedOperation(
+                        "path-based file download",
+                    ))
+                }
+
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    engine
+                        .download_file(&params.file_id, &params.target_path)
+                        .await?;
+                    Ok(None)
+                }
             }
             DaemonCommand::DeleteFile(params) => {
                 engine.delete_file(&params.file_id).await?;
@@ -154,9 +240,23 @@ mod imp {
         let mut rx = engine().subscribe();
         let _ = rx.changed().await;
     }
+
+    pub(crate) async fn upload_file_bytes(
+        filename: &str,
+        mime_type: &str,
+        bytes: Vec<u8>,
+    ) -> RuntimeResult<String> {
+        Ok(engine()
+            .upload_file_bytes(filename, Some(mime_type), &bytes)
+            .await?)
+    }
+
+    pub(crate) async fn download_file_bytes(file_id: &str) -> RuntimeResult<Vec<u8>> {
+        Ok(engine().download_file_bytes(file_id).await?)
+    }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "android")))]
+#[cfg(not(any(target_os = "macos", target_os = "android", target_family = "wasm")))]
 mod imp {
     use clipper_daemon_types::{AppState, ConnectionStatus};
 
@@ -182,6 +282,18 @@ mod imp {
 
     pub(crate) async fn wait_for_change() {
         std::future::pending::<()>().await;
+    }
+
+    pub(crate) async fn upload_file_bytes(
+        _filename: &str,
+        _mime_type: &str,
+        _bytes: Vec<u8>,
+    ) -> RuntimeResult<String> {
+        Err(RuntimeError::UnsupportedPlatform)
+    }
+
+    pub(crate) async fn download_file_bytes(_file_id: &str) -> RuntimeResult<Vec<u8>> {
+        Err(RuntimeError::UnsupportedPlatform)
     }
 }
 

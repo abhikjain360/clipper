@@ -3,13 +3,18 @@
 //! The network boundary remains encrypted. This store is for local convenience
 //! and durable UI state, so clipboard text is stored as plaintext.
 
-use std::path::{Path, PathBuf};
+#[cfg(not(target_family = "wasm"))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 use clipper_app_types::DecryptedClipboardItem;
+#[cfg(not(target_family = "wasm"))]
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_PROFILE: &str = "default";
+#[cfg(target_family = "wasm")]
+const BROWSER_INDEX_LIMIT: usize = 1_000;
 
 #[derive(Debug)]
 pub struct LocalStore {
@@ -38,6 +43,47 @@ impl LocalStore {
         item: &DecryptedClipboardItem,
     ) -> Result<(), LocalStoreError> {
         let item_id = validate_item_id(&item.id)?;
+        self.persist_clipboard_item_inner(&item_id, item).await
+    }
+
+    pub async fn persist_clipboard_items(
+        &self,
+        items: &[DecryptedClipboardItem],
+    ) -> Result<(), LocalStoreError> {
+        for item in items {
+            self.persist_clipboard_item(item).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn recent_clipboard_items(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<DecryptedClipboardItem>, LocalStoreError> {
+        self.recent_clipboard_items_inner(limit).await
+    }
+
+    pub async fn clipboard_text(&self, id: &str) -> Result<Option<String>, LocalStoreError> {
+        let item_id = validate_item_id(id)?;
+        self.clipboard_text_inner(&item_id).await
+    }
+
+    fn profile_id(&self) -> String {
+        self.profile_id
+            .read()
+            .expect("local store profile lock poisoned")
+            .clone()
+            .unwrap_or_else(|| DEFAULT_PROFILE.to_string())
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl LocalStore {
+    async fn persist_clipboard_item_inner(
+        &self,
+        item_id: &str,
+        item: &DecryptedClipboardItem,
+    ) -> Result<(), LocalStoreError> {
         let dir = self.clipboard_dir();
         tokio::fs::create_dir_all(&dir).await?;
 
@@ -59,17 +105,7 @@ impl LocalStore {
         Ok(())
     }
 
-    pub async fn persist_clipboard_items(
-        &self,
-        items: &[DecryptedClipboardItem],
-    ) -> Result<(), LocalStoreError> {
-        for item in items {
-            self.persist_clipboard_item(item).await?;
-        }
-        Ok(())
-    }
-
-    pub async fn recent_clipboard_items(
+    async fn recent_clipboard_items_inner(
         &self,
         limit: usize,
     ) -> Result<Vec<DecryptedClipboardItem>, LocalStoreError> {
@@ -96,17 +132,11 @@ impl LocalStore {
             }
         }
 
-        items.sort_by(|a, b| {
-            b.created_at
-                .cmp(&a.created_at)
-                .then_with(|| b.id.cmp(&a.id))
-        });
-        items.truncate(limit);
+        sort_and_truncate(&mut items, limit);
         Ok(items)
     }
 
-    pub async fn clipboard_text(&self, id: &str) -> Result<Option<String>, LocalStoreError> {
-        let item_id = validate_item_id(id)?;
+    async fn clipboard_text_inner(&self, item_id: &str) -> Result<Option<String>, LocalStoreError> {
         let path = self.clipboard_dir().join(format!("{item_id}.txt"));
         match tokio::fs::read_to_string(path).await {
             Ok(text) => Ok(Some(text)),
@@ -116,13 +146,7 @@ impl LocalStore {
     }
 
     fn profile_root(&self) -> PathBuf {
-        let profile_id = self
-            .profile_id
-            .read()
-            .expect("local store profile lock poisoned")
-            .clone()
-            .unwrap_or_else(|| DEFAULT_PROFILE.to_string());
-        self.base_dir.join(profile_id)
+        self.base_dir.join(self.profile_id())
     }
 
     fn clipboard_dir(&self) -> PathBuf {
@@ -154,6 +178,112 @@ impl LocalStore {
     }
 }
 
+#[cfg(target_family = "wasm")]
+impl LocalStore {
+    async fn persist_clipboard_item_inner(
+        &self,
+        item_id: &str,
+        item: &DecryptedClipboardItem,
+    ) -> Result<(), LocalStoreError> {
+        let storage = browser_storage()?;
+        let item_json = serde_json::to_string(item)?;
+        storage
+            .set_item(&self.clipboard_item_key(item_id), &item_json)
+            .map_err(storage_error)?;
+        self.prepend_clipboard_index(&storage, item_id)?;
+        Ok(())
+    }
+
+    async fn recent_clipboard_items_inner(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<DecryptedClipboardItem>, LocalStoreError> {
+        let storage = browser_storage()?;
+        let mut items = Vec::new();
+
+        for item_id in self.read_clipboard_index(&storage)? {
+            let item_json = storage
+                .get_item(&self.clipboard_item_key(&item_id))
+                .map_err(storage_error)?;
+            let Some(item_json) = item_json else {
+                continue;
+            };
+
+            match serde_json::from_str::<DecryptedClipboardItem>(&item_json) {
+                Ok(item) => items.push(item),
+                Err(e) => {
+                    tracing::warn!(item_id = %item_id, "Failed to read local clipboard item: {}", e)
+                }
+            }
+        }
+
+        sort_and_truncate(&mut items, limit);
+        Ok(items)
+    }
+
+    async fn clipboard_text_inner(&self, item_id: &str) -> Result<Option<String>, LocalStoreError> {
+        let storage = browser_storage()?;
+        let item_json = storage
+            .get_item(&self.clipboard_item_key(item_id))
+            .map_err(storage_error)?;
+        let Some(item_json) = item_json else {
+            return Ok(None);
+        };
+        let item: DecryptedClipboardItem = serde_json::from_str(&item_json)?;
+        Ok(Some(item.text))
+    }
+
+    fn prepend_clipboard_index(
+        &self,
+        storage: &web_sys::Storage,
+        item_id: &str,
+    ) -> Result<(), LocalStoreError> {
+        let mut index = self.read_clipboard_index(storage)?;
+        index.retain(|id| id != item_id);
+        index.insert(0, item_id.to_string());
+        index.truncate(BROWSER_INDEX_LIMIT);
+
+        let index_json = serde_json::to_string(&index)?;
+        storage
+            .set_item(&self.clipboard_index_key(), &index_json)
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    fn read_clipboard_index(
+        &self,
+        storage: &web_sys::Storage,
+    ) -> Result<Vec<String>, LocalStoreError> {
+        let index_json = storage
+            .get_item(&self.clipboard_index_key())
+            .map_err(storage_error)?;
+        let Some(index_json) = index_json else {
+            return Ok(Vec::new());
+        };
+
+        let mut index: Vec<String> = serde_json::from_str(&index_json)?;
+        index.retain(|id| validate_item_id(id).is_ok());
+        Ok(index)
+    }
+
+    fn storage_prefix(&self) -> String {
+        format!(
+            "clipper.client.v1.{}.{}",
+            self.base_dir.display(),
+            self.profile_id()
+        )
+    }
+
+    fn clipboard_index_key(&self) -> String {
+        format!("{}.clipboard.index", self.storage_prefix())
+    }
+
+    fn clipboard_item_key(&self, item_id: &str) -> String {
+        format!("{}.clipboard.{item_id}", self.storage_prefix())
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
 #[derive(Debug, Serialize, Deserialize)]
 struct ClipboardMetadata {
     id: String,
@@ -165,10 +295,21 @@ struct ClipboardMetadata {
     source_device_id: String,
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn default_clipboard_mime_type() -> String {
     "text/plain".into()
 }
 
+fn sort_and_truncate(items: &mut Vec<DecryptedClipboardItem>, limit: usize) {
+    items.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    items.truncate(limit);
+}
+
+#[cfg(not(target_family = "wasm"))]
 async fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), LocalStoreError> {
     let tmp_path = path.with_extension(format!(
         "{}.tmp",
@@ -186,6 +327,25 @@ fn validate_item_id(id: &str) -> Result<String, LocalStoreError> {
     Ok(uuid.to_string())
 }
 
+#[cfg(target_family = "wasm")]
+fn browser_storage() -> Result<web_sys::Storage, LocalStoreError> {
+    let window =
+        web_sys::window().ok_or_else(|| LocalStoreError::BrowserStorage("no window".into()))?;
+    window
+        .local_storage()
+        .map_err(storage_error)?
+        .ok_or_else(|| LocalStoreError::BrowserStorage("localStorage is not available".into()))
+}
+
+#[cfg(target_family = "wasm")]
+fn storage_error(error: wasm_bindgen::JsValue) -> LocalStoreError {
+    LocalStoreError::BrowserStorage(
+        error
+            .as_string()
+            .unwrap_or_else(|| "browser storage operation failed".into()),
+    )
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LocalStoreError {
     #[error("local store I/O error: {0}")]
@@ -194,6 +354,8 @@ pub enum LocalStoreError {
     Json(#[from] serde_json::Error),
     #[error("invalid local clipboard item id: {0}")]
     InvalidId(String),
+    #[error("browser local storage error: {0}")]
+    BrowserStorage(String),
 }
 
 #[cfg(test)]

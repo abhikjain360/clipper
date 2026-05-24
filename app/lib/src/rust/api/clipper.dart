@@ -50,6 +50,16 @@ Future<String> copyToLocal({required String id}) =>
 Future<String> uploadFile({required String filePath}) =>
     RustLib.instance.api.crateApiClipperUploadFile(filePath: filePath);
 
+Future<String> uploadFileBytes({
+  required String filename,
+  required String mimeType,
+  required List<int> bytes,
+}) => RustLib.instance.api.crateApiClipperUploadFileBytes(
+  filename: filename,
+  mimeType: mimeType,
+  bytes: bytes,
+);
+
 Future<void> downloadFile({
   required String fileId,
   required String targetPath,
@@ -57,6 +67,9 @@ Future<void> downloadFile({
   fileId: fileId,
   targetPath: targetPath,
 );
+
+Future<Uint8List> downloadFileBytes({required String fileId}) =>
+    RustLib.instance.api.crateApiClipperDownloadFileBytes(fileId: fileId);
 
 Future<void> deleteFile({required String fileId}) =>
     RustLib.instance.api.crateApiClipperDeleteFile(fileId: fileId);

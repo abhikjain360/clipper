@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 
 String clipperDeviceName([TargetPlatform? platform]) {
+  if (kIsWeb) return 'Web-Clipper';
+
   return switch (platform ?? defaultTargetPlatform) {
     TargetPlatform.android => 'Android-Clipper',
     TargetPlatform.iOS => 'iOS-Clipper',
@@ -12,6 +14,8 @@ String clipperDeviceName([TargetPlatform? platform]) {
 }
 
 String defaultServerUrl([TargetPlatform? platform]) {
+  if (kIsWeb) return 'http://127.0.0.1:8787';
+
   return switch (platform ?? defaultTargetPlatform) {
     TargetPlatform.android => 'http://10.0.2.2:8787',
     _ => 'http://127.0.0.1:8787',
