@@ -28,6 +28,7 @@ impl DaemonRequest {
 #[serde(tag = "cmd", content = "params", rename_all = "snake_case")]
 pub enum DaemonCommand {
     Login(LoginParams),
+    Register(RegisterParams),
     Logout,
     GetState,
     SendClipboard(SendClipboardParams),
@@ -40,6 +41,15 @@ pub enum DaemonCommand {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginParams {
+    pub passphrase: String,
+    pub user_id: Option<String>,
+    pub device_name: Option<String>,
+    pub server_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterParams {
+    pub access_key: String,
     pub passphrase: String,
     pub device_name: Option<String>,
     pub server_url: Option<String>,
@@ -79,6 +89,11 @@ pub struct CopyToLocalResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadFileResult {
     pub file_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterResult {
+    pub user_id: String,
 }
 
 /// Response from daemon to app.
@@ -152,6 +167,7 @@ mod tests {
             id: "abc-123".into(),
             command: DaemonCommand::Login(LoginParams {
                 passphrase: "secret".into(),
+                user_id: None,
                 device_name: None,
                 server_url: None,
             }),
@@ -170,6 +186,29 @@ mod tests {
         let json = r#"{"id":"1","cmd":"logout"}"#;
         let req: DaemonRequest = serde_json::from_str(json).unwrap();
         assert!(matches!(req.command, DaemonCommand::Logout));
+    }
+
+    #[test]
+    fn register_request_roundtrip() {
+        let req = DaemonRequest {
+            id: "reg-1".into(),
+            command: DaemonCommand::Register(RegisterParams {
+                access_key: "invite".into(),
+                passphrase: "secret".into(),
+                device_name: Some("Phone".into()),
+                server_url: Some("http://localhost:8787".into()),
+            }),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
+        match parsed.command {
+            DaemonCommand::Register(params) => {
+                assert_eq!(params.access_key, "invite");
+                assert_eq!(params.device_name.as_deref(), Some("Phone"));
+            }
+            _ => panic!("expected register"),
+        }
     }
 
     #[test]
@@ -202,6 +241,7 @@ mod tests {
     fn event_state_changed_roundtrip() {
         let state = AppState {
             logged_in: true,
+            user_id: Some("user1".into()),
             device_id: Some("dev1".into()),
             device_name: Some("Mac".into()),
             connection_status: crate::ConnectionStatus::Connected,

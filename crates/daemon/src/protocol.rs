@@ -4,5 +4,5 @@
 pub use clipper_daemon_types::{
     CopyToLocalParams, CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonEventKind, DaemonLine,
     DaemonRequest, DaemonResponse, DeleteFileParams, DownloadFileParams, LoginParams,
-    SendClipboardParams, UploadFileParams, UploadFileResult,
+    RegisterParams, RegisterResult, SendClipboardParams, UploadFileParams, UploadFileResult,
 };

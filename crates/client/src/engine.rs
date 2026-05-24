@@ -70,6 +70,14 @@ impl SyncEngine {
         api.base_url().to_string()
     }
 
+    pub async fn set_saved_profile(&self, user_id: Option<String>, device_name: Option<String>) {
+        let mut state = self.state.write().await;
+        state.user_id = user_id;
+        state.device_name = device_name;
+        drop(state);
+        self.bump_version();
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.state_rx.clone()
     }
@@ -89,7 +97,7 @@ impl SyncEngine {
         passphrase: &str,
         device_name: &str,
     ) -> Result<(), ClientError> {
-        self.login_with_platform(passphrase, device_name, "macos")
+        self.login_with_platform_and_user(passphrase, None, device_name, "macos")
             .await
     }
 
@@ -99,20 +107,93 @@ impl SyncEngine {
         device_name: &str,
         platform: &str,
     ) -> Result<(), ClientError> {
+        self.login_with_platform_and_user(passphrase, None, device_name, platform)
+            .await
+    }
+
+    pub async fn login_with_platform_and_user(
+        self: &Arc<Self>,
+        passphrase: &str,
+        user_id: Option<&str>,
+        device_name: &str,
+        platform: &str,
+    ) -> Result<(), ClientError> {
         let login_resp = {
             let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.login(passphrase, device_name, platform).await?
+            api.login(passphrase, user_id, device_name, platform)
+                .await?
         };
 
+        self.finish_auth(
+            passphrase,
+            device_name,
+            login_resp.user_id.clone(),
+            login_resp.device_id.clone(),
+            &login_resp.server,
+        )
+        .await?;
+
+        info!("Login complete, device_id={}", login_resp.device_id);
+        Ok(())
+    }
+
+    pub async fn register(
+        self: &Arc<Self>,
+        access_key: &str,
+        passphrase: &str,
+        device_name: &str,
+    ) -> Result<String, ClientError> {
+        self.register_with_platform(access_key, passphrase, device_name, "macos")
+            .await
+    }
+
+    pub async fn register_with_platform(
+        self: &Arc<Self>,
+        access_key: &str,
+        passphrase: &str,
+        device_name: &str,
+        platform: &str,
+    ) -> Result<String, ClientError> {
+        let register_resp = {
+            let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
+            api.register(access_key, passphrase, device_name, platform)
+                .await?
+        };
+
+        self.finish_auth(
+            passphrase,
+            device_name,
+            register_resp.user_id.clone(),
+            register_resp.device_id.clone(),
+            &register_resp.server,
+        )
+        .await?;
+
+        info!(
+            user_id = %register_resp.user_id,
+            device_id = %register_resp.device_id,
+            "Registration complete"
+        );
+        Ok(register_resp.user_id)
+    }
+
+    async fn finish_auth(
+        self: &Arc<Self>,
+        passphrase: &str,
+        device_name: &str,
+        user_id: String,
+        device_id: String,
+        server: &ServerInfo,
+    ) -> Result<(), ClientError> {
         let encryption_salt = B64
-            .decode(&login_resp.server.encryption_salt_b64)
+            .decode(&server.encryption_salt_b64)
             .map_err(|e| ClientError::Other(format!("encryption_salt decode: {}", e)))?;
         self.local_store
             .set_profile(profile_id_from_encryption_salt(&encryption_salt));
         let encryption_key = crypto::derive_key(
             passphrase.as_bytes(),
             &encryption_salt,
-            &login_resp.server.encryption_params,
+            &server.encryption_params,
         )
         .map_err(ClientError::Crypto)?;
 
@@ -121,7 +202,8 @@ impl SyncEngine {
         {
             let mut state = self.state.write().await;
             state.logged_in = true;
-            state.device_id = Some(login_resp.device_id.clone());
+            state.user_id = Some(user_id);
+            state.device_id = Some(device_id);
             state.device_name = Some(device_name.to_string());
             state.error = None;
         }
@@ -141,7 +223,6 @@ impl SyncEngine {
             crate::clipboard_watcher::start_clipboard_watcher(engine);
         }
 
-        info!("Login complete, device_id={}", login_resp.device_id);
         Ok(())
     }
 

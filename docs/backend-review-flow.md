@@ -128,8 +128,9 @@ Normal client login:
 
 Client runtime notes:
 
-- macOS login requests are sent to the daemon, which uses the shared Rust client engine.
-- Android login requests are handled by the Rust client engine inside the Flutter app process.
+- macOS registration and login requests are sent to the daemon, which uses the shared Rust client engine.
+- Android registration and login requests are handled by the Rust client engine inside the Flutter app process.
+- The Flutter auth screen exposes separate Register and Login modes. Register requires an access key and passphrase; Login sends the saved or entered `user_id` when available.
 - Both paths must produce the same server-facing OPAQUE, bearer-token, encryption, sync, and file/clipboard behavior.
 - Android emulator development uses `http://10.0.2.2:8787` for host loopback. Production and physical-device deployments should use HTTPS.
 

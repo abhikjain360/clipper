@@ -102,19 +102,28 @@ async fn run() -> DaemonResult<()> {
     // Determine server URL: prefer stored profile, fall back to CLI arg.
     // The passphrase is intentionally not persisted, so the daemon waits for
     // the app to provide it after startup.
-    let server_url = match keychain::load_credentials() {
+    let loaded_creds = match keychain::load_credentials() {
         Ok(Some(creds)) => {
             info!("Found stored server profile in Keychain");
-            creds.server_url
+            Some(creds)
         }
-        Ok(None) => default_server_url,
+        Ok(None) => None,
         Err(e) => {
             warn!("Failed to load server profile from Keychain: {}", e);
-            default_server_url
+            None
         }
     };
+    let server_url = loaded_creds
+        .as_ref()
+        .map(|creds| creds.server_url.as_str())
+        .unwrap_or(default_server_url.as_str());
 
-    let engine = SyncEngine::new_with_data_dir(&server_url, data_dir.join("client"));
+    let engine = SyncEngine::new_with_data_dir(server_url, data_dir.join("client"));
+    if let Some(creds) = loaded_creds {
+        engine
+            .set_saved_profile(creds.user_id, Some(creds.device_name))
+            .await;
+    }
 
     let client_mgr = Arc::new(ClientManager::new());
 

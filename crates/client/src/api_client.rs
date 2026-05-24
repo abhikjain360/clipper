@@ -59,6 +59,7 @@ impl ApiClient {
     pub async fn login(
         &mut self,
         passphrase: &str,
+        user_id: Option<&str>,
         device_name: &str,
         platform: &str,
     ) -> Result<LoginResponse, ClientError> {
@@ -67,18 +68,26 @@ impl ApiClient {
         let (credential_request, client_login_state) =
             crypto::opaque_client_login_start(passphrase.as_bytes())?;
         let challenge_req = LoginChallengeRequest {
-            user_id: None,
+            user_id: user_id.map(str::to_string),
             credential_request_b64: B64.encode(credential_request),
         };
-        let challenge_resp: LoginChallengeResponse = self
+        let challenge_resp = self
             .http
             .post(self.url("/api/auth/challenge"))
             .json(&challenge_req)
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
+
+        if !challenge_resp.status().is_success() {
+            let status = challenge_resp.status().as_u16();
+            let body = challenge_resp.text().await.unwrap_or_default();
+            return Err(ClientError::Api {
+                status,
+                message: body,
+            });
+        }
+
+        let challenge_resp: LoginChallengeResponse = challenge_resp.json().await?;
 
         let credential_response = B64
             .decode(&challenge_resp.credential_response_b64)
@@ -116,6 +125,80 @@ impl ApiClient {
         self.token = Some(login_resp.token.clone());
         debug!("Logged in, device_id={}", login_resp.device_id);
         Ok(login_resp)
+    }
+
+    pub async fn register(
+        &mut self,
+        access_key: &str,
+        passphrase: &str,
+        device_name: &str,
+        platform: &str,
+    ) -> Result<RegisterFinishResponse, ClientError> {
+        validate_server_url(&self.base_url)?;
+
+        let (registration_request, client_state) =
+            crypto::opaque_client_register_start(passphrase.as_bytes())?;
+        let start_req = RegisterStartRequest {
+            access_key: access_key.to_string(),
+            registration_request_b64: B64.encode(registration_request),
+        };
+        let resp = self
+            .http
+            .post(self.url("/api/auth/register/start"))
+            .json(&start_req)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ClientError::Api {
+                status,
+                message: body,
+            });
+        }
+
+        let start_resp: RegisterStartResponse = resp.json().await?;
+        let registration_response = B64
+            .decode(&start_resp.registration_response_b64)
+            .map_err(|e| ClientError::Other(format!("registration response decode: {}", e)))?;
+        let registration_upload = crypto::opaque_client_register_finish(
+            &client_state,
+            passphrase.as_bytes(),
+            &registration_response,
+        )?;
+
+        let finish_req = RegisterFinishRequest {
+            registration_id: start_resp.registration_id,
+            registration_upload_b64: B64.encode(registration_upload),
+            device_id: None,
+            device_name: Some(device_name.to_string()),
+            platform: Some(platform.to_string()),
+        };
+        let resp = self
+            .http
+            .post(self.url("/api/auth/register/finish"))
+            .json(&finish_req)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ClientError::Api {
+                status,
+                message: body,
+            });
+        }
+
+        let register_resp: RegisterFinishResponse = resp.json().await?;
+        self.token = Some(register_resp.token.clone());
+        debug!(
+            user_id = %register_resp.user_id,
+            device_id = %register_resp.device_id,
+            "Registered"
+        );
+        Ok(register_resp)
     }
 
     pub async fn logout(&mut self) -> Result<(), ClientError> {

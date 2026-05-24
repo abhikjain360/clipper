@@ -22,6 +22,12 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
+    #[sea_orm(has_many = "super::clipboard_items::Entity")]
+    ClipboardItems,
+    #[sea_orm(has_many = "super::files::Entity")]
+    Files,
+    #[sea_orm(has_many = "super::sessions::Entity")]
+    Sessions,
     #[sea_orm(
         belongs_to = "super::users::Entity",
         from = "Column::UserId",
@@ -30,23 +36,11 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     Users,
-    #[sea_orm(has_many = "super::clipboard_items::Entity")]
-    ClipboardItems,
-    #[sea_orm(has_many = "super::files::Entity")]
-    Files,
-    #[sea_orm(has_many = "super::sessions::Entity")]
-    Sessions,
 }
 
 impl Related<super::clipboard_items::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::ClipboardItems.def()
-    }
-}
-
-impl Related<super::users::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Users.def()
     }
 }
 
@@ -59,6 +53,12 @@ impl Related<super::files::Entity> for Entity {
 impl Related<super::sessions::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Sessions.def()
+    }
+}
+
+impl Related<super::users::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Users.def()
     }
 }
 

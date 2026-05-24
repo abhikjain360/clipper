@@ -13,7 +13,7 @@ use crate::clients::ClientManager;
 use crate::keychain::{self, Credentials};
 use crate::protocol::{
     CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, LoginParams,
-    UploadFileResult,
+    RegisterParams, RegisterResult, UploadFileResult,
 };
 
 /// Handle a single client connection.
@@ -96,6 +96,7 @@ async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> Daemo
     let id = req.id.clone();
     match req.command {
         DaemonCommand::Login(params) => cmd_login(id, params, engine).await,
+        DaemonCommand::Register(params) => cmd_register(id, params, engine).await,
         DaemonCommand::Logout => cmd_logout(id, engine).await,
         DaemonCommand::GetState => cmd_get_state(id, engine).await,
         DaemonCommand::SendClipboard(params) => cmd_send_clipboard(id, params.text, engine).await,
@@ -117,18 +118,59 @@ async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) ->
         engine.set_base_url(url).await;
     }
 
-    match engine.login(&params.passphrase, device_name).await {
+    match engine
+        .login_with_platform_and_user(
+            &params.passphrase,
+            params.user_id.as_deref(),
+            device_name,
+            "macos",
+        )
+        .await
+    {
         Ok(()) => {
             // Store credentials in Keychain
             let url = engine.base_url().await;
+            let state = engine.get_state().await;
             let creds = Credentials {
                 device_name: device_name.to_string(),
                 server_url: url,
+                user_id: state.user_id,
             };
             if let Err(e) = keychain::store_credentials(&creds) {
                 warn!("Failed to store server profile in Keychain: {}", e);
             }
             DaemonResponse::success(id, None)
+        }
+        Err(e) => DaemonResponse::error(id, e.to_string()),
+    }
+}
+
+async fn cmd_register(
+    id: String,
+    params: RegisterParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    let device_name = params.device_name.as_deref().unwrap_or("macOS");
+
+    if let Some(url) = params.server_url.as_deref() {
+        engine.set_base_url(url).await;
+    }
+
+    match engine
+        .register(&params.access_key, &params.passphrase, device_name)
+        .await
+    {
+        Ok(user_id) => {
+            let url = engine.base_url().await;
+            let creds = Credentials {
+                device_name: device_name.to_string(),
+                server_url: url,
+                user_id: Some(user_id.clone()),
+            };
+            if let Err(e) = keychain::store_credentials(&creds) {
+                warn!("Failed to store server profile in Keychain: {}", e);
+            }
+            json_success(id, RegisterResult { user_id })
         }
         Err(e) => DaemonResponse::error(id, e.to_string()),
     }

@@ -1,12 +1,15 @@
-use sea_orm::DatabaseConnection;
+use sea_orm::{Database, DatabaseConnection};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::error::ServerResult;
+use crate::migration;
 use crate::ws::WsBroadcast;
+use sea_orm_migration::MigratorTrait;
 
 const AUTH_CHALLENGE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_AUTH_CHALLENGES: usize = 4096;
@@ -39,7 +42,43 @@ pub struct PendingRegistration {
 }
 
 impl AppState {
-    pub fn new(db: DatabaseConnection, data_dir: PathBuf) -> Self {
+    pub(crate) async fn open(data_dir: PathBuf) -> ServerResult<Self> {
+        tokio::fs::create_dir_all(&data_dir).await?;
+        let db = Self::connect_db(&data_dir).await?;
+        Self::open_with_db(db, data_dir).await
+    }
+
+    pub(crate) async fn open_with_db(
+        db: DatabaseConnection,
+        data_dir: PathBuf,
+    ) -> ServerResult<Self> {
+        let state = Self::new(db, data_dir);
+        state.run_migrations().await?;
+        state.ensure_storage_dirs().await?;
+        Ok(state)
+    }
+
+    async fn connect_db(data_dir: impl AsRef<Path>) -> ServerResult<DatabaseConnection> {
+        let db_path = data_dir.as_ref().join("clipper.db");
+        let url = format!("sqlite:{}?mode=rwc", db_path.display());
+        let db = Database::connect(&url).await?;
+        Ok(db)
+    }
+
+    async fn run_migrations(&self) -> ServerResult<()> {
+        migration::Migrator::up(self.db(), None).await?;
+        Ok(())
+    }
+
+    async fn ensure_storage_dirs(&self) -> ServerResult<()> {
+        tokio::try_join!(
+            tokio::fs::create_dir_all(self.clipboard_dir()),
+            tokio::fs::create_dir_all(self.files_dir()),
+        )?;
+        Ok(())
+    }
+
+    fn new(db: DatabaseConnection, data_dir: PathBuf) -> Self {
         let (ws_tx, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(AppStateInner {
@@ -54,6 +93,10 @@ impl AppState {
 
     pub fn db(&self) -> &DatabaseConnection {
         &self.inner.db
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        &self.inner.data_dir
     }
 
     pub fn clipboard_dir(&self) -> PathBuf {

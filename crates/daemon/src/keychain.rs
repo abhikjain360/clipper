@@ -9,6 +9,8 @@ const ACCOUNT: &str = "credentials";
 pub struct Credentials {
     pub device_name: String,
     pub server_url: String,
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 pub type KeychainResult<T> = Result<T, KeychainError>;

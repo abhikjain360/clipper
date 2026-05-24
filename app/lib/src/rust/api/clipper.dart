@@ -14,9 +14,23 @@ Future<void> connectToDaemon() =>
 
 Future<void> login({
   required String passphrase,
+  String? userId,
   required String deviceName,
   required String serverUrl,
 }) => RustLib.instance.api.crateApiClipperLogin(
+  passphrase: passphrase,
+  userId: userId,
+  deviceName: deviceName,
+  serverUrl: serverUrl,
+);
+
+Future<String> register({
+  required String accessKey,
+  required String passphrase,
+  required String deviceName,
+  required String serverUrl,
+}) => RustLib.instance.api.crateApiClipperRegister(
+  accessKey: accessKey,
   passphrase: passphrase,
   deviceName: deviceName,
   serverUrl: serverUrl,
@@ -54,6 +68,7 @@ Future<void> waitForStateChange() =>
 
 class BridgeAppState {
   final bool loggedIn;
+  final String? userId;
   final String? deviceId;
   final String? deviceName;
   final BridgeConnectionStatus connectionStatus;
@@ -63,6 +78,7 @@ class BridgeAppState {
 
   const BridgeAppState({
     required this.loggedIn,
+    this.userId,
     this.deviceId,
     this.deviceName,
     required this.connectionStatus,
@@ -77,6 +93,7 @@ class BridgeAppState {
   @override
   int get hashCode =>
       loggedIn.hashCode ^
+      userId.hashCode ^
       deviceId.hashCode ^
       deviceName.hashCode ^
       connectionStatus.hashCode ^
@@ -90,6 +107,7 @@ class BridgeAppState {
       other is BridgeAppState &&
           runtimeType == other.runtimeType &&
           loggedIn == other.loggedIn &&
+          userId == other.userId &&
           deviceId == other.deviceId &&
           deviceName == other.deviceName &&
           connectionStatus == other.connectionStatus &&

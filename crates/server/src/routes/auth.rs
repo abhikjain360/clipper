@@ -471,20 +471,24 @@ where
 mod tests {
     use super::*;
     use sea_orm::{ActiveModelTrait, Database, Set};
-    use sea_orm_migration::MigratorTrait;
     use std::net::{IpAddr, Ipv4Addr};
     use tempfile::TempDir;
 
     use crate::entity::access_keys;
-    use crate::migration;
 
     const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
-    async fn test_state(passphrase: &[u8]) -> (AppState, TempDir) {
+    async fn empty_state() -> (AppState, TempDir) {
         let data_dir = tempfile::tempdir().expect("tempdir");
         let db = Database::connect("sqlite::memory:").await.expect("db");
-        migration::Migrator::up(&db, None).await.expect("migrate");
+        let state = AppState::open_with_db(db, data_dir.path().to_path_buf())
+            .await
+            .expect("state");
+        (state, data_dir)
+    }
 
+    async fn test_state(passphrase: &[u8]) -> (AppState, TempDir) {
+        let (state, data_dir) = empty_state().await;
         let user_id = Uuid::new_v4();
         let opaque_server_setup = crypto::opaque_new_server_setup();
         let (registration_request, client_state) =
@@ -514,7 +518,7 @@ mod tests {
             used_at: Set(Some(now.clone())),
             used_by_user_id: Set(Some(user_id)),
         }
-        .insert(&db)
+        .insert(state.db())
         .await
         .expect("insert access key");
 
@@ -527,11 +531,11 @@ mod tests {
             created_at: Set(now.clone()),
             updated_at: Set(now),
         }
-        .insert(&db)
+        .insert(state.db())
         .await
         .expect("insert config");
 
-        (AppState::new(db, data_dir.path().to_path_buf()), data_dir)
+        (state, data_dir)
     }
 
     fn peer() -> ConnectInfo<SocketAddr> {
@@ -602,10 +606,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_uses_access_key_and_never_receives_password() {
-        let data_dir = tempfile::tempdir().expect("tempdir");
-        let db = Database::connect("sqlite::memory:").await.expect("db");
-        migration::Migrator::up(&db, None).await.expect("migrate");
-        let state = AppState::new(db, data_dir.path().to_path_buf());
+        let (state, _data_dir) = empty_state().await;
         let access_key = "invite-key-with-entropy";
         let passphrase = b"user private passphrase";
         insert_access_key(&state, access_key).await;

@@ -57,11 +57,6 @@ pub async fn init_upload(
         .decode(&req.blob_nonce_b64)
         .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid blob_nonce_b64"))?;
 
-    let files_dir = state.files_dir();
-    tokio::fs::create_dir_all(&files_dir)
-        .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Storage error"))?;
-
     let blob_filename = format!("{}.bin", req.id);
 
     let new_file = files::ActiveModel {
@@ -145,13 +140,6 @@ pub async fn upload_blob(
 
     // Stream body to disk
     let files_dir = state.files_dir();
-    if tokio::fs::create_dir_all(&files_dir).await.is_err() {
-        reset_file_status(&state, file_uuid, "uploading", "pending").await;
-        return Err(error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Storage error",
-        ));
-    }
     let path = files_dir.join(&existing.blob_path);
     let tmp_path = files_dir.join(format!(
         "{}.{}.tmp",
@@ -598,20 +586,30 @@ mod tests {
     use super::*;
     use base64::Engine;
     use sea_orm::{ActiveModelTrait, Database, EntityTrait, Set};
-    use sea_orm_migration::MigratorTrait;
     use tempfile::TempDir;
     use uuid::Uuid;
 
     use crate::entity::{access_keys, devices, users};
-    use crate::migration;
 
     const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
-    async fn test_state() -> (AppState, TempDir) {
-        let data_dir = tempfile::tempdir().expect("tempdir");
-        let db = Database::connect("sqlite::memory:").await.expect("db");
-        migration::Migrator::up(&db, None).await.expect("migrate");
-        (AppState::new(db, data_dir.path().to_path_buf()), data_dir)
+    type TestResult = Result<(), (StatusCode, Json<ErrorResponse>)>;
+
+    async fn test_state() -> Result<(AppState, TempDir), (StatusCode, Json<ErrorResponse>)> {
+        let data_dir = tempfile::tempdir()
+            .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Storage error"))?;
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+        let state = AppState::open_with_db(db, data_dir.path().to_path_buf())
+            .await
+            .map_err(|error| match error {
+                crate::error::ServerError::Io(_) => {
+                    error_response(StatusCode::INTERNAL_SERVER_ERROR, "Storage error")
+                }
+                _ => error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
+            })?;
+        Ok((state, data_dir))
     }
 
     fn auth(user_id: Uuid, device_id: Uuid) -> AuthInfo {
@@ -682,8 +680,8 @@ mod tests {
     // because file IDs become blob filenames, and one bad pending record would
     // put later upload/download/delete operations on an unsafe path.
     #[tokio::test]
-    async fn init_rejects_non_uuid_id() {
-        let (state, data_dir) = test_state().await;
+    async fn init_rejects_non_uuid_id() -> TestResult {
+        let (state, data_dir) = test_state().await?;
 
         let result = init_upload(
             State(state),
@@ -694,14 +692,15 @@ mod tests {
 
         assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
         assert!(!data_dir.path().join("files").join("escape.bin").exists());
+        Ok(())
     }
 
     // This declares a blob larger than the server limit during init. We test it
     // here because rejecting before the body upload prevents resource-exhaustion
     // work from ever starting.
     #[tokio::test]
-    async fn init_rejects_files_over_size_limit() {
-        let (state, _data_dir) = test_state().await;
+    async fn init_rejects_files_over_size_limit() -> TestResult {
+        let (state, _data_dir) = test_state().await?;
         let id = Uuid::new_v4().to_string();
 
         let result = init_upload(
@@ -712,14 +711,15 @@ mod tests {
         .await;
 
         assert_eq!(result.unwrap_err().0, StatusCode::PAYLOAD_TOO_LARGE);
+        Ok(())
     }
 
     // This sends a spoofed source_device_id in the file metadata request. We
     // test it because file provenance must be derived from the authenticated
     // session, not from a client-controlled field.
     #[tokio::test]
-    async fn init_uses_authenticated_device_as_source() {
-        let (state, _data_dir) = test_state().await;
+    async fn init_uses_authenticated_device_as_source() -> TestResult {
+        let (state, _data_dir) = test_state().await?;
         let user_id = insert_user(&state).await;
         let device_auth = Uuid::new_v4();
         insert_device(&state, user_id, device_auth).await;
@@ -739,14 +739,15 @@ mod tests {
             .expect("query")
             .expect("file");
         assert_eq!(file.source_device_id, device_auth);
+        Ok(())
     }
 
     // This uploads a body whose byte count does not match the init metadata. We
     // test it because mismatched partial files must be removed before they can
     // later be completed or served.
     #[tokio::test]
-    async fn upload_blob_rejects_body_size_mismatch() {
-        let (state, data_dir) = test_state().await;
+    async fn upload_blob_rejects_body_size_mismatch() -> TestResult {
+        let (state, data_dir) = test_state().await?;
         let user_id = insert_user(&state).await;
         let device_a = Uuid::new_v4();
         insert_device(&state, user_id, device_a).await;
@@ -776,11 +777,12 @@ mod tests {
                 .join(format!("{id}.bin"))
                 .exists()
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn upload_blob_rejects_duplicate_without_overwriting_blob() {
-        let (state, data_dir) = test_state().await;
+    async fn upload_blob_rejects_duplicate_without_overwriting_blob() -> TestResult {
+        let (state, data_dir) = test_state().await?;
         let user_id = insert_user(&state).await;
         let device_a = Uuid::new_v4();
         insert_device(&state, user_id, device_a).await;
@@ -816,11 +818,12 @@ mod tests {
             .await
             .expect("blob");
         assert_eq!(blob, b"first");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn complete_upload_marks_file_complete_and_logs_event() {
-        let (state, _data_dir) = test_state().await;
+    async fn complete_upload_marks_file_complete_and_logs_event() -> TestResult {
+        let (state, _data_dir) = test_state().await?;
         let user_id = insert_user(&state).await;
         let device_a = Uuid::new_v4();
         insert_device(&state, user_id, device_a).await;
@@ -874,5 +877,6 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "file.created");
         assert_eq!(events[0].object_id, id);
+        Ok(())
     }
 }

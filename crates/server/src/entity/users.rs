@@ -23,27 +23,29 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_many = "super::devices::Entity")]
-    Devices,
-    #[sea_orm(has_many = "super::sessions::Entity")]
-    Sessions,
+    #[sea_orm(
+        belongs_to = "super::access_keys::Entity",
+        from = "Column::AccessKeyHash",
+        to = "super::access_keys::Column::KeyHash",
+        on_update = "Cascade",
+        on_delete = "Restrict"
+    )]
+    AccessKeys,
     #[sea_orm(has_many = "super::clipboard_items::Entity")]
     ClipboardItems,
-    #[sea_orm(has_many = "super::files::Entity")]
-    Files,
+    #[sea_orm(has_many = "super::devices::Entity")]
+    Devices,
     #[sea_orm(has_many = "super::event_log::Entity")]
     EventLog,
+    #[sea_orm(has_many = "super::files::Entity")]
+    Files,
+    #[sea_orm(has_many = "super::sessions::Entity")]
+    Sessions,
 }
 
-impl Related<super::devices::Entity> for Entity {
+impl Related<super::access_keys::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Devices.def()
-    }
-}
-
-impl Related<super::sessions::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Sessions.def()
+        Relation::AccessKeys.def()
     }
 }
 
@@ -53,15 +55,27 @@ impl Related<super::clipboard_items::Entity> for Entity {
     }
 }
 
-impl Related<super::files::Entity> for Entity {
+impl Related<super::devices::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Files.def()
+        Relation::Devices.def()
     }
 }
 
 impl Related<super::event_log::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::EventLog.def()
+    }
+}
+
+impl Related<super::files::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Files.def()
+    }
+}
+
+impl Related<super::sessions::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Sessions.def()
     }
 }
 

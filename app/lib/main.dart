@@ -133,6 +133,6 @@ class _AppRootState extends State<AppRoot> {
     if (_state!.loggedIn) {
       return HomeScreen(state: _state!);
     }
-    return const LoginScreen();
+    return LoginScreen(initialUserId: _state!.userId);
   }
 }

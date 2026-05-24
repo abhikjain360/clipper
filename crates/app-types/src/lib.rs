@@ -41,6 +41,8 @@ pub enum ConnectionStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppState {
     pub logged_in: bool,
+    #[serde(default)]
+    pub user_id: Option<String>,
     pub device_id: Option<String>,
     pub device_name: Option<String>,
     pub connection_status: ConnectionStatus,

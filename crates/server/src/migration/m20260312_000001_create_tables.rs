@@ -18,21 +18,6 @@ impl MigrationTrait for Migration {
                             .primary_key()
                             .check(Expr::col(ServerConfig::Id).eq(1)),
                     )
-                    .col(
-                        ColumnDef::new(ServerConfig::OpaqueServerSetup)
-                            .blob()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(ServerConfig::OpaquePasswordFile)
-                            .blob()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(ServerConfig::EncryptionSalt)
-                            .blob()
-                            .not_null(),
-                    )
                     .col(ColumnDef::new(ServerConfig::CreatedAt).text().not_null())
                     .col(ColumnDef::new(ServerConfig::UpdatedAt).text().not_null())
                     .to_owned(),
@@ -369,9 +354,6 @@ impl MigrationTrait for Migration {
 enum ServerConfig {
     Table,
     Id,
-    OpaqueServerSetup,
-    OpaquePasswordFile,
-    EncryptionSalt,
     CreatedAt,
     UpdatedAt,
 }

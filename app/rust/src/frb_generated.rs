@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1373812254;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 2063723708;
 
 // Section: executor
 
@@ -418,6 +418,7 @@ fn wire__crate__api__clipper__login_impl(
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_passphrase = <String>::sse_decode(&mut deserializer);
+            let api_user_id = <Option<String>>::sse_decode(&mut deserializer);
             let api_device_name = <String>::sse_decode(&mut deserializer);
             let api_server_url = <String>::sse_decode(&mut deserializer);
             deserializer.end();
@@ -426,6 +427,7 @@ fn wire__crate__api__clipper__login_impl(
                     (move || async move {
                         let output_ok = crate::api::clipper::login(
                             api_passphrase,
+                            api_user_id,
                             api_device_name,
                             api_server_url,
                         )
@@ -500,6 +502,51 @@ fn wire__crate__api__clipper__refresh_impl(
                 transform_result_sse::<_, String>(
                     (move || async move {
                         let output_ok = crate::api::clipper::refresh().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__clipper__register_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "register",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_access_key = <String>::sse_decode(&mut deserializer);
+            let api_passphrase = <String>::sse_decode(&mut deserializer);
+            let api_device_name = <String>::sse_decode(&mut deserializer);
+            let api_server_url = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::clipper::register(
+                            api_access_key,
+                            api_passphrase,
+                            api_device_name,
+                            api_server_url,
+                        )
+                        .await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -639,6 +686,7 @@ impl SseDecode for crate::api::clipper::BridgeAppState {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_loggedIn = <bool>::sse_decode(deserializer);
+        let mut var_userId = <Option<String>>::sse_decode(deserializer);
         let mut var_deviceId = <Option<String>>::sse_decode(deserializer);
         let mut var_deviceName = <Option<String>>::sse_decode(deserializer);
         let mut var_connectionStatus =
@@ -649,6 +697,7 @@ impl SseDecode for crate::api::clipper::BridgeAppState {
         let mut var_error = <Option<String>>::sse_decode(deserializer);
         return crate::api::clipper::BridgeAppState {
             logged_in: var_loggedIn,
+            user_id: var_userId,
             device_id: var_deviceId,
             device_name: var_deviceName,
             connection_status: var_connectionStatus,
@@ -828,9 +877,10 @@ fn pde_ffi_dispatcher_primary_impl(
         11 => wire__crate__api__clipper__login_impl(port, ptr, rust_vec_len, data_len),
         12 => wire__crate__api__clipper__logout_impl(port, ptr, rust_vec_len, data_len),
         13 => wire__crate__api__clipper__refresh_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__clipper__send_clipboard_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__clipper__upload_file_impl(port, ptr, rust_vec_len, data_len),
-        16 => {
+        14 => wire__crate__api__clipper__register_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__clipper__send_clipboard_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__clipper__upload_file_impl(port, ptr, rust_vec_len, data_len),
+        17 => {
             wire__crate__api__clipper__wait_for_state_change_impl(port, ptr, rust_vec_len, data_len)
         }
         _ => unreachable!(),
@@ -856,6 +906,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::clipper::BridgeAppState {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.logged_in.into_into_dart().into_dart(),
+            self.user_id.into_into_dart().into_dart(),
             self.device_id.into_into_dart().into_dart(),
             self.device_name.into_into_dart().into_dart(),
             self.connection_status.into_into_dart().into_dart(),
@@ -967,6 +1018,7 @@ impl SseEncode for crate::api::clipper::BridgeAppState {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.logged_in, serializer);
+        <Option<String>>::sse_encode(self.user_id, serializer);
         <Option<String>>::sse_encode(self.device_id, serializer);
         <Option<String>>::sse_encode(self.device_name, serializer);
         <crate::api::clipper::BridgeConnectionStatus>::sse_encode(

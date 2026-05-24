@@ -54,7 +54,9 @@ mod imp {
     use std::sync::{Arc, LazyLock};
 
     use clipper_client::engine::SyncEngine;
-    use clipper_daemon_types::{AppState, CopyToLocalResult, DaemonCommand, UploadFileResult};
+    use clipper_daemon_types::{
+        AppState, CopyToLocalResult, DaemonCommand, RegisterResult, UploadFileResult,
+    };
 
     use super::RuntimeResult;
 
@@ -87,13 +89,28 @@ mod imp {
                     engine.set_base_url(&server_url).await;
                 }
                 engine
-                    .login_with_platform(
+                    .login_with_platform_and_user(
                         &params.passphrase,
+                        params.user_id.as_deref(),
                         params.device_name.as_deref().unwrap_or("Android"),
                         "android",
                     )
                     .await?;
                 Ok(None)
+            }
+            DaemonCommand::Register(params) => {
+                if let Some(server_url) = params.server_url {
+                    engine.set_base_url(&server_url).await;
+                }
+                let user_id = engine
+                    .register_with_platform(
+                        &params.access_key,
+                        &params.passphrase,
+                        params.device_name.as_deref().unwrap_or("Android"),
+                        "android",
+                    )
+                    .await?;
+                Ok(Some(serde_json::to_value(RegisterResult { user_id })?))
             }
             DaemonCommand::Logout => {
                 engine.logout().await?;

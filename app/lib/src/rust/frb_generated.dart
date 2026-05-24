@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => 1373812254;
+  int get rustContentHash => 2063723708;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -103,6 +103,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<void> crateApiClipperLogin({
     required String passphrase,
+    String? userId,
     required String deviceName,
     required String serverUrl,
   });
@@ -110,6 +111,13 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiClipperLogout();
 
   Future<void> crateApiClipperRefresh();
+
+  Future<String> crateApiClipperRegister({
+    required String accessKey,
+    required String passphrase,
+    required String deviceName,
+    required String serverUrl,
+  });
 
   Future<void> crateApiClipperSendClipboard({required String text});
 
@@ -416,6 +424,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @override
   Future<void> crateApiClipperLogin({
     required String passphrase,
+    String? userId,
     required String deviceName,
     required String serverUrl,
   }) {
@@ -424,6 +433,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(passphrase, serializer);
+          sse_encode_opt_String(userId, serializer);
           sse_encode_String(deviceName, serializer);
           sse_encode_String(serverUrl, serializer);
           pdeCallFfi(
@@ -438,7 +448,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiClipperLoginConstMeta,
-        argValues: [passphrase, deviceName, serverUrl],
+        argValues: [passphrase, userId, deviceName, serverUrl],
         apiImpl: this,
       ),
     );
@@ -446,7 +456,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiClipperLoginConstMeta => const TaskConstMeta(
     debugName: "login",
-    argNames: ["passphrase", "deviceName", "serverUrl"],
+    argNames: ["passphrase", "userId", "deviceName", "serverUrl"],
   );
 
   @override
@@ -504,6 +514,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "refresh", argNames: []);
 
   @override
+  Future<String> crateApiClipperRegister({
+    required String accessKey,
+    required String passphrase,
+    required String deviceName,
+    required String serverUrl,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(accessKey, serializer);
+          sse_encode_String(passphrase, serializer);
+          sse_encode_String(deviceName, serializer);
+          sse_encode_String(serverUrl, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 14,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiClipperRegisterConstMeta,
+        argValues: [accessKey, passphrase, deviceName, serverUrl],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiClipperRegisterConstMeta => const TaskConstMeta(
+    debugName: "register",
+    argNames: ["accessKey", "passphrase", "deviceName", "serverUrl"],
+  );
+
+  @override
   Future<void> crateApiClipperSendClipboard({required String text}) {
     return handler.executeNormal(
       NormalTask(
@@ -513,7 +561,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 15,
             port: port_,
           );
         },
@@ -541,7 +589,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 16,
             port: port_,
           );
         },
@@ -568,7 +616,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 17,
             port: port_,
           );
         },
@@ -602,16 +650,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   BridgeAppState dco_decode_bridge_app_state(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return BridgeAppState(
       loggedIn: dco_decode_bool(arr[0]),
-      deviceId: dco_decode_opt_String(arr[1]),
-      deviceName: dco_decode_opt_String(arr[2]),
-      connectionStatus: dco_decode_bridge_connection_status(arr[3]),
-      clipboardItems: dco_decode_list_bridge_clipboard_item(arr[4]),
-      files: dco_decode_list_bridge_file_item(arr[5]),
-      error: dco_decode_opt_String(arr[6]),
+      userId: dco_decode_opt_String(arr[1]),
+      deviceId: dco_decode_opt_String(arr[2]),
+      deviceName: dco_decode_opt_String(arr[3]),
+      connectionStatus: dco_decode_bridge_connection_status(arr[4]),
+      clipboardItems: dco_decode_list_bridge_clipboard_item(arr[5]),
+      files: dco_decode_list_bridge_file_item(arr[6]),
+      error: dco_decode_opt_String(arr[7]),
     );
   }
 
@@ -718,6 +767,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   BridgeAppState sse_decode_bridge_app_state(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_loggedIn = sse_decode_bool(deserializer);
+    var var_userId = sse_decode_opt_String(deserializer);
     var var_deviceId = sse_decode_opt_String(deserializer);
     var var_deviceName = sse_decode_opt_String(deserializer);
     var var_connectionStatus = sse_decode_bridge_connection_status(
@@ -730,6 +780,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_error = sse_decode_opt_String(deserializer);
     return BridgeAppState(
       loggedIn: var_loggedIn,
+      userId: var_userId,
       deviceId: var_deviceId,
       deviceName: var_deviceName,
       connectionStatus: var_connectionStatus,
@@ -872,6 +923,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_bool(self.loggedIn, serializer);
+    sse_encode_opt_String(self.userId, serializer);
     sse_encode_opt_String(self.deviceId, serializer);
     sse_encode_opt_String(self.deviceName, serializer);
     sse_encode_bridge_connection_status(self.connectionStatus, serializer);

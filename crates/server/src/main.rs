@@ -9,7 +9,7 @@ mod state;
 mod ws;
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
@@ -17,8 +17,6 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use clap::{Parser, Subcommand};
-use sea_orm::{Database, DatabaseConnection};
-use sea_orm_migration::MigratorTrait;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -76,19 +74,16 @@ async fn run() -> ServerResult<()> {
 }
 
 async fn init_server(data_dir: PathBuf) -> ServerResult<()> {
-    tokio::fs::create_dir_all(&data_dir).await?;
-
-    let db = connect_db(&data_dir).await?;
-    migration::Migrator::up(&db, None).await?;
+    let state = AppState::open(data_dir).await?;
 
     // Check if already initialized
     use sea_orm::EntityTrait;
     let existing = entity::server_config::Entity::find_by_id(1)
-        .one(&db)
+        .one(state.db())
         .await?;
 
     if existing.is_some() {
-        println!("Server already initialized. To reinitialize, delete the database.");
+        info!("Server already initialized. To reinitialize, delete the database.");
         return Ok(());
     }
 
@@ -97,42 +92,29 @@ async fn init_server(data_dir: PathBuf) -> ServerResult<()> {
 
     let config = entity::server_config::ActiveModel {
         id: Set(1),
-        opaque_server_setup: Set(Vec::new()),
-        opaque_password_file: Set(Vec::new()),
-        encryption_salt: Set(Vec::new()),
         created_at: Set(now.clone()),
         updated_at: Set(now),
     };
-    config.insert(&db).await?;
+    config.insert(state.db()).await?;
 
-    // Create data subdirectories
-    tokio::fs::create_dir_all(data_dir.join("clipboard")).await?;
-    tokio::fs::create_dir_all(data_dir.join("files")).await?;
-
-    println!("Server initialized successfully.");
-    println!("Data directory: {}", data_dir.display());
+    info!(data_dir = %state.data_dir().display(), "Server initialized successfully.");
 
     Ok(())
 }
 
 async fn serve(data_dir: PathBuf, addr: String) -> ServerResult<()> {
-    let db = connect_db(&data_dir).await?;
-    migration::Migrator::up(&db, None).await?;
+    let state = AppState::open(data_dir).await?;
 
     // Verify server is initialized
     use sea_orm::EntityTrait;
     entity::server_config::Entity::find_by_id(1)
-        .one(&db)
+        .one(state.db())
         .await?
         .ok_or(ServerError::NotInitialized)?;
 
-    tokio::fs::create_dir_all(data_dir.join("clipboard")).await?;
-    tokio::fs::create_dir_all(data_dir.join("files")).await?;
-
-    let state = AppState::new(db, data_dir);
     let limiter = Arc::new(RateLimiter::new());
 
-    // Routes that require auth
+    // private routes
     let authed = Router::new()
         .route("/api/auth/logout", post(routes::auth::logout))
         .route("/api/clipboard", post(routes::clipboard::upload))
@@ -153,7 +135,7 @@ async fn serve(data_dir: PathBuf, addr: String) -> ServerResult<()> {
             auth::auth_middleware,
         ));
 
-    // Public routes
+    // public routes
     let app = Router::new()
         .route("/api/health", get(routes::health::health))
         .route(
@@ -171,7 +153,7 @@ async fn serve(data_dir: PathBuf, addr: String) -> ServerResult<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 
-    // Spawn cleanup task
+    // cleanup task
     tokio::spawn(cleanup::run_cleanup_loop(state.clone()));
 
     // Spawn rate limiter pruning
@@ -199,16 +181,10 @@ async fn serve(data_dir: PathBuf, addr: String) -> ServerResult<()> {
     Ok(())
 }
 
-async fn connect_db(data_dir: impl AsRef<Path>) -> ServerResult<DatabaseConnection> {
-    let db_path = data_dir.as_ref().join("clipper.db");
-    let url = format!("sqlite:{}?mode=rwc", db_path.display());
-    let db = Database::connect(&url).await?;
-    Ok(db)
-}
-
 async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("Failed to install Ctrl+C handler");
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        error!(%error, "failed to install Ctrl+C handler");
+        return;
+    }
     info!("Shutdown signal received");
 }

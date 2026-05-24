@@ -62,12 +62,8 @@ pub async fn upload(
     }
 
     // Write ciphertext to disk
-    let clip_dir = state.clipboard_dir();
-    tokio::fs::create_dir_all(&clip_dir)
-        .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Storage error"))?;
-
     let filename = format!("{}.bin", req.id);
+    let clip_dir = state.clipboard_dir();
     let path = clip_dir.join(&filename);
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -227,20 +223,30 @@ mod tests {
     use super::*;
     use base64::Engine;
     use sea_orm::{ActiveModelTrait, Database, EntityTrait, Set};
-    use sea_orm_migration::MigratorTrait;
     use tempfile::TempDir;
     use uuid::Uuid;
 
     use crate::entity::{access_keys, devices, users};
-    use crate::migration;
 
     const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
-    async fn test_state() -> (AppState, TempDir) {
-        let data_dir = tempfile::tempdir().expect("tempdir");
-        let db = Database::connect("sqlite::memory:").await.expect("db");
-        migration::Migrator::up(&db, None).await.expect("migrate");
-        (AppState::new(db, data_dir.path().to_path_buf()), data_dir)
+    type TestResult = Result<(), (StatusCode, Json<ErrorResponse>)>;
+
+    async fn test_state() -> Result<(AppState, TempDir), (StatusCode, Json<ErrorResponse>)> {
+        let data_dir = tempfile::tempdir()
+            .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Storage error"))?;
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+        let state = AppState::open_with_db(db, data_dir.path().to_path_buf())
+            .await
+            .map_err(|error| match error {
+                crate::error::ServerError::Io(_) => {
+                    error_response(StatusCode::INTERNAL_SERVER_ERROR, "Storage error")
+                }
+                _ => error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
+            })?;
+        Ok((state, data_dir))
     }
 
     fn auth(user_id: Uuid, device_id: Uuid) -> AuthInfo {
@@ -319,8 +325,8 @@ mod tests {
     // test it because object IDs become filenames, so accepting non-UUID IDs
     // would reopen path traversal bugs in the upload path.
     #[tokio::test]
-    async fn upload_rejects_non_uuid_id_before_writing() {
-        let (state, data_dir) = test_state().await;
+    async fn upload_rejects_non_uuid_id_before_writing() -> TestResult {
+        let (state, data_dir) = test_state().await?;
 
         let result = upload(
             State(state),
@@ -331,14 +337,15 @@ mod tests {
 
         assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
         assert!(!data_dir.path().join("escape.bin").exists());
+        Ok(())
     }
 
     // This sends a spoofed source_device_id in the body while authenticated as a
     // different device. We test it because provenance must come from the bearer
     // token, not from client-controlled JSON.
     #[tokio::test]
-    async fn upload_uses_authenticated_device_as_source() {
-        let (state, _data_dir) = test_state().await;
+    async fn upload_uses_authenticated_device_as_source() -> TestResult {
+        let (state, _data_dir) = test_state().await?;
         let user_id = insert_user(&state).await;
         let device_auth = Uuid::new_v4();
         insert_device(&state, user_id, device_auth).await;
@@ -358,14 +365,15 @@ mod tests {
             .expect("query")
             .expect("item");
         assert_eq!(item.source_device_id, device_auth);
+        Ok(())
     }
 
     // This uploads two clipboard blobs with the same client ID. We test it
     // because rejecting the duplicate in the database is not enough if the
     // second write already replaced the ciphertext on disk.
     #[tokio::test]
-    async fn upload_rejects_duplicate_id_without_overwriting_blob() {
-        let (state, data_dir) = test_state().await;
+    async fn upload_rejects_duplicate_id_without_overwriting_blob() -> TestResult {
+        let (state, data_dir) = test_state().await?;
         let user_id = insert_user(&state).await;
         let device_a = Uuid::new_v4();
         insert_device(&state, user_id, device_a).await;
@@ -399,11 +407,12 @@ mod tests {
             .await
             .expect("blob");
         assert_eq!(blob, b"first encrypted clipboard");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn list_only_returns_items_for_authenticated_user() {
-        let (state, _data_dir) = test_state().await;
+    async fn list_only_returns_items_for_authenticated_user() -> TestResult {
+        let (state, _data_dir) = test_state().await?;
         let user_a = insert_user(&state).await;
         let user_b = insert_user(&state).await;
         let device_a = Uuid::new_v4();
@@ -449,5 +458,6 @@ mod tests {
 
         assert_eq!(resp.items.len(), 1);
         assert_eq!(resp.items[0].id, item_a);
+        Ok(())
     }
 }
