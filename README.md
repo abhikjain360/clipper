@@ -44,9 +44,24 @@ synced clipboard history and can add the current text clipboard entry through
 the Clipboard tab when the browser grants access.
 
 ```sh
-cd app && flutter run -d macos
 cd app && flutter run -d android
 ```
+
+macOS app packaging currently uses host Flutter and Xcode, while Rust artifacts
+still use the Nix-pinned Rust toolchain through `CARGOKIT_CARGO` /
+`CARGOKIT_RUSTC`. Use the wrapper so the Xcode environment is sanitized and the
+daemon build uses the same pinned Rust toolchain:
+
+```sh
+nix run .#macos-build
+```
+
+By default the wrapper looks for Homebrew Flutter at `/opt/homebrew/bin/flutter`
+or `/usr/local/bin/flutter`, builds `--debug`, and disables Flutter's Swift
+Package Manager integration so the current CocoaPods-based macOS project is not
+rewritten by newer host Flutter versions. Override with
+`CLIPPER_HOST_FLUTTER=/path/to/flutter` and pass normal Flutter build flags
+after `--`, for example `nix run .#macos-build -- --release`.
 
 ## Development
 

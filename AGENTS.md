@@ -47,6 +47,13 @@
   - Flutter Rust Bridge requires shared-memory wasm and cross-origin isolation
     for the wasm worker. Use these wrappers instead of generic build or static
     file server commands.
+- Build the macOS Flutter app: `nix run .#macos-build`
+  - This wrapper is Darwin-only. It uses host Flutter/Xcode for app packaging
+    because Flutter mutates copied macOS engine framework artifacts during the
+    build, but keeps Rust on the flake-provided fenix toolchain through
+    `CARGOKIT_CARGO` / `CARGOKIT_RUSTC`.
+  - It defaults `FLUTTER_SWIFT_PACKAGE_MANAGER=false` so newer host Flutter
+    versions do not rewrite the current CocoaPods-based macOS project.
 
 - Regenerate SeaORM entities after server schema changes:
 

@@ -45,13 +45,8 @@ post_install do |installer|
   runner_target = main_project.targets.find { |t| t.name == 'Runner' }
   if runner_target
     phase_name = 'Build & Embed clipper-daemon'
-    # Remove existing phase if present (idempotent)
-    runner_target.shell_script_build_phases.each do |phase|
-      if phase.name == phase_name
-        runner_target.build_phases.delete(phase)
-      end
-    end
-    phase = runner_target.new_shell_script_build_phase(phase_name)
+    phase = runner_target.shell_script_build_phases.find { |p| p.name == phase_name }
+    phase ||= runner_target.new_shell_script_build_phase(phase_name)
     phase.output_paths = ['$(BUILT_PRODUCTS_DIR)/$(PRODUCT_NAME).app/Contents/MacOS/clipper-daemon']
     phase.shell_script = <<~SCRIPT
       set -e
@@ -66,9 +61,22 @@ post_install do |installer|
         CARGO_FLAGS=""
       fi
 
-      # Build clipper-daemon
-      export PATH="$HOME/.cargo/bin:$PATH"
-      cargo build -p clipper-daemon $CARGO_FLAGS --manifest-path "$WORKSPACE_ROOT/Cargo.toml"
+      # Build clipper-daemon with the same pinned Rust toolchain used by cargokit
+      CARGO_BIN="${CARGOKIT_CARGO:-}"
+      if [ -z "$CARGO_BIN" ] && [ -n "${CLIPPER_STABLE_BIN:-}" ]; then
+        CARGO_BIN="$CLIPPER_STABLE_BIN/cargo"
+      fi
+      if [ -z "$CARGO_BIN" ]; then
+        CARGO_BIN="cargo"
+      fi
+
+      if [ -n "${CARGOKIT_RUSTC:-}" ]; then
+        export RUSTC="$CARGOKIT_RUSTC"
+      elif [ -n "${CLIPPER_STABLE_BIN:-}" ] && [ -x "$CLIPPER_STABLE_BIN/rustc" ]; then
+        export RUSTC="$CLIPPER_STABLE_BIN/rustc"
+      fi
+
+      "$CARGO_BIN" build -p clipper-daemon $CARGO_FLAGS --manifest-path "$WORKSPACE_ROOT/Cargo.toml"
 
       # Copy daemon binary into app bundle
       DAEMON_SRC="$WORKSPACE_ROOT/target/$CARGO_PROFILE/clipper-daemon"

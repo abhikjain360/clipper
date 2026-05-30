@@ -19,10 +19,10 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral/.symlinks/plugins/rust_lib_clipper_app/macos
 
 SPEC CHECKSUMS:
-  file_picker: e716a70a9fe5fd9e09ebc922d7541464289443af
+  file_picker: 7584aae6fa07a041af2b36a2655122d42f578c1a
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
-  rust_lib_clipper_app: 3c64dfb7fd2a815bb196bca582ae1de595aa8a1b
+  rust_lib_clipper_app: af21e6104ce958a740081ca8c3e0ff81332ece90
 
-PODFILE CHECKSUM: 4d57f9125646aeefd6b03979408fdf906dbcb141
+PODFILE CHECKSUM: 8161f28eb3314bd00915f7038c44ef624bdb913c
 
 COCOAPODS: 1.16.2

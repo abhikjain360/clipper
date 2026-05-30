@@ -106,6 +106,12 @@
             ])
             ++ [ toolchains.nightly ];
           webServeRuntimeInputs = baseRuntimeInputs ++ [ pkgs.python3 ];
+          macosBuildRuntimeInputs =
+            baseRuntimeInputs
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              pkgs.cocoapods
+              toolchains.stable
+            ];
           nightlyEnv = ''
             export CLIPPER_RUST_NIGHTLY_BIN="${toolchains.nightly}/bin"
           '';
@@ -117,6 +123,10 @@
           '';
           flutterEnv = ''
             export FLUTTER_ROOT="${pkgs.flutter}"
+          '';
+          cargokitStableEnv = stableEnv + ''
+            export CARGOKIT_CARGO="${toolchains.stable}/bin/cargo"
+            export CARGOKIT_RUSTC="${toolchains.stable}/bin/rustc"
           '';
         in
         {
@@ -187,6 +197,15 @@
             script = "web-serve.sh";
             description = "Serve the Flutter web build with required cross-origin isolation headers";
             runtimeInputs = webServeRuntimeInputs;
+          };
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+          macos-build = {
+            program = "clipper-macos-build";
+            script = "macos-build.sh";
+            description = "Build the macOS Flutter app with host Flutter/Xcode and Nix Rust";
+            runtimeInputs = macosBuildRuntimeInputs;
+            env = cargokitStableEnv;
           };
         };
       mkCommandScripts =
