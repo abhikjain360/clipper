@@ -31,6 +31,10 @@
 ## Common Commands
 
 - Format everything: `nix run .#fmt`
+  - Do not run `cargo fmt` directly in this repo. `rustfmt.toml` uses unstable
+    nightly-only options, so formatting must go through the flake wrapper,
+    which selects the pinned nightly toolchain before invoking Cargo.
+  - For Rust-only formatting, use `nix run .#rustfmt` rather than `cargo fmt`.
 - Dependency vulnerability scan: `nix run .#audit`
 - Unused Rust dependency scan: `nix run .#udeps`
 - Rust workspace check: `cargo check --workspace`
