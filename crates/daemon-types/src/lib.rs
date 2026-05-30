@@ -8,7 +8,6 @@ pub mod ipc_path;
 mod protocol;
 mod state;
 
+pub use clipper_api_types::{ApiErrorCode, ErrorResponse};
 pub use protocol::*;
 pub use state::*;
-
-pub use clipper_api_types::{ApiErrorCode, ErrorResponse};

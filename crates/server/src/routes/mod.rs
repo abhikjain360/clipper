@@ -43,7 +43,11 @@ impl ApiError {
     }
 
     pub(crate) fn from_code_with_message(code: ApiErrorCode, message: impl Into<String>) -> Self {
-        Self::new(code_to_status(code), code, message)
+        Self::new(
+            StatusCode::from_u16(code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            code,
+            message,
+        )
     }
 
     pub(crate) fn status(&self) -> StatusCode {
