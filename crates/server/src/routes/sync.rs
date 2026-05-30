@@ -6,6 +6,7 @@ use axum::{
 use base64::Engine;
 use clipper_core::models::{BootstrapResponse, DeviceInfo, ServerInfo};
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
+use tracing::error;
 
 use crate::{
     auth::AuthInfo,
@@ -23,27 +24,68 @@ pub async fn bootstrap(
     let dev = devices::Entity::find_by_id(auth.device_id)
         .one(state.db())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|e| {
+            error!(
+                device_id = %auth.device_id,
+                error = %e,
+                "Failed to look up device in bootstrap",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            error!(
+                device_id = %auth.device_id,
+                "Authenticated device row missing in bootstrap (data inconsistency)",
+            );
+            StatusCode::NOT_FOUND
+        })?;
 
     let user = users::Entity::find_by_id(auth.user_id)
         .one(state.db())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            error!(
+                user_id = %auth.user_id,
+                error = %e,
+                "Failed to look up user in bootstrap",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            error!(
+                user_id = %auth.user_id,
+                "Authenticated user row missing in bootstrap (data inconsistency)",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let latest_seq = event_log::Entity::find()
         .filter(event_log::Column::UserId.eq(auth.user_id))
         .order_by(event_log::Column::Seq, Order::Desc)
         .one(state.db())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            error!(
+                user_id = %auth.user_id,
+                error = %e,
+                "Failed to load latest event_log seq in bootstrap",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .map(|e| i64::from(e.seq))
         .unwrap_or(0);
 
     let encryption_salt =
-        secret_storage::unwrap_encryption_salt(state.secrets(), &user.encryption_salt)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        secret_storage::unwrap_encryption_salt(state.secrets(), &user.encryption_salt).map_err(
+            |e| {
+                error!(
+                    user_id = %auth.user_id,
+                    error = %e,
+                    "Failed to unwrap encryption_salt in bootstrap",
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
+        )?;
 
     Ok(Json(BootstrapResponse {
         device: DeviceInfo {

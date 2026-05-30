@@ -18,12 +18,12 @@ use clipper_core::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set,
-    TransactionTrait,
+    SqlErr, TransactionTrait,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
-use tracing::info;
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -50,7 +50,10 @@ pub async fn init_object(
     if objects::Entity::find_by_id(object_id)
         .one(state.db())
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+        .map_err(|e| {
+            error!(object_id = %object_id, error = %e, "Failed to look up object in init_object");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?
         .is_some()
     {
         return Err(error_response(
@@ -71,7 +74,14 @@ pub async fn init_object(
         let inline = payload.inline_ciphertext.as_ref().expect("inline exists");
         write_payload_bytes_create_new(&path, inline)
             .await
-            .map_err(|_| {
+            .map_err(|e| {
+                error!(
+                    object_id = %object_id,
+                    payload_id = %payload_id,
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to write inline payload to disk",
+                );
                 error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Object payload storage error",
@@ -82,11 +92,10 @@ pub async fn init_object(
 
     let now = Utc::now().to_rfc3339();
     let expires_at = object_expires_at(&state, req.kind, &now);
-    let txn = state
-        .db()
-        .begin()
-        .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+    let txn = state.db().begin().await.map_err(|e| {
+        error!(error = %e, "Failed to begin init_object transaction");
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+    })?;
 
     let object = objects::ActiveModel {
         id: Set(object_id),
@@ -101,13 +110,23 @@ pub async fn init_object(
         status: Set(if all_inline { "complete" } else { "pending" }.into()),
     };
 
-    if object.insert(&txn).await.is_err() {
+    if let Err(e) = object.insert(&txn).await {
         let _ = txn.rollback().await;
         remove_paths(written_paths).await;
-        return Err(error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Database error",
-        ));
+        return Err(match e.sql_err() {
+            Some(SqlErr::UniqueConstraintViolation(_)) => {
+                warn!(
+                    object_id = %object_id,
+                    user_id = %auth.user_id,
+                    "Concurrent init_object lost a race on object id uniqueness",
+                );
+                error_response(StatusCode::CONFLICT, "Object already exists")
+            }
+            _ => {
+                error!(object_id = %object_id, error = %e, "Failed to insert object row");
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+            }
+        });
     }
 
     for payload in &req.payloads {
@@ -129,13 +148,28 @@ pub async fn init_object(
             .into()),
         };
 
-        if payload_model.insert(&txn).await.is_err() {
+        if let Err(e) = payload_model.insert(&txn).await {
             let _ = txn.rollback().await;
             remove_paths(written_paths).await;
-            return Err(error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Database error",
-            ));
+            return Err(match e.sql_err() {
+                Some(SqlErr::UniqueConstraintViolation(_)) => {
+                    warn!(
+                        object_id = %object_id,
+                        payload_id = %payload_id,
+                        "Duplicate payload id in init_object request",
+                    );
+                    error_response(StatusCode::CONFLICT, "Duplicate object payload id")
+                }
+                _ => {
+                    error!(
+                        object_id = %object_id,
+                        payload_id = %payload_id,
+                        error = %e,
+                        "Failed to insert object payload row",
+                    );
+                    error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+                }
+            });
         }
     }
 
@@ -145,7 +179,8 @@ pub async fn init_object(
         None
     };
 
-    if txn.commit().await.is_err() {
+    if let Err(e) = txn.commit().await {
+        error!(object_id = %object_id, error = %e, "Failed to commit init_object transaction");
         remove_paths(written_paths).await;
         return Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -198,7 +233,15 @@ pub async fn upload_payload(
     let payload = object_payloads::Entity::find_by_id((object_uuid, payload_uuid))
         .one(state.db())
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                payload_id = %payload_uuid,
+                error = %e,
+                "Failed to look up object payload for upload",
+            );
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Object payload not found"))?;
 
     if payload.status != "pending" {
@@ -224,7 +267,15 @@ pub async fn upload_payload(
         .filter(object_payloads::Column::Status.eq("pending"))
         .exec(state.db())
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                payload_id = %payload_uuid,
+                error = %e,
+                "Failed to claim payload for upload",
+            );
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
 
     if claimed.rows_affected != 1 {
         return Err(error_response(
@@ -247,7 +298,15 @@ pub async fn upload_payload(
     }
 
     let _ = tokio::fs::remove_file(&final_path).await;
-    if tokio::fs::rename(&tmp_path, &final_path).await.is_err() {
+    if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
+        error!(
+            object_id = %object_uuid,
+            payload_id = %payload_uuid,
+            tmp = %tmp_path.display(),
+            dest = %final_path.display(),
+            error = %e,
+            "Failed to rename tmp payload to final path",
+        );
         let _ = tokio::fs::remove_file(&tmp_path).await;
         reset_payload_status(&state, object_uuid, payload_uuid, "uploading", "pending").await;
         return Err(error_response(
@@ -271,7 +330,15 @@ pub async fn upload_payload(
         .filter(object_payloads::Column::Status.eq("uploading"))
         .exec(state.db())
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                payload_id = %payload_uuid,
+                error = %e,
+                "Failed to mark payload uploaded",
+            );
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
 
     if uploaded.rows_affected != 1 {
         let _ = tokio::fs::remove_file(&final_path).await;
@@ -302,7 +369,14 @@ pub async fn complete_object(
         .filter(object_payloads::Column::ObjectId.eq(object_uuid))
         .all(state.db())
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                error = %e,
+                "Failed to list payloads in complete_object",
+            );
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
 
     if payloads.is_empty() {
         return Err(error_response(
@@ -351,9 +425,20 @@ pub async fn complete_object(
         }
 
         let path = state.objects_dir().join(&payload.ciphertext_path);
-        let (computed_hash, actual_size) = sha256_file(&path)
-            .await
-            .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Payload not found"))?;
+        let (computed_hash, actual_size) = sha256_file(&path).await.map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                payload_id = %payload.payload_id,
+                path = %path.display(),
+                error = %e,
+                error_kind = ?e.kind(),
+                "Failed to hash uploaded payload (file missing or unreadable)",
+            );
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Payload read error",
+            )
+        })?;
         if actual_size != payload.ciphertext_size as u64
             || computed_hash.as_slice() != payload.sha256_ciphertext.as_slice()
         {
@@ -366,11 +451,10 @@ pub async fn complete_object(
 
     let kind = object_kind_from_db(&object.kind)?;
     let now = Utc::now().to_rfc3339();
-    let txn = state
-        .db()
-        .begin()
-        .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+    let txn = state.db().begin().await.map_err(|e| {
+        error!(error = %e, "Failed to begin complete_object transaction");
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+    })?;
 
     object_payloads::Entity::update_many()
         .col_expr(
@@ -384,7 +468,14 @@ pub async fn complete_object(
         .filter(object_payloads::Column::ObjectId.eq(object_uuid))
         .exec(&txn)
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                error = %e,
+                "Failed to mark payloads complete",
+            );
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
 
     let updated = objects::Entity::update_many()
         .col_expr(
@@ -401,7 +492,14 @@ pub async fn complete_object(
         .filter(objects::Column::SourceDeviceId.eq(auth.device_id))
         .exec(&txn)
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                error = %e,
+                "Failed to mark object complete",
+            );
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
 
     if updated.rows_affected != 1 {
         let _ = txn.rollback().await;
@@ -413,9 +511,14 @@ pub async fn complete_object(
 
     let inserted = insert_created_event(&txn, auth.user_id, kind, object_uuid, &now).await?;
 
-    txn.commit()
-        .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+    txn.commit().await.map_err(|e| {
+        error!(
+            object_id = %object_uuid,
+            error = %e,
+            "Failed to commit complete_object transaction",
+        );
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+    })?;
 
     broadcast_created(
         &state,
@@ -455,7 +558,10 @@ pub async fn list_objects(
         .order_by(objects::Column::CreatedAt, Order::Desc);
 
     if let Some(kind) = &query.kind {
-        let kind = object_kind_from_query(kind).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let kind = object_kind_from_query(kind).map_err(|_| {
+            debug!(kind = %kind, "Rejected unknown object kind in list query");
+            StatusCode::BAD_REQUEST
+        })?;
         q = q.filter(objects::Column::Kind.eq(kind.as_str()));
     }
 
@@ -467,7 +573,14 @@ pub async fn list_objects(
         .limit(limit + 1)
         .all(state.db())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            error!(
+                user_id = %auth.user_id,
+                error = %e,
+                "Failed to list objects",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let has_more = objects.len() as u64 > limit;
     let objects: Vec<objects::Model> = objects.into_iter().take(limit as usize).collect();
@@ -480,12 +593,25 @@ pub async fn list_objects(
             .order_by(object_payloads::Column::PayloadId, Order::Asc)
             .all(state.db())
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| {
+                error!(
+                    object_id = %object.id,
+                    error = %e,
+                    "Failed to load payloads while listing objects",
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
         items.push(ObjectListItem {
             id: object.id.into(),
-            kind: object_kind_from_db(&object.kind)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            kind: object_kind_from_db(&object.kind).map_err(|_| {
+                error!(
+                    object_id = %object.id,
+                    kind = %object.kind,
+                    "Object row has unknown kind value in database",
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?,
             meta_nonce: object.meta_nonce.clone(),
             meta_ciphertext: object.meta_ciphertext.clone(),
             payloads: payloads
@@ -524,20 +650,52 @@ pub async fn download_payload(
         .filter(objects::Column::Status.eq("complete"))
         .one(state.db())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                error = %e,
+                "Failed to look up object for download",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let payload = object_payloads::Entity::find_by_id((object_uuid, payload_uuid))
         .filter(object_payloads::Column::Status.eq("complete"))
         .one(state.db())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                payload_id = %payload_uuid,
+                error = %e,
+                "Failed to look up payload for download",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let path = state.objects_dir().join(&payload.ciphertext_path);
-    let file = tokio::fs::File::open(&path)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let file = tokio::fs::File::open(&path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            error!(
+                object_id = %object_uuid,
+                payload_id = %payload_uuid,
+                path = %path.display(),
+                "Payload file missing for complete payload (data inconsistency)",
+            );
+        } else {
+            error!(
+                object_id = %object_uuid,
+                payload_id = %payload_uuid,
+                path = %path.display(),
+                error = %e,
+                error_kind = ?e.kind(),
+                "Failed to open payload file for download",
+            );
+        }
+        StatusCode::NOT_FOUND
+    })?;
 
     Ok(Body::from_stream(ReaderStream::new(file)))
 }
@@ -552,9 +710,23 @@ pub async fn delete_object(
         .filter(objects::Column::UserId.eq(auth.user_id))
         .one(state.db())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                error = %e,
+                "Failed to look up object for delete",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::NOT_FOUND)?;
-    let kind = object_kind_from_db(&object.kind).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let kind = object_kind_from_db(&object.kind).map_err(|_| {
+        error!(
+            object_id = %object_uuid,
+            kind = %object.kind,
+            "Object row has unknown kind value in database",
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     if kind != ObjectKind::File {
         return Err(StatusCode::BAD_REQUEST);
@@ -564,22 +736,35 @@ pub async fn delete_object(
         .filter(object_payloads::Column::ObjectId.eq(object_uuid))
         .all(state.db())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                error = %e,
+                "Failed to list payloads for delete",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let paths: Vec<_> = payloads
         .iter()
         .map(|payload| state.objects_dir().join(&payload.ciphertext_path))
         .collect();
 
-    let txn = state
-        .db()
-        .begin()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let txn = state.db().begin().await.map_err(|e| {
+        error!(error = %e, "Failed to begin delete_object transaction");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     objects::Entity::delete_by_id(object_uuid)
         .exec(&txn)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                error = %e,
+                "Failed to delete object row",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let now = Utc::now().to_rfc3339();
     let event = event_log::ActiveModel {
@@ -592,15 +777,25 @@ pub async fn delete_object(
     };
     let inserted = match event.insert(&txn).await {
         Ok(inserted) => inserted,
-        Err(_) => {
+        Err(e) => {
+            error!(
+                object_id = %object_uuid,
+                error = %e,
+                "Failed to insert file.deleted event",
+            );
             let _ = txn.rollback().await;
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
 
-    txn.commit()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    txn.commit().await.map_err(|e| {
+        error!(
+            object_id = %object_uuid,
+            error = %e,
+            "Failed to commit delete_object transaction",
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     remove_paths(paths).await;
     let _ = state.ws_tx().send(WsBroadcast {
@@ -625,7 +820,15 @@ async fn object_for_upload(
         .filter(objects::Column::UserId.eq(user_id))
         .one(state.db())
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+        .map_err(|e| {
+            error!(
+                object_id = %object_id,
+                user_id = %user_id,
+                error = %e,
+                "Failed to look up object for upload context",
+            );
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Object not found"))?;
 
     if object.source_device_id != device_id {
@@ -655,7 +858,16 @@ where
     }
     .insert(db)
     .await
-    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))
+    .map_err(|e| {
+        error!(
+            object_id = %object_id,
+            user_id = %user_id,
+            kind = kind.as_str(),
+            error = %e,
+            "Failed to insert created event",
+        );
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+    })
 }
 
 fn broadcast_created(
@@ -757,7 +969,12 @@ async fn stream_body_to_payload_file(
         .create_new(true)
         .open(tmp_path)
         .await
-        .map_err(|_| {
+        .map_err(|e| {
+            error!(
+                path = %tmp_path.display(),
+                error = %e,
+                "Failed to create tmp payload file",
+            );
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Object payload storage error",
@@ -768,7 +985,10 @@ async fn stream_body_to_payload_file(
     let mut stream = body.into_data_stream();
     let mut total_size = 0_u64;
     while let Some(chunk) = stream.next().await {
-        let data = chunk.map_err(|_| error_response(StatusCode::BAD_REQUEST, "Stream error"))?;
+        let data = chunk.map_err(|e| {
+            debug!(error = %e, "Payload upload stream error (client disconnect or network)");
+            error_response(StatusCode::BAD_REQUEST, "Stream error")
+        })?;
         total_size += data.len() as u64;
         if total_size > expected_size {
             drop(out_file);
@@ -777,7 +997,12 @@ async fn stream_body_to_payload_file(
                 "Payload size does not match initialized size",
             ));
         }
-        out_file.write_all(&data).await.map_err(|_| {
+        out_file.write_all(&data).await.map_err(|e| {
+            error!(
+                path = %tmp_path.display(),
+                error = %e,
+                "Failed to write payload chunk to disk",
+            );
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Object payload write error",
@@ -785,7 +1010,12 @@ async fn stream_body_to_payload_file(
         })?;
     }
 
-    out_file.flush().await.map_err(|_| {
+    out_file.flush().await.map_err(|e| {
+        error!(
+            path = %tmp_path.display(),
+            error = %e,
+            "Failed to flush tmp payload file",
+        );
         error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Object payload flush error",
@@ -811,7 +1041,7 @@ async fn reset_payload_status(
     to: &str,
 ) {
     let now = Utc::now().to_rfc3339();
-    let _ = object_payloads::Entity::update_many()
+    if let Err(e) = object_payloads::Entity::update_many()
         .col_expr(
             object_payloads::Column::Status,
             sea_orm::sea_query::Expr::value(to),
@@ -824,7 +1054,17 @@ async fn reset_payload_status(
         .filter(object_payloads::Column::PayloadId.eq(payload_id))
         .filter(object_payloads::Column::Status.eq(from))
         .exec(state.db())
-        .await;
+        .await
+    {
+        warn!(
+            object_id = %object_id,
+            payload_id = %payload_id,
+            from = from,
+            to = to,
+            error = %e,
+            "Best-effort payload status reset failed",
+        );
+    }
 }
 
 async fn sha256_file(path: &std::path::Path) -> std::io::Result<([u8; SHA256_BYTES], u64)> {

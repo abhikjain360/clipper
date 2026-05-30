@@ -15,9 +15,9 @@ use clipper_core::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, Set,
-    TransactionTrait,
+    SqlErr, TransactionTrait,
 };
-use tracing::info;
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -40,12 +40,14 @@ pub async fn challenge(
 
     let opaque_server_setup =
         secret_storage::unwrap_opaque_server_setup(state.secrets(), &user.opaque_server_setup)
-            .map_err(|_| {
+            .map_err(|e| {
+                error!(user_id = %user.id, error = %e, "Failed to unwrap opaque_server_setup");
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
             })?;
     let opaque_password_file =
         secret_storage::unwrap_opaque_password_file(state.secrets(), &user.opaque_password_file)
-            .map_err(|_| {
+            .map_err(|e| {
+                error!(user_id = %user.id, error = %e, "Failed to unwrap opaque_password_file");
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
             })?;
 
@@ -68,7 +70,10 @@ pub async fn challenge(
         &req.credential_request,
         &credential_identifier,
     )
-    .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid login request"))?;
+    .map_err(|e| {
+        warn!(user_id = %user.id, error = %e, "OPAQUE login start rejected client request");
+        error_response(StatusCode::UNAUTHORIZED, "Invalid login request")
+    })?;
     // Stash state_S keyed by challenge_id until the client returns its
     // CredentialFinalization (= client_mac) in `login`.
     let challenge_id = state.create_auth_challenge(user.id, server_login_state);
@@ -91,18 +96,27 @@ pub async fn register_start(
         state.secrets(),
         &db_config.access_key_hash_salt,
     )
-    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error"))?;
+    .map_err(|e| {
+        error!(error = %e, "Failed to unwrap access_key_hash_salt");
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
+    })?;
     let access_key_hash = access_key_hash(
         &req.access_key,
         &access_key_hash_salt,
         &state.secrets().access_key_pepper,
         &state.config().crypto.access_key_hash_params,
     )
-    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error"))?;
+    .map_err(|e| {
+        error!(error = %e, "Failed to hash access key");
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error")
+    })?;
     let access_key = access_keys::Entity::find_by_id(access_key_hash.clone())
         .one(state.db())
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+        .map_err(|e| {
+            error!(error = %e, "Failed to look up access key in register_start");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid access key"))?;
 
     if access_key.used_at.is_some()
@@ -134,7 +148,10 @@ pub async fn register_start(
         &req.registration_request,
         &credential_identifier,
     )
-    .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid registration request"))?;
+    .map_err(|e| {
+        warn!(error = %e, "OPAQUE register start rejected client request");
+        error_response(StatusCode::UNAUTHORIZED, "Invalid registration request")
+    })?;
 
     // OPAQUE round 1 needs no server-side state, but THIS server has to remember
     // the freshly minted user_id and opaque_server_setup (plus the access-key
@@ -171,19 +188,28 @@ pub async fn register_finish(
     // Server does no math here; opaque_password_file is just the upload
     // re-serialized for storage. We persist it on the user row below.
     let opaque_password_file = crypto::opaque_server_register_finish(&req.registration_upload)
-        .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid registration upload"))?;
+        .map_err(|e| {
+            warn!(
+                user_id = %pending.user_id,
+                error = %e,
+                "OPAQUE register finish rejected client upload",
+            );
+            error_response(StatusCode::UNAUTHORIZED, "Invalid registration upload")
+        })?;
 
     let now = Utc::now().to_rfc3339();
-    let txn = state
-        .db()
-        .begin()
-        .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+    let txn = state.db().begin().await.map_err(|e| {
+        error!(error = %e, "Failed to begin register_finish transaction");
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+    })?;
 
     let access_key = access_keys::Entity::find_by_id(pending.access_key_hash.clone())
         .one(&txn)
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+        .map_err(|e| {
+            error!(error = %e, "Failed to look up access key in register_finish");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid access key"))?;
     if access_key.used_at.is_some()
         || access_key
@@ -199,16 +225,23 @@ pub async fn register_finish(
 
     let wrapped_opaque_server_setup =
         secret_storage::wrap_opaque_server_setup(state.secrets(), &pending.opaque_server_setup)
-            .map_err(|_| {
+            .map_err(|e| {
+                error!(error = %e, "Failed to wrap opaque_server_setup");
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
             })?;
     let wrapped_opaque_password_file =
         secret_storage::wrap_opaque_password_file(state.secrets(), &opaque_password_file).map_err(
-            |_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error"),
+            |e| {
+                error!(error = %e, "Failed to wrap opaque_password_file");
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
+            },
         )?;
     let wrapped_encryption_salt =
         secret_storage::wrap_encryption_salt(state.secrets(), &pending.encryption_salt).map_err(
-            |_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error"),
+            |e| {
+                error!(error = %e, "Failed to wrap encryption_salt");
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
+            },
         )?;
 
     users::ActiveModel {
@@ -222,7 +255,19 @@ pub async fn register_finish(
     }
     .insert(&txn)
     .await
-    .map_err(|_| error_response(StatusCode::CONFLICT, "Access key already used"))?;
+    .map_err(|e| match e.sql_err() {
+        Some(SqlErr::UniqueConstraintViolation(_)) => {
+            warn!(
+                user_id = %pending.user_id,
+                "Concurrent register_finish lost a race on access_key_hash uniqueness",
+            );
+            error_response(StatusCode::CONFLICT, "Access key already used")
+        }
+        _ => {
+            error!(error = %e, "Failed to insert user row");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        }
+    })?;
 
     let consumed = access_keys::Entity::update_many()
         .col_expr(
@@ -237,8 +282,16 @@ pub async fn register_finish(
         .filter(access_keys::Column::UsedAt.is_null())
         .exec(&txn)
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+        .map_err(|e| {
+            error!(error = %e, "Failed to mark access key consumed");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
     if consumed.rows_affected != 1 {
+        warn!(
+            user_id = %pending.user_id,
+            rows_affected = consumed.rows_affected,
+            "Access key consumption race detected during register_finish",
+        );
         return Err(error_response(
             StatusCode::CONFLICT,
             "Access key already used",
@@ -262,9 +315,10 @@ pub async fn register_finish(
     )
     .await?;
 
-    txn.commit()
-        .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+    txn.commit().await.map_err(|e| {
+        error!(error = %e, "Failed to commit register_finish transaction");
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+    })?;
 
     info!(user_id = %pending.user_id, device_id = %session.device_id, "Registration successful");
 
@@ -293,8 +347,21 @@ pub async fn login(
     let user = users::Entity::find_by_id(auth_challenge.user_id)
         .one(state.db())
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
-        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid challenge"))?;
+        .map_err(|e| {
+            error!(
+                user_id = %auth_challenge.user_id,
+                error = %e,
+                "Failed to look up user in login",
+            );
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?
+        .ok_or_else(|| {
+            warn!(
+                user_id = %auth_challenge.user_id,
+                "User disappeared between challenge and login",
+            );
+            error_response(StatusCode::UNAUTHORIZED, "Invalid challenge")
+        })?;
     // req.credential_finalization = client_mac.
     // opaque_server_login_finish re-derives
     //   expected_mac = MAC(client_mac_key, transcript_pre ‖ server_mac)
@@ -305,7 +372,10 @@ pub async fn login(
         &auth_challenge.server_login_state,
         &req.credential_finalization,
     )
-    .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid passphrase"))?;
+    .map_err(|e| {
+        debug!(user_id = %user.id, error = %e, "OPAQUE login finalization rejected");
+        error_response(StatusCode::UNAUTHORIZED, "Invalid passphrase")
+    })?;
 
     let session = issue_session(
         state.db(),
@@ -342,7 +412,15 @@ pub async fn logout(
     sessions::Entity::delete_by_id(auth.session_id)
         .exec(state.db())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            error!(
+                session_id = %auth.session_id,
+                device_id = %auth.device_id,
+                error = %e,
+                "Failed to delete session on logout",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     info!(device_id = %auth.device_id, "Logout");
 
@@ -364,7 +442,10 @@ async fn load_server_config(
     server_config::Entity::find_by_id(1)
         .one(state.db())
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+        .map_err(|e| {
+            error!(error = %e, "Failed to load server_config");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?
         .ok_or_else(|| error_response(StatusCode::SERVICE_UNAVAILABLE, "Server not initialized"))
 }
 
@@ -378,7 +459,10 @@ fn server_info(
 ) -> Result<ServerInfo, (StatusCode, Json<ErrorResponse>)> {
     let encryption_salt =
         secret_storage::unwrap_encryption_salt(state.secrets(), &user.encryption_salt).map_err(
-            |_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error"),
+            |e| {
+                error!(user_id = %user.id, error = %e, "Failed to unwrap encryption_salt");
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
+            },
         )?;
     Ok(ServerInfo {
         encryption_salt_b64: B64.encode(&encryption_salt),
@@ -391,10 +475,14 @@ async fn resolve_login_user(
     user_id: Option<clipper_core::models::UserId>,
 ) -> Result<users::Model, (StatusCode, Json<ErrorResponse>)> {
     if let Some(user_id) = user_id {
-        return users::Entity::find_by_id(user_id.into_uuid())
+        let user_uuid = user_id.into_uuid();
+        return users::Entity::find_by_id(user_uuid)
             .one(state.db())
             .await
-            .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+            .map_err(|e| {
+                error!(user_id = %user_uuid, error = %e, "Failed to look up user by id");
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+            })?
             .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unknown user"));
     }
 
@@ -402,7 +490,10 @@ async fn resolve_login_user(
         .limit(2)
         .all(state.db())
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+        .map_err(|e| {
+            error!(error = %e, "Failed to list users for implicit login");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
     match users.len() {
         1 => Ok(users.remove(0)),
         0 => Err(error_response(StatusCode::UNAUTHORIZED, "Unknown user")),
@@ -439,10 +530,19 @@ where
     let existing_device = devices::Entity::find_by_id(device_id)
         .one(db)
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+        .map_err(|e| {
+            error!(device_id = %device_id, error = %e, "Failed to look up device");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
 
     if let Some(existing_device) = existing_device {
         if existing_device.user_id != user_id {
+            warn!(
+                device_id = %device_id,
+                requested_user_id = %user_id,
+                existing_user_id = %existing_device.user_id,
+                "Device id already bound to a different user",
+            );
             return Err(error_response(
                 StatusCode::CONFLICT,
                 "Device id already exists",
@@ -461,7 +561,15 @@ where
             .filter(devices::Column::UserId.eq(user_id))
             .exec(db)
             .await
-            .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+            .map_err(|e| {
+                error!(
+                    device_id = %device_id,
+                    user_id = %user_id,
+                    error = %e,
+                    "Failed to update device last_seen_at",
+                );
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+            })?;
     } else {
         devices::ActiveModel {
             id: Set(device_id),
@@ -474,7 +582,15 @@ where
         }
         .insert(db)
         .await
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+        .map_err(|e| {
+            error!(
+                device_id = %device_id,
+                user_id = %user_id,
+                error = %e,
+                "Failed to insert device row",
+            );
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
     }
 
     let token_raw = crypto::generate_token_with_length(options.token_bytes);
@@ -496,7 +612,16 @@ where
     }
     .insert(db)
     .await
-    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+    .map_err(|e| {
+        error!(
+            session_id = %session_id,
+            user_id = %user_id,
+            device_id = %device_id,
+            error = %e,
+            "Failed to insert session row",
+        );
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+    })?;
 
     Ok(IssuedSession { token, device_id })
 }

@@ -8,6 +8,7 @@ use axum::{
 use clipper_core::models::{ErrorResponse, POSTCARD_CONTENT_TYPE};
 use garde::Validate;
 use serde::{Serialize, de::DeserializeOwned};
+use tracing::{debug, error};
 use uuid::Uuid;
 
 pub mod auth;
@@ -34,11 +35,14 @@ where
             ));
         }
 
-        let bytes = Bytes::from_request(req, state)
-            .await
-            .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid request body"))?;
-        let value = postcard::from_bytes(&bytes)
-            .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid postcard body"))?;
+        let bytes = Bytes::from_request(req, state).await.map_err(|e| {
+            debug!(error = %e, "Failed to read postcard request body");
+            error_response(StatusCode::BAD_REQUEST, "Invalid request body")
+        })?;
+        let value = postcard::from_bytes(&bytes).map_err(|e| {
+            debug!(error = %e, "Failed to decode postcard body");
+            error_response(StatusCode::BAD_REQUEST, "Invalid postcard body")
+        })?;
         validate_request(&value)?;
         Ok(Self(value))
     }
@@ -102,7 +106,10 @@ where
     fn into_response(self) -> Response {
         match postcard::to_allocvec(&self.0) {
             Ok(bytes) => ([(header::CONTENT_TYPE, POSTCARD_CONTENT_TYPE)], bytes).into_response(),
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            Err(e) => {
+                error!(error = %e, "Failed to serialize postcard response");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
         }
     }
 }
