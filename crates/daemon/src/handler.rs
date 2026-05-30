@@ -1,8 +1,10 @@
 //! Per-connection handler: reads commands, dispatches to SyncEngine, writes responses.
 
-use std::sync::Arc;
+use std::{path::Path, path::PathBuf, sync::Arc};
 
 use clipper_client::engine::SyncEngine;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::unix::{OwnedReadHalf, OwnedWriteHalf},
@@ -14,12 +16,15 @@ use crate::{
     clients::ClientManager,
     keychain::{self, Credentials},
     protocol::{
-        CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, LoginParams,
-        RegisterParams, RegisterResult, UploadFileResult,
+        AuthChallenge, CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest,
+        DaemonResponse, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams,
+        RegisterParams, RegisterResult, UploadFileResult, ipc_auth_message,
     },
 };
 
 const MAX_IPC_REQUEST_LINE_BYTES: usize = 4 * 1024 * 1024;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Handle a single client connection.
 pub async fn handle_connection(
@@ -27,9 +32,16 @@ pub async fn handle_connection(
     write_half: OwnedWriteHalf,
     engine: Arc<SyncEngine>,
     client_mgr: Arc<ClientManager>,
+    data_dir: PathBuf,
 ) {
-    let (client_id, mut broadcast_rx) = client_mgr.register().await;
     let writer = Arc::new(Mutex::new(write_half));
+    let mut reader = BufReader::new(read_half);
+
+    if !authenticate_connection(&mut reader, &writer, &data_dir).await {
+        return;
+    }
+
+    let (client_id, mut broadcast_rx) = client_mgr.register().await;
 
     // Send initial state
     let state = engine.get_state().await;
@@ -42,8 +54,6 @@ pub async fn handle_connection(
             return;
         }
     }
-
-    let mut reader = BufReader::new(read_half);
 
     let writer_for_broadcast = Arc::clone(&writer);
 
@@ -121,6 +131,144 @@ pub async fn handle_connection(
     debug!(client_id, "Client disconnected");
 }
 
+async fn authenticate_connection(
+    reader: &mut BufReader<OwnedReadHalf>,
+    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    data_dir: &Path,
+) -> bool {
+    let secret = match keychain::load_or_create_ipc_secret(data_dir) {
+        Ok(secret) => secret,
+        Err(e) => {
+            warn!("Failed to load IPC secret: {}", e);
+            return false;
+        }
+    };
+
+    let daemon_nonce = random_bytes::<IPC_AUTH_NONCE_BYTES>().to_vec();
+    let challenge = DaemonEvent::auth_challenge(AuthChallenge {
+        protocol_version: IPC_AUTH_VERSION,
+        daemon_nonce: daemon_nonce.clone(),
+    });
+    if let Ok(json) = serde_json::to_string(&challenge) {
+        let mut w = writer.lock().await;
+        let line = format!("{}\n", json);
+        if w.write_all(line.as_bytes()).await.is_err() {
+            return false;
+        }
+    } else {
+        return false;
+    }
+
+    let mut line = Vec::new();
+    loop {
+        let trimmed = match read_limited_line(reader, &mut line).await {
+            Ok(Some(trimmed)) => trimmed,
+            Ok(None) => return false,
+            Err(RequestLineError::TooLong) => {
+                let response =
+                    DaemonResponse::error(String::new(), "Request line too large".into());
+                let _ = write_response(writer, response).await;
+                return false;
+            }
+            Err(RequestLineError::Utf8) => {
+                let response = DaemonResponse::error(
+                    String::new(),
+                    "Invalid request: request line is not UTF-8".into(),
+                );
+                let _ = write_response(writer, response).await;
+                return false;
+            }
+            Err(RequestLineError::Io(e)) => {
+                warn!("IPC auth read error: {}", e);
+                return false;
+            }
+        };
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        match verify_auth_request(&trimmed, &secret, &daemon_nonce) {
+            Ok(id) => {
+                let response = DaemonResponse::success(id, None);
+                return write_response(writer, response).await;
+            }
+            Err(AuthRequestError { id, message }) => {
+                let response = DaemonResponse::error(id.unwrap_or_default(), message);
+                let _ = write_response(writer, response).await;
+                return false;
+            }
+        }
+    }
+}
+
+struct AuthRequestError {
+    id: Option<String>,
+    message: String,
+}
+
+fn verify_auth_request(
+    line: &str,
+    secret: &[u8],
+    daemon_nonce: &[u8],
+) -> Result<String, AuthRequestError> {
+    let req = serde_json::from_str::<DaemonRequest>(line).map_err(|e| AuthRequestError {
+        id: None,
+        message: format!("Invalid auth request: {}", e),
+    })?;
+    let id = req.id.clone();
+
+    let DaemonCommand::Authenticate(params) = req.command else {
+        return Err(AuthRequestError {
+            id: Some(id),
+            message: "IPC authentication required".into(),
+        });
+    };
+
+    if params.protocol_version != IPC_AUTH_VERSION {
+        return Err(AuthRequestError {
+            id: Some(id),
+            message: "Unsupported IPC authentication version".into(),
+        });
+    }
+    if params.client_nonce.len() != IPC_AUTH_NONCE_BYTES {
+        return Err(AuthRequestError {
+            id: Some(id),
+            message: "Invalid IPC authentication nonce".into(),
+        });
+    }
+    if params.tag.len() != IPC_AUTH_TAG_BYTES {
+        return Err(AuthRequestError {
+            id: Some(id),
+            message: "Invalid IPC authentication tag".into(),
+        });
+    }
+
+    let mut mac = HmacSha256::new_from_slice(secret).map_err(|_| AuthRequestError {
+        id: Some(id.clone()),
+        message: "Invalid IPC secret".into(),
+    })?;
+    mac.update(&ipc_auth_message(daemon_nonce, &params.client_nonce));
+    mac.verify_slice(&params.tag)
+        .map_err(|_| AuthRequestError {
+            id: Some(id.clone()),
+            message: "IPC authentication failed".into(),
+        })?;
+
+    Ok(id)
+}
+
+async fn write_response(
+    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    response: DaemonResponse,
+) -> bool {
+    let Ok(json) = serde_json::to_string(&response) else {
+        return false;
+    };
+    let mut w = writer.lock().await;
+    let line = format!("{}\n", json);
+    w.write_all(line.as_bytes()).await.is_ok()
+}
+
 #[derive(Debug, thiserror::Error)]
 enum RequestLineError {
     #[error("request line exceeds maximum size")]
@@ -171,6 +319,9 @@ where
 async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> DaemonResponse {
     let id = req.id.clone();
     match req.command {
+        DaemonCommand::Authenticate(_) => {
+            DaemonResponse::error(id, "Already authenticated".into())
+        }
         DaemonCommand::Login(params) => cmd_login(id, params, engine).await,
         DaemonCommand::Register(params) => cmd_register(id, params, engine).await,
         DaemonCommand::Logout => cmd_logout(id, engine).await,
@@ -184,6 +335,15 @@ async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> Daemo
         DaemonCommand::DeleteFile(params) => cmd_delete_file(id, params.file_id, engine).await,
         DaemonCommand::Refresh => cmd_refresh(id, engine).await,
     }
+}
+
+fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0u8; N];
+    for chunk in bytes.chunks_mut(16) {
+        let random = *uuid::Uuid::new_v4().as_bytes();
+        chunk.copy_from_slice(&random[..chunk.len()]);
+    }
+    bytes
 }
 
 async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) -> DaemonResponse {

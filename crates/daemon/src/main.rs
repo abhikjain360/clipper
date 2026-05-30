@@ -2,45 +2,66 @@
 //!
 //! Runs as a macOS LaunchAgent, exposes a Unix socket for app control.
 
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    std::process::exit(1);
+}
+
+#[cfg(target_os = "macos")]
 mod clients;
+#[cfg(target_os = "macos")]
 mod error;
+#[cfg(target_os = "macos")]
 mod handler;
+#[cfg(target_os = "macos")]
 mod keychain;
+#[cfg(target_os = "macos")]
 mod protocol;
 
+#[cfg(target_os = "macos")]
 use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
+#[cfg(target_os = "macos")]
 use clipper_client::engine::SyncEngine;
+#[cfg(target_os = "macos")]
 use tokio::net::UnixListener;
+#[cfg(target_os = "macos")]
 use tracing::{error, info, warn};
 
+#[cfg(target_os = "macos")]
 use crate::{
     clients::ClientManager,
     error::{DaemonError, DaemonResult},
     protocol::DaemonEvent,
 };
 
+#[cfg(target_os = "macos")]
 const PRIVATE_DIR_MODE: u32 = 0o700;
+#[cfg(target_os = "macos")]
 const SOCKET_FILE_MODE: u32 = 0o600;
 
+#[cfg(target_os = "macos")]
 fn app_data_dir() -> DaemonResult<PathBuf> {
     dirs::data_dir()
         .map(|base| base.join("Clipper"))
         .ok_or(DaemonError::DataDirUnavailable)
 }
 
+#[cfg(target_os = "macos")]
 fn socket_path() -> DaemonResult<PathBuf> {
     Ok(app_data_dir()?.join("daemon.sock"))
 }
 
+#[cfg(target_os = "macos")]
 fn data_dir() -> DaemonResult<PathBuf> {
     app_data_dir()
 }
 
+#[cfg(target_os = "macos")]
 fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)?;
     let metadata = std::fs::symlink_metadata(path)?;
@@ -54,6 +75,7 @@ fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn parse_args() -> String {
     let args: Vec<String> = std::env::args().collect();
     let mut server_url = "http://127.0.0.1:8787".to_string();
@@ -70,6 +92,7 @@ fn parse_args() -> String {
     server_url
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -78,6 +101,7 @@ async fn main() {
     }
 }
 
+#[cfg(target_os = "macos")]
 async fn run() -> DaemonResult<()> {
     let default_server_url = parse_args();
 
@@ -196,9 +220,10 @@ async fn run() -> DaemonResult<()> {
                     Ok((stream, _addr)) => {
                         let engine = Arc::clone(&engine);
                         let client_mgr = Arc::clone(&client_mgr);
+                        let data_dir = data_dir.clone();
                         let (read_half, write_half) = stream.into_split();
                         tokio::spawn(handler::handle_connection(
-                            read_half, write_half, engine, client_mgr,
+                            read_half, write_half, engine, client_mgr, data_dir,
                         ));
                     }
                     Err(e) => {

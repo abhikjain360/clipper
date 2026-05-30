@@ -13,9 +13,15 @@ use std::{
 };
 
 use clipper_daemon_types as dt;
-use clipper_daemon_types::{DaemonCommand, DaemonRequest, DaemonResponse};
+use clipper_daemon_types::{
+    AuthenticateParams, AuthChallenge, DaemonCommand, DaemonEventKind, DaemonLine,
+    DaemonRequest, DaemonResponse, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION,
+    ipc_auth_message,
+};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::unix::OwnedWriteHalf,
     sync::{Mutex, RwLock, oneshot, watch},
 };
@@ -24,6 +30,10 @@ use tracing::warn;
 use crate::daemon_process;
 
 pub(crate) type TransportResult<T> = Result<T, TransportError>;
+
+const MAX_DAEMON_LINE_BYTES: usize = 4 * 1024 * 1024;
+
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TransportError {
@@ -47,6 +57,16 @@ pub(crate) enum TransportError {
     RequestEncode(#[from] serde_json::Error),
     #[error("daemon write failed: {0}")]
     Write(#[source] std::io::Error),
+    #[error("daemon read failed: {0}")]
+    Read(#[source] std::io::Error),
+    #[error("daemon message is too large")]
+    DaemonLineTooLarge,
+    #[error("daemon message is not UTF-8")]
+    DaemonLineUtf8,
+    #[error("daemon IPC authentication failed: {0}")]
+    Auth(String),
+    #[error("IPC secret unavailable: {0}")]
+    IpcSecret(#[from] crate::ipc_auth::IpcSecretError),
 }
 
 // ── Connection types ──
@@ -113,7 +133,9 @@ pub(crate) async fn connect() -> TransportResult<()> {
             source,
         })?;
 
-    let (read_half, write_half) = stream.into_split();
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    authenticate_connection(&mut reader, &mut write_half).await?;
 
     let pending: Arc<Mutex<HashMap<String, oneshot::Sender<DaemonResponse>>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -130,23 +152,20 @@ pub(crate) async fn connect() -> TransportResult<()> {
     // Spawn reader task with captured generation.
     let state_tx = BRIDGE.state_tx.clone();
     tokio::spawn(async move {
-        let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
+        let mut line = Vec::new();
         loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) => {
+            match read_limited_daemon_line(&mut reader, &mut line).await {
+                Ok(None) => {
                     warn!("Daemon connection lost (EOF)");
                     drain_pending(&pending, "Daemon disconnected").await;
                     send_terminal_state_if_current(conn_gen, &state_tx);
                     break;
                 }
-                Ok(_) => {
-                    let trimmed = line.trim();
+                Ok(Some(trimmed)) => {
                     if trimmed.is_empty() {
                         continue;
                     }
-                    route_daemon_line(trimmed, &pending, &state_tx).await;
+                    route_daemon_line(&trimmed, &pending, &state_tx).await;
                 }
                 Err(e) => {
                     warn!("Daemon read error: {}", e);
@@ -223,6 +242,131 @@ async fn drain_pending(
     }
 }
 
+async fn authenticate_connection(
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: &mut OwnedWriteHalf,
+) -> TransportResult<()> {
+    let mut line = Vec::new();
+    let challenge_line = read_limited_daemon_line(reader, &mut line)
+        .await?
+        .ok_or(TransportError::ConnectionLost)?;
+    let challenge = parse_auth_challenge(&challenge_line)?;
+    if challenge.protocol_version != IPC_AUTH_VERSION {
+        return Err(TransportError::Auth(
+            "daemon offered unsupported IPC authentication version".into(),
+        ));
+    }
+    if challenge.daemon_nonce.len() != IPC_AUTH_NONCE_BYTES {
+        return Err(TransportError::Auth(
+            "daemon sent invalid IPC authentication nonce".into(),
+        ));
+    }
+
+    let secret = crate::ipc_auth::load_ipc_secret()?;
+    let client_nonce = random_bytes::<IPC_AUTH_NONCE_BYTES>().to_vec();
+    let tag = ipc_auth_tag(&secret, &challenge.daemon_nonce, &client_nonce)?;
+    if tag.len() != IPC_AUTH_TAG_BYTES {
+        return Err(TransportError::Auth("invalid IPC authentication tag".into()));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let req = DaemonRequest::new(
+        id.clone(),
+        DaemonCommand::Authenticate(AuthenticateParams {
+            protocol_version: IPC_AUTH_VERSION,
+            client_nonce,
+            tag,
+        }),
+    );
+    let json = serde_json::to_string(&req)?;
+    let request_line = format!("{}\n", json);
+    writer
+        .write_all(request_line.as_bytes())
+        .await
+        .map_err(TransportError::Write)?;
+
+    let response_line = read_limited_daemon_line(reader, &mut line)
+        .await?
+        .ok_or(TransportError::ConnectionLost)?;
+    let response = serde_json::from_str::<DaemonResponse>(&response_line)
+        .map_err(|e| TransportError::Auth(format!("invalid auth response: {}", e)))?;
+    if response.id != id {
+        return Err(TransportError::Auth(
+            "daemon returned mismatched auth response".into(),
+        ));
+    }
+    if !response.ok {
+        return Err(TransportError::Auth(
+            response.error.unwrap_or_else(|| "daemon rejected IPC auth".into()),
+        ));
+    }
+
+    Ok(())
+}
+
+fn parse_auth_challenge(line: &str) -> TransportResult<AuthChallenge> {
+    match serde_json::from_str::<DaemonLine>(line) {
+        Ok(DaemonLine::Event(event)) if event.event == DaemonEventKind::AuthChallenge => event
+            .auth_challenge
+            .ok_or_else(|| TransportError::Auth("daemon auth challenge missing payload".into())),
+        Ok(_) => Err(TransportError::Auth(
+            "daemon did not send an auth challenge".into(),
+        )),
+        Err(e) => Err(TransportError::Auth(format!(
+            "invalid auth challenge: {}",
+            e
+        ))),
+    }
+}
+
+fn ipc_auth_tag(
+    secret: &[u8],
+    daemon_nonce: &[u8],
+    client_nonce: &[u8],
+) -> TransportResult<Vec<u8>> {
+    let mut mac = HmacSha256::new_from_slice(secret)
+        .map_err(|_| TransportError::Auth("invalid IPC secret".into()))?;
+    mac.update(&ipc_auth_message(daemon_nonce, client_nonce));
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+async fn read_limited_daemon_line<R>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+) -> TransportResult<Option<String>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    line.clear();
+
+    loop {
+        let available = reader.fill_buf().await.map_err(TransportError::Read)?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |pos| pos + 1);
+        if line.len() + take > MAX_DAEMON_LINE_BYTES {
+            return Err(TransportError::DaemonLineTooLarge);
+        }
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
+
+        if line.ends_with(b"\n") {
+            break;
+        }
+    }
+
+    let text = std::str::from_utf8(line).map_err(|_| TransportError::DaemonLineUtf8)?;
+    Ok(Some(text.trim().to_string()))
+}
+
 async fn route_daemon_line(
     line: &str,
     pending: &Arc<Mutex<HashMap<String, oneshot::Sender<DaemonResponse>>>>,
@@ -248,6 +392,15 @@ async fn route_daemon_line(
             warn!("Failed to parse daemon message: {}", e);
         }
     }
+}
+
+fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0u8; N];
+    for chunk in bytes.chunks_mut(16) {
+        let random = *uuid::Uuid::new_v4().as_bytes();
+        chunk.copy_from_slice(&random[..chunk.len()]);
+    }
+    bytes
 }
 
 /// Only publish DaemonNotRunning if this reader's generation is still current.

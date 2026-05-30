@@ -50,10 +50,13 @@ choices that can break old data.
 
 ## P0: Local Daemon IPC Is Too Powerful For A Bare Unix Socket
 
-Status: partially addressed. The current patch removes the `/tmp` socket
-fallback, requires a platform data directory, creates the Clipper directory with
-`0700`, sets the socket file to `0600`, and caps daemon request lines. Peer UID
-checks and IPC tokens remain open.
+Status: addressed for the current local IPC threat model. The current patch
+removes the `/tmp` socket fallback, requires a platform data directory, creates
+the Clipper directory with `0700`, sets the socket file to `0600`, caps daemon
+request lines, and requires an HMAC-based IPC auth handshake before state or
+commands are accepted. The daemon IPC path is macOS-only, and the IPC secret is
+stored in macOS Keychain. Peer UID checks are intentionally not used because IPC
+auth is the explicit trust boundary.
 
 The daemon socket is the local control plane. A client that can connect can get
 initial decrypted state and issue commands for login/register, sending/copying
@@ -79,12 +82,14 @@ Immediate remediation already applied:
 - Require a platform data directory for the daemon socket and client data.
 - Create the socket directory with owner-only permissions, `0700`.
 - Cap daemon IPC request lines.
+- Authenticate each app connection before sending initial state, broadcasts, or
+  accepting commands.
 
 Remaining hardening to consider:
 
-- Verify peer UID where available (`getpeereid` on macOS/BSD or equivalent).
-- Add a per-launch or Keychain-backed IPC secret if same-user local processes
-  are not trusted.
+- If same-user malware with Keychain or process-memory access is in scope,
+  stronger platform identity controls such as signing/sandboxing/entitlements
+  are needed.
 - Consider separate authorization for commands that can read/write arbitrary
   local files.
 

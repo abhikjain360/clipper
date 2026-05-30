@@ -143,6 +143,9 @@ mod imp {
         let engine = engine();
 
         match command {
+            DaemonCommand::Authenticate(_) => Err(super::RuntimeError::UnsupportedOperation(
+                "IPC authentication is only used by the macOS daemon transport",
+            )),
             DaemonCommand::Login(params) => {
                 if let Some(server_url) = params.server_url {
                     engine.set_base_url(&server_url).await;

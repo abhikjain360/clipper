@@ -10,6 +10,25 @@
 use clipper_app_types::AppState;
 use serde::{Deserialize, Serialize};
 
+pub const IPC_AUTH_VERSION: u32 = 1;
+pub const IPC_AUTH_NONCE_BYTES: usize = 32;
+pub const IPC_AUTH_TAG_BYTES: usize = 32;
+
+const IPC_AUTH_CONTEXT: &[u8] = b"clipper-ipc-auth-v1";
+
+pub fn ipc_auth_message(daemon_nonce: &[u8], client_nonce: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(
+        IPC_AUTH_CONTEXT.len() + std::mem::size_of::<u32>() * 3 + daemon_nonce.len() + client_nonce.len(),
+    );
+    message.extend_from_slice(IPC_AUTH_CONTEXT);
+    message.extend_from_slice(&IPC_AUTH_VERSION.to_be_bytes());
+    message.extend_from_slice(&(daemon_nonce.len() as u32).to_be_bytes());
+    message.extend_from_slice(daemon_nonce);
+    message.extend_from_slice(&(client_nonce.len() as u32).to_be_bytes());
+    message.extend_from_slice(client_nonce);
+    message
+}
+
 /// Request from app to daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonRequest {
@@ -27,6 +46,7 @@ impl DaemonRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", content = "params", rename_all = "snake_case")]
 pub enum DaemonCommand {
+    Authenticate(AuthenticateParams),
     Login(LoginParams),
     Register(RegisterParams),
     Logout,
@@ -37,6 +57,13 @@ pub enum DaemonCommand {
     DownloadFile(DownloadFileParams),
     DeleteFile(DeleteFileParams),
     Refresh,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthenticateParams {
+    pub protocol_version: u32,
+    pub client_nonce: Vec<u8>,
+    pub tag: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,19 +167,37 @@ pub struct DaemonEvent {
     pub event: DaemonEventKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<AppState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_challenge: Option<AuthChallenge>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonEventKind {
+    AuthChallenge,
     StateChanged,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthChallenge {
+    pub protocol_version: u32,
+    pub daemon_nonce: Vec<u8>,
+}
+
 impl DaemonEvent {
+    pub fn auth_challenge(challenge: AuthChallenge) -> Self {
+        Self {
+            event: DaemonEventKind::AuthChallenge,
+            state: None,
+            auth_challenge: Some(challenge),
+        }
+    }
+
     pub fn state_changed(state: AppState) -> Self {
         Self {
             event: DaemonEventKind::StateChanged,
             state: Some(state),
+            auth_challenge: None,
         }
     }
 }
