@@ -17,8 +17,8 @@ use clipper_core::{
 };
 use clipper_fs_txn::FsTransaction;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DerivePartialModel, EntityTrait, Order, QueryFilter, QueryOrder,
-    QuerySelect, Set, SqlErr, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DbErr, DerivePartialModel, EntityTrait, Order, QueryFilter,
+    QueryOrder, QuerySelect, Set, SqlErr, TransactionTrait,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -151,9 +151,32 @@ pub async fn init_object(
             upload_url: format!("/api/objects/{}/payloads/{}", object_id_text, p.id),
         })
         .collect();
+    let payload_count = req.payloads.len();
+    let payload_models: Vec<_> = req
+        .payloads
+        .iter()
+        .map(|payload| {
+            let payload_id = payload.id.to_string();
+            object_payloads::ActiveModel {
+                object_id: Set(object_id),
+                payload_id: Set(payload.id.into_uuid()),
+                ciphertext_path: Set(object_payload_filename(&object_id_text, &payload_id)),
+                nonce: Set(payload.nonce.clone()),
+                ciphertext_size: Set(payload.ciphertext_size),
+                sha256_ciphertext: Set(payload.sha256_ciphertext.clone()),
+                created_at: Set(now.clone()),
+                updated_at: Set(now.clone()),
+                status: Set(if payload.inline_ciphertext.is_some() {
+                    "complete"
+                } else {
+                    "pending"
+                }
+                .into()),
+            }
+        })
+        .collect();
 
     let now_str = now.as_str();
-    let object_id_text_ref = object_id_text.as_str();
     let state_ref = &state;
     let inserted_event = with_txn(state.db(), "init_object", async move |txn| {
         let object = objects::ActiveModel {
@@ -187,50 +210,21 @@ pub async fn init_object(
             }
         })?;
 
-        for payload in &req.payloads {
-            let payload_id = payload.id.to_string();
-            let payload_model = object_payloads::ActiveModel {
-                object_id: Set(object_id),
-                payload_id: Set(payload.id.into_uuid()),
-                ciphertext_path: Set(object_payload_filename(object_id_text_ref, &payload_id)),
-                nonce: Set(payload.nonce.clone()),
-                ciphertext_size: Set(payload.ciphertext_size),
-                sha256_ciphertext: Set(payload.sha256_ciphertext.clone()),
-                created_at: Set(now_str.to_owned()),
-                updated_at: Set(now_str.to_owned()),
-                status: Set(if payload.inline_ciphertext.is_some() {
-                    "complete"
-                } else {
-                    "pending"
-                }
-                .into()),
-            };
-
-            payload_model
-                .insert(txn)
-                .await
-                .map_err(|e| match e.sql_err() {
-                    Some(SqlErr::UniqueConstraintViolation(_)) => {
-                        warn!(
-                            object_id = %object_id,
-                            payload_id = %payload_id,
-                            "Duplicate payload id in init_object request",
-                        );
-                        ApiError::from_code_with_message(
-                            ApiErrorCode::DuplicateObjectPayloadId,
-                            "Duplicate object payload id",
-                        )
-                    }
-                    _ => {
-                        error!(
-                            object_id = %object_id,
-                            payload_id = %payload_id,
-                            error = %e,
-                            "Failed to insert object payload row",
-                        );
-                        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-                    }
-                })?;
+        let inserted_payloads = object_payloads::Entity::insert_many(payload_models)
+            .exec_without_returning(txn)
+            .await
+            .map_err(|e| map_payload_batch_insert_error(e, object_id))?;
+        if inserted_payloads != payload_count as u64 {
+            error!(
+                object_id = %object_id,
+                expected_payloads = payload_count,
+                inserted_payloads,
+                "Object payload batch insert affected an unexpected row count",
+            );
+            return Err(ApiError::from_code_with_message(
+                ApiErrorCode::Database,
+                "Database error",
+            ));
         }
 
         // Allocated here, after the object/payload inserts above have taken the
@@ -377,7 +371,7 @@ pub async fn upload_payload(
         return Err(response);
     }
 
-    let _ = tokio::fs::remove_file(&final_path).await;
+    _ = tokio::fs::remove_file(&final_path).await;
     if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
         error!(
             object_id = %object_uuid,
@@ -1165,6 +1159,60 @@ where
     })
 }
 
+fn map_payload_batch_insert_error(error: DbErr, object_id: Uuid) -> ApiError {
+    match error.sql_err() {
+        Some(SqlErr::UniqueConstraintViolation(constraint)) => {
+            if is_duplicate_payload_id_violation(&constraint) {
+                warn!(
+                    object_id = %object_id,
+                    constraint = %constraint,
+                    "Duplicate payload id in init_object request",
+                );
+                ApiError::from_code_with_message(
+                    ApiErrorCode::DuplicateObjectPayloadId,
+                    "Duplicate object payload id",
+                )
+            } else if is_payload_path_conflict(&constraint) {
+                warn!(
+                    object_id = %object_id,
+                    constraint = %constraint,
+                    "Object payload ids resolve to conflicting storage paths",
+                );
+                ApiError::from_code_with_message(
+                    ApiErrorCode::BadRequest,
+                    "Object payload ids conflict",
+                )
+            } else {
+                error!(
+                    object_id = %object_id,
+                    constraint = %constraint,
+                    error = %error,
+                    "Failed to batch insert object payload rows due to a uniqueness violation",
+                );
+                ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+            }
+        }
+        _ => {
+            error!(
+                object_id = %object_id,
+                error = %error,
+                "Failed to batch insert object payload rows",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        }
+    }
+}
+
+fn is_duplicate_payload_id_violation(constraint: &str) -> bool {
+    (constraint.contains("object_payloads.object_id")
+        && constraint.contains("object_payloads.payload_id"))
+        || constraint.contains("pk_object_payloads")
+}
+
+fn is_payload_path_conflict(constraint: &str) -> bool {
+    constraint.contains("object_payloads.ciphertext_path")
+}
+
 fn broadcast_created(
     state: &AppState,
     user_id: Uuid,
@@ -1557,6 +1605,142 @@ mod tests {
         .expect("download");
         let bytes = to_bytes(body, usize::MAX).await.expect("bytes");
         assert_eq!(&bytes[..], ciphertext);
+    }
+
+    #[tokio::test]
+    async fn inline_init_accepts_multiple_payloads_in_one_batch() {
+        let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        insert_device(&state, user_id, device_id).await;
+        let object_id = Uuid::now_v7().to_string();
+        let object_uuid = object_id.parse::<Uuid>().expect("object id");
+        let first_payload_id = Uuid::now_v7();
+        let second_payload_id = Uuid::now_v7();
+        let payloads = [
+            (first_payload_id, b"first encrypted payload".to_vec()),
+            (second_payload_id, b"second encrypted payload".to_vec()),
+        ];
+
+        let Postcard(resp) = init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(ObjectInitRequest {
+                id: object_id.parse().expect("object id"),
+                kind: ObjectKind::Clipboard,
+                meta_nonce: vec![1_u8; XCHACHA20_NONCE_BYTES],
+                meta_ciphertext: b"encrypted metadata".to_vec(),
+                payloads: payloads
+                    .iter()
+                    .map(|(id, ciphertext)| ObjectPayloadInit {
+                        id: (*id).into(),
+                        nonce: vec![2_u8; XCHACHA20_NONCE_BYTES],
+                        ciphertext_size: ciphertext.len() as i64,
+                        sha256_ciphertext: sha256(ciphertext).to_vec(),
+                        inline_ciphertext: Some(ciphertext.clone()),
+                    })
+                    .collect(),
+            }),
+        )
+        .await
+        .expect("init");
+
+        assert!(resp.complete);
+        assert!(resp.upload_urls.is_empty());
+
+        let rows = object_payloads::Entity::find()
+            .filter(object_payloads::Column::ObjectId.eq(object_uuid))
+            .order_by(object_payloads::Column::PayloadId, Order::Asc)
+            .all(state.db())
+            .await
+            .expect("payload rows");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.status == "complete"));
+
+        let Postcard(list) = list_objects(
+            State(state),
+            Extension(auth(user_id, device_id)),
+            Query(ObjectListQuery {
+                kind: Some("clipboard".into()),
+                limit: None,
+                before: None,
+            }),
+        )
+        .await
+        .expect("list");
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].payloads.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn init_maps_batched_duplicate_payload_insert_to_duplicate_payload_error() {
+        let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        insert_device(&state, user_id, device_id).await;
+        let object_id = Uuid::now_v7();
+        let payload_id = Uuid::now_v7();
+        let ciphertext = b"encrypted file payload";
+
+        // Bypass request validation to cover the DB-error mapping branch used
+        // when a batched insert trips the object_payloads uniqueness constraint.
+        let result = init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Postcard(ObjectInitRequest {
+                id: object_id.into(),
+                kind: ObjectKind::File,
+                meta_nonce: vec![1_u8; XCHACHA20_NONCE_BYTES],
+                meta_ciphertext: b"encrypted metadata".to_vec(),
+                payloads: vec![
+                    ObjectPayloadInit {
+                        id: payload_id.into(),
+                        nonce: vec![2_u8; XCHACHA20_NONCE_BYTES],
+                        ciphertext_size: ciphertext.len() as i64,
+                        sha256_ciphertext: sha256(ciphertext).to_vec(),
+                        inline_ciphertext: None,
+                    },
+                    ObjectPayloadInit {
+                        id: payload_id.into(),
+                        nonce: vec![3_u8; XCHACHA20_NONCE_BYTES],
+                        ciphertext_size: ciphertext.len() as i64,
+                        sha256_ciphertext: sha256(ciphertext).to_vec(),
+                        inline_ciphertext: None,
+                    },
+                ],
+            }),
+        )
+        .await;
+
+        let err = result.expect_err("duplicate payload id should fail");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.body().code, ApiErrorCode::DuplicateObjectPayloadId);
+
+        let object = objects::Entity::find_by_id(object_id)
+            .one(state.db())
+            .await
+            .expect("object lookup");
+        assert!(object.is_none(), "failed init transaction rolls back");
+    }
+
+    #[test]
+    fn payload_uniqueness_helpers_separate_payload_id_from_path_conflict() {
+        let duplicate_payload_id =
+            "UNIQUE constraint failed: object_payloads.object_id, object_payloads.payload_id";
+        let path_conflict = "UNIQUE constraint failed: object_payloads.ciphertext_path";
+        let unknown = "UNIQUE constraint failed: other.column";
+
+        assert!(is_duplicate_payload_id_violation(duplicate_payload_id));
+        assert!(!is_payload_path_conflict(duplicate_payload_id));
+
+        assert!(
+            !is_duplicate_payload_id_violation(path_conflict),
+            "ciphertext_path is not the payload-id primary key"
+        );
+        assert!(is_payload_path_conflict(path_conflict));
+
+        assert!(!is_duplicate_payload_id_violation(unknown));
+        assert!(!is_payload_path_conflict(unknown));
     }
 
     #[tokio::test]
