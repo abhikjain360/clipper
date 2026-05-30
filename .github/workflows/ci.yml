@@ -1,0 +1,177 @@
+name: CI
+
+# When this runs (intentionally narrow):
+#
+#   1. workflow_dispatch — a maintainer runs CI manually from the Actions tab,
+#      selecting the branch under test (e.g. a PR's head branch). Dispatch
+#      requires write access, so this is maintainer-only by design.
+#
+#   2. A maintainer adds the "run-ci" label to a pull request targeting main.
+#      Only users with triage/write access can label a PR, so this is the
+#      "maintainer manually triggers CI on a pull request" path. Re-add the
+#      label to re-run after new commits are pushed to the PR.
+#
+#   3. A pull request targeting main is merged (closed with merged == true).
+#      This validates main after a PR merge. A direct `git push` to main does
+#      NOT fire pull_request, so CI never runs on direct pushes. To make that
+#      guarantee meaningful, enable branch protection on main so it can only
+#      advance via merged PRs.
+#
+# Note on third-party actions: versions below are pinned to major tags for
+# readability. Before relying on this, confirm the tags exist and pin them to
+# full commit SHAs. CI uses no secrets, so fork PRs cannot exfiltrate anything;
+# the workflow definition itself always comes from the base branch.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [labeled, closed]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Single source of truth for "should this event run CI?" so every job below
+  # can share one condition instead of repeating it.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          MERGED: ${{ github.event.pull_request.merged }}
+        run: |
+          run=false
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            run=true
+          elif [ "$EVENT" = "pull_request" ] && [ "$ACTION" = "labeled" ] && [ "$LABEL" = "run-ci" ]; then
+            run=true
+          elif [ "$EVENT" = "pull_request" ] && [ "$ACTION" = "closed" ] && [ "$MERGED" = "true" ]; then
+            run=true
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "Decision: run=$run (event=$EVENT action=$ACTION label='$LABEL' merged=$MERGED)"
+
+  format:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      # Zero-config Nix store caching. If unavailable in your org, swap for
+      # nix-community/cache-nix-action or FlakeHub Cache.
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      # `nix run .#fmt` formats Rust, Dart, Deno, and Nix in place; if anything
+      # was not already formatted, the working tree changes and the diff fails.
+      - name: Format
+        run: nix run .#fmt
+      - name: Fail if formatting changed files
+        run: git diff --exit-code
+
+  rust:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: Cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-rust-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-rust-
+      - name: Clippy
+        run: nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: nix develop --command cargo test --workspace --locked
+
+  wasm-check:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: Cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-wasm-
+      - run: nix run .#wasm-check
+
+  udeps:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: Cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-udeps-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-udeps-
+      - run: nix run .#udeps
+
+  audit:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - run: nix run .#audit
+
+  flutter:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: Cache pub cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            app/.dart_tool
+          key: pub-${{ runner.os }}-${{ hashFiles('app/pubspec.lock') }}
+          restore-keys: pub-${{ runner.os }}-
+      - name: Analyze and test
+        run: nix develop --command bash -c 'cd app && flutter pub get && flutter analyze && flutter test'
