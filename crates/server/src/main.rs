@@ -211,7 +211,7 @@ async fn add_access_key(
         })
         .transpose()?;
 
-    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+    use sea_orm::{ActiveModelTrait, Set};
     let access_key_hash_params = config.crypto.access_key_hash_params;
     let state = AppState::open(config, secrets).await?;
     let salt = load_access_key_hash_salt(&state).await?;
@@ -362,4 +362,56 @@ async fn shutdown_signal() {
         return;
     }
     info!("Shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use sea_orm::{ActiveModelTrait, Set};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn load_access_key_hash_salt_rejects_wrong_secret() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let mut config = ServerConfig::default();
+        config.server.data_dir = data_dir.path().to_path_buf();
+        let correct_secrets =
+            ServerSecrets::from_root(&[0x11_u8; clipper_core::crypto::SERVER_SECRET_BYTES]);
+        let state = AppState::open(config.clone(), correct_secrets)
+            .await
+            .expect("state");
+
+        let now = Utc::now().to_rfc3339();
+        let plaintext_salt = clipper_core::crypto::generate_access_key_hash_salt();
+        let wrapped_salt =
+            secret_storage::wrap_access_key_hash_salt(state.secrets(), &plaintext_salt)
+                .expect("wrap salt");
+        entity::server_config::ActiveModel {
+            id: Set(1),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            access_key_hash_salt: Set(wrapped_salt),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert server config");
+
+        assert_eq!(
+            load_access_key_hash_salt(&state).await.expect("load salt"),
+            plaintext_salt
+        );
+
+        let wrong_secrets =
+            ServerSecrets::from_root(&[0x22_u8; clipper_core::crypto::SERVER_SECRET_BYTES]);
+        let wrong_state =
+            AppState::open_with_db_and_config(state.db().clone(), config, wrong_secrets)
+                .await
+                .expect("wrong state");
+
+        let error = load_access_key_hash_salt(&wrong_state)
+            .await
+            .expect_err("wrong secret should fail");
+        assert!(matches!(error, ServerError::Config(message) if message.contains("server secret")));
+    }
 }

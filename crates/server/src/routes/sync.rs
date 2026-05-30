@@ -41,11 +41,9 @@ pub async fn bootstrap(
         .map(|e| i64::from(e.seq))
         .unwrap_or(0);
 
-    let encryption_salt = secret_storage::unwrap_encryption_salt(
-        state.secrets(),
-        &user.encryption_salt,
-    )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let encryption_salt =
+        secret_storage::unwrap_encryption_salt(state.secrets(), &user.encryption_salt)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(BootstrapResponse {
         device: DeviceInfo {
@@ -59,4 +57,94 @@ pub async fn bootstrap(
             encryption_params: state.config().crypto.encryption_params,
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use clipper_core::crypto;
+    use sea_orm::{ActiveModelTrait, Database, Set};
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::{entity::access_keys, secret::ServerSecrets};
+
+    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+    async fn empty_state() -> (AppState, tempfile::TempDir) {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::connect("sqlite::memory:").await.expect("db");
+        let mut config = crate::config::ServerConfig::default();
+        config.server.data_dir = data_dir.path().to_path_buf();
+        let state = AppState::open_with_db_and_config(db, config, ServerSecrets::test_fixture())
+            .await
+            .expect("state");
+        (state, data_dir)
+    }
+
+    #[tokio::test]
+    async fn bootstrap_returns_plaintext_encryption_salt() {
+        let (state, _data_dir) = empty_state().await;
+        let now = Utc::now().to_rfc3339();
+        let user_id = Uuid::now_v7();
+        let device_id = Uuid::now_v7();
+        let access_key_hash = "bootstrap-test-access-key".to_string();
+        let plaintext_salt = crypto::generate_encryption_salt();
+        let wrapped_salt = secret_storage::wrap_encryption_salt(state.secrets(), &plaintext_salt)
+            .expect("wrap salt");
+
+        access_keys::ActiveModel {
+            key_hash: Set(access_key_hash.clone()),
+            created_at: Set(now.clone()),
+            expires_at: Set(None),
+            used_at: Set(Some(now.clone())),
+            used_by_user_id: Set(Some(user_id)),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert access key");
+
+        users::ActiveModel {
+            id: Set(user_id),
+            opaque_server_setup: Set(vec![1]),
+            opaque_password_file: Set(vec![2]),
+            encryption_salt: Set(wrapped_salt.clone()),
+            access_key_hash: Set(access_key_hash),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert user");
+
+        devices::ActiveModel {
+            id: Set(device_id),
+            user_id: Set(user_id),
+            name: Set("test-device".into()),
+            platform: Set("test".into()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            last_seen_at: Set(now),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert device");
+
+        let Json(response) = bootstrap(
+            State(state),
+            Extension(AuthInfo {
+                session_id: Uuid::now_v7(),
+                user_id,
+                device_id,
+            }),
+        )
+        .await
+        .expect("bootstrap");
+
+        let returned_salt = B64
+            .decode(response.server.encryption_salt_b64)
+            .expect("decode salt");
+        assert_eq!(returned_salt, plaintext_salt);
+        assert_ne!(returned_salt, wrapped_salt);
+    }
 }
