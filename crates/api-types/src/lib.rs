@@ -90,10 +90,13 @@ mod base64_vec {
 pub const POSTCARD_CONTENT_TYPE: &str = "application/vnd.clipper.postcard";
 
 /// Argon2id parameters used for client-side encryption key derivation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Validate)]
 pub struct Argon2Params {
+    #[garde(range(min = 1))]
     pub m_cost: u32,
+    #[garde(range(min = 1))]
     pub t_cost: u32,
+    #[garde(range(min = 1))]
     pub p_cost: u32,
 }
 

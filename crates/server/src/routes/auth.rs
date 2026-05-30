@@ -54,7 +54,7 @@ pub async fn challenge(
     Ok(Json(LoginChallengeResponse {
         challenge_id,
         credential_response_b64: B64.encode(credential_response),
-        server: server_info(&user),
+        server: server_info(&user, &state.config().crypto),
     }))
 }
 
@@ -67,9 +67,13 @@ pub async fn register_start(
     check_auth_rate_limit(&limiter, ip)?;
 
     let now = Utc::now().to_rfc3339();
-    let config = load_server_config(&state).await?;
-    let access_key_hash = access_key_hash(&req.access_key, &config.access_key_hash_salt)
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error"))?;
+    let db_config = load_server_config(&state).await?;
+    let access_key_hash = access_key_hash(
+        &req.access_key,
+        &db_config.access_key_hash_salt,
+        &state.config().crypto.access_key_hash_params,
+    )
+    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error"))?;
     let access_key = access_keys::Entity::find_by_id(access_key_hash.clone())
         .one(state.db())
         .await
@@ -90,7 +94,8 @@ pub async fn register_start(
 
     let user_id = Uuid::now_v7();
     let opaque_server_setup = crypto::opaque_new_server_setup();
-    let encryption_salt = crypto::generate_encryption_salt().to_vec();
+    let encryption_salt =
+        crypto::generate_random_bytes(state.config().crypto.encryption_salt_bytes);
     let credential_identifier = opaque_credential_identifier(user_id);
     let registration_response = crypto::opaque_server_register_start(
         &opaque_server_setup,
@@ -112,7 +117,7 @@ pub async fn register_start(
         registration_response_b64: B64.encode(registration_response),
         server: ServerInfo {
             encryption_salt_b64: B64.encode(encryption_salt),
-            encryption_params: crypto::Argon2Params::default(),
+            encryption_params: state.config().crypto.encryption_params,
         },
     }))
 }
@@ -193,11 +198,17 @@ pub async fn register_finish(
     let session = issue_session(
         &txn,
         pending.user_id,
-        req.device_id,
-        req.device_name,
-        req.platform,
-        &headers,
-        ip.to_string(),
+        SessionOptions {
+            requested_device_id: req.device_id,
+            device_name: req.device_name,
+            platform: req.platform,
+            ip: ip.to_string(),
+            user_agent: headers
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+            token_bytes: state.config().crypto.session_token_bytes,
+        },
     )
     .await?;
 
@@ -213,7 +224,7 @@ pub async fn register_finish(
         device_id: session.device_id.to_string(),
         server: ServerInfo {
             encryption_salt_b64: B64.encode(pending.encryption_salt),
-            encryption_params: crypto::Argon2Params::default(),
+            encryption_params: state.config().crypto.encryption_params,
         },
     }))
 }
@@ -245,11 +256,17 @@ pub async fn login(
     let session = issue_session(
         state.db(),
         user.id,
-        req.device_id,
-        req.device_name,
-        req.platform,
-        &headers,
-        ip.to_string(),
+        SessionOptions {
+            requested_device_id: req.device_id,
+            device_name: req.device_name,
+            platform: req.platform,
+            ip: ip.to_string(),
+            user_agent: headers
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+            token_bytes: state.config().crypto.session_token_bytes,
+        },
     )
     .await?;
 
@@ -259,7 +276,7 @@ pub async fn login(
         token: session.token,
         user_id: user.id.to_string(),
         device_id: session.device_id.to_string(),
-        server: server_info(&user),
+        server: server_info(&user, &state.config().crypto),
     }))
 }
 
@@ -280,8 +297,9 @@ pub async fn logout(
 fn access_key_hash(
     access_key: &str,
     salt: &[u8],
+    access_key_hash_params: &crypto::Argon2Params,
 ) -> Result<String, clipper_core::crypto::CryptoError> {
-    server_auth::hash_access_key(access_key, salt)
+    server_auth::hash_access_key(access_key, salt, access_key_hash_params)
 }
 
 async fn load_server_config(
@@ -320,10 +338,10 @@ fn opaque_credential_identifier_for_user(user: &users::Model) -> Vec<u8> {
     }
 }
 
-fn server_info(user: &users::Model) -> ServerInfo {
+fn server_info(user: &users::Model, crypto: &crate::config::CryptoConfig) -> ServerInfo {
     ServerInfo {
         encryption_salt_b64: B64.encode(&user.encryption_salt),
-        encryption_params: crypto::Argon2Params::default(),
+        encryption_params: crypto.encryption_params,
     }
 }
 
@@ -362,21 +380,20 @@ struct IssuedSession {
 async fn issue_session<C>(
     db: &C,
     user_id: Uuid,
-    requested_device_id: Option<clipper_core::models::DeviceId>,
-    device_name: Option<String>,
-    platform: Option<String>,
-    headers: &HeaderMap,
-    ip: String,
+    options: SessionOptions,
 ) -> Result<IssuedSession, (StatusCode, Json<ErrorResponse>)>
 where
     C: ConnectionTrait,
 {
     let now = Utc::now().to_rfc3339();
-    let device_id = requested_device_id
+    let device_id = options
+        .requested_device_id
         .map(clipper_core::models::DeviceId::into_uuid)
         .unwrap_or_else(Uuid::now_v7);
-    let device_name = device_name.unwrap_or_else(|| "Unknown Device".into());
-    let platform = platform.unwrap_or_else(|| "unknown".into());
+    let device_name = options
+        .device_name
+        .unwrap_or_else(|| "Unknown Device".into());
+    let platform = options.platform.unwrap_or_else(|| "unknown".into());
 
     let existing_device = devices::Entity::find_by_id(device_id)
         .one(db)
@@ -419,17 +436,12 @@ where
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
     }
 
-    let token_raw = crypto::generate_token();
+    let token_raw = crypto::generate_token_with_length(options.token_bytes);
     let token_hash = crypto::sha256(&token_raw);
     let token = B64.encode(token_raw);
 
     let session_id = Uuid::now_v7();
     let expires_at = (Utc::now() + Duration::days(30)).to_rfc3339();
-    let user_agent = headers
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
     sessions::ActiveModel {
         id: Set(session_id),
         token_hash: Set(token_hash.to_vec()),
@@ -438,14 +450,24 @@ where
         created_at: Set(now.clone()),
         expires_at: Set(expires_at),
         last_seen_at: Set(now),
-        user_agent: Set(user_agent),
-        ip_addr: Set(Some(ip)),
+        user_agent: Set(options.user_agent),
+        ip_addr: Set(Some(options.ip)),
     }
     .insert(db)
     .await
     .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
 
     Ok(IssuedSession { token, device_id })
+}
+
+#[derive(Debug)]
+struct SessionOptions {
+    requested_device_id: Option<clipper_core::models::DeviceId>,
+    device_name: Option<String>,
+    platform: Option<String>,
+    ip: String,
+    user_agent: Option<String>,
+    token_bytes: usize,
 }
 
 #[cfg(test)]
@@ -616,7 +638,12 @@ mod tests {
             .await
             .expect("query server config")
             .expect("server config");
-        access_key_hash(access_key, &config.access_key_hash_salt).expect("access key hash")
+        access_key_hash(
+            access_key,
+            &config.access_key_hash_salt,
+            &state.config().crypto.access_key_hash_params,
+        )
+        .expect("access key hash")
     }
 
     #[tokio::test]

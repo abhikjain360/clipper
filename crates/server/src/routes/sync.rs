@@ -4,10 +4,7 @@ use axum::{
     http::StatusCode,
 };
 use base64::Engine;
-use clipper_core::{
-    crypto::Argon2Params,
-    models::{BootstrapResponse, ClipboardItem, DeviceInfo, ServerInfo},
-};
+use clipper_core::models::{BootstrapResponse, ClipboardItem, DeviceInfo, ServerInfo};
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
 
 use crate::{
@@ -80,7 +77,7 @@ pub async fn bootstrap(
         latest_seq,
         server: ServerInfo {
             encryption_salt_b64: b64.encode(&user.encryption_salt),
-            encryption_params: Argon2Params::default(),
+            encryption_params: state.config().crypto.encryption_params,
         },
     }))
 }

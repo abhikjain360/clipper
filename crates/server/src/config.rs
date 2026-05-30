@@ -1,6 +1,7 @@
 use std::{net::IpAddr, path::PathBuf};
 
 use clap::Args;
+use clipper_core::crypto::Argon2Params;
 use garde::Validate;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use serde::Deserialize;
@@ -35,6 +36,21 @@ const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
         event_log_retention_days: 3,
         orphan_upload_ttl_secs: 60 * 60,
     },
+    crypto: CryptoConfig {
+        access_key_hash_params: Argon2Params {
+            m_cost: 19 * 1024,
+            t_cost: 2,
+            p_cost: 1,
+        },
+        encryption_params: Argon2Params {
+            m_cost: 65536, // 64 MiB
+            t_cost: 3,
+            p_cost: 1,
+        },
+        access_key_hash_salt_bytes: 16,
+        encryption_salt_bytes: 16,
+        session_token_bytes: 32,
+    },
 };
 
 struct ConfigDefaults {
@@ -45,6 +61,7 @@ struct ConfigDefaults {
     clipboard: ClipboardConfig,
     list: ListConfig,
     cleanup: CleanupConfig,
+    crypto: CryptoConfig,
 }
 
 struct ServerDefaults {
@@ -87,6 +104,8 @@ pub struct ServerConfig {
     pub list: ListConfig,
     #[garde(dive)]
     pub cleanup: CleanupConfig,
+    #[garde(dive)]
+    pub crypto: CryptoConfig,
 }
 
 impl Default for ServerConfig {
@@ -108,6 +127,7 @@ impl Default for ServerConfig {
             clipboard: DEFAULT_CONFIG.clipboard.clone(),
             list: DEFAULT_CONFIG.list.clone(),
             cleanup: DEFAULT_CONFIG.cleanup.clone(),
+            crypto: DEFAULT_CONFIG.crypto.clone(),
         }
     }
 }
@@ -117,7 +137,9 @@ impl ServerConfig {
         apply_nested_overrides!(
             self,
             overrides,
-            [server, rate_limit, auth, limits, clipboard, list, cleanup]
+            [
+                server, rate_limit, auth, limits, clipboard, list, cleanup, crypto
+            ]
         );
     }
 
@@ -261,6 +283,54 @@ impl CleanupConfig {
     }
 }
 
+#[derive(Debug, Clone, Validate)]
+pub struct CryptoConfig {
+    #[garde(dive)]
+    pub access_key_hash_params: Argon2Params,
+    #[garde(dive)]
+    pub encryption_params: Argon2Params,
+    #[garde(range(min = 1))]
+    pub access_key_hash_salt_bytes: usize,
+    #[garde(range(min = 1))]
+    pub encryption_salt_bytes: usize,
+    #[garde(range(min = 1))]
+    pub session_token_bytes: usize,
+}
+
+impl CryptoConfig {
+    fn apply_overrides(&mut self, overrides: CryptoConfigOverrides) {
+        if let Some(value) = overrides.access_key_hash_m_cost {
+            self.access_key_hash_params.m_cost = value;
+        }
+        if let Some(value) = overrides.access_key_hash_t_cost {
+            self.access_key_hash_params.t_cost = value;
+        }
+        if let Some(value) = overrides.access_key_hash_p_cost {
+            self.access_key_hash_params.p_cost = value;
+        }
+
+        if let Some(value) = overrides.encryption_m_cost {
+            self.encryption_params.m_cost = value;
+        }
+        if let Some(value) = overrides.encryption_t_cost {
+            self.encryption_params.t_cost = value;
+        }
+        if let Some(value) = overrides.encryption_p_cost {
+            self.encryption_params.p_cost = value;
+        }
+
+        if let Some(value) = overrides.access_key_hash_salt_bytes {
+            self.access_key_hash_salt_bytes = value;
+        }
+        if let Some(value) = overrides.encryption_salt_bytes {
+            self.encryption_salt_bytes = value;
+        }
+        if let Some(value) = overrides.session_token_bytes {
+            self.session_token_bytes = value;
+        }
+    }
+}
+
 #[derive(Args, Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConfigOverrides {
@@ -278,6 +348,8 @@ pub struct ConfigOverrides {
     pub list: ListConfigOverrides,
     #[command(flatten)]
     pub cleanup: CleanupConfigOverrides,
+    #[command(flatten)]
+    pub crypto: CryptoConfigOverrides,
 }
 
 impl ConfigOverrides {
@@ -391,6 +463,38 @@ pub struct CleanupConfigOverrides {
     pub orphan_upload_ttl_secs: Option<u64>,
 }
 
+#[derive(Args, Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CryptoConfigOverrides {
+    /// Argon2 m-cost for access-key hashing.
+    #[arg(long = "access-key-hash-m-cost")]
+    pub access_key_hash_m_cost: Option<u32>,
+    /// Argon2 t-cost for access-key hashing.
+    #[arg(long = "access-key-hash-t-cost")]
+    pub access_key_hash_t_cost: Option<u32>,
+    /// Argon2 p-cost for access-key hashing.
+    #[arg(long = "access-key-hash-p-cost")]
+    pub access_key_hash_p_cost: Option<u32>,
+    /// Argon2 m-cost for client-side encryption key derivation.
+    #[arg(long = "encryption-m-cost")]
+    pub encryption_m_cost: Option<u32>,
+    /// Argon2 t-cost for client-side encryption key derivation.
+    #[arg(long = "encryption-t-cost")]
+    pub encryption_t_cost: Option<u32>,
+    /// Argon2 p-cost for client-side encryption key derivation.
+    #[arg(long = "encryption-p-cost")]
+    pub encryption_p_cost: Option<u32>,
+    /// Access-key hash salt size in bytes.
+    #[arg(long = "access-key-hash-salt-bytes")]
+    pub access_key_hash_salt_bytes: Option<usize>,
+    /// Encryption salt size in bytes.
+    #[arg(long = "encryption-salt-bytes")]
+    pub encryption_salt_bytes: Option<usize>,
+    /// Session token size in bytes.
+    #[arg(long = "session-token-bytes")]
+    pub session_token_bytes: Option<usize>,
+}
+
 pub fn parse_trusted_proxy(value: &str) -> Result<IpNet, String> {
     if let Ok(network) = value.parse::<IpNet>() {
         return Ok(network);
@@ -487,6 +591,17 @@ mod tests {
                 interval_secs = 15
                 event_log_retention_days = 4
                 orphan_upload_ttl_secs = 20
+
+                [crypto]
+                access_key_hash_m_cost = 4096
+                access_key_hash_t_cost = 1
+                access_key_hash_p_cost = 2
+                encryption_m_cost = 32768
+                encryption_t_cost = 1
+                encryption_p_cost = 1
+                access_key_hash_salt_bytes = 32
+                encryption_salt_bytes = 24
+                session_token_bytes = 48
             "#,
         )
         .expect("config TOML");
@@ -511,6 +626,15 @@ mod tests {
         assert_eq!(config.cleanup.interval_secs, 15);
         assert_eq!(config.cleanup.event_log_retention_days, 4);
         assert_eq!(config.cleanup.orphan_upload_ttl_secs, 20);
+        assert_eq!(config.crypto.access_key_hash_params.m_cost, 4096);
+        assert_eq!(config.crypto.access_key_hash_params.t_cost, 1);
+        assert_eq!(config.crypto.access_key_hash_params.p_cost, 2);
+        assert_eq!(config.crypto.encryption_params.m_cost, 32768);
+        assert_eq!(config.crypto.encryption_params.t_cost, 1);
+        assert_eq!(config.crypto.encryption_params.p_cost, 1);
+        assert_eq!(config.crypto.access_key_hash_salt_bytes, 32);
+        assert_eq!(config.crypto.encryption_salt_bytes, 24);
+        assert_eq!(config.crypto.session_token_bytes, 48);
     }
 
     #[test]

@@ -17,8 +17,13 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 pub fn hash_access_key(
     access_key: &str,
     salt: &[u8],
+    params: &crypto::Argon2Params,
 ) -> Result<String, clipper_core::crypto::CryptoError> {
-    Ok(B64.encode(crypto::access_key_hash(access_key.as_bytes(), salt)?))
+    Ok(B64.encode(crypto::access_key_hash_with_params(
+        access_key.as_bytes(),
+        salt,
+        params,
+    )?))
 }
 
 /// Extract bearer token from Authorization header.

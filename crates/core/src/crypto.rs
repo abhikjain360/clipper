@@ -4,7 +4,7 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, generic_array::typenum::Unsigned},
 };
 pub use clipper_api_types::Argon2Params;
-use rand::RngExt;
+use rand::Rng;
 use sha2::{Digest, Sha256, digest::OutputSizeUser};
 use zeroize::Zeroizing;
 
@@ -15,7 +15,7 @@ pub const SHA256_BYTES: usize = <<Sha256 as OutputSizeUser>::OutputSize as Unsig
 pub const ACCESS_KEY_HASH_SALT_BYTES: usize = 16;
 pub const ACCESS_KEY_HASH_BYTES: usize = 32;
 
-const ACCESS_KEY_HASH_PARAMS: Argon2Params = Argon2Params {
+const ACCESS_KEY_HASH_PARAMS_DEFAULT: Argon2Params = Argon2Params {
     m_cost: 19 * 1024,
     t_cost: 2,
     p_cost: 1,
@@ -31,22 +31,40 @@ impl opaque_ke::CipherSuite for ClipperOpaqueCipherSuite {
 
 /// Generate a random 16-byte salt for client-side encryption key derivation.
 pub fn generate_encryption_salt() -> [u8; 16] {
-    rand::rng().random()
+    generate_bytes::<16>()
 }
 
 /// Generate a random 16-byte salt for server-side access-key hashing.
 pub fn generate_access_key_hash_salt() -> [u8; ACCESS_KEY_HASH_SALT_BYTES] {
-    rand::rng().random()
+    generate_bytes::<ACCESS_KEY_HASH_SALT_BYTES>()
+}
+
+/// Generate `count` random bytes.
+pub fn generate_random_bytes(length: usize) -> Vec<u8> {
+    let mut bytes = vec![0_u8; length];
+    rand::rng().fill_bytes(&mut bytes);
+    bytes
+}
+
+fn generate_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0_u8; N];
+    rand::rng().fill_bytes(&mut bytes);
+    bytes
 }
 
 /// Generate a random 24-byte nonce for XChaCha20-Poly1305.
 pub fn generate_nonce() -> [u8; XCHACHA20_NONCE_BYTES] {
-    rand::rng().random()
+    generate_bytes::<XCHACHA20_NONCE_BYTES>()
 }
 
 /// Generate a random 32-byte session token.
 pub fn generate_token() -> [u8; 32] {
-    rand::rng().random()
+    generate_bytes::<32>()
+}
+
+/// Generate a random session token with the requested size.
+pub fn generate_token_with_length(length: usize) -> Vec<u8> {
+    generate_random_bytes(length)
 }
 
 /// SHA-256 hash.
@@ -61,12 +79,27 @@ pub fn access_key_hash(
     access_key: &[u8],
     salt: &[u8],
 ) -> Result<[u8; ACCESS_KEY_HASH_BYTES], CryptoError> {
-    let argon2 = build_argon2(&ACCESS_KEY_HASH_PARAMS)?;
+    access_key_hash_with_params(access_key, salt, &ACCESS_KEY_HASH_PARAMS_DEFAULT)
+}
+
+/// Derive the stored verifier for a registration access key using configurable
+/// Argon2id parameters.
+pub fn access_key_hash_with_params(
+    access_key: &[u8],
+    salt: &[u8],
+    params: &Argon2Params,
+) -> Result<[u8; ACCESS_KEY_HASH_BYTES], CryptoError> {
+    let argon2 = build_argon2(params)?;
     let mut hash = [0u8; ACCESS_KEY_HASH_BYTES];
     argon2
         .hash_password_into(access_key, salt, &mut hash)
         .map_err(|e| CryptoError::Kdf(e.to_string()))?;
     Ok(hash)
+}
+
+/// Default access key hash params for backwards-compatible startup.
+pub fn default_access_key_hash_params() -> Argon2Params {
+    ACCESS_KEY_HASH_PARAMS_DEFAULT
 }
 
 fn build_argon2(params: &Argon2Params) -> Result<Argon2<'static>, CryptoError> {

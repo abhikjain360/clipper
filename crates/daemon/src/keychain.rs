@@ -30,8 +30,10 @@ pub enum KeychainError {
     Utf8(#[from] std::string::FromUtf8Error),
     #[error("keychain store failed: {0}")]
     Store(String),
+    #[allow(dead_code)]
     #[error("keychain read failed: {0}")]
     Read(String),
+    #[allow(dead_code)]
     #[error("IPC secret has invalid length: expected {expected} bytes, got {actual}")]
     InvalidIpcSecretLength { expected: usize, actual: usize },
     #[cfg(not(target_os = "macos"))]

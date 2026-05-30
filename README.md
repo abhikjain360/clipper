@@ -143,6 +143,17 @@ max_object_meta_ciphertext_bytes = 65536
 [clipboard]
 ttl_days = 7
 
+[crypto]
+access_key_hash_m_cost = 19456
+access_key_hash_t_cost = 2
+access_key_hash_p_cost = 1
+encryption_m_cost = 65536
+encryption_t_cost = 3
+encryption_p_cost = 1
+access_key_hash_salt_bytes = 16
+encryption_salt_bytes = 16
+session_token_bytes = 32
+
 [list]
 default_limit = 100
 max_limit = 500

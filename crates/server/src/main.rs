@@ -137,6 +137,7 @@ fn load_config(path: Option<&Path>, cli_overrides: ConfigOverrides) -> ServerRes
 }
 
 async fn init_server(config: ServerConfig) -> ServerResult<()> {
+    let access_key_hash_salt_bytes = config.crypto.access_key_hash_salt_bytes;
     let state = AppState::open(config).await?;
 
     // Check if already initialized
@@ -157,7 +158,9 @@ async fn init_server(config: ServerConfig) -> ServerResult<()> {
         id: Set(1),
         created_at: Set(now.clone()),
         updated_at: Set(now),
-        access_key_hash_salt: Set(clipper_core::crypto::generate_access_key_hash_salt().to_vec()),
+        access_key_hash_salt: Set(clipper_core::crypto::generate_random_bytes(
+            access_key_hash_salt_bytes,
+        )),
     };
     config.insert(state.db()).await?;
 
@@ -191,12 +194,17 @@ async fn add_access_key(
         .transpose()?;
 
     use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+    let access_key_hash_params = config.crypto.access_key_hash_params;
     let state = AppState::open(config).await?;
     let server_config = entity::server_config::Entity::find_by_id(1)
         .one(state.db())
         .await?
         .ok_or(ServerError::NotInitialized)?;
-    let key_hash = hash_access_key(access_key, &server_config.access_key_hash_salt)?;
+    let key_hash = hash_access_key(
+        access_key,
+        &server_config.access_key_hash_salt,
+        &access_key_hash_params,
+    )?;
     let now = chrono::Utc::now().to_rfc3339();
 
     access_keys::ActiveModel {
