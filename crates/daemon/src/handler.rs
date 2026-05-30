@@ -96,7 +96,7 @@ pub async fn handle_connection(
                         if let Ok(json) = serde_json::to_string(&response) {
                             let mut w = writer.lock().await;
                             let resp_line = format!("{}\n", json);
-                            let _ = w.write_all(resp_line.as_bytes()).await;
+                            _ = w.write_all(resp_line.as_bytes()).await;
                         }
                         break;
                     }
@@ -171,7 +171,7 @@ async fn authenticate_connection(
             Err(RequestLineError::TooLong) => {
                 let response =
                     DaemonResponse::error_message(String::new(), "Request line too large");
-                let _ = write_response(writer, response).await;
+                _ = write_response(writer, response).await;
                 return false;
             }
             Err(RequestLineError::Utf8) => {
@@ -179,7 +179,7 @@ async fn authenticate_connection(
                     String::new(),
                     "Invalid request: request line is not UTF-8",
                 );
-                let _ = write_response(writer, response).await;
+                _ = write_response(writer, response).await;
                 return false;
             }
             Err(RequestLineError::Io(e)) => {
@@ -198,7 +198,7 @@ async fn authenticate_connection(
             }
             Err(AuthRequestError { id, message }) => {
                 let response = DaemonResponse::error_message(id.unwrap_or_default(), message);
-                let _ = write_response(writer, response).await;
+                _ = write_response(writer, response).await;
                 return false;
             }
         }

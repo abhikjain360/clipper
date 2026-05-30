@@ -1071,7 +1071,7 @@ mod tests {
             platform: Some("test".into()),
         };
 
-        let _ = login(
+        _ = login(
             State(state.clone()),
             client_ip(),
             HeaderMap::new(),
@@ -1253,7 +1253,7 @@ mod tests {
         let user_id = Uuid::parse_str(&start_resp.user_id).expect("user id");
         let finish_req = registration_finish_request(start_resp, &client_state, passphrase);
 
-        let _ = register_finish(
+        _ = register_finish(
             State(state.clone()),
             client_ip(),
             HeaderMap::new(),

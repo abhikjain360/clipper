@@ -54,7 +54,7 @@ pub enum KeychainError {
 pub fn store_credentials(creds: &Credentials) -> KeychainResult<()> {
     let json = serde_json::to_string(creds).map_err(KeychainError::Encode)?;
     // Delete existing entry first (ignore error if it doesn't exist)
-    let _ = security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT);
+    _ = security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT);
     security_framework::passwords::set_generic_password(SERVICE, ACCOUNT, json.as_bytes())
         .map_err(|e| KeychainError::Store(e.to_string()))?;
     Ok(())
@@ -82,7 +82,7 @@ pub fn load_credentials() -> KeychainResult<Option<Credentials>> {
 
 #[cfg(target_os = "macos")]
 pub fn clear_credentials() -> KeychainResult<()> {
-    let _ = security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT);
+    _ = security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT);
     Ok(())
 }
 
@@ -93,8 +93,7 @@ pub fn load_or_create_ipc_secret(_data_dir: &Path) -> KeychainResult<Vec<u8>> {
         Ok(secret) => {
             let actual = secret.len();
             let secret = new_ipc_secret();
-            let _ =
-                security_framework::passwords::delete_generic_password(SERVICE, IPC_SECRET_ACCOUNT);
+            _ = security_framework::passwords::delete_generic_password(SERVICE, IPC_SECRET_ACCOUNT);
             security_framework::passwords::set_generic_password(
                 SERVICE,
                 IPC_SECRET_ACCOUNT,

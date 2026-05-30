@@ -99,7 +99,7 @@ impl SyncEngine {
             .state_version
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        let _ = self.state_tx.send(v);
+        _ = self.state_tx.send(v);
     }
 
     // ── Auth ──
@@ -983,7 +983,7 @@ impl SyncEngine {
                     }
                 }
                 tungstenite::Message::Ping(data) => {
-                    let _ = write.send(tungstenite::Message::Pong(data)).await;
+                    _ = write.send(tungstenite::Message::Pong(data)).await;
                 }
                 tungstenite::Message::Close(_) => {
                     info!("WebSocket closed by server");

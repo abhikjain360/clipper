@@ -140,7 +140,7 @@ async fn delete_clipboard_objects(state: &AppState, ids: &[Uuid]) -> Result<usiz
         .await?;
     for payload_path in &payload_paths {
         let path = state.objects_dir().join(payload_path);
-        let _ = tokio::fs::remove_file(path).await;
+        _ = tokio::fs::remove_file(path).await;
     }
 
     let res = objects::Entity::delete_many()
@@ -194,7 +194,7 @@ async fn cleanup_orphan_object_uploads(state: &AppState) -> CleanupResult<()> {
             .await?;
         for payload_path in payload_paths {
             let path = state.objects_dir().join(payload_path);
-            let _ = tokio::fs::remove_file(path).await;
+            _ = tokio::fs::remove_file(path).await;
         }
     }
 

@@ -96,7 +96,7 @@ pub(crate) fn install_and_start_daemon() -> DaemonProcessResult<()> {
 
 #[cfg(target_os = "macos")]
 fn install_launchagent(plist_path: &Path, new_plist: &str) -> DaemonProcessResult<()> {
-    let _ = std::process::Command::new("launchctl")
+    _ = std::process::Command::new("launchctl")
         .args(["unload", &plist_path.to_string_lossy()])
         .output();
 

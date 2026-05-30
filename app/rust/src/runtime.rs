@@ -247,7 +247,7 @@ mod imp {
             DaemonCommand::UploadFile(params) => {
                 #[cfg(target_family = "wasm")]
                 {
-                    let _ = params;
+                    _ = params;
                     Err(super::RuntimeError::UnsupportedOperation(
                         "path-based file upload",
                     ))
@@ -262,7 +262,7 @@ mod imp {
             DaemonCommand::DownloadFile(params) => {
                 #[cfg(target_family = "wasm")]
                 {
-                    let _ = params;
+                    _ = params;
                     Err(super::RuntimeError::UnsupportedOperation(
                         "path-based file download",
                     ))
@@ -294,7 +294,7 @@ mod imp {
 
     pub(crate) async fn wait_for_change() {
         let mut rx = engine().subscribe();
-        let _ = rx.changed().await;
+        _ = rx.changed().await;
     }
 
     pub(crate) async fn upload_file_bytes(

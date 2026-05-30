@@ -241,7 +241,7 @@ pub(crate) fn current_state() -> dt::AppState {
 /// Wait until the daemon state changes, then return.
 pub(crate) async fn wait_for_change() {
     let mut rx = BRIDGE.state_tx.subscribe();
-    let _ = rx.changed().await;
+    _ = rx.changed().await;
 }
 
 // ── Internal helpers ──
@@ -252,7 +252,7 @@ async fn drain_pending(
 ) {
     let mut map = pending.lock().await;
     for (_, tx) in map.drain() {
-        let _ = tx.send(DaemonResponse {
+        _ = tx.send(DaemonResponse {
             id: String::new(),
             ok: false,
             result: None,
@@ -400,13 +400,13 @@ async fn route_daemon_line(
         Ok(dt::DaemonLine::Response(resp)) => {
             let id = resp.id.clone();
             if let Some(tx) = pending.lock().await.remove(&id) {
-                let _ = tx.send(resp);
+                _ = tx.send(resp);
             }
         }
         Ok(dt::DaemonLine::Event(event)) => match event.event {
             dt::DaemonEventKind::StateChanged => {
                 if let Some(state) = event.state {
-                    let _ = state_tx.send(state);
+                    _ = state_tx.send(state);
                 } else {
                     warn!("State change event did not include state");
                 }
@@ -431,7 +431,7 @@ fn random_bytes<const N: usize>() -> [u8; N] {
 fn send_terminal_state_if_current(conn_gen: u64, state_tx: &watch::Sender<dt::AppState>) {
     let current = BRIDGE.conn_generation.load(Ordering::Relaxed);
     if conn_gen == current {
-        let _ = state_tx.send(dt::AppState {
+        _ = state_tx.send(dt::AppState {
             connection_status: dt::ConnectionStatus::DaemonNotRunning,
             ..Default::default()
         });
@@ -503,7 +503,7 @@ mod tests {
         );
 
         // Send a connected state so we can detect the terminal state change.
-        let _ = state_tx.send(dt::AppState {
+        _ = state_tx.send(dt::AppState {
             connection_status: dt::ConnectionStatus::Connected,
             ..Default::default()
         });
@@ -665,7 +665,7 @@ mod tests {
         let mut rx1 = state_tx.subscribe();
         let mut rx2 = state_tx.subscribe();
 
-        let _ = state_tx.send(dt::AppState {
+        _ = state_tx.send(dt::AppState {
             logged_in: true,
             connection_status: dt::ConnectionStatus::Connected,
             ..Default::default()

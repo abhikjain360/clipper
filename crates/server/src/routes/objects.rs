@@ -366,7 +366,7 @@ pub async fn upload_payload(
     ));
 
     if let Err(response) = stream_body_to_payload_file(body, expected_size, &tmp_path).await {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
+        _ = tokio::fs::remove_file(&tmp_path).await;
         reset_payload_status(&state, object_uuid, payload_uuid, "uploading", "pending").await;
         return Err(response);
     }
@@ -381,7 +381,7 @@ pub async fn upload_payload(
             error = %e,
             "Failed to rename tmp payload to final path",
         );
-        let _ = tokio::fs::remove_file(&tmp_path).await;
+        _ = tokio::fs::remove_file(&tmp_path).await;
         reset_payload_status(&state, object_uuid, payload_uuid, "uploading", "pending").await;
         return Err(ApiError::from_code_with_message(
             ApiErrorCode::Storage,
@@ -415,7 +415,7 @@ pub async fn upload_payload(
         })?;
 
     if uploaded.rows_affected != 1 {
-        let _ = tokio::fs::remove_file(&final_path).await;
+        _ = tokio::fs::remove_file(&final_path).await;
         warn!(
             object_id = %object_uuid,
             payload_id = %payload_uuid,
@@ -636,7 +636,7 @@ pub async fn complete_object(
         })?;
 
     if updated.rows_affected != 1 {
-        let _ = txn.rollback().await;
+        _ = txn.rollback().await;
         warn!(
             object_id = %object_uuid,
             user_id = %auth.user_id,
@@ -1050,7 +1050,7 @@ pub async fn delete_object(
                 error = %e,
                 "Failed to insert file.deleted event",
             );
-            let _ = txn.rollback().await;
+            _ = txn.rollback().await;
             return Err(ApiError::from_code_with_message(
                 ApiErrorCode::Database,
                 "Database error",
@@ -1068,7 +1068,7 @@ pub async fn delete_object(
     })?;
 
     remove_paths(paths).await;
-    let _ = state.ws_tx().send(WsBroadcast {
+    _ = state.ws_tx().send(WsBroadcast {
         user_id: auth.user_id,
         seq: inserted.seq,
         event_type: "file.deleted".into(),
@@ -1221,7 +1221,7 @@ fn broadcast_created(
     object_id: &str,
     now: &str,
 ) {
-    let _ = state.ws_tx().send(WsBroadcast {
+    _ = state.ws_tx().send(WsBroadcast {
         user_id,
         seq,
         event_type: format!("{}.created", kind.as_ref()),

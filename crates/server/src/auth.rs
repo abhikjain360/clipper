@@ -85,7 +85,7 @@ pub async fn auth_middleware(
     }
 
     // Update last_seen_at
-    let _ = sessions::Entity::update_many()
+    _ = sessions::Entity::update_many()
         .col_expr(
             sessions::Column::LastSeenAt,
             sea_orm::sea_query::Expr::value(now),

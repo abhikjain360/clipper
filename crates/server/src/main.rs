@@ -162,7 +162,7 @@ async fn init_server(config: ServerConfig, secrets: ServerSecrets) -> ServerResu
         .await?;
 
     if existing.is_some() {
-        let _ = load_access_key_hash_salt(&state).await?;
+        _ = load_access_key_hash_salt(&state).await?;
         info!("Server already initialized. To reinitialize, delete the database.");
         return Ok(());
     }
@@ -254,7 +254,7 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
 
     // Verify the server is initialized and this process has the matching
     // pepper before accepting traffic.
-    let _ = load_access_key_hash_salt(&state).await?;
+    _ = load_access_key_hash_salt(&state).await?;
 
     let limiter = Arc::new(RateLimiter::new(&state.config().rate_limit));
     if !trusted_proxies.is_empty() {
