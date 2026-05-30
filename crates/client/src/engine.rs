@@ -6,6 +6,7 @@ pub use clipper_app_types::{
     AppState, ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem,
 };
 use clipper_core::{crypto, models::*};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use tokio::sync::{Mutex, RwLock, watch};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
@@ -22,6 +23,8 @@ use crate::{
 const INLINE_OBJECT_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 const RECENT_CLIPBOARD_LIMIT: usize = 100;
 const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
+const CLIPBOARD_HYDRATION_CONCURRENCY: usize = 8;
+const LOCAL_PERSIST_CONCURRENCY: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct ClipboardPayload {
@@ -743,11 +746,19 @@ impl SyncEngine {
         &self,
         objects: &[DecryptedClipboardObject],
     ) -> Result<(), ClientError> {
-        for object in objects {
-            self.local_store
-                .persist_clipboard_payload_item(&object.item, &object.payload)
-                .await?;
-        }
+        let objects = objects
+            .iter()
+            .map(|object| (object.item.clone(), object.payload.clone()))
+            .collect::<Vec<_>>();
+        stream::iter(objects)
+            .map(|(item, payload)| async move {
+                self.local_store
+                    .persist_clipboard_payload_item(&item, &payload)
+                    .await
+            })
+            .buffer_unordered(LOCAL_PERSIST_CONCURRENCY)
+            .try_collect::<Vec<_>>()
+            .await?;
         Ok(())
     }
 
@@ -755,16 +766,14 @@ impl SyncEngine {
         &self,
         limit: u64,
     ) -> Result<(Vec<DecryptedClipboardObject>, Vec<DecryptedFileItem>), ClientError> {
-        let (clipboard_resp, files_resp) = {
+        let api = {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            let clipboard = api
-                .list_objects(Some(ObjectKind::Clipboard), Some(limit), None)
-                .await?;
-            let files = api
-                .list_objects(Some(ObjectKind::File), Some(limit), None)
-                .await?;
-            (clipboard, files)
+            api.clone()
         };
+        let (clipboard_resp, files_resp) = tokio::try_join!(
+            api.list_objects(Some(ObjectKind::Clipboard), Some(limit), None),
+            api.list_objects(Some(ObjectKind::File), Some(limit), None),
+        )?;
 
         let encryption_key = {
             let encryption_key = self.encryption_key.read().await;
@@ -773,18 +782,26 @@ impl SyncEngine {
                 .ok_or_else(|| ClientError::Other("Not logged in".into()))?
         };
 
-        let mut clipboard_items = Vec::new();
-        for item in &clipboard_resp.items {
-            match self
-                .decrypt_clipboard_object_item(item, &encryption_key)
-                .await
-            {
-                Ok(item) => clipboard_items.push(item),
-                Err(e) => {
-                    warn!(id = %item.id, "Failed to load clipboard object: {}", e);
+        let clipboard_items = stream::iter(clipboard_resp.items)
+            .map(|item| {
+                let api = &api;
+                async move {
+                    match self
+                        .decrypt_clipboard_object_item_with_api(api, &item, &encryption_key)
+                        .await
+                    {
+                        Ok(item) => Some(item),
+                        Err(e) => {
+                            warn!(id = %item.id, "Failed to load clipboard object: {}", e);
+                            None
+                        }
+                    }
                 }
-            }
-        }
+            })
+            .buffer_unordered(CLIPBOARD_HYDRATION_CONCURRENCY)
+            .filter_map(std::future::ready)
+            .collect::<Vec<_>>()
+            .await;
 
         let mut files = Vec::new();
         for item in &files_resp.items {
@@ -799,8 +816,9 @@ impl SyncEngine {
         Ok((clipboard_items, files))
     }
 
-    async fn decrypt_clipboard_object_item(
+    async fn decrypt_clipboard_object_item_with_api(
         &self,
+        api: &ApiClient,
         item: &ObjectListItem,
         encryption_key: &[u8; 32],
     ) -> Result<DecryptedClipboardObject, ClientError> {
@@ -813,11 +831,9 @@ impl SyncEngine {
         }
         let payload = single_payload(item)?;
         let payload_size = meta.size.unwrap_or(payload.ciphertext_size);
-        let encrypted_payload = {
-            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.download_object_payload(&item.id.to_string(), &payload.id.to_string())
-                .await?
-        };
+        let encrypted_payload = api
+            .download_object_payload(&item.id.to_string(), &payload.id.to_string())
+            .await?;
         let plaintext =
             decrypt_clipboard_payload(&payload.nonce, &encrypted_payload, encryption_key)?;
         let text = clipboard_display_text(&meta.mime_type, &plaintext);

@@ -1,4 +1,5 @@
 use chrono::{Duration, Utc};
+use futures_util::{StreamExt, stream};
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 use tracing::info;
 use uuid::Uuid;
@@ -9,6 +10,7 @@ use crate::{
 };
 
 type CleanupResult<T> = Result<T, CleanupError>;
+const FILE_DELETE_CONCURRENCY: usize = 16;
 
 #[derive(Debug, thiserror::Error)]
 enum CleanupError {
@@ -138,10 +140,7 @@ async fn delete_clipboard_objects(state: &AppState, ids: &[Uuid]) -> Result<usiz
         .into_tuple()
         .all(state.db())
         .await?;
-    for payload_path in &payload_paths {
-        let path = state.objects_dir().join(payload_path);
-        _ = tokio::fs::remove_file(path).await;
-    }
+    remove_payload_files(state, payload_paths).await;
 
     let res = objects::Entity::delete_many()
         .filter(objects::Column::Id.is_in(ids.to_vec()))
@@ -192,10 +191,7 @@ async fn cleanup_orphan_object_uploads(state: &AppState) -> CleanupResult<()> {
             .into_tuple()
             .all(state.db())
             .await?;
-        for payload_path in payload_paths {
-            let path = state.objects_dir().join(payload_path);
-            _ = tokio::fs::remove_file(path).await;
-        }
+        remove_payload_files(state, payload_paths).await;
     }
 
     if count > 0 {
@@ -208,4 +204,17 @@ async fn cleanup_orphan_object_uploads(state: &AppState) -> CleanupResult<()> {
     }
 
     Ok(())
+}
+
+async fn remove_payload_files(state: &AppState, payload_paths: Vec<String>) {
+    let objects_dir = state.objects_dir();
+    stream::iter(
+        payload_paths
+            .into_iter()
+            .map(|payload_path| objects_dir.join(payload_path)),
+    )
+    .for_each_concurrent(FILE_DELETE_CONCURRENCY, |path| async move {
+        _ = tokio::fs::remove_file(path).await;
+    })
+    .await;
 }

@@ -76,8 +76,7 @@ impl AppState {
     ) -> ServerResult<Self> {
         let state = Self::new(db, config, secrets);
         state.run_migrations().await?;
-        state.seed_event_seq().await?;
-        state.ensure_storage_dirs().await?;
+        tokio::try_join!(state.seed_event_seq(), state.ensure_storage_dirs())?;
         Ok(state)
     }
 

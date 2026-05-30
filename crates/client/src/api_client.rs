@@ -12,6 +12,7 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 const POSTCARD_ERROR_PREVIEW_BYTES: usize = 64;
 
 /// Clipper API client.
+#[derive(Clone)]
 pub struct ApiClient {
     http: Client,
     base_url: String,

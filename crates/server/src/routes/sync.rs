@@ -28,43 +28,47 @@ pub async fn bootstrap(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
 ) -> Result<Json<BootstrapResponse>, ApiError> {
-    let dev = devices::Entity::find_by_id(auth.device_id)
-        .into_partial_model::<BootstrapDeviceRow>()
-        .one(state.db())
-        .await
-        .map_err(|e| {
-            error!(
-                device_id = %auth.device_id,
-                error = %e,
-                "Failed to look up device in bootstrap",
-            );
-            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-        })?
-        .ok_or_else(|| {
-            error!(
-                device_id = %auth.device_id,
-                "Authenticated device row missing in bootstrap (data inconsistency)",
-            );
-            ApiError::from_code_with_message(ApiErrorCode::NotFound, "Device not found")
-        })?;
-
-    let latest_seq = event_log::Entity::find()
-        .filter(event_log::Column::UserId.eq(auth.user_id))
-        .order_by(event_log::Column::Seq, Order::Desc)
-        .select_only()
-        .column(event_log::Column::Seq)
-        .into_tuple::<i64>()
-        .one(state.db())
-        .await
-        .map_err(|e| {
-            error!(
-                user_id = %auth.user_id,
-                error = %e,
-                "Failed to load latest event_log seq in bootstrap",
-            );
-            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-        })?
-        .unwrap_or(0);
+    let dev_fut = async {
+        devices::Entity::find_by_id(auth.device_id)
+            .into_partial_model::<BootstrapDeviceRow>()
+            .one(state.db())
+            .await
+            .map_err(|e| {
+                error!(
+                    device_id = %auth.device_id,
+                    error = %e,
+                    "Failed to look up device in bootstrap",
+                );
+                ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+            })?
+            .ok_or_else(|| {
+                error!(
+                    device_id = %auth.device_id,
+                    "Authenticated device row missing in bootstrap (data inconsistency)",
+                );
+                ApiError::from_code_with_message(ApiErrorCode::NotFound, "Device not found")
+            })
+    };
+    let latest_seq_fut = async {
+        event_log::Entity::find()
+            .filter(event_log::Column::UserId.eq(auth.user_id))
+            .order_by(event_log::Column::Seq, Order::Desc)
+            .select_only()
+            .column(event_log::Column::Seq)
+            .into_tuple::<i64>()
+            .one(state.db())
+            .await
+            .map_err(|e| {
+                error!(
+                    user_id = %auth.user_id,
+                    error = %e,
+                    "Failed to load latest event_log seq in bootstrap",
+                );
+                ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+            })
+            .map(|seq| seq.unwrap_or(0))
+    };
+    let (dev, latest_seq) = tokio::try_join!(dev_fut, latest_seq_fut)?;
 
     Ok(Json(BootstrapResponse {
         device: DeviceInfo {
