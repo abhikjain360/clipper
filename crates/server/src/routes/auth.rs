@@ -1,8 +1,6 @@
-use std::net::SocketAddr;
-
 use axum::{
     Json,
-    extract::{ConnectInfo, Extension, State},
+    extract::{Extension, State},
     http::{HeaderMap, StatusCode},
 };
 use base64::Engine;
@@ -25,7 +23,7 @@ use uuid::Uuid;
 use crate::{
     auth::AuthInfo,
     entity::{access_keys, devices, sessions, users},
-    rate_limit::RateLimiter,
+    rate_limit::{ClientIp, RateLimiter},
     routes::{error_response, validate_client_id},
     state::AppState,
 };
@@ -35,18 +33,10 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 pub async fn challenge(
     State(state): State<AppState>,
     Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    ClientIp(ip): ClientIp,
     Json(req): Json<LoginChallengeRequest>,
 ) -> Result<Json<LoginChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let ip = peer_addr.ip().to_string();
-    if !limiter.check(&ip) {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(ErrorResponse {
-                error: "Too many requests".into(),
-            }),
-        ));
-    }
+    check_auth_rate_limit(&limiter, ip)?;
 
     let user = resolve_login_user(&state, req.user_id.as_deref()).await?;
 
@@ -74,16 +64,10 @@ pub async fn challenge(
 pub async fn register_start(
     State(state): State<AppState>,
     Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    ClientIp(ip): ClientIp,
     Json(req): Json<RegisterStartRequest>,
 ) -> Result<Json<RegisterStartResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let ip = peer_addr.ip().to_string();
-    if !limiter.check(&ip) {
-        return Err(error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Too many requests",
-        ));
-    }
+    check_auth_rate_limit(&limiter, ip)?;
 
     if req.access_key.is_empty() {
         return Err(error_response(
@@ -147,17 +131,11 @@ pub async fn register_start(
 pub async fn register_finish(
     State(state): State<AppState>,
     Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    ClientIp(ip): ClientIp,
     headers: HeaderMap,
     Json(req): Json<RegisterFinishRequest>,
 ) -> Result<Json<RegisterFinishResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let ip = peer_addr.ip().to_string();
-    if !limiter.check(&ip) {
-        return Err(error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Too many requests",
-        ));
-    }
+    check_auth_rate_limit(&limiter, ip)?;
 
     let pending = state
         .take_pending_registration(&req.registration_id)
@@ -233,7 +211,7 @@ pub async fn register_finish(
         req.device_name,
         req.platform,
         &headers,
-        ip,
+        ip.to_string(),
     )
     .await?;
 
@@ -257,20 +235,11 @@ pub async fn register_finish(
 pub async fn login(
     State(state): State<AppState>,
     Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    ClientIp(ip): ClientIp,
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let ip = peer_addr.ip().to_string();
-
-    if !limiter.check(&ip) {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(ErrorResponse {
-                error: "Too many requests".into(),
-            }),
-        ));
-    }
+    check_auth_rate_limit(&limiter, ip)?;
 
     // Finish the OPAQUE login without receiving the raw passphrase or a DB-reusable secret.
     let auth_challenge = state
@@ -298,7 +267,7 @@ pub async fn login(
         req.device_name,
         req.platform,
         &headers,
-        ip,
+        ip.to_string(),
     )
     .await?;
 
@@ -328,6 +297,20 @@ pub async fn logout(
 
 fn access_key_hash(access_key: &str) -> String {
     B64.encode(crypto::sha256(access_key.as_bytes()))
+}
+
+fn check_auth_rate_limit(
+    limiter: &RateLimiter,
+    ip: std::net::IpAddr,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if limiter.check(ip) {
+        return Ok(());
+    }
+
+    Err(error_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        "Too many requests",
+    ))
 }
 
 fn opaque_credential_identifier(user_id: Uuid) -> Vec<u8> {
@@ -544,8 +527,14 @@ mod tests {
         (state, data_dir)
     }
 
-    fn peer() -> ConnectInfo<SocketAddr> {
-        ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345))
+    fn client_ip() -> ClientIp {
+        ClientIp(IpAddr::V4(Ipv4Addr::LOCALHOST))
+    }
+
+    fn limiter() -> std::sync::Arc<RateLimiter> {
+        std::sync::Arc::new(RateLimiter::new(
+            &crate::config::ServerConfig::default().rate_limit,
+        ))
     }
 
     fn challenge_request(passphrase: &[u8]) -> (LoginChallengeRequest, Vec<u8>) {
@@ -620,8 +609,8 @@ mod tests {
         let (start_req, client_state) = registration_start_request(access_key, passphrase);
         let Json(start_resp) = register_start(
             State(state.clone()),
-            Extension(std::sync::Arc::new(RateLimiter::new())),
-            peer(),
+            Extension(limiter()),
+            client_ip(),
             Json(start_req),
         )
         .await
@@ -631,8 +620,8 @@ mod tests {
 
         let Json(finish_resp) = register_finish(
             State(state.clone()),
-            Extension(std::sync::Arc::new(RateLimiter::new())),
-            peer(),
+            Extension(limiter()),
+            client_ip(),
             HeaderMap::new(),
             Json(finish_req),
         )
@@ -663,8 +652,8 @@ mod tests {
             crypto::opaque_client_login_start(passphrase).expect("client login start");
         let Json(challenge_resp) = challenge(
             State(state.clone()),
-            Extension(std::sync::Arc::new(RateLimiter::new())),
-            peer(),
+            Extension(limiter()),
+            client_ip(),
             Json(LoginChallengeRequest {
                 user_id: Some(user_id.to_string()),
                 credential_request_b64: B64.encode(challenge_req),
@@ -675,8 +664,8 @@ mod tests {
         let login_req = login_request(challenge_resp, &client_login_state, passphrase);
         let Json(login_resp) = login(
             State(state),
-            Extension(std::sync::Arc::new(RateLimiter::new())),
-            peer(),
+            Extension(limiter()),
+            client_ip(),
             HeaderMap::new(),
             Json(login_req),
         )
@@ -717,8 +706,8 @@ mod tests {
         let (challenge_req, client_state) = challenge_request(passphrase);
         let Json(challenge) = challenge(
             State(state.clone()),
-            Extension(std::sync::Arc::new(RateLimiter::new())),
-            peer(),
+            Extension(limiter()),
+            client_ip(),
             Json(challenge_req),
         )
         .await
@@ -727,8 +716,8 @@ mod tests {
 
         let Json(resp) = login(
             State(state),
-            Extension(std::sync::Arc::new(RateLimiter::new())),
-            peer(),
+            Extension(limiter()),
+            client_ip(),
             HeaderMap::new(),
             Json(req),
         )
@@ -750,8 +739,8 @@ mod tests {
         let (challenge_req, client_state) = challenge_request(passphrase);
         let Json(challenge) = challenge(
             State(state.clone()),
-            Extension(std::sync::Arc::new(RateLimiter::new())),
-            peer(),
+            Extension(limiter()),
+            client_ip(),
             Json(challenge_req),
         )
         .await
@@ -767,8 +756,8 @@ mod tests {
 
         let _ = login(
             State(state.clone()),
-            Extension(std::sync::Arc::new(RateLimiter::new())),
-            peer(),
+            Extension(limiter()),
+            client_ip(),
             HeaderMap::new(),
             Json(req),
         )
@@ -777,8 +766,8 @@ mod tests {
 
         let result = login(
             State(state),
-            Extension(std::sync::Arc::new(RateLimiter::new())),
-            peer(),
+            Extension(limiter()),
+            client_ip(),
             HeaderMap::new(),
             Json(reused_req),
         )
@@ -795,8 +784,8 @@ mod tests {
         let (challenge_req, client_state) = challenge_request(b"wrong passphrase");
         let Json(challenge) = challenge(
             State(state.clone()),
-            Extension(std::sync::Arc::new(RateLimiter::new())),
-            peer(),
+            Extension(limiter()),
+            client_ip(),
             Json(challenge_req),
         )
         .await
@@ -814,22 +803,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_rate_limit_ignores_spoofed_forwarded_headers() {
+    async fn login_rate_limits_by_client_ip() {
         let passphrase = b"correct horse battery staple";
         let (state, _data_dir) = test_state(passphrase).await;
-        let limiter = std::sync::Arc::new(RateLimiter::new());
+        let limiter = limiter();
 
         for i in 0..10 {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                "x-forwarded-for",
-                format!("203.0.113.{i}").parse().expect("header"),
-            );
             let result = login(
                 State(state.clone()),
                 Extension(limiter.clone()),
-                peer(),
-                headers,
+                client_ip(),
+                HeaderMap::new(),
                 Json(LoginRequest {
                     challenge_id: format!("missing-{i}"),
                     credential_finalization_b64: B64.encode(b"not opaque"),
@@ -843,13 +827,11 @@ mod tests {
             assert_eq!(result.unwrap_err().0, StatusCode::UNAUTHORIZED);
         }
 
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "198.51.100.99".parse().expect("header"));
         let result = login(
             State(state),
             Extension(limiter),
-            peer(),
-            headers,
+            client_ip(),
+            HeaderMap::new(),
             Json(LoginRequest {
                 challenge_id: "missing-final".into(),
                 credential_finalization_b64: B64.encode(b"not opaque"),
@@ -864,17 +846,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn challenge_rate_limits_opaque_password_attempts_by_peer() {
+    async fn challenge_rate_limits_opaque_password_attempts_by_client_ip() {
         let passphrase = b"correct horse battery staple";
         let (state, _data_dir) = test_state(passphrase).await;
-        let limiter = std::sync::Arc::new(RateLimiter::new());
+        let limiter = limiter();
 
         for _ in 0..10 {
             let (challenge_req, _client_state) = challenge_request(b"candidate passphrase");
             let result = challenge(
                 State(state.clone()),
                 Extension(limiter.clone()),
-                peer(),
+                client_ip(),
                 Json(challenge_req),
             )
             .await;
@@ -885,7 +867,7 @@ mod tests {
         let result = challenge(
             State(state),
             Extension(limiter),
-            peer(),
+            client_ip(),
             Json(challenge_req),
         )
         .await;

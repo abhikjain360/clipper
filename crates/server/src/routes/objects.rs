@@ -12,8 +12,8 @@ use clipper_core::{
     crypto::{SHA256_BYTES, XCHACHA20_NONCE_BYTES},
     models::{
         ErrorResponse, ObjectCompleteRequest, ObjectInitRequest, ObjectInitResponse, ObjectKind,
-        ObjectListItem, ObjectListResponse, ObjectPayloadComplete, ObjectPayloadDescriptor,
-        ObjectPayloadInit, ObjectPayloadUpload, OkResponse,
+        ObjectListItem, ObjectListResponse, ObjectPayloadDescriptor, ObjectPayloadUpload,
+        OkResponse,
     },
 };
 use sea_orm::{
@@ -34,8 +34,6 @@ use crate::{
     ws::WsBroadcast,
 };
 
-const MAX_OBJECT_META_CIPHERTEXT_BYTES: usize = 64 * 1024;
-
 pub async fn init_object(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
@@ -45,7 +43,7 @@ pub async fn init_object(
     validate_exact_byte_len(&req.meta_nonce, XCHACHA20_NONCE_BYTES, "meta_nonce")?;
     crate::routes::validate_max_byte_len(
         &req.meta_ciphertext,
-        MAX_OBJECT_META_CIPHERTEXT_BYTES,
+        state.config().limits.max_object_meta_ciphertext_bytes,
         "Object metadata ciphertext exceeds maximum size",
     )?;
     if req.payloads.is_empty() {
@@ -482,7 +480,10 @@ pub async fn list_objects(
     Extension(auth): Extension<AuthInfo>,
     Query(query): Query<ObjectListQuery>,
 ) -> Result<Postcard<ObjectListResponse>, StatusCode> {
-    let limit = query.limit.unwrap_or(100).min(500);
+    let limit = query
+        .limit
+        .unwrap_or(state.config().list.default_limit)
+        .min(state.config().list.max_limit);
     let mut q = objects::Entity::find()
         .filter(objects::Column::UserId.eq(auth.user_id))
         .filter(objects::Column::Status.eq("complete"))
@@ -870,7 +871,10 @@ async fn remove_paths(paths: Vec<std::path::PathBuf>) {
 #[cfg(test)]
 mod tests {
     use axum::body::to_bytes;
-    use clipper_core::crypto::sha256;
+    use clipper_core::{
+        crypto::sha256,
+        models::{ObjectPayloadComplete, ObjectPayloadInit},
+    };
     use sea_orm::Database;
     use tempfile::TempDir;
 

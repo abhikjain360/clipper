@@ -92,7 +92,7 @@ pub async fn upload(
     drop(file);
 
     let now = Utc::now().to_rfc3339();
-    let expires = (Utc::now() + Duration::days(7)).to_rfc3339();
+    let expires = (Utc::now() + Duration::days(state.config().clipboard.ttl_days)).to_rfc3339();
 
     let txn = state
         .db()
@@ -176,7 +176,10 @@ pub async fn list(
     Query(query): Query<ListQuery>,
 ) -> Result<Json<ClipboardListResponse>, StatusCode> {
     let b64 = &base64::engine::general_purpose::STANDARD;
-    let limit = query.limit.unwrap_or(100).min(500);
+    let limit = query
+        .limit
+        .unwrap_or(state.config().list.default_limit)
+        .min(state.config().list.max_limit);
 
     let mut q = clipboard_items::Entity::find()
         .filter(clipboard_items::Column::UserId.eq(auth.user_id))

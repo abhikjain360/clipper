@@ -1,5 +1,6 @@
 mod auth;
 mod cleanup;
+mod config;
 mod entity;
 mod error;
 mod migration;
@@ -8,7 +9,11 @@ mod routes;
 mod state;
 mod ws;
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use axum::{
     Router,
@@ -25,14 +30,18 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::{
+    config::{ConfigOverrides, ServerConfig},
     error::{ServerError, ServerResult},
-    rate_limit::RateLimiter,
+    rate_limit::{RateLimiter, TrustedProxies},
     state::AppState,
 };
 
 #[derive(Parser)]
 #[command(name = "clipper-server")]
 struct Cli {
+    /// Path to a TOML config file. CLI flags override config file values.
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -42,14 +51,12 @@ enum Command {
     /// Initialize the server database
     Init {
         #[arg(long, short = 'd')]
-        data_dir: PathBuf,
+        data_dir: Option<PathBuf>,
     },
     /// Run the server
     Serve {
-        #[arg(long, short = 'd')]
-        data_dir: PathBuf,
-        #[arg(long, default_value = "127.0.0.1:8787")]
-        addr: String,
+        #[command(flatten)]
+        overrides: Box<ConfigOverrides>,
     },
 }
 
@@ -71,15 +78,44 @@ async fn run() -> ServerResult<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Init { data_dir } => init_server(data_dir).await?,
-        Command::Serve { data_dir, addr } => serve(data_dir, addr).await?,
+        Command::Init { data_dir } => {
+            let mut overrides = ConfigOverrides::default();
+            overrides.server.data_dir = data_dir;
+            let config = load_config(cli.config.as_deref(), overrides)?;
+            init_server(config).await?;
+        }
+        Command::Serve { overrides } => {
+            let config = load_config(cli.config.as_deref(), *overrides)?;
+            serve(config).await?;
+        }
     }
 
     Ok(())
 }
 
-async fn init_server(data_dir: PathBuf) -> ServerResult<()> {
-    let state = AppState::open(data_dir).await?;
+fn load_config(path: Option<&Path>, cli_overrides: ConfigOverrides) -> ServerResult<ServerConfig> {
+    let mut config = ServerConfig::default();
+
+    if let Some(path) = path {
+        let contents = std::fs::read_to_string(path)?;
+        let file_overrides = toml::from_str::<ConfigOverrides>(&contents).map_err(|error| {
+            ServerError::Config(format!(
+                "failed to parse config `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        config.apply_overrides(file_overrides);
+    }
+
+    config.apply_overrides(ConfigOverrides::from_env().map_err(ServerError::Config)?);
+    config.apply_overrides(cli_overrides);
+    config.validate_config().map_err(ServerError::Config)?;
+
+    Ok(config)
+}
+
+async fn init_server(config: ServerConfig) -> ServerResult<()> {
+    let state = AppState::open(config).await?;
 
     // Check if already initialized
     use sea_orm::EntityTrait;
@@ -107,8 +143,11 @@ async fn init_server(data_dir: PathBuf) -> ServerResult<()> {
     Ok(())
 }
 
-async fn serve(data_dir: PathBuf, addr: String) -> ServerResult<()> {
-    let state = AppState::open(data_dir).await?;
+async fn serve(config: ServerConfig) -> ServerResult<()> {
+    let state = AppState::open(config).await?;
+    let addr = state.config().server.addr.clone();
+    let trusted_proxies = TrustedProxies::new(state.config().server.trusted_proxies.clone());
+    let rate_limit_prune_interval_secs = state.config().rate_limit.prune_interval_secs;
 
     // Verify server is initialized
     use sea_orm::EntityTrait;
@@ -117,7 +156,13 @@ async fn serve(data_dir: PathBuf, addr: String) -> ServerResult<()> {
         .await?
         .ok_or(ServerError::NotInitialized)?;
 
-    let limiter = Arc::new(RateLimiter::new());
+    let limiter = Arc::new(RateLimiter::new(&state.config().rate_limit));
+    if !trusted_proxies.is_empty() {
+        info!(
+            trusted_proxy_count = trusted_proxies.len(),
+            "Trusting proxy forwarded client IP headers"
+        );
+    }
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([
@@ -176,6 +221,7 @@ async fn serve(data_dir: PathBuf, addr: String) -> ServerResult<()> {
         .route("/api/auth/login", post(routes::auth::login))
         .merge(authed)
         .layer(axum::Extension(limiter.clone()))
+        .layer(axum::Extension(trusted_proxies))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
@@ -183,11 +229,13 @@ async fn serve(data_dir: PathBuf, addr: String) -> ServerResult<()> {
     // cleanup task
     tokio::spawn(cleanup::run_cleanup_loop(state.clone()));
 
-    // Spawn rate limiter pruning
+    // rate limiter pruning
     tokio::spawn({
         let limiter = limiter.clone();
         async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                rate_limit_prune_interval_secs,
+            ));
             loop {
                 interval.tick().await;
                 limiter.prune();

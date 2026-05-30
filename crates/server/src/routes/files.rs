@@ -30,9 +30,6 @@ use crate::{
     ws::WsBroadcast,
 };
 
-const MAX_FILE_BLOB_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_FILE_META_CIPHERTEXT_BYTES: usize = 64 * 1024;
-
 pub async fn init_upload(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
@@ -42,14 +39,14 @@ pub async fn init_upload(
     let now = Utc::now().to_rfc3339();
 
     let file_uuid = validate_client_id(&req.id)?;
-    let blob_size = validate_blob_size(req.blob_size)?;
+    let blob_size = validate_blob_size(req.blob_size, state.config().limits.max_file_blob_bytes)?;
 
     let meta_ciphertext = b64
         .decode(&req.meta_ciphertext_b64)
         .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid meta_ciphertext_b64"))?;
     validate_max_byte_len(
         &meta_ciphertext,
-        MAX_FILE_META_CIPHERTEXT_BYTES,
+        state.config().limits.max_file_meta_ciphertext_bytes,
         "File metadata ciphertext exceeds maximum size",
     )?;
     let meta_nonce = b64
@@ -125,7 +122,10 @@ pub async fn upload_blob(
         return Err(error_response(StatusCode::FORBIDDEN, "Forbidden"));
     }
 
-    let expected_size = validate_blob_size(existing.blob_size)?;
+    let expected_size = validate_blob_size(
+        existing.blob_size,
+        state.config().limits.max_file_blob_bytes,
+    )?;
     let now = Utc::now().to_rfc3339();
     let claimed = files::Entity::update_many()
         .col_expr(
@@ -296,14 +296,17 @@ pub async fn complete_upload(
         return Err(error_response(StatusCode::FORBIDDEN, "Forbidden"));
     }
 
-    let expected_size = validate_blob_size(existing.blob_size)?;
+    let expected_size = validate_blob_size(
+        existing.blob_size,
+        state.config().limits.max_file_blob_bytes,
+    )?;
 
     let provided_hash = b64
         .decode(&req.sha256_ciphertext_b64)
         .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid sha256_ciphertext_b64"))?;
     validate_exact_byte_len(&provided_hash, SHA256_BYTES, "sha256_ciphertext_b64")?;
 
-    let client_size = validate_blob_size(req.blob_size)?;
+    let client_size = validate_blob_size(req.blob_size, state.config().limits.max_file_blob_bytes)?;
 
     // Verify the blob exists and compute hash
     let blob_path = state.files_dir().join(&existing.blob_path);
@@ -417,7 +420,10 @@ pub async fn list_files(
     Query(query): Query<FileListQuery>,
 ) -> Result<Json<FileListResponse>, StatusCode> {
     let b64 = &base64::engine::general_purpose::STANDARD;
-    let limit = query.limit.unwrap_or(100).min(500);
+    let limit = query
+        .limit
+        .unwrap_or(state.config().list.default_limit)
+        .min(state.config().list.max_limit);
 
     let mut q = files::Entity::find()
         .filter(files::Column::UserId.eq(auth.user_id))
@@ -562,13 +568,16 @@ async fn reset_file_status(state: &AppState, file_id: uuid::Uuid, from: &str, to
         .await;
 }
 
-fn validate_blob_size(size: i64) -> Result<u64, (StatusCode, Json<ErrorResponse>)> {
+fn validate_blob_size(
+    size: i64,
+    max_file_blob_bytes: u64,
+) -> Result<u64, (StatusCode, Json<ErrorResponse>)> {
     if size < 0 {
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid blob_size"));
     }
 
     let size = size as u64;
-    if size > MAX_FILE_BLOB_BYTES {
+    if size > max_file_blob_bytes {
         return Err(error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
             "File exceeds maximum size",
@@ -716,12 +725,13 @@ mod tests {
     #[tokio::test]
     async fn init_rejects_files_over_size_limit() -> TestResult {
         let (state, _data_dir) = test_state().await?;
+        let max_file_blob_bytes = state.config().limits.max_file_blob_bytes;
         let id = Uuid::new_v4().to_string();
 
         let result = init_upload(
             State(state),
             Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
-            Json(init_request(id, MAX_FILE_BLOB_BYTES as i64 + 1, "device-a")),
+            Json(init_request(id, max_file_blob_bytes as i64 + 1, "device-a")),
         )
         .await;
 
@@ -766,8 +776,9 @@ mod tests {
     #[tokio::test]
     async fn init_rejects_metadata_ciphertext_over_size_limit() -> TestResult {
         let (state, _data_dir) = test_state().await?;
+        let max_meta_ciphertext_bytes = state.config().limits.max_file_meta_ciphertext_bytes;
         let mut req = init_request(Uuid::new_v4().to_string(), 3, "device-a");
-        req.meta_ciphertext_b64 = B64.encode(vec![9_u8; MAX_FILE_META_CIPHERTEXT_BYTES + 1]);
+        req.meta_ciphertext_b64 = B64.encode(vec![9_u8; max_meta_ciphertext_bytes + 1]);
 
         let result = init_upload(
             State(state),

@@ -494,7 +494,7 @@ impl SyncEngine {
                 .as_ref()
                 .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
             let (meta_nonce, meta_ciphertext) = encrypt_file_meta_bytes(&meta, encryption_key)?;
-            let (blob_nonce, encrypted_blob) = encrypt_file_blob_bytes(&data, encryption_key)?;
+            let (blob_nonce, encrypted_blob) = encrypt_file_blob_bytes(data, encryption_key)?;
             (meta_nonce, meta_ciphertext, blob_nonce, encrypted_blob)
         };
 

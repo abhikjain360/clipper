@@ -285,17 +285,20 @@ Recommended fix:
 - Cancel or replace existing sync and clipboard watcher tasks during re-auth,
   logout, and server switching.
 
-## P2/P3: Auth Rate Limiting Is Peer-IP Based
+## P2/P3: Auth Rate Limiting And Proxy IPs
 
-Status: open.
+Status: fixed for trusted-proxy-aware client IP extraction; follow-up remains
+open for optional per-user and per-access-key limits.
 
-The server correctly avoids trusting spoofable forwarding headers. However,
-behind a reverse proxy all clients may share the proxy peer IP and therefore
-one limiter bucket.
+The server uses a `governor`-backed in-memory limiter for auth routes, keyed by
+resolved client IP, plus a configurable global auth cap. By default it uses the
+direct TCP peer IP. When running behind a reverse proxy, operators can configure
+trusted proxy IPs or CIDR ranges in TOML, with `--trusted-proxy`, or with
+`CLIPPER_TRUSTED_PROXIES`; only then will `X-Forwarded-For`, `X-Real-IP`, or
+`Forwarded` be used.
 
-Recommended fix:
+Remaining hardening:
 
-- Add explicit trusted-proxy configuration before using forwarded headers.
 - Consider per-user and per-access-key rate limits in addition to peer IP.
 
 ## P3: Secret-Bearing Types Derive Or Use Ordinary `String`
@@ -329,8 +332,9 @@ Recommended fix:
 ## Intentional Or Product-Dependent Tradeoffs
 
 - Local clipboard cache is plaintext by design in the roadmap. That is a valid
-  local-device tradeoff, but the UI/docs should make it explicit and retention
-  should be configurable.
+  local-device tradeoff, but the UI/docs should make it explicit. Server
+  clipboard retention is configurable; local cache retention should remain a
+  client-side decision.
 - Plain HTTP is still allowed for loopback and Android emulator development.
   Production and physical-device deployments need HTTPS.
 - Server-visible plaintext/MCP support is planned separately in

@@ -17,7 +17,9 @@ enum CleanupError {
 
 /// Run periodic cleanup tasks.
 pub async fn run_cleanup_loop(state: AppState) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // every hour
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+        state.config().cleanup.interval_secs,
+    ));
 
     loop {
         interval.tick().await;
@@ -59,7 +61,8 @@ async fn cleanup_expired_clipboard(state: &AppState) -> CleanupResult<()> {
 }
 
 async fn cleanup_old_events(state: &AppState) -> CleanupResult<()> {
-    let cutoff = (Utc::now() - Duration::days(3)).to_rfc3339();
+    let cutoff =
+        (Utc::now() - Duration::days(state.config().cleanup.event_log_retention_days)).to_rfc3339();
 
     let result = event_log::Entity::delete_many()
         .filter(event_log::Column::CreatedAt.lt(&cutoff))
@@ -77,8 +80,9 @@ async fn cleanup_old_events(state: &AppState) -> CleanupResult<()> {
 }
 
 async fn cleanup_orphan_uploads(state: &AppState) -> CleanupResult<()> {
-    // Delete incomplete uploads stuck before completion for more than 1 hour.
-    let cutoff = (Utc::now() - Duration::hours(1)).to_rfc3339();
+    let cutoff = (Utc::now()
+        - Duration::seconds(state.config().cleanup.orphan_upload_ttl_secs as i64))
+    .to_rfc3339();
 
     let orphans = files::Entity::find()
         .filter(files::Column::Status.ne("complete"))

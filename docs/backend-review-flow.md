@@ -11,11 +11,14 @@ then send encrypted records and non-decrypted metadata to the server.
 
 - `crates/server/src/main.rs`
   - boots the Axum HTTP server;
+  - loads built-in defaults, optional TOML config, environment overrides, and CLI overrides;
   - runs migrations;
   - checks `server_config` exists;
   - wires public registration/login routes, authenticated routes, tracing, cleanup, rate-limit pruning, and typed process-level error handling.
 - `crates/server/src/error.rs`
   - owns server process error variants, display text, and exit-code mapping.
+- `crates/server/src/config.rs`
+  - owns server runtime config defaults, TOML/CLI override shapes, and `garde` validation rules.
 - `crates/server/src/routes/auth.rs`
   - handles invite-key-gated OPAQUE registration, OPAQUE login challenge creation/finalization, device registration/update, session creation, and logout.
 - `crates/server/src/auth.rs`
@@ -195,7 +198,8 @@ Review `routes/auth.rs`, `auth.rs`, `state.rs`, and `rate_limit.rs` first.
 - Session tokens must be random, stored server-side only as hashes, and required on all private routes.
 - Expired sessions must fail closed.
 - Logout should delete only the authenticated session.
-- Rate limiting must apply to registration starts/finishes, OPAQUE challenge starts, and login finalizations, and must not trust spoofable proxy headers unless deployment config guarantees a trusted proxy.
+- Auth rate limiting must apply to registration starts/finishes, OPAQUE challenge starts, and login finalizations. It is `governor`-backed, keyed by resolved client IP, configurable from TOML/CLI, and also has a global auth cap.
+- Forwarded client IP headers must only be honored when the immediate peer matches startup trusted-proxy config (`trusted_proxies`, `--trusted-proxy`, or `CLIPPER_TRUSTED_PROXIES`).
 - All authenticated handlers must use the `user_id` injected by `auth_middleware` for authorization and data filtering.
 
 ## 5. Object And Path Safety

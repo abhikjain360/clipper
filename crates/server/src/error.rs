@@ -10,12 +10,14 @@ pub enum ServerError {
     Crypto(#[from] clipper_core::crypto::CryptoError),
     #[error("server not initialized; run `clipper-server init` first")]
     NotInitialized,
+    #[error("configuration error: {0}")]
+    Config(String),
 }
 
 impl ServerError {
     pub fn exit_code(&self) -> i32 {
         match self {
-            ServerError::NotInitialized => 2,
+            ServerError::NotInitialized | ServerError::Config(_) => 2,
             ServerError::Io(_) | ServerError::Database(_) | ServerError::Crypto(_) => 1,
         }
     }

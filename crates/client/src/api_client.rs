@@ -778,7 +778,7 @@ pub fn decrypt_file_meta_bytes(
 }
 
 fn decode_file_meta_plaintext(plaintext: &[u8]) -> Result<FileMeta, crypto::CryptoError> {
-    serde_json::from_slice(&plaintext)
+    serde_json::from_slice(plaintext)
         .map_err(|e| crypto::CryptoError::Decrypt(format!("json: {}", e)))
 }
 

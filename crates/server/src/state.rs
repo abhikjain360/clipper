@@ -10,10 +10,7 @@ use sea_orm_migration::MigratorTrait;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::{error::ServerResult, migration, ws::WsBroadcast};
-
-const AUTH_CHALLENGE_TTL: Duration = Duration::from_secs(5 * 60);
-const MAX_AUTH_CHALLENGES: usize = 4096;
+use crate::{config::ServerConfig, error::ServerResult, migration, ws::WsBroadcast};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,6 +20,7 @@ pub struct AppState {
 pub struct AppStateInner {
     pub db: DatabaseConnection,
     pub data_dir: PathBuf,
+    pub config: ServerConfig,
     pub ws_tx: broadcast::Sender<WsBroadcast>,
     auth_challenges: std::sync::Mutex<HashMap<String, AuthChallenge>>,
     pending_registrations: std::sync::Mutex<HashMap<String, PendingRegistration>>,
@@ -43,17 +41,28 @@ pub struct PendingRegistration {
 }
 
 impl AppState {
-    pub(crate) async fn open(data_dir: PathBuf) -> ServerResult<Self> {
+    pub(crate) async fn open(config: ServerConfig) -> ServerResult<Self> {
+        let data_dir = config.server.data_dir.clone();
         tokio::fs::create_dir_all(&data_dir).await?;
         let db = Self::connect_db(&data_dir).await?;
-        Self::open_with_db(db, data_dir).await
+        Self::open_with_db_and_config(db, config).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn open_with_db(
         db: DatabaseConnection,
         data_dir: PathBuf,
     ) -> ServerResult<Self> {
-        let state = Self::new(db, data_dir);
+        let mut config = ServerConfig::default();
+        config.server.data_dir = data_dir;
+        Self::open_with_db_and_config(db, config).await
+    }
+
+    pub(crate) async fn open_with_db_and_config(
+        db: DatabaseConnection,
+        config: ServerConfig,
+    ) -> ServerResult<Self> {
+        let state = Self::new(db, config);
         state.run_migrations().await?;
         state.ensure_storage_dirs().await?;
         Ok(state)
@@ -80,12 +89,14 @@ impl AppState {
         Ok(())
     }
 
-    fn new(db: DatabaseConnection, data_dir: PathBuf) -> Self {
+    fn new(db: DatabaseConnection, config: ServerConfig) -> Self {
         let (ws_tx, _) = broadcast::channel(256);
+        let data_dir = config.server.data_dir.clone();
         Self {
             inner: Arc::new(AppStateInner {
                 db,
                 data_dir,
+                config,
                 ws_tx,
                 auth_challenges: std::sync::Mutex::new(HashMap::new()),
                 pending_registrations: std::sync::Mutex::new(HashMap::new()),
@@ -99,6 +110,10 @@ impl AppState {
 
     pub fn data_dir(&self) -> &Path {
         &self.inner.data_dir
+    }
+
+    pub fn config(&self) -> &ServerConfig {
+        &self.inner.config
     }
 
     pub fn clipboard_dir(&self) -> PathBuf {
@@ -122,7 +137,7 @@ impl AppState {
         let mut challenges = self.inner.auth_challenges.lock().expect("lock poisoned");
         challenges.retain(|_, challenge| challenge.expires_at > now);
 
-        while challenges.len() >= MAX_AUTH_CHALLENGES {
+        while challenges.len() >= self.config().auth.max_pending_challenges {
             if let Some(id) = challenges.keys().next().cloned() {
                 challenges.remove(&id);
             } else {
@@ -136,7 +151,7 @@ impl AppState {
             AuthChallenge {
                 user_id,
                 server_login_state,
-                expires_at: now + AUTH_CHALLENGE_TTL,
+                expires_at: now + Duration::from_secs(self.config().auth.challenge_ttl_secs),
             },
         );
         challenge_id
@@ -166,7 +181,7 @@ impl AppState {
             .expect("lock poisoned");
         registrations.retain(|_, registration| registration.expires_at > now);
 
-        while registrations.len() >= MAX_AUTH_CHALLENGES {
+        while registrations.len() >= self.config().auth.max_pending_challenges {
             if let Some(id) = registrations.keys().next().cloned() {
                 registrations.remove(&id);
             } else {
@@ -182,7 +197,7 @@ impl AppState {
                 access_key_hash,
                 opaque_server_setup,
                 encryption_salt,
-                expires_at: now + AUTH_CHALLENGE_TTL,
+                expires_at: now + Duration::from_secs(self.config().auth.challenge_ttl_secs),
             },
         );
         registration_id

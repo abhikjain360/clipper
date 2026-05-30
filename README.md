@@ -114,5 +114,61 @@ target/release/clipper-server init --data-dir /var/lib/clipper
 target/release/clipper-server serve --data-dir /var/lib/clipper --addr 127.0.0.1:8787
 ```
 
+Server configuration can also live in a TOML file. Built-in defaults are used
+when no config file is supplied; config file values override those defaults,
+`CLIPPER_TRUSTED_PROXIES` can override `server.trusted_proxies`, and CLI flags
+override the config file.
+
+```toml
+[server]
+data_dir = "/var/lib/clipper"
+addr = "127.0.0.1:8787"
+trusted_proxies = ["127.0.0.1", "::1"]
+
+[rate_limit]
+auth_per_client_per_minute = 10
+auth_global_per_minute = 600
+prune_interval_secs = 60
+
+[auth]
+challenge_ttl_secs = 300
+max_pending_challenges = 4096
+
+[limits]
+max_file_blob_bytes = 536870912
+max_file_meta_ciphertext_bytes = 65536
+max_object_meta_ciphertext_bytes = 65536
+
+[clipboard]
+ttl_days = 7
+
+[list]
+default_limit = 100
+max_limit = 500
+
+[cleanup]
+interval_secs = 3600
+event_log_retention_days = 3
+orphan_upload_ttl_secs = 3600
+```
+
+```sh
+target/release/clipper-server --config /etc/clipper/server.toml init
+target/release/clipper-server --config /etc/clipper/server.toml serve
+```
+
 Put it behind a TLS reverse proxy for anything outside local development. Use
 `--addr 0.0.0.0:8787` only when that is really what you want.
+
+If a reverse proxy connects to `clipper-server`, configure that proxy as trusted
+so auth rate limiting uses the real client IP from `X-Forwarded-For`,
+`X-Real-IP`, or `Forwarded`. This is startup configuration and requires a server
+restart when changed.
+
+```sh
+CLIPPER_TRUSTED_PROXIES=127.0.0.1,::1 \
+  target/release/clipper-server serve --data-dir /var/lib/clipper --addr 127.0.0.1:8787
+```
+
+The equivalent CLI form is `--trusted-proxy 127.0.0.1 --trusted-proxy ::1`.
+Do not trust forwarded headers from arbitrary peers; clients can spoof them.
