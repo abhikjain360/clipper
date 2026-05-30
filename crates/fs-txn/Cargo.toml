@@ -2,6 +2,7 @@
 name = "clipper-fs-txn"
 version.workspace = true
 edition.workspace = true
+license-file.workspace = true
 
 [dependencies]
 tokio = { workspace = true, features = ["fs", "io-util"] }
