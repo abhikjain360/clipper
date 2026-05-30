@@ -1,0 +1,6 @@
+[[PackageOverrides]]
+name = "rsa"
+version = "0.9.10"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Pulled into Cargo.lock through sea-orm-migration's scanner-visible sea-orm-cli/sqlx-mysql metadata path; the server uses SQLite migrations only, and OSV reports no fixed rsa version."
