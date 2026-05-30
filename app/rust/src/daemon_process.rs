@@ -112,6 +112,22 @@ fn launchagent_plist_path() -> PathBuf {
 
 #[cfg(target_os = "macos")]
 fn generate_plist(daemon_path: &Path) -> String {
+    let environment_variables = crate::transport::socket_path()
+        .ok()
+        .map(|socket_path| {
+            format!(
+                r#"    <key>EnvironmentVariables</key>
+    <dict>
+        <key>{socket_path_env}</key>
+        <string>{socket_path}</string>
+    </dict>
+"#,
+                socket_path_env = clipper_daemon_types::ipc_path::SOCKET_PATH_ENV,
+                socket_path = xml_escape(&socket_path.display().to_string()),
+            )
+        })
+        .unwrap_or_default();
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -124,7 +140,7 @@ fn generate_plist(daemon_path: &Path) -> String {
     <array>
         <string>{daemon}</string>
     </array>
-    <key>RunAtLoad</key>
+{environment_variables}    <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <dict>
@@ -140,8 +156,19 @@ fn generate_plist(daemon_path: &Path) -> String {
 </dict>
 </plist>"#,
         label = LAUNCHAGENT_LABEL,
-        daemon = daemon_path.display(),
+        daemon = xml_escape(&daemon_path.display().to_string()),
+        environment_variables = environment_variables,
     )
+}
+
+#[cfg(target_os = "macos")]
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 /// Ensure the Linux user service is installed and running.

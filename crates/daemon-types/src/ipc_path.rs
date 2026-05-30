@@ -4,10 +4,15 @@ use std::path::{Path, PathBuf};
 
 pub const PRIVATE_SOCKET_DIR_MODE: u32 = 0o700;
 pub const SOCKET_FILE_MODE: u32 = 0o600;
+pub const SOCKET_PATH_ENV: &str = "CLIPPER_DAEMON_SOCKET_PATH";
 
 const SOCKET_FILE_NAME: &str = "daemon.sock";
 
 pub fn socket_path() -> PathBuf {
+    if let Some(path) = env_socket_path() {
+        return path;
+    }
+
     socket_dir().join(SOCKET_FILE_NAME)
 }
 
@@ -15,6 +20,11 @@ pub fn socket_dir() -> PathBuf {
     #[cfg(target_os = "linux")]
     if let Some(path) = xdg_runtime_dir() {
         return path.join("clipper");
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Some(path) = macos_sandbox_container_socket_dir() {
+        return path;
     }
 
     fallback_socket_dir()
@@ -62,6 +72,32 @@ fn xdg_runtime_dir() -> Option<PathBuf> {
 
 fn fallback_socket_dir() -> PathBuf {
     PathBuf::from("/tmp").join(format!("clipper-{}", current_euid()))
+}
+
+fn env_socket_path() -> Option<PathBuf> {
+    std::env::var_os(SOCKET_PATH_ENV)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_sandbox_container_socket_dir() -> Option<PathBuf> {
+    let data_dir = dirs::data_dir()?;
+    if !data_dir.ends_with(Path::new("Library/Application Support")) {
+        return None;
+    }
+
+    let container_data_dir = data_dir.parent()?.parent()?;
+    if container_data_dir.file_name()?.to_str()? != "Data" {
+        return None;
+    }
+
+    let container_dir = container_data_dir.parent()?;
+    if container_dir.parent()?.file_name()?.to_str()? != "Containers" {
+        return None;
+    }
+
+    Some(container_data_dir.join("tmp").join("Clipper"))
 }
 
 fn current_euid() -> u32 {

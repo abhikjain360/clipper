@@ -10,4 +10,5 @@ serde_json.workspace = true
 strum.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+dirs.workspace = true
 libc.workspace = true
