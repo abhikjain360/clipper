@@ -18,7 +18,27 @@ use clipper_core::crypto::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::error::{ServerError, ServerResult};
+use crate::error::ServerResult;
+
+#[derive(Debug, thiserror::Error)]
+pub enum SecretLoadError {
+    #[error("set only one of CLIPPER_SERVER_SECRET or CLIPPER_SERVER_SECRET_FILE, not both")]
+    BothEnvAndFileSet,
+    #[error("failed to read CLIPPER_SERVER_SECRET_FILE ({}): {source}", path.display())]
+    FileRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "CLIPPER_SERVER_SECRET or CLIPPER_SERVER_SECRET_FILE must be set; run `clipper-server generate-secret` to mint one"
+    )]
+    NotSet,
+    #[error("server secret is not valid base64: {0}")]
+    InvalidBase64(#[from] base64::DecodeError),
+    #[error("server secret must decode to exactly {expected} bytes, got {actual}")]
+    WrongLength { expected: usize, actual: usize },
+}
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -62,43 +82,30 @@ impl ServerSecrets {
     }
 }
 
-fn load_root_from_env() -> ServerResult<Zeroizing<[u8; SERVER_SECRET_BYTES]>> {
+fn load_root_from_env() -> Result<Zeroizing<[u8; SERVER_SECRET_BYTES]>, SecretLoadError> {
     let env_value = std::env::var(ENV_SECRET).ok();
     let file_path = std::env::var(ENV_SECRET_FILE).ok().map(PathBuf::from);
 
     let raw = match (env_value, file_path) {
-        (Some(_), Some(_)) => {
-            return Err(ServerError::Config(format!(
-                "set only one of {ENV_SECRET} or {ENV_SECRET_FILE}, not both"
-            )));
-        }
+        (Some(_), Some(_)) => return Err(SecretLoadError::BothEnvAndFileSet),
         (Some(v), None) => v,
-        (None, Some(path)) => std::fs::read_to_string(&path).map_err(|e| {
-            ServerError::Config(format!(
-                "failed to read {ENV_SECRET_FILE} ({}): {e}",
-                path.display()
-            ))
-        })?,
-        (None, None) => {
-            return Err(ServerError::Config(format!(
-                "{ENV_SECRET} or {ENV_SECRET_FILE} must be set; run `clipper-server generate-secret` to mint one"
-            )));
-        }
+        (None, Some(path)) => std::fs::read_to_string(&path)
+            .map_err(|source| SecretLoadError::FileRead { path, source })?,
+        (None, None) => return Err(SecretLoadError::NotSet),
     };
 
     decode_root(raw.trim())
 }
 
-fn decode_root(s: &str) -> ServerResult<Zeroizing<[u8; SERVER_SECRET_BYTES]>> {
-    let mut decoded = B64
-        .decode(s)
-        .map_err(|e| ServerError::Config(format!("server secret is not valid base64: {e}")))?;
+fn decode_root(s: &str) -> Result<Zeroizing<[u8; SERVER_SECRET_BYTES]>, SecretLoadError> {
+    let mut decoded = B64.decode(s)?;
     if decoded.len() != SERVER_SECRET_BYTES {
+        let actual = decoded.len();
         decoded.zeroize();
-        return Err(ServerError::Config(format!(
-            "server secret must decode to exactly {SERVER_SECRET_BYTES} bytes, got {}",
-            decoded.len()
-        )));
+        return Err(SecretLoadError::WrongLength {
+            expected: SERVER_SECRET_BYTES,
+            actual,
+        });
     }
     let mut root = Zeroizing::new([0_u8; SERVER_SECRET_BYTES]);
     root.copy_from_slice(&decoded);
