@@ -3,7 +3,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tracing::info;
 
 use crate::{
-    entity::{clipboard_items, event_log, files},
+    entity::{clipboard_items, event_log, object_payloads, objects},
     state::AppState,
 };
 
@@ -29,7 +29,7 @@ pub async fn run_cleanup_loop(state: AppState) {
         if let Err(e) = cleanup_old_events(&state).await {
             tracing::error!(error = %e, "Event log cleanup failed");
         }
-        if let Err(e) = cleanup_orphan_uploads(&state).await {
+        if let Err(e) = cleanup_orphan_object_uploads(&state).await {
             tracing::error!(error = %e, "Orphan upload cleanup failed");
         }
     }
@@ -79,30 +79,36 @@ async fn cleanup_old_events(state: &AppState) -> CleanupResult<()> {
     Ok(())
 }
 
-async fn cleanup_orphan_uploads(state: &AppState) -> CleanupResult<()> {
+async fn cleanup_orphan_object_uploads(state: &AppState) -> CleanupResult<()> {
     let cutoff = (Utc::now()
         - Duration::seconds(state.config().cleanup.orphan_upload_ttl_secs as i64))
     .to_rfc3339();
 
-    let orphans = files::Entity::find()
-        .filter(files::Column::Status.ne("complete"))
-        .filter(files::Column::CreatedAt.lt(&cutoff))
+    let orphans = objects::Entity::find()
+        .filter(objects::Column::Status.ne("complete"))
+        .filter(objects::Column::CreatedAt.lt(&cutoff))
         .all(state.db())
         .await?;
 
     let count = orphans.len();
-    for f in &orphans {
-        let path = state.files_dir().join(&f.blob_path);
-        let _ = tokio::fs::remove_file(&path).await;
+    for object in &orphans {
+        let payloads = object_payloads::Entity::find()
+            .filter(object_payloads::Column::ObjectId.eq(object.id))
+            .all(state.db())
+            .await?;
+        for payload in payloads {
+            let path = state.objects_dir().join(&payload.ciphertext_path);
+            let _ = tokio::fs::remove_file(&path).await;
+        }
     }
 
     if count > 0 {
-        files::Entity::delete_many()
-            .filter(files::Column::Status.ne("complete"))
-            .filter(files::Column::CreatedAt.lt(&cutoff))
+        objects::Entity::delete_many()
+            .filter(objects::Column::Status.ne("complete"))
+            .filter(objects::Column::CreatedAt.lt(&cutoff))
             .exec(state.db())
             .await?;
-        info!(count, "Cleaned up orphan file uploads");
+        info!(count, "Cleaned up orphan object uploads");
     }
 
     Ok(())

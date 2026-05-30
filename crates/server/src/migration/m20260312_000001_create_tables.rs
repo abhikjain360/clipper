@@ -195,64 +195,6 @@ impl MigrationTrait for Migration {
         manager
             .create_table(
                 Table::create()
-                    .table(Files::Table)
-                    .if_not_exists()
-                    .col(ColumnDef::new(Files::Id).uuid().not_null().primary_key())
-                    .col(ColumnDef::new(Files::UserId).uuid().not_null())
-                    .col(
-                        ColumnDef::new(Files::BlobPath)
-                            .text()
-                            .not_null()
-                            .unique_key(),
-                    )
-                    .col(ColumnDef::new(Files::MetaCiphertext).blob().not_null())
-                    .col(ColumnDef::new(Files::MetaNonce).blob().not_null())
-                    .col(ColumnDef::new(Files::BlobNonce).blob().not_null())
-                    .col(
-                        ColumnDef::new(Files::BlobSize)
-                            .big_integer()
-                            .not_null()
-                            .check(Expr::col(Files::BlobSize).gte(0)),
-                    )
-                    .col(ColumnDef::new(Files::Sha256Ciphertext).blob().not_null())
-                    .col(ColumnDef::new(Files::CreatedAt).text().not_null())
-                    .col(ColumnDef::new(Files::UpdatedAt).text().not_null())
-                    .col(ColumnDef::new(Files::SourceDeviceId).uuid().not_null())
-                    .col(
-                        ColumnDef::new(Files::Status)
-                            .text()
-                            .not_null()
-                            .default("pending")
-                            .check(Expr::col(Files::Status).is_in([
-                                "pending",
-                                "uploading",
-                                "uploaded",
-                                "complete",
-                            ])),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_files_source_device_id")
-                            .from(Files::Table, Files::SourceDeviceId)
-                            .to(Devices::Table, Devices::Id)
-                            .on_delete(ForeignKeyAction::Restrict)
-                            .on_update(ForeignKeyAction::Cascade),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_files_user_id")
-                            .from(Files::Table, Files::UserId)
-                            .to(Users::Table, Users::Id)
-                            .on_delete(ForeignKeyAction::Cascade)
-                            .on_update(ForeignKeyAction::Cascade),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_table(
-                Table::create()
                     .table(Objects::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Objects::Id).uuid().not_null().primary_key())
@@ -424,9 +366,6 @@ impl MigrationTrait for Migration {
             .drop_table(Table::drop().table(Objects::Table).if_exists().to_owned())
             .await?;
         manager
-            .drop_table(Table::drop().table(Files::Table).if_exists().to_owned())
-            .await?;
-        manager
             .drop_table(
                 Table::drop()
                     .table(ClipboardItems::Table)
@@ -519,23 +458,6 @@ enum ClipboardItems {
     CreatedAt,
     ExpiresAt,
     SourceDeviceId,
-}
-
-#[derive(DeriveIden)]
-enum Files {
-    Table,
-    Id,
-    UserId,
-    BlobPath,
-    MetaCiphertext,
-    MetaNonce,
-    BlobNonce,
-    BlobSize,
-    Sha256Ciphertext,
-    CreatedAt,
-    UpdatedAt,
-    SourceDeviceId,
-    Status,
 }
 
 #[derive(DeriveIden)]

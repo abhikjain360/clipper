@@ -19,7 +19,7 @@ use axum::{
     Router,
     http::{Method, header},
     middleware,
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
 };
 use clap::{Parser, Subcommand};
 use tower_http::{
@@ -179,15 +179,6 @@ async fn serve(config: ServerConfig) -> ServerResult<()> {
         .route("/api/auth/logout", post(routes::auth::logout))
         .route("/api/clipboard", post(routes::clipboard::upload))
         .route("/api/clipboard", get(routes::clipboard::list))
-        .route("/api/files/init", post(routes::files::init_upload))
-        .route("/api/files/{id}/blob", put(routes::files::upload_blob))
-        .route(
-            "/api/files/{id}/complete",
-            post(routes::files::complete_upload),
-        )
-        .route("/api/files", get(routes::files::list_files))
-        .route("/api/files/{id}/blob", get(routes::files::download_blob))
-        .route("/api/files/{id}", delete(routes::files::delete_file))
         .route("/api/objects/init", post(routes::objects::init_object))
         .route(
             "/api/objects/{id}/payloads/{payload_id}",

@@ -4,7 +4,6 @@ pub mod access_keys;
 pub mod clipboard_items;
 pub mod devices;
 pub mod event_log;
-pub mod files;
 pub mod object_payloads;
 pub mod objects;
 pub mod server_config;

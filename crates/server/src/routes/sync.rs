@@ -6,13 +6,13 @@ use axum::{
 use base64::Engine;
 use clipper_core::{
     crypto::Argon2Params,
-    models::{BootstrapResponse, ClipboardItem, DeviceInfo, FileListItem, ServerInfo},
+    models::{BootstrapResponse, ClipboardItem, DeviceInfo, ServerInfo},
 };
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
 
 use crate::{
     auth::AuthInfo,
-    entity::{clipboard_items, devices, event_log, files, users},
+    entity::{clipboard_items, devices, event_log, users},
     state::AppState,
 };
 
@@ -60,29 +60,6 @@ pub async fn bootstrap(
         }
     }
 
-    // Recent files (last 100)
-    let files = files::Entity::find()
-        .filter(files::Column::UserId.eq(auth.user_id))
-        .filter(files::Column::Status.eq("complete"))
-        .order_by(files::Column::CreatedAt, Order::Desc)
-        .all(state.db())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let files: Vec<files::Model> = files.into_iter().take(100).collect();
-    let file_items: Vec<FileListItem> = files
-        .iter()
-        .map(|f| FileListItem {
-            id: f.id.to_string(),
-            meta_nonce_b64: b64.encode(&f.meta_nonce),
-            meta_ciphertext_b64: b64.encode(&f.meta_ciphertext),
-            blob_nonce_b64: b64.encode(&f.blob_nonce),
-            blob_size: f.blob_size,
-            created_at: f.created_at.clone(),
-            source_device_id: f.source_device_id.to_string(),
-        })
-        .collect();
-
     // Latest event seq
     let latest_seq = event_log::Entity::find()
         .filter(event_log::Column::UserId.eq(auth.user_id))
@@ -100,7 +77,6 @@ pub async fn bootstrap(
             platform: dev.platform,
         },
         clipboard_items,
-        files: file_items,
         latest_seq,
         server: ServerInfo {
             encryption_salt_b64: b64.encode(&user.encryption_salt),

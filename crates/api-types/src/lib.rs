@@ -138,47 +138,6 @@ pub struct ClipboardListResponse {
     pub next_before: Option<String>,
 }
 
-// -- Files --
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FileInitRequest {
-    pub id: String,
-    pub meta_nonce_b64: String,
-    pub meta_ciphertext_b64: String,
-    pub blob_nonce_b64: String,
-    pub blob_size: i64,
-    pub source_device_id: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FileInitResponse {
-    pub upload_url: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FileCompleteRequest {
-    pub sha256_ciphertext_b64: String,
-    pub blob_size: i64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FileListItem {
-    pub id: String,
-    pub meta_nonce_b64: String,
-    pub meta_ciphertext_b64: String,
-    pub blob_nonce_b64: String,
-    pub blob_size: i64,
-    pub created_at: String,
-    pub source_device_id: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FileListResponse {
-    pub items: Vec<FileListItem>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_before: Option<String>,
-}
-
 // -- Objects --
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,7 +259,6 @@ pub enum WsServerMessage {
 pub struct BootstrapResponse {
     pub device: DeviceInfo,
     pub clipboard_items: Vec<ClipboardItem>,
-    pub files: Vec<FileListItem>,
     pub latest_seq: i64,
     pub server: ServerInfo,
 }
