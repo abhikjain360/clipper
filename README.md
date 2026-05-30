@@ -7,6 +7,14 @@ Encrypted clipboard and file sync.
 > [`docs/rust-code-review.md`](docs/rust-code-review.md). Don't trust it with
 > secrets you can't afford to lose yet. See [SECURITY.md](SECURITY.md).
 
+> **Contributions:** upstream pull requests are closed for now. Clipper is
+> experimental both as a product and as a development-process experiment: it is
+> being used to explore how far high-quality software can be written with heavy
+> agentic coding while keeping design judgment, review responsibility, and
+> maintenance ownership with the maintainer. You are still welcome to read the
+> code, run it locally, fork it, experiment, and send feedback. See
+> [CONTRIBUTING.md](CONTRIBUTING.md).
+
 The server stores ciphertext and sync metadata. Clients do the crypto locally.
 The raw passphrase is not sent to the server.
 
