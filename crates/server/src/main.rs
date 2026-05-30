@@ -162,6 +162,7 @@ async fn init_server(config: ServerConfig, secrets: ServerSecrets) -> ServerResu
         .await?;
 
     if existing.is_some() {
+        let _ = load_access_key_hash_salt(&state).await?;
         info!("Server already initialized. To reinitialize, delete the database.");
         return Ok(());
     }
@@ -213,14 +214,7 @@ async fn add_access_key(
     use sea_orm::{ActiveModelTrait, EntityTrait, Set};
     let access_key_hash_params = config.crypto.access_key_hash_params;
     let state = AppState::open(config, secrets).await?;
-    let server_config = entity::server_config::Entity::find_by_id(1)
-        .one(state.db())
-        .await?
-        .ok_or(ServerError::NotInitialized)?;
-    let salt = secret_storage::unwrap_access_key_hash_salt(
-        state.secrets(),
-        &server_config.access_key_hash_salt,
-    )?;
+    let salt = load_access_key_hash_salt(&state).await?;
     let key_hash = hash_access_key(
         access_key,
         &salt,
@@ -250,12 +244,9 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
     let trusted_proxies = TrustedProxies::new(state.config().server.trusted_proxies.clone());
     let rate_limit_prune_interval_secs = state.config().rate_limit.prune_interval_secs;
 
-    // Verify server is initialized
-    use sea_orm::EntityTrait;
-    entity::server_config::Entity::find_by_id(1)
-        .one(state.db())
-        .await?
-        .ok_or(ServerError::NotInitialized)?;
+    // Verify the server is initialized and this process has the matching
+    // pepper before accepting traffic.
+    let _ = load_access_key_hash_salt(&state).await?;
 
     let limiter = Arc::new(RateLimiter::new(&state.config().rate_limit));
     if !trusted_proxies.is_empty() {
@@ -344,6 +335,25 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
     .await?;
 
     Ok(())
+}
+
+async fn load_access_key_hash_salt(state: &AppState) -> ServerResult<Vec<u8>> {
+    use sea_orm::EntityTrait;
+
+    let server_config = entity::server_config::Entity::find_by_id(1)
+        .one(state.db())
+        .await?
+        .ok_or(ServerError::NotInitialized)?;
+    secret_storage::unwrap_access_key_hash_salt(
+        state.secrets(),
+        &server_config.access_key_hash_salt,
+    )
+    .map_err(|_| {
+        ServerError::Config(
+            "server secret cannot decrypt existing server configuration; check CLIPPER_SERVER_SECRET"
+                .into(),
+        )
+    })
 }
 
 async fn shutdown_signal() {
