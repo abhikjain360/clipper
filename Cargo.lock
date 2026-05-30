@@ -318,28 +318,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axum-extra"
-version = "0.12.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be44683b41ccb9ab2d23a5230015c9c3c55be97a25e4428366de8873103f7970"
-dependencies = [
- "axum",
- "axum-core",
- "bytes",
- "futures-core",
- "futures-util",
- "headers",
- "http",
- "http-body",
- "http-body-util",
- "mime",
- "pin-project-lite",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
 name = "axum-macros"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -682,7 +660,6 @@ dependencies = [
  "chrono",
  "clipper-app-types",
  "clipper-core",
- "clipper-daemon-types",
  "futures-util",
  "getrandom 0.4.2",
  "objc2-app-kit",
@@ -710,19 +687,15 @@ name = "clipper-core"
 version = "0.1.0"
 dependencies = [
  "argon2",
- "base64",
  "chacha20poly1305",
- "chrono",
  "clipper-api-types",
  "getrandom 0.4.2",
  "hkdf",
  "opaque-ke",
  "rand 0.10.1",
  "serde",
- "serde_json",
  "sha2",
  "thiserror",
- "tracing",
  "zeroize",
 ]
 
@@ -766,7 +739,6 @@ dependencies = [
  "argon2",
  "async-trait",
  "axum",
- "axum-extra",
  "base64",
  "chrono",
  "clap",
@@ -1778,30 +1750,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
 dependencies = [
  "hashbrown 0.15.5",
-]
-
-[[package]]
-name = "headers"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3314d5adb5d94bcdf56771f2e50dbbc80bb4bdf88967526706205ac9eff24eb"
-dependencies = [
- "base64",
- "bytes",
- "headers-core",
- "http",
- "httpdate",
- "mime",
- "sha1",
-]
-
-[[package]]
-name = "headers-core"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54b4a22553d4242c49fddb9ba998a99962b5cc6f22cb5a3482bec22522403ce4"
-dependencies = [
- "http",
 ]
 
 [[package]]

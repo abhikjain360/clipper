@@ -81,6 +81,7 @@ One-off checks:
 ```sh
 nix run .#fmt
 nix run .#audit
+nix run .#udeps
 cargo test --workspace
 cd app && flutter analyze && flutter test
 nix run .#wasm-check

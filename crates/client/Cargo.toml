@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 clipper-core.workspace = true
 clipper-app-types.workspace = true
-clipper-daemon-types.workspace = true
 base64.workspace = true
 chrono.workspace = true
 postcard.workspace = true

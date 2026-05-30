@@ -193,6 +193,31 @@
             '';
           };
 
+          udeps = {
+            program = "clipper-udeps";
+            description = "Detect unused Rust dependencies with cargo-udeps";
+            runtimeInputs =
+              baseRuntimeInputs
+              ++ (with pkgs; [
+                cargo-udeps
+              ])
+              ++ [ toolchains.nightly ];
+            env = nightlyEnv;
+            text = ''
+              # shellcheck disable=SC1091
+              source ${scriptsDir}/common.sh
+
+              clipper_enter_repo
+              clipper_use_nightly
+
+              if [ "$#" -eq 0 ]; then
+                set -- --workspace --all-targets --locked
+              fi
+
+              exec cargo udeps "$@"
+            '';
+          };
+
           wasm-check = {
             program = "clipper-wasm-check";
             description = "Check the Rust app crate for wasm32-unknown-unknown";
@@ -363,6 +388,7 @@
             packages =
               (with pkgs; [
                 cargo-edit
+                cargo-udeps
                 cmake
                 cocoapods
                 dart

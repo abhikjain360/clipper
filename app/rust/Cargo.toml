@@ -7,7 +7,6 @@ edition = "2024"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-clipper-client.workspace = true
 clipper-app-types.workspace = true
 clipper-daemon-types.workspace = true
 flutter_rust_bridge = { version = "=2.12.0", default-features = false, features = [
@@ -31,6 +30,9 @@ uuid = { workspace = true, features = ["js", "v7"] }
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 dirs.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "sync", "rt", "time", "macros"] }
+
+[target.'cfg(any(target_os = "android", target_family = "wasm"))'.dependencies]
+clipper-client.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 hmac.workspace = true
