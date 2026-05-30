@@ -24,23 +24,25 @@ then send encrypted records and non-decrypted metadata to the server.
 - `crates/server/src/auth.rs`
   - validates bearer tokens and injects authenticated `user_id`/`device_id`/`session_id` into request handlers.
 - `crates/server/src/routes/objects.rs`
-  - handles generic encrypted objects: multi-payload init, streamed payload upload, completion, listing, payload download, and delete. Both clipboard items and files now flow through this route.
-- `crates/server/src/routes/clipboard.rs`
-  - legacy single-blob clipboard upload/list. The Axum router still mounts these endpoints, but the current `clipper-client` no longer calls them — clipboard items go through `routes::objects` with `kind = "clipboard"`. Treat any future change here as either intentional dead-code maintenance or a regression that re-introduces a parallel write path.
+  - handles generic encrypted objects: multi-payload init, streamed payload upload, completion, listing, payload download, and delete. Both clipboard items and files flow through this route — there is no longer a separate clipboard or files route. Clipboard items are `kind = "clipboard"` with a TTL and a per-user `max_items` trim; files are `kind = "file"`.
+- `crates/server/src/routes/health.rs`
+  - unauthenticated `GET /api/health` liveness probe.
 - `crates/server/src/routes/sync.rs` and `crates/server/src/ws.rs`
-  - provide bootstrap state and event notification. `bootstrap` currently returns device info, `latest_seq`, encryption parameters, and recent rows from the legacy `clipboard_items` table; the latter is effectively unused by the current client, which derives clipboard state from `routes::objects`. WebSocket replay reads `event_log` and falls back to `Invalidate` on query errors.
+  - provide bootstrap state and event notification. `bootstrap` returns device info, `latest_seq`, and `ServerInfo` (the unwrapped `encryption_salt` plus encryption KDF parameters) only; the client rebuilds clipboard/file state from `GET /api/objects`. WebSocket replay reads `event_log` and falls back to `Invalidate` only when the replay query errors — it does not yet detect pruned-event gaps or cap replay size (see `docs/rust-code-review.md` P1).
 - `crates/server/src/state.rs`
   - owns shared DB connection, data directories, WebSocket broadcast channel, in-memory auth challenges, and in-memory pending registrations.
 - `crates/server/src/cleanup.rs`
-  - removes expired clipboard items, old event-log rows, and orphaned non-complete object uploads plus their on-disk payload files.
+  - periodic loop plus on-write trims, all over the `objects` table: `cleanup_expired_clipboard_objects` (clipboard past TTL), `cleanup_excess_clipboard_objects` / `trim_user_clipboard` (clipboard beyond per-user `max_items`), `cleanup_old_events` (event-log retention), and `cleanup_orphan_object_uploads` (non-`complete` objects past `orphan_upload_ttl_secs`). Each deletes the on-disk payload files before the rows.
 - `crates/api-types/src/lib.rs`
-  - owns the HTTP/WebSocket API contracts shared by server and clients. Object endpoints exchange `postcard`-encoded bodies (`POSTCARD_CONTENT_TYPE`); auth and clipboard endpoints still use JSON with base64 fields.
+  - owns the HTTP/WebSocket API contracts shared by server and clients. Object endpoints exchange `postcard`-encoded bodies (`POSTCARD_CONTENT_TYPE`); auth endpoints use JSON with base64 fields.
 - `crates/core/src/models.rs`
   - compatibility re-exports `clipper-api-types` for existing imports.
 - `crates/client/src/api_client.rs`
   - is the reference client implementation and should be checked when route models or crypto flow change.
 - `crates/client/src/engine.rs`
   - owns client-side auth completion, key derivation, encryption/decryption, HTTP/WebSocket sync, decrypted in-memory state, and adapts the multi-payload object API to the single-payload clipboard/file behavior the UI assumes.
+- `crates/client/src/local_store.rs`
+  - per-profile, filesystem-backed durable clipboard cache (roadmap step 1). Stores clipboard payloads and metadata as plaintext files under the profile root; the network boundary stays encrypted. File metadata is not yet cached here (still server-derived).
 - `crates/app-types/src/lib.rs`
   - owns decrypted app-visible state shared by the sync engine, daemon state events, and Flutter bridge adapters.
 - `docs/local-store-p2p-roadmap.md`
@@ -78,10 +80,8 @@ SQLite stores durable metadata. The filesystem stores larger encrypted blobs:
   - stores user-scoped random session token hashes, not bearer tokens themselves; also captures user-agent and IP for audit.
 - `devices`
   - stores user ID, device ID, device name, platform, and last-seen timestamps.
-- `clipboard_items`
-  - legacy single-blob clipboard table. Still migrated and still maintained by `routes::clipboard` and `cleanup::cleanup_expired_clipboard`, but no longer written by the current client. Treat new writes here as suspicious.
 - `objects`
-  - per-object header: user, kind (`clipboard` | `file`), encrypted metadata, source device, status (`pending` | `complete`).
+  - per-object header: user, kind (`clipboard` | `file`), encrypted metadata (`meta_ciphertext` + `meta_nonce`), source device, `expires_at` (set for clipboard, null for files), status (`pending` | `complete`). There is no longer a separate `clipboard_items` table.
 - `object_payloads`
   - per-payload row keyed by `(object_id, payload_id)`: ciphertext path, nonce, ciphertext size, SHA-256, status (`pending` | `uploading` | `uploaded` | `complete`). Each row points at a file under `state.objects_dir()`.
 - `event_log`
@@ -96,7 +96,7 @@ schema and should not be treated as the schema owner.
 First-run server setup:
 
 1. Operator runs `clipper-server init`.
-2. Server creates the database, runs migrations, inserts the singleton `server_config` initialization marker and a wrapped access-key hashing salt, and creates `clipboard/` and `objects/` data directories.
+2. Server creates the database, runs migrations, inserts the singleton `server_config` initialization marker and a wrapped access-key hashing salt, and creates the `objects/` data directory (the only on-disk blob directory).
 3. No user passphrase is entered during server init.
 
 Access-key provisioning:
@@ -169,9 +169,10 @@ Sync flow:
 
 Cleanup flow:
 
-1. Expired clipboard items are deleted from DB and the `clipboard/` directory (legacy table only).
-2. Old event-log rows are pruned, which can force clients to bootstrap or refresh instead of replaying old gaps.
-3. Pending or uploading objects older than `cleanup.orphan_upload_ttl_secs` are deleted with their payload files.
+1. Clipboard objects past their `expires_at` TTL are deleted with their payload files.
+2. Clipboard objects beyond the per-user `clipboard.max_items` cap are trimmed (oldest first); this also runs opportunistically after each clipboard write.
+3. Old event-log rows are pruned, which can force clients to bootstrap or refresh instead of replaying old gaps.
+4. Pending or uploading objects older than `cleanup.orphan_upload_ttl_secs` are deleted with their payload files.
 
 ## 3. Security Model To Rebuild Before Review
 
@@ -181,7 +182,7 @@ Cleanup flow:
   - It may know user IDs, device IDs, timestamps, ciphertext sizes, event IDs, upload status, encrypted metadata, ciphertext hashes, and access-key hashes.
   - It must not receive plaintext clipboard contents, plaintext file bytes, plaintext file metadata, raw passphrases, plaintext access keys after registration request processing, or reusable client-side encryption keys.
 - Confirm whether the route handles attacker-controlled input from a client, even if authenticated.
-- Treat SQLite rows and blob filenames as security-sensitive because many routes convert DB values into filesystem paths (`clipboard_items.ciphertext_path`, `object_payloads.ciphertext_path`).
+- Treat SQLite rows and blob filenames as security-sensitive because routes convert DB values into filesystem paths (`object_payloads.ciphertext_path`).
 - Treat client-supplied `platform` and `device_name` values as display/provenance metadata only.
 
 ## 4. Authentication And Sessions
@@ -191,6 +192,7 @@ Review `routes/auth.rs`, `auth.rs`, `state.rs`, and `rate_limit.rs` first.
 - Public auth routes are `POST /api/auth/register/start`, `POST /api/auth/register/finish`, `POST /api/auth/challenge`, and `POST /api/auth/login`.
 - Registration must be gated by a one-time access key stored as an Argon2id verifier. The verifier is derived from the access key, the unwrapped server salt, and the server pepper passed as Argon2's `secret` input.
 - Registration and login must use OPAQUE flows; raw user passphrases and reusable authentication secrets must not be sent to the server.
+- Usernames are enumerable: `challenge` returns `401 "Unknown user"` for a missing username without doing OPAQUE work, and `register_start` returns `409 "Username already taken"`. Because `opaque_server_setup` is per-user, the OPAQUE `fake_sk` enumeration mitigation is not exercised. Treat this as an accepted tradeoff of the username-based design, not as something `fake_sk` defends (see `docs/opaque.md` and `docs/rust-code-review.md` P3).
 - Challenge IDs must be random, short-lived, and single-use. Pending registration IDs must be random, short-lived, and single-use. Both maps in `AppState` cap themselves at `auth.max_pending_challenges`; the eviction order under that cap is HashMap iteration order (effectively arbitrary), so high pressure can drop fresh entries.
 - Session tokens must be random, stored server-side only as hashes (`sha256(token)`), and required on all private routes.
 - Expired sessions must fail closed; `auth_middleware` rejects when `sess.expires_at < now_rfc3339`.
@@ -204,7 +206,7 @@ Review `routes/auth.rs`, `auth.rs`, `state.rs`, and `rate_limit.rs` first.
 Review every route that reads, writes, or deletes files.
 
 - Client-provided object and payload IDs must be validated to 36-character UUIDs before becoming filenames (`routes::validate_client_id`). The `objects` route builds filenames as `{object_id}.{payload_id}.bin`; do not relax that.
-- File paths must be built from server-controlled directories (`state.clipboard_dir()`, `state.objects_dir()`) plus validated filenames only.
+- File paths must be built from the server-controlled directory (`state.objects_dir()`) plus validated filenames only.
 - Uploads must not overwrite existing payloads accidentally. `init_object` writes inline payloads with `create_new`, and streaming uploads write to a per-attempt `.tmp` path before atomically renaming over the final filename.
 - Failed database writes after file writes must clean up partial files; `init_object` and the streaming upload paths both call `remove_paths`/`remove_file` on the rollback branches.
 - Delete and download routes must reject invalid IDs before touching storage and must scope by `user_id`. The current `delete_object` additionally rejects `kind = "clipboard"`.
@@ -214,8 +216,8 @@ Review every route that reads, writes, or deletes files.
 
 For object and clipboard ingestion:
 
-- Enforce an explicit maximum size before accepting data. Per-payload streaming upload (`PUT /api/objects/{id}/payloads/{payload_id}`) refuses any byte beyond the size declared during init, then rejects the request if the final byte count does not match.
-- `init_object` validates encrypted metadata against `limits.max_object_meta_ciphertext_bytes` but does not currently enforce `limits.max_file_blob_bytes` against per-payload `ciphertext_size` declared in the init request, against inline payload sizes, or against the total postcard body. Treat unbounded `ObjectInitRequest` size as a known gap (see `docs/rust-code-review.md`).
+- Per-payload streaming upload (`PUT /api/objects/{id}/payloads/{payload_id}`) refuses any byte beyond the `ciphertext_size` declared during init, then rejects the request if the final byte count does not match. But the declared `ciphertext_size` is itself unbounded — `limits.max_file_blob_bytes` is defined but enforced nowhere, so a client can declare and stream an arbitrarily large payload to disk. Treat this as a known P1 gap (see `docs/rust-code-review.md`).
+- `init_object` validates encrypted metadata against `limits.max_object_meta_ciphertext_bytes`, and `garde` now validates that each inline payload's length equals its declared `ciphertext_size` and matches `sha256_ciphertext`. There is no explicit `DefaultBodyLimit`, so buffered (`init`/`complete`) routes are bounded only by axum's implicit 2 MiB request-body default — a framework default, not an explicit policy.
 - Enforce that uploaded blob size matches initialized metadata. Hash large blobs incrementally on disk before completion.
 - Delete corrupt or mismatched partial blobs.
 - Prefer status transitions that cannot create visible half-complete objects (`pending` → `uploading` → `uploaded` → `complete` per payload, gated by `object_for_upload` device scoping).
@@ -232,7 +234,7 @@ For object and clipboard ingestion:
 
 Review `clipper-core` and `clipper-client` when server API shapes change.
 
-- Clipboard text and clipboard payload bytes must be encrypted client-side before upload (`AAD_CLIPBOARD_V1` for the legacy single-blob payload, `AAD_CLIPBOARD_META_V1` and `AAD_CLIPBOARD_PAYLOAD_V1` for the new object split).
+- Clipboard text and clipboard payload bytes must be encrypted client-side before upload (`AAD_CLIPBOARD_META_V1` for metadata, `AAD_CLIPBOARD_PAYLOAD_V1` for the payload). `AAD_CLIPBOARD_V1` is a leftover from the removed single-blob path and is now unused outside tests.
 - File metadata and file blobs must be encrypted separately client-side (`AAD_FILE_META_V1`, `AAD_FILE_BLOB_V1`).
 - macOS, Linux, Android, and web should share the same Rust encryption and sync path through `clipper-client`; platform-specific code should only handle local OS integration.
 - Nonces must be random and never reused with the same key. `garde` rules enforce that nonces are 24 bytes and SHA-256 fields are 32 bytes at the API edge; `crypto::decrypt` rejects malformed nonce lengths before delegating to `chacha20poly1305`.
@@ -267,6 +269,7 @@ Prioritize tests where failure is a security bug:
 - Registration stores OPAQUE verifier material without receiving the raw passphrase.
 - Login rejects invalid, expired, reused, or malformed OPAQUE challenge finalizations.
 - User A cannot list, download, delete, bootstrap, or receive WebSocket events for User B's objects.
-- The legacy `routes::clipboard` endpoints either stay disabled in client code or, if revived, must not bypass the object route's per-payload size and provenance invariants.
+- Declared `ciphertext_size` (and inline length) are bounded by `limits.max_file_blob_bytes` before a payload is accepted or streamed.
+- Crypto config validation rejects insecure floors (tiny session tokens/salts, trivial Argon2 parameters).
 
 Avoid broad fixture-heavy tests unless they protect a real invariant.

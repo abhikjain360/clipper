@@ -33,8 +33,13 @@ opaque_server_setup = oprf_seed ‖ sk_S ‖ fake_sk
 - `oprf_seed`: 64 random bytes.
 - `(sk_S, pk_S = sk_S · B)`: server static AKE keypair. `pk_S` is recomputed
   from `sk_S` on deserialize, not stored separately.
-- `fake_sk`: random scalar used only by login when the requested user does
-  not exist (client-enumeration mitigation); never touched by registration.
+- `fake_sk`: random scalar that stock OPAQUE uses to fake a login response
+  for a non-existent user (client-enumeration mitigation); never touched by
+  registration. **Clipper does not get this mitigation**: because
+  `opaque_server_setup` is per-user, `routes::auth::challenge` looks the user
+  up first and returns `401` for an unknown username before any OPAQUE step,
+  so `fake_sk` is never used on the missing-user path and usernames are
+  enumerable. See the deviations section below.
 
 Per-user OPRF key (never stored; recomputed every request):
 
@@ -205,7 +210,12 @@ output session_key
 ## Clipper deviations from a "stock" OPAQUE deployment
 
 - `opaque_server_setup` is **per user**, not global: each user has
-  independent `oprf_seed`, `sk_S`, `fake_sk`.
+  independent `oprf_seed`, `sk_S`, `fake_sk`. A consequence is that the
+  standard OPAQUE enumeration defense (a global setup that fabricates a
+  response for unknown users via `fake_sk`) does not apply here — the server
+  must look up the per-user setup first, so unknown usernames are
+  distinguishable. Username enumeration is therefore an accepted property of
+  this design, not something `fake_sk` mitigates.
 - `session_key` is discarded after login; clipper authenticates the session
   with a fresh random bearer token issued by `issue_session` after
   `opaque_server_login_finish` succeeds.

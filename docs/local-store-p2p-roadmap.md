@@ -19,8 +19,15 @@ Today the client keeps decrypted display state in memory:
 - recent clipboard items are decrypted into `AppState.clipboard_items`;
 - recent file metadata is decrypted into `AppState.files`;
 - file blobs are not kept in memory, and downloads happen on demand;
-- downloaded files are written to a user-selected target path;
-- there is no durable client-side object repository.
+- downloaded files are written to a user-selected target path.
+
+Implementation status: **step 1 below has landed**. The client now has a
+durable, per-profile clipboard repository in `crates/client/src/local_store.rs`
+(plaintext clipboard payloads + metadata on disk), and `AppState.clipboard_items`
+is rebuilt from it. File metadata is **not** yet cached locally (step 2) — file
+lists are still rebuilt from `GET /api/objects`, so the download path still
+depends on the server (see `docs/rust-code-review.md`, "File Download Only Finds
+Metadata In The First Page").
 
 The server stores the durable canonical repo today:
 
@@ -159,7 +166,7 @@ conflicting provenance, and unauthenticated deletes without decrypting content.
 
 ## Five-Step Implementation Plan
 
-1. Add local clipboard-on-disk.
+1. Add local clipboard-on-disk. **(Done — `crates/client/src/local_store.rs`.)**
 
    Persist clipboard items locally and stop using `AppState.clipboard_items` as
    the durable clipboard history. Keep the current UI behavior by rebuilding a
