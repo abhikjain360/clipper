@@ -233,8 +233,8 @@ impl SyncEngine {
             });
         }
 
-        // Start clipboard watcher on macOS
-        #[cfg(target_os = "macos")]
+        // Start platform clipboard watcher where background reads are available.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let engine = Arc::clone(self);
             crate::clipboard_watcher::start_clipboard_watcher(engine);

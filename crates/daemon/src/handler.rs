@@ -349,7 +349,10 @@ fn random_bytes<const N: usize>() -> [u8; N] {
 }
 
 async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) -> DaemonResponse {
-    let device_name = params.device_name.as_deref().unwrap_or("macOS");
+    let device_name = params
+        .device_name
+        .as_deref()
+        .unwrap_or(default_device_name());
 
     // If server_url is provided, reconfigure the engine
     if let Some(url) = params.server_url.as_deref() {
@@ -361,7 +364,7 @@ async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) ->
             &params.passphrase,
             params.user_id.as_deref(),
             device_name,
-            "macos",
+            platform_name(),
         )
         .await
     {
@@ -375,7 +378,7 @@ async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) ->
                 user_id: state.user_id,
             };
             if let Err(e) = keychain::store_credentials(&creds) {
-                warn!("Failed to store server profile in Keychain: {}", e);
+                warn!("Failed to store server profile: {}", e);
             }
             DaemonResponse::success(id, None)
         }
@@ -388,14 +391,22 @@ async fn cmd_register(
     params: RegisterParams,
     engine: &Arc<SyncEngine>,
 ) -> DaemonResponse {
-    let device_name = params.device_name.as_deref().unwrap_or("macOS");
+    let device_name = params
+        .device_name
+        .as_deref()
+        .unwrap_or(default_device_name());
 
     if let Some(url) = params.server_url.as_deref() {
         engine.set_base_url(url).await;
     }
 
     match engine
-        .register(&params.access_key, &params.passphrase, device_name)
+        .register_with_platform(
+            &params.access_key,
+            &params.passphrase,
+            device_name,
+            platform_name(),
+        )
         .await
     {
         Ok(user_id) => {
@@ -406,7 +417,7 @@ async fn cmd_register(
                 user_id: Some(user_id.clone()),
             };
             if let Err(e) = keychain::store_credentials(&creds) {
-                warn!("Failed to store server profile in Keychain: {}", e);
+                warn!("Failed to store server profile: {}", e);
             }
             json_success(id, RegisterResult { user_id })
         }
@@ -418,7 +429,7 @@ async fn cmd_logout(id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
     match engine.logout().await {
         Ok(()) => {
             if let Err(e) = keychain::clear_credentials() {
-                warn!("Failed to clear Keychain: {}", e);
+                warn!("Failed to clear stored server profile: {}", e);
             }
             DaemonResponse::success(id, None)
         }
@@ -456,7 +467,13 @@ async fn cmd_copy_to_local(
     engine: &Arc<SyncEngine>,
 ) -> DaemonResponse {
     match engine.copy_to_local(&item_id).await {
-        Ok(text) => json_success(id, CopyToLocalResult { text }),
+        Ok(text) => {
+            #[cfg(target_os = "linux")]
+            if let Err(error) = crate::platform_clipboard::set_text(&text) {
+                return DaemonResponse::error(id, error.to_string());
+            }
+            json_success(id, CopyToLocalResult { text })
+        }
         Err(e) => DaemonResponse::error(id, e.to_string()),
     }
 }
@@ -520,6 +537,28 @@ fn json_success<T: serde::Serialize>(id: String, value: T) -> DaemonResponse {
     match serde_json::to_value(value) {
         Ok(value) => DaemonResponse::success(id, Some(value)),
         Err(e) => DaemonResponse::error(id, e.to_string()),
+    }
+}
+
+fn default_device_name() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "macOS"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "Linux"
+    }
+}
+
+fn platform_name() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "macos"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "linux"
     }
 }
 

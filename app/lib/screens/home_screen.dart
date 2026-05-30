@@ -29,6 +29,9 @@ class _HomeScreenState extends State<HomeScreen> {
   bool get _supportsManualClipboardImport =>
       kIsWeb || defaultTargetPlatform == TargetPlatform.android;
 
+  bool get _usesDaemonClipboardCopy =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
+
   Future<void> _refresh() async {
     setState(() => _refreshing = true);
     try {
@@ -49,6 +52,19 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _copyToClipboard(String id) async {
     try {
+      if (_usesDaemonClipboardCopy) {
+        await copyToLocal(id: id);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Copied to clipboard'),
+              duration: Duration(seconds: 1),
+            ),
+          );
+        }
+        return;
+      }
+
       final payload = await clipboardPayload(id: id);
       await setSecureClipboardEntry(
         DeviceClipboardEntry(
@@ -272,7 +288,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     .trim();
                 final isText = mime.startsWith('text/');
                 final isImage = mime.startsWith('image/');
-                final canCopy = isText || isImage;
+                final canCopy =
+                    isText || (isImage && !_usesDaemonClipboardCopy);
                 return SyncListTileCard(
                   leading: isImage ? _ClipboardImagePreview(id: item.id) : null,
                   title: Text(

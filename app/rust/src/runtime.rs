@@ -1,13 +1,13 @@
 //! Platform runtime boundary for the Flutter bridge.
 //!
-//! macOS uses the installed daemon over a Unix socket. Android runs the shared
-//! sync engine in-process behind the same FRB-facing API.
+//! macOS and Linux use the installed daemon over a Unix socket. Android runs
+//! the shared sync engine in-process behind the same FRB-facing API.
 
 pub(crate) type RuntimeResult<T> = Result<T, RuntimeError>;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RuntimeError {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[error(transparent)]
     Transport(#[from] crate::transport::TransportError),
     #[cfg(any(target_os = "android", target_family = "wasm"))]
@@ -18,12 +18,17 @@ pub(crate) enum RuntimeError {
     ResultEncode(#[from] serde_json::Error),
     #[error("unsupported operation: {0}")]
     UnsupportedOperation(&'static str),
-    #[cfg(not(any(target_os = "macos", target_os = "android", target_family = "wasm")))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "android",
+        target_family = "wasm"
+    )))]
     #[error("unsupported platform")]
     UnsupportedPlatform,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod imp {
     use clipper_daemon_types::AppState;
 
@@ -276,7 +281,12 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "android", target_family = "wasm")))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "android",
+    target_family = "wasm"
+)))]
 mod imp {
     use clipper_daemon_types::{AppState, ConnectionStatus};
 

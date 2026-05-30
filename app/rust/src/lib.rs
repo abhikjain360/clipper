@@ -1,10 +1,10 @@
 pub mod api;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod daemon_process;
 pub mod error;
 mod frb_generated;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod ipc_auth;
 pub(crate) mod runtime;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) mod transport;

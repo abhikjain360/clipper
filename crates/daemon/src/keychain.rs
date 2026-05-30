@@ -1,4 +1,4 @@
-//! macOS Keychain integration for credential persistence.
+//! Platform credential persistence for the daemon.
 
 use std::path::Path;
 
@@ -11,6 +11,14 @@ const IPC_SECRET_ACCOUNT: &str = "ipc-secret-v1";
 const IPC_SECRET_BYTES: usize = 32;
 #[cfg(target_os = "macos")]
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+#[cfg(target_os = "linux")]
+const CREDENTIALS_FILE: &str = "profile.json";
+#[cfg(target_os = "linux")]
+const IPC_SECRET_FILE: &str = "ipc-secret-v1";
+#[cfg(target_os = "linux")]
+const PRIVATE_DIR_MODE: u32 = 0o700;
+#[cfg(target_os = "linux")]
+const PRIVATE_FILE_MODE: u32 = 0o600;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Credentials {
@@ -34,9 +42,12 @@ pub enum KeychainError {
     Store(String),
     #[error("keychain read failed: {0}")]
     Read(String),
-    #[cfg(not(target_os = "macos"))]
-    #[error("keychain is not supported on this platform")]
-    UnsupportedPlatform,
+    #[cfg(target_os = "linux")]
+    #[error("credential store path is unavailable")]
+    DataDirUnavailable,
+    #[cfg(target_os = "linux")]
+    #[error("credential store I/O failed: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[cfg(target_os = "macos")]
@@ -113,24 +124,137 @@ pub fn load_or_create_ipc_secret(_data_dir: &Path) -> KeychainResult<Vec<u8>> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn store_credentials(_creds: &Credentials) -> KeychainResult<()> {
-    Err(KeychainError::UnsupportedPlatform)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn load_credentials() -> KeychainResult<Option<Credentials>> {
-    Ok(None)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn clear_credentials() -> KeychainResult<()> {
+#[cfg(target_os = "linux")]
+pub fn store_credentials(creds: &Credentials) -> KeychainResult<()> {
+    let json = serde_json::to_vec(creds).map_err(KeychainError::Encode)?;
+    write_private_file(&credentials_path()?, &json)?;
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn load_or_create_ipc_secret(_data_dir: &Path) -> KeychainResult<Vec<u8>> {
-    Err(KeychainError::UnsupportedPlatform)
+#[cfg(target_os = "linux")]
+pub fn load_credentials() -> KeychainResult<Option<Credentials>> {
+    let Some(bytes) = read_optional_file(&credentials_path()?)? else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(KeychainError::Decode)?;
+    let had_legacy_passphrase = value.get("passphrase").is_some();
+    let creds: Credentials = serde_json::from_value(value).map_err(KeychainError::Decode)?;
+    if had_legacy_passphrase {
+        store_credentials(&creds)?;
+    }
+    Ok(Some(creds))
+}
+
+#[cfg(target_os = "linux")]
+pub fn clear_credentials() -> KeychainResult<()> {
+    match std::fs::remove_file(credentials_path()?) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub fn load_or_create_ipc_secret(data_dir: &Path) -> KeychainResult<Vec<u8>> {
+    ensure_private_dir(data_dir)?;
+    let path = data_dir.join(IPC_SECRET_FILE);
+
+    match read_optional_file(&path)? {
+        Some(secret) if secret.len() == IPC_SECRET_BYTES => Ok(secret),
+        Some(secret) => {
+            let actual = secret.len();
+            let secret = new_ipc_secret();
+            write_private_file(&path, &secret)?;
+            if actual != 0 {
+                tracing::warn!(
+                    expected = IPC_SECRET_BYTES,
+                    actual,
+                    "replaced invalid IPC secret"
+                );
+            }
+            Ok(secret)
+        }
+        None => {
+            let secret = new_ipc_secret();
+            write_private_file(&path, &secret)?;
+            Ok(secret)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn credentials_path() -> KeychainResult<std::path::PathBuf> {
+    let dir = dirs::data_dir()
+        .map(|base| base.join("Clipper"))
+        .ok_or(KeychainError::DataDirUnavailable)?;
+    ensure_private_dir(&dir)?;
+    Ok(dir.join(CREDENTIALS_FILE))
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(path)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a directory", path.display()),
+        ));
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_optional_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    reject_non_regular_existing_file(path)?;
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::{
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
+
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent)?;
+    }
+    reject_non_regular_existing_file(path)?;
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(PRIVATE_FILE_MODE)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn reject_non_regular_existing_file(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is not a regular file", path.display()),
+            ))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn new_ipc_secret() -> Vec<u8> {

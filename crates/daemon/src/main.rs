@@ -1,67 +1,70 @@
 //! Clipper daemon: background clipboard sync service.
 //!
-//! Runs as a macOS LaunchAgent, exposes a Unix socket for app control.
+//! Runs as a per-user background service and exposes a Unix socket for app
+//! control.
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn main() {
     std::process::exit(1);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod clients;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod error;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod handler;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod keychain;
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
+mod platform_clipboard;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod protocol;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use clipper_client::engine::SyncEngine;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use tokio::net::UnixListener;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use tracing::{error, info, warn};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::{
     clients::ClientManager,
     error::{DaemonError, DaemonResult},
     protocol::DaemonEvent,
 };
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const PRIVATE_DIR_MODE: u32 = 0o700;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const SOCKET_FILE_MODE: u32 = 0o600;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn app_data_dir() -> DaemonResult<PathBuf> {
     dirs::data_dir()
         .map(|base| base.join("Clipper"))
         .ok_or(DaemonError::DataDirUnavailable)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn socket_path() -> DaemonResult<PathBuf> {
     Ok(app_data_dir()?.join("daemon.sock"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn data_dir() -> DaemonResult<PathBuf> {
     app_data_dir()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)?;
     let metadata = std::fs::symlink_metadata(path)?;
@@ -76,6 +79,22 @@ fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+fn log_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("Library/Logs/Clipper")
+}
+
+#[cfg(target_os = "linux")]
+fn log_dir() -> PathBuf {
+    dirs::cache_dir()
+        .or_else(dirs::data_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("clipper")
+        .join("logs")
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn parse_args() -> String {
     let args: Vec<String> = std::env::args().collect();
     let mut server_url = "http://127.0.0.1:8787".to_string();
@@ -92,7 +111,7 @@ fn parse_args() -> String {
     server_url
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -101,14 +120,11 @@ async fn main() {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn run() -> DaemonResult<()> {
     let default_server_url = parse_args();
 
-    // Init logging
-    let log_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("Library/Logs/Clipper");
+    let log_dir = log_dir();
     std::fs::create_dir_all(&log_dir).ok();
 
     let log_file = std::fs::OpenOptions::new()
@@ -149,12 +165,12 @@ async fn run() -> DaemonResult<()> {
     // the app to provide it after startup.
     let loaded_creds = match keychain::load_credentials() {
         Ok(Some(creds)) => {
-            info!("Found stored server profile in Keychain");
+            info!("Found stored server profile");
             Some(creds)
         }
         Ok(None) => None,
         Err(e) => {
-            warn!("Failed to load server profile from Keychain: {}", e);
+            warn!("Failed to load stored server profile: {}", e);
             None
         }
     };

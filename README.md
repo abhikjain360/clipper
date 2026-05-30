@@ -23,10 +23,15 @@ bearer tokens or sync metadata from plain HTTP.
 
 ## Platforms
 
-The Flutter bridge is wired for macOS and Android.
+The Flutter bridge is wired for macOS, Linux, and Android.
 
 macOS runs the Flutter app against a local `clipper-daemon` over a Unix socket.
 The daemon owns sync, clipboard watching, and Keychain-backed profile storage.
+
+Linux also runs the Flutter app against `clipper-daemon` over a Unix socket. The
+daemon is a per-user process, started through `systemd --user` when available
+and falling back to a direct spawn. Wayland clipboard sync uses data-control via
+`wl-clipboard-rs`; X11 clipboard support is intentionally not implemented.
 
 Android runs the same Rust sync engine in-process behind the Flutter bridge.
 The emulator default server URL is `http://10.0.2.2:8787`.

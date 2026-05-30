@@ -49,12 +49,12 @@ then send encrypted records and non-decrypted metadata to the server.
   - owns the daemon/app IPC request, response, event, command, parameter, and result shapes, plus the HMAC IPC auth message format.
 - `app/rust/src/runtime.rs`
   - selects the Flutter bridge runtime:
-    - macOS talks to the local `clipper-daemon` over a Unix socket and authenticates with an HMAC handshake;
+    - macOS and Linux talk to the local `clipper-daemon` over a Unix socket and authenticate with an HMAC handshake;
     - Android and the WASM web build both run the shared Rust `SyncEngine` in-process and talk to the server directly.
 
 Current app client paths:
 
-- macOS Flutter app -> Rust FRB bridge -> local daemon -> `clipper-client` -> server.
+- macOS/Linux Flutter app -> Rust FRB bridge -> local daemon -> `clipper-client` -> server.
 - Android Flutter app -> Rust FRB bridge -> in-process `clipper-client::SyncEngine` -> server.
 - Web Flutter app (WASM) -> Rust FRB bridge -> in-process `clipper-client::SyncEngine` -> server.
 
@@ -135,7 +135,7 @@ Normal client login:
 
 Client runtime notes:
 
-- macOS registration and login requests are sent to the daemon, which uses the shared Rust client engine.
+- macOS and Linux registration and login requests are sent to the daemon, which uses the shared Rust client engine.
 - Android and web registration and login requests are handled by the Rust client engine inside the Flutter app process.
 - The Flutter auth screen exposes separate Register and Login modes. Register requires an access key and passphrase; Login sends the saved or entered `user_id` when available.
 - All paths must produce the same server-facing OPAQUE, bearer-token, encryption, sync, and object/clipboard behavior.
@@ -176,7 +176,7 @@ Cleanup flow:
 ## 3. Security Model To Rebuild Before Review
 
 - Identify which routes are public and which routes require `auth_middleware`.
-- Identify which client runtime path is affected: macOS daemon, Android in-process engine, web in-process engine, or all of them.
+- Identify which client runtime path is affected: macOS/Linux daemon, Android in-process engine, web in-process engine, or all of them.
 - Confirm what the server is allowed to know:
   - It may know user IDs, device IDs, timestamps, ciphertext sizes, event IDs, upload status, encrypted metadata, ciphertext hashes, and access-key hashes.
   - It must not receive plaintext clipboard contents, plaintext file bytes, plaintext file metadata, raw passphrases, plaintext access keys after registration request processing, or reusable client-side encryption keys.
@@ -234,7 +234,7 @@ Review `clipper-core` and `clipper-client` when server API shapes change.
 
 - Clipboard text and clipboard payload bytes must be encrypted client-side before upload (`AAD_CLIPBOARD_V1` for the legacy single-blob payload, `AAD_CLIPBOARD_META_V1` and `AAD_CLIPBOARD_PAYLOAD_V1` for the new object split).
 - File metadata and file blobs must be encrypted separately client-side (`AAD_FILE_META_V1`, `AAD_FILE_BLOB_V1`).
-- macOS, Android, and web should share the same Rust encryption and sync path through `clipper-client`; platform-specific code should only handle local OS integration.
+- macOS, Linux, Android, and web should share the same Rust encryption and sync path through `clipper-client`; platform-specific code should only handle local OS integration.
 - Nonces must be random and never reused with the same key. `garde` rules enforce that nonces are 24 bytes and SHA-256 fields are 32 bytes at the API edge; `crypto::decrypt` rejects malformed nonce lengths before delegating to `chacha20poly1305`.
 - AAD currently binds only the object type/version (e.g. `clipper:clipboard-payload:v1`). It does not bind object ID, payload ID, source device, timestamps, or the metadata/payload relationship; see `docs/rust-code-review.md` P1.
 - Server responses must never include plaintext content.
