@@ -11,5 +11,6 @@ clipper_use_nightly
 export FLUTTER_ROOT
 
 flutter pub get
-flutter_rust_bridge_codegen build-web
+flutter_rust_bridge_codegen build-web \
+  --wasm-pack-rustflags "$(clipper_wasm_shared_memory_rustflags)"
 flutter build web --no-pub --no-wasm-dry-run "$@"

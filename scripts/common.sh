@@ -85,4 +85,25 @@ clipper_use_nightly() {
   clipper_use_toolchain_path "$CLIPPER_RUST_NIGHTLY_BIN"
 }
 
+clipper_wasm_shared_memory_rustflags() {
+  local shared_flags
+  shared_flags="-C target-feature=+atomics,+bulk-memory,+mutable-globals"
+  shared_flags+=" -C link-arg=--shared-memory"
+  shared_flags+=" -C link-arg=--import-memory"
+  shared_flags+=" -C link-arg=--max-memory=4294967296"
+  shared_flags+=" -C link-arg=--export=__heap_base"
+  shared_flags+=" -C link-arg=--export=__wasm_init_tls"
+  shared_flags+=" -C link-arg=--export=__tls_size"
+  shared_flags+=" -C link-arg=--export=__tls_align"
+  shared_flags+=" -C link-arg=--export=__tls_base"
+
+  printf '%s\n' "$shared_flags"
+}
+
+clipper_use_wasm_shared_memory_rustflags() {
+  local shared_flags
+  shared_flags="$(clipper_wasm_shared_memory_rustflags)"
+  export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$shared_flags"
+}
+
 clipper_init_repo_root

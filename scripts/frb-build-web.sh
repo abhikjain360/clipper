@@ -10,4 +10,6 @@ clipper_enter_app
 clipper_use_nightly
 export FLUTTER_ROOT
 
-flutter_rust_bridge_codegen build-web "$@"
+flutter_rust_bridge_codegen build-web \
+  --wasm-pack-rustflags "$(clipper_wasm_shared_memory_rustflags)" \
+  "$@"
