@@ -14,4 +14,4 @@ if [ ! -f "$root/index.html" ]; then
   exit 1
 fi
 
-python3 "$SCRIPT_DIR/web-serve.py" "$root" "$preferred_port"
+deno run --allow-read="$root" --allow-net=127.0.0.1 "$SCRIPT_DIR/web-serve.ts" "$root" "$preferred_port"

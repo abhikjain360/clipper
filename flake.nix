@@ -105,7 +105,7 @@
               wasm-pack
             ])
             ++ [ toolchains.nightly ];
-          webServeRuntimeInputs = baseRuntimeInputs ++ [ pkgs.python3 ];
+          webServeRuntimeInputs = baseRuntimeInputs ++ [ pkgs.deno ];
           macosBuildRuntimeInputs =
             baseRuntimeInputs
             ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
@@ -261,7 +261,6 @@
                 nixfmt
                 openssl
                 pkg-config
-                python3
                 sea-orm-cli
                 sqlite
                 wasm-pack

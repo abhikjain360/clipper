@@ -154,13 +154,13 @@ mod imp {
                 "IPC authentication is only used by the macOS daemon transport",
             )),
             DaemonCommand::Login(params) => {
-                if let Some(server_url) = params.server_url {
-                    engine.set_base_url(&server_url).await;
+                if let Some(server_url) = params.server_url.as_deref() {
+                    engine.set_base_url(server_url).await;
                 }
                 engine
-                    .login_with_platform_and_user(
+                    .login_with_platform(
                         &params.passphrase,
-                        params.user_id.as_deref(),
+                        &params.username,
                         params
                             .device_name
                             .as_deref()
@@ -171,12 +171,13 @@ mod imp {
                 Ok(None)
             }
             DaemonCommand::Register(params) => {
-                if let Some(server_url) = params.server_url {
-                    engine.set_base_url(&server_url).await;
+                if let Some(server_url) = params.server_url.as_deref() {
+                    engine.set_base_url(server_url).await;
                 }
-                let user_id = engine
+                let username = engine
                     .register_with_platform(
                         &params.access_key,
+                        &params.username,
                         &params.passphrase,
                         params
                             .device_name
@@ -185,7 +186,7 @@ mod imp {
                         platform(),
                     )
                     .await?;
-                Ok(Some(serde_json::to_value(RegisterResult { user_id })?))
+                Ok(Some(serde_json::to_value(RegisterResult { username })?))
             }
             DaemonCommand::Logout => {
                 engine.logout().await?;
