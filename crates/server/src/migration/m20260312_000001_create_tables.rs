@@ -302,6 +302,68 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_event_log_user_seq")
+                    .table(EventLog::Table)
+                    .col(EventLog::UserId)
+                    .col(EventLog::Seq)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_event_log_created_at")
+                    .table(EventLog::Table)
+                    .col(EventLog::CreatedAt)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_objects_kind_user_status_created_at")
+                    .table(Objects::Table)
+                    .col(Objects::Kind)
+                    .col(Objects::UserId)
+                    .col(Objects::Status)
+                    .col(Objects::CreatedAt)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_objects_kind_user_created_at")
+                    .table(Objects::Table)
+                    .col(Objects::Kind)
+                    .col(Objects::UserId)
+                    .col(Objects::CreatedAt)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_objects_kind_expires_at")
+                    .table(Objects::Table)
+                    .col(Objects::Kind)
+                    .col(Objects::ExpiresAt)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+
         Ok(())
     }
 
