@@ -173,11 +173,19 @@ async fn init_server(config: ServerConfig, secrets: ServerSecrets) -> ServerResu
     let plaintext_salt = clipper_core::crypto::generate_random_bytes(access_key_hash_salt_bytes);
     let wrapped_salt = secret_storage::wrap_access_key_hash_salt(state.secrets(), &plaintext_salt)?;
 
+    // One server-wide OPAQUE setup (oprf_seed ‖ sk_S ‖ fake_sk), generated once
+    // and stored wrapped. It must stay stable: every user's password file and
+    // export_key are bound to its oprf_seed.
+    let opaque_server_setup = clipper_core::crypto::opaque_new_server_setup();
+    let wrapped_opaque_server_setup =
+        secret_storage::wrap_opaque_server_setup(state.secrets(), &opaque_server_setup)?;
+
     let config = entity::server_config::ActiveModel {
         id: Set(1),
         created_at: Set(now.clone()),
         updated_at: Set(now),
         access_key_hash_salt: Set(wrapped_salt),
+        opaque_server_setup: Set(wrapped_opaque_server_setup),
     };
     config.insert(state.db()).await?;
 
@@ -394,11 +402,17 @@ mod tests {
         let wrapped_salt =
             secret_storage::wrap_access_key_hash_salt(state.secrets(), &plaintext_salt)
                 .expect("wrap salt");
+        let wrapped_opaque_server_setup = secret_storage::wrap_opaque_server_setup(
+            state.secrets(),
+            &clipper_core::crypto::opaque_new_server_setup(),
+        )
+        .expect("wrap opaque_server_setup");
         entity::server_config::ActiveModel {
             id: Set(1),
             created_at: Set(now.clone()),
             updated_at: Set(now),
             access_key_hash_salt: Set(wrapped_salt),
+            opaque_server_setup: Set(wrapped_opaque_server_setup),
         }
         .insert(state.db())
         .await

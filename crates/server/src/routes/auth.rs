@@ -35,7 +35,6 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 #[sea_orm(entity = "users::Entity", from_query_result)]
 struct LoginChallengeUserRow {
     id: Uuid,
-    opaque_server_setup: Vec<u8>,
     opaque_password_file: Vec<u8>,
 }
 
@@ -51,6 +50,14 @@ pub async fn challenge(
     State(state): State<AppState>,
     Postcard(req): Postcard<LoginChallengeRequest>,
 ) -> Result<Postcard<LoginChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let db_config = load_server_config(&state).await?;
+    let opaque_server_setup = unwrap_global_opaque_server_setup(&state, &db_config)?;
+
+    // A missing user does NOT short-circuit: we fabricate a challenge that is
+    // indistinguishable from a real one (opaque-ke's fake-record path), so the
+    // endpoint can't be used to tell which usernames exist. The fabricated
+    // challenge simply fails at the finalization in `login`, like a wrong
+    // passphrase would.
     let user = users::Entity::find()
         .filter(users::Column::Username.eq(&req.username))
         .into_partial_model::<LoginChallengeUserRow>()
@@ -59,48 +66,40 @@ pub async fn challenge(
         .map_err(|e| {
             error!(username = %req.username, error = %e, "Failed to look up user by username");
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
-        })?
-        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unknown user"))?;
+        })?;
 
-    let opaque_server_setup =
-        secret_storage::unwrap_opaque_server_setup(state.secrets(), &user.opaque_server_setup)
-            .map_err(|e| {
-                error!(user_id = %user.id, error = %e, "Failed to unwrap opaque_server_setup");
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
-            })?;
-    let opaque_password_file =
-        secret_storage::unwrap_opaque_password_file(state.secrets(), &user.opaque_password_file)
+    let (password_file, challenge_user_id) = match &user {
+        Some(user) => {
+            let password_file = secret_storage::unwrap_opaque_password_file(
+                state.secrets(),
+                &user.opaque_password_file,
+            )
             .map_err(|e| {
                 error!(user_id = %user.id, error = %e, "Failed to unwrap opaque_password_file");
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
             })?;
+            (Some(password_file), Some(user.id))
+        }
+        None => (None, None),
+    };
 
-    // id_U = "clipper:user:{user_id}:passphrase:v1".
-    let credential_identifier = opaque_credential_identifier(user.id);
-    // req.credential_request = M ‖ ke1 from the client.
-    // Inside opaque_server_login_start:
-    //   k_U     = Expand(oprf_seed, id_U)
-    //   N       = k_U · M
-    //   masked  = (pk_S ‖ env) XOR Expand(masking_key, nonce_M ‖ ·)
-    //   (x_S, X_S) ← AKE ephemeral, nonce_S ← random
-    //   ikm     = (x_S · X_C) ‖ (x_S · pk_C) ‖ (sk_S · X_C)
-    //   (server_mac_key, client_mac_key, session_key) = Expand(ikm, transcript_pre)
-    //   server_mac = MAC(server_mac_key, transcript_pre)
-    // credential_response = (N, nonce_M, masked, nonce_S, X_S, server_mac).
-    // server_login_state = state_S = (client_mac_key, session_key, transcript_pre ‖ server_mac).
+    // id_U = "clipper:user:{username}:passphrase:v1" — derivable from the
+    // submitted username alone, so the fake path is stable across probes.
+    let credential_identifier = opaque_credential_identifier(&req.username);
     let (credential_response, server_login_state) = crypto::opaque_server_login_start(
         &opaque_server_setup,
-        &opaque_password_file,
+        password_file.as_deref(),
         &req.credential_request,
         &credential_identifier,
     )
     .map_err(|e| {
-        warn!(user_id = %user.id, error = %e, "OPAQUE login start rejected client request");
+        warn!(error = %e, "OPAQUE login start rejected client request");
         error_response(StatusCode::UNAUTHORIZED, "Invalid login request")
     })?;
     // Stash state_S keyed by challenge_id until the client returns its
-    // CredentialFinalization (= client_mac) in `login`.
-    let challenge_id = state.create_auth_challenge(user.id, server_login_state);
+    // CredentialFinalization in `login`. `challenge_user_id` is None for a
+    // fabricated challenge.
+    let challenge_id = state.create_auth_challenge(challenge_user_id, server_login_state);
 
     Ok(Postcard(LoginChallengeResponse {
         challenge_id,
@@ -191,17 +190,12 @@ pub async fn register_start(
         ));
     }
 
-    // start OPAQUE
+    // start OPAQUE against the server-wide setup
 
+    let opaque_server_setup = unwrap_global_opaque_server_setup(&state, &db_config)?;
     let user_id = Uuid::now_v7();
-    // Fresh opaque_server_setup = oprf_seed ‖ sk_S ‖ fake_sk for this user.
-    let opaque_server_setup = crypto::opaque_new_server_setup();
-    // id_U = "clipper:user:{user_id}:passphrase:v1".
-    let credential_identifier = opaque_credential_identifier(user_id);
-    // req.registration_request = M. Inside opaque_server_register_start:
-    //   k_U = Expand(oprf_seed, id_U)
-    //   N   = k_U · M
-    // registration_response = RegistrationResponse = (N, pk_S). Stateless.
+    // id_U = "clipper:user:{username}:passphrase:v1".
+    let credential_identifier = opaque_credential_identifier(&req.username);
     let registration_response = crypto::opaque_server_register_start(
         &opaque_server_setup,
         &req.registration_request,
@@ -212,15 +206,9 @@ pub async fn register_start(
         error_response(StatusCode::UNAUTHORIZED, "Invalid registration request")
     })?;
 
-    // OPAQUE round 1 needs no server-side state, but THIS server has to remember
-    // the freshly minted user_id and opaque_server_setup (plus the access-key
-    // hash to consume) until register_finish.
-    let registration_id = state.create_pending_registration(
-        user_id,
-        req.username,
-        access_key_hash,
-        opaque_server_setup,
-    );
+    // OPAQUE round 1 is stateless server-side, but THIS server must remember the
+    // freshly minted user_id (and the access-key hash to consume) until finish.
+    let registration_id = state.create_pending_registration(user_id, req.username, access_key_hash);
 
     Ok(Postcard(RegisterStartResponse {
         registration_id,
@@ -279,12 +267,6 @@ pub async fn register_finish(
         ));
     }
 
-    let wrapped_opaque_server_setup =
-        secret_storage::wrap_opaque_server_setup(state.secrets(), &pending.opaque_server_setup)
-            .map_err(|e| {
-                error!(error = %e, "Failed to wrap opaque_server_setup");
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
-            })?;
     let wrapped_opaque_password_file =
         secret_storage::wrap_opaque_password_file(state.secrets(), &opaque_password_file).map_err(
             |e| {
@@ -303,7 +285,6 @@ pub async fn register_finish(
     users::ActiveModel {
         id: Set(pending.user_id),
         username: Set(pending.username.clone()),
-        opaque_server_setup: Set(wrapped_opaque_server_setup),
         opaque_password_file: Set(wrapped_opaque_password_file),
         encryption_salt: Set(wrapped_encryption_salt),
         access_key_hash: Set(pending.access_key_hash.clone()),
@@ -400,39 +381,36 @@ pub async fn login(
     let auth_challenge = state
         .take_auth_challenge(&req.challenge_id)
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid challenge"))?;
-    let user = users::Entity::find_by_id(auth_challenge.user_id)
-        .into_partial_model::<LoginUserRow>()
-        .one(state.db())
-        .await
-        .map_err(|e| {
-            error!(
-                user_id = %auth_challenge.user_id,
-                error = %e,
-                "Failed to look up user in login",
-            );
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
-        })?
-        .ok_or_else(|| {
-            warn!(
-                user_id = %auth_challenge.user_id,
-                "User disappeared between challenge and login",
-            );
-            error_response(StatusCode::UNAUTHORIZED, "Invalid challenge")
-        })?;
-    // req.credential_finalization = client_mac.
-    // opaque_server_login_finish re-derives
-    //   expected_mac = MAC(client_mac_key, transcript_pre ‖ server_mac)
-    // from state_S and checks expected_mac == client_mac. It returns
-    // session_key on success; clipper discards it and issues a fresh random
-    // bearer token via `issue_session` below.
+    // Verify the client's finalization first. A fabricated (unknown-user)
+    // challenge and a wrong passphrase both fail here identically, so neither
+    // the response nor the control flow reveals whether the account exists.
     crypto::opaque_server_login_finish(
         &auth_challenge.server_login_state,
         &req.credential_finalization,
     )
     .map_err(|e| {
-        debug!(user_id = %user.id, error = %e, "OPAQUE login finalization rejected");
+        debug!(error = %e, "OPAQUE login finalization rejected");
         error_response(StatusCode::UNAUTHORIZED, "Invalid passphrase")
     })?;
+
+    // Only a real challenge carries a user_id; a verifying finalization without
+    // one would break a protocol invariant.
+    let user_id = auth_challenge.user_id.ok_or_else(|| {
+        warn!("Fabricated challenge unexpectedly produced a verifying finalization");
+        error_response(StatusCode::UNAUTHORIZED, "Invalid passphrase")
+    })?;
+    let user = users::Entity::find_by_id(user_id)
+        .into_partial_model::<LoginUserRow>()
+        .one(state.db())
+        .await
+        .map_err(|e| {
+            error!(user_id = %user_id, error = %e, "Failed to look up user in login");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?
+        .ok_or_else(|| {
+            warn!(user_id = %user_id, "User disappeared between challenge and login");
+            error_response(StatusCode::UNAUTHORIZED, "Invalid challenge")
+        })?;
 
     let session = issue_session(
         state.db(),
@@ -506,8 +484,19 @@ async fn load_server_config(
         .ok_or_else(|| error_response(StatusCode::SERVICE_UNAVAILABLE, "Server not initialized"))
 }
 
-fn opaque_credential_identifier(user_id: Uuid) -> Vec<u8> {
-    format!("clipper:user:{user_id}:passphrase:v1").into_bytes()
+fn opaque_credential_identifier(username: &str) -> Vec<u8> {
+    format!("clipper:user:{username}:passphrase:v1").into_bytes()
+}
+
+fn unwrap_global_opaque_server_setup(
+    state: &AppState,
+    db_config: &server_config::Model,
+) -> Result<Vec<u8>, (StatusCode, Json<ErrorResponse>)> {
+    secret_storage::unwrap_opaque_server_setup(state.secrets(), &db_config.opaque_server_setup)
+        .map_err(|e| {
+            error!(error = %e, "Failed to unwrap global opaque_server_setup");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
+        })
 }
 
 struct IssuedSession {
@@ -679,11 +668,17 @@ mod tests {
             &crypto::generate_access_key_hash_salt(),
         )
         .expect("wrap salt");
+        let wrapped_opaque_server_setup = secret_storage::wrap_opaque_server_setup(
+            state.secrets(),
+            &crypto::opaque_new_server_setup(),
+        )
+        .expect("wrap opaque_server_setup");
         server_config::ActiveModel {
             id: Set(1),
             created_at: Set(now.clone()),
             updated_at: Set(now),
             access_key_hash_salt: Set(wrapped_salt),
+            opaque_server_setup: Set(wrapped_opaque_server_setup),
         }
         .insert(state.db())
         .await
@@ -694,13 +689,25 @@ mod tests {
     async fn test_state(passphrase: &[u8]) -> (AppState, TempDir) {
         let (state, data_dir) = empty_state().await;
         let user_id = Uuid::now_v7();
-        let opaque_server_setup = crypto::opaque_new_server_setup();
+        // Register against the server-wide setup that empty_state persisted, so
+        // a later challenge/login (which loads it from server_config) matches.
+        let db_config = server_config::Entity::find_by_id(1)
+            .one(state.db())
+            .await
+            .expect("query server config")
+            .expect("server config");
+        let opaque_server_setup = secret_storage::unwrap_opaque_server_setup(
+            state.secrets(),
+            &db_config.opaque_server_setup,
+        )
+        .expect("unwrap opaque_server_setup");
+        let credential_identifier = opaque_credential_identifier("alice");
         let (registration_request, client_state) =
             crypto::opaque_client_register_start(passphrase).expect("client register start");
         let registration_response = crypto::opaque_server_register_start(
             &opaque_server_setup,
             &registration_request,
-            &opaque_credential_identifier(user_id),
+            &credential_identifier,
         )
         .expect("server register start");
         let registration_finish = crypto::opaque_client_register_finish(
@@ -727,9 +734,6 @@ mod tests {
         .await
         .expect("insert access key");
 
-        let wrapped_opaque_server_setup =
-            secret_storage::wrap_opaque_server_setup(state.secrets(), &opaque_server_setup)
-                .expect("wrap opaque_server_setup");
         let wrapped_opaque_password_file =
             secret_storage::wrap_opaque_password_file(state.secrets(), &opaque_password_file)
                 .expect("wrap opaque_password_file");
@@ -740,7 +744,6 @@ mod tests {
         users::ActiveModel {
             id: Set(user_id),
             username: Set("alice".into()),
-            opaque_server_setup: Set(wrapped_opaque_server_setup),
             opaque_password_file: Set(wrapped_opaque_password_file),
             encryption_salt: Set(wrapped_encryption_salt),
             access_key_hash: Set(access_key_hash),
@@ -1108,6 +1111,54 @@ mod tests {
         assert!(finish.is_err());
     }
 
+    // An unknown username must get a normal-looking challenge (not a distinct
+    // error), and the client must be unable to finish it — exactly like a wrong
+    // passphrase against a real account. This is the anti-enumeration property.
+    #[tokio::test]
+    async fn challenge_for_unknown_user_is_indistinguishable() {
+        let (state, _data_dir) = empty_state().await;
+
+        let (challenge_req, client_state) = challenge_request("ghost", b"whatever");
+        let Postcard(resp) = challenge(State(state), validated(challenge_req))
+            .await
+            .expect("challenge must not reveal that the user is unknown");
+
+        assert!(!resp.challenge_id.is_empty());
+        assert!(!resp.credential_response.is_empty());
+
+        // Finishing against the fabricated response fails on the client, the
+        // same failure mode a wrong passphrase produces for a real user.
+        let finish = crypto::opaque_client_login_finish(
+            &client_state,
+            b"whatever",
+            &resp.credential_response,
+        );
+        assert!(finish.is_err());
+    }
+
+    // A fabricated (unknown-user) challenge can never be turned into a session,
+    // even if an attacker submits an arbitrary finalization against it.
+    #[tokio::test]
+    async fn login_rejects_fabricated_challenge() {
+        let (state, _data_dir) = empty_state().await;
+
+        let (challenge_req, _client_state) = challenge_request("ghost", b"whatever");
+        let Postcard(resp) = challenge(State(state.clone()), validated(challenge_req))
+            .await
+            .expect("challenge");
+
+        let req = LoginRequest {
+            challenge_id: resp.challenge_id,
+            credential_finalization: vec![0_u8; 64],
+            device_id: None,
+            device_name: Some("test-device".into()),
+            platform: Some("test".into()),
+        };
+        let result = login(State(state), client_ip(), HeaderMap::new(), validated(req)).await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::UNAUTHORIZED);
+    }
+
     #[tokio::test]
     async fn login_rate_limits_by_client_ip() {
         let passphrase = b"correct horse battery staple";
@@ -1226,15 +1277,9 @@ mod tests {
                 .expect("unwrap encryption_salt");
         assert!(recovered.is_empty());
 
-        // OPAQUE blobs must not survive in cleartext, and must unwrap
-        // with the same pepper.
-        assert!(
-            secret_storage::unwrap_opaque_server_setup(
-                state.secrets(),
-                &stored.opaque_server_setup,
-            )
-            .is_ok()
-        );
+        // The per-user OPAQUE blob must not survive in cleartext and must
+        // unwrap with the same pepper. (The server-wide setup lives in
+        // server_config, covered by init_server_wraps_access_key_hash_salt.)
         assert!(
             secret_storage::unwrap_opaque_password_file(
                 state.secrets(),
@@ -1258,10 +1303,6 @@ mod tests {
 
         let attacker = crate::secret::ServerSecrets::from_root(&[0x99_u8; 32]);
         assert!(
-            secret_storage::unwrap_opaque_server_setup(&attacker, &user.opaque_server_setup)
-                .is_err()
-        );
-        assert!(
             secret_storage::unwrap_opaque_password_file(&attacker, &user.opaque_password_file)
                 .is_err()
         );
@@ -1272,6 +1313,13 @@ mod tests {
             .await
             .expect("query")
             .expect("server_config");
+        assert!(
+            secret_storage::unwrap_opaque_server_setup(
+                &attacker,
+                &server_config.opaque_server_setup
+            )
+            .is_err()
+        );
         assert!(
             secret_storage::unwrap_access_key_hash_salt(
                 &attacker,

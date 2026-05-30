@@ -10,8 +10,6 @@ pub struct Model {
     #[sea_orm(column_type = "Text", unique)]
     pub username: String,
     #[sea_orm(column_type = "Blob")]
-    pub opaque_server_setup: Vec<u8>,
-    #[sea_orm(column_type = "Blob")]
     pub opaque_password_file: Vec<u8>,
     #[sea_orm(column_type = "Blob")]
     pub encryption_salt: Vec<u8>,

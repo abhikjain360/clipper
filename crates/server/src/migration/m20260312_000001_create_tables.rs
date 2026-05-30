@@ -25,6 +25,11 @@ impl MigrationTrait for Migration {
                             .blob()
                             .not_null(),
                     )
+                    .col(
+                        ColumnDef::new(ServerConfig::OpaqueServerSetup)
+                            .blob()
+                            .not_null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -60,7 +65,6 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .unique_key(),
                     )
-                    .col(ColumnDef::new(Users::OpaqueServerSetup).blob().not_null())
                     .col(ColumnDef::new(Users::OpaquePasswordFile).blob().not_null())
                     .col(ColumnDef::new(Users::EncryptionSalt).blob().not_null())
                     .col(
@@ -417,6 +421,7 @@ enum ServerConfig {
     CreatedAt,
     UpdatedAt,
     AccessKeyHashSalt,
+    OpaqueServerSetup,
 }
 
 #[derive(DeriveIden)]
@@ -434,7 +439,6 @@ enum Users {
     Table,
     Id,
     Username,
-    OpaqueServerSetup,
     OpaquePasswordFile,
     EncryptionSalt,
     AccessKeyHash,

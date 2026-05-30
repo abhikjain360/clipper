@@ -37,7 +37,9 @@ pub struct AppStateInner {
 }
 
 pub struct AuthChallenge {
-    pub user_id: Uuid,
+    /// `None` for a fabricated challenge issued to an unknown username; such a
+    /// challenge can never produce a verifying finalization.
+    pub user_id: Option<Uuid>,
     pub server_login_state: Vec<u8>,
     expires_at: Instant,
 }
@@ -46,7 +48,6 @@ pub struct PendingRegistration {
     pub user_id: Uuid,
     pub username: String,
     pub access_key_hash: String,
-    pub opaque_server_setup: Vec<u8>,
     expires_at: Instant,
 }
 
@@ -177,7 +178,11 @@ impl AppState {
         &self.inner.ws_tx
     }
 
-    pub fn create_auth_challenge(&self, user_id: Uuid, server_login_state: Vec<u8>) -> String {
+    pub fn create_auth_challenge(
+        &self,
+        user_id: Option<Uuid>,
+        server_login_state: Vec<u8>,
+    ) -> String {
         let now = Instant::now();
         let mut challenges = self.inner.auth_challenges.lock().expect("lock poisoned");
         challenges.retain(|_, challenge| challenge.expires_at > now);
@@ -214,7 +219,6 @@ impl AppState {
         user_id: Uuid,
         username: String,
         access_key_hash: String,
-        opaque_server_setup: Vec<u8>,
     ) -> String {
         let now = Instant::now();
         let mut registrations = self
@@ -239,7 +243,6 @@ impl AppState {
                 user_id,
                 username,
                 access_key_hash,
-                opaque_server_setup,
                 expires_at: now + Duration::from_secs(self.config().auth.challenge_ttl_secs),
             },
         );

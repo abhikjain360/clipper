@@ -392,7 +392,7 @@ pub fn opaque_client_login_finish(
 /// kept until `opaque_server_login_finish`. See `docs/opaque.md`.
 pub fn opaque_server_login_start(
     server_setup: &[u8],
-    password_file: &[u8],
+    password_file: Option<&[u8]>,
     credential_request: &[u8],
     credential_identifier: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
@@ -400,16 +400,20 @@ pub fn opaque_server_login_start(
     let server_setup =
         opaque_ke::ServerSetup::<ClipperOpaqueCipherSuite>::deserialize(server_setup)
             .map_err(opaque_error)?;
-    let password_file =
-        opaque_ke::ServerRegistration::<ClipperOpaqueCipherSuite>::deserialize(password_file)
-            .map_err(opaque_error)?;
+    // `None` selects opaque-ke's fake-record path: it fabricates a credential
+    // response indistinguishable from a real one — and stable for a given
+    // `credential_identifier` — so an unknown username cannot be enumerated.
+    let password_file = password_file
+        .map(opaque_ke::ServerRegistration::<ClipperOpaqueCipherSuite>::deserialize)
+        .transpose()
+        .map_err(opaque_error)?;
     let request =
         opaque_ke::CredentialRequest::<ClipperOpaqueCipherSuite>::deserialize(credential_request)
             .map_err(opaque_error)?;
     let start = opaque_ke::ServerLogin::<ClipperOpaqueCipherSuite>::start(
         &mut rng,
         &server_setup,
-        Some(password_file),
+        password_file,
         request,
         credential_identifier,
         opaque_ke::ServerLoginParameters::default(),
@@ -714,7 +718,7 @@ mod tests {
         let (request, client_state) = opaque_client_login_start(password).unwrap();
         let (response, server_state) = opaque_server_login_start(
             &server_setup,
-            &password_file,
+            Some(&password_file),
             &request,
             TEST_CREDENTIAL_IDENTIFIER,
         )
@@ -747,7 +751,7 @@ mod tests {
         let (request, client_state) = opaque_client_login_start(password).unwrap();
         let (response, _server_state) = opaque_server_login_start(
             &server_setup,
-            &password_file,
+            Some(&password_file),
             &request,
             TEST_CREDENTIAL_IDENTIFIER,
         )
@@ -771,7 +775,7 @@ mod tests {
         let (request, client_state) = opaque_client_login_start(b"wrong password").unwrap();
         let (response, _server_state) = opaque_server_login_start(
             &server_setup,
-            &password_file,
+            Some(&password_file),
             &request,
             TEST_CREDENTIAL_IDENTIFIER,
         )
