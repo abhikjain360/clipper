@@ -578,15 +578,7 @@ where
         }
         .insert(db)
         .await
-        .map_err(|e| {
-            error!(
-                device_id = %device_id,
-                user_id = %user_id,
-                error = %e,
-                "Failed to insert device row",
-            );
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
-        })?;
+        .map_err(|e| map_device_insert_error(e, device_id, user_id))?;
     }
 
     let token_raw = crypto::generate_token_with_length(options.token_bytes);
@@ -620,6 +612,29 @@ where
     })?;
 
     Ok(IssuedSession { token, device_id })
+}
+
+fn map_device_insert_error(error: sea_orm::DbErr, device_id: Uuid, user_id: Uuid) -> ApiError {
+    match error.sql_err() {
+        Some(SqlErr::UniqueConstraintViolation(constraint)) => {
+            warn!(
+                device_id = %device_id,
+                user_id = %user_id,
+                constraint = %constraint,
+                "Concurrent session issue lost a uniqueness race on device id",
+            );
+            error_response(StatusCode::CONFLICT, "Device id already exists")
+        }
+        _ => {
+            error!(
+                device_id = %device_id,
+                user_id = %user_id,
+                error = %error,
+                "Failed to insert device row",
+            );
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1048,6 +1063,53 @@ mod tests {
 
         assert!(!resp.token.is_empty());
         assert!(!resp.device_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn device_insert_uniqueness_race_returns_conflict() {
+        let passphrase = b"correct horse battery staple";
+        let (state, _data_dir) = test_state(passphrase).await;
+        let user_id = users::Entity::find()
+            .select_only()
+            .column(users::Column::Id)
+            .into_tuple::<Uuid>()
+            .one(state.db())
+            .await
+            .expect("query user id")
+            .expect("user id");
+        let device_id = Uuid::now_v7();
+        let now = Utc::now().to_rfc3339();
+
+        devices::ActiveModel {
+            id: Set(device_id),
+            user_id: Set(user_id),
+            name: Set("existing-device".into()),
+            platform: Set("test".into()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            last_seen_at: Set(now.clone()),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert existing device");
+
+        let err = devices::ActiveModel {
+            id: Set(device_id),
+            user_id: Set(user_id),
+            name: Set("raced-device".into()),
+            platform: Set("test".into()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            last_seen_at: Set(now),
+        }
+        .insert(state.db())
+        .await
+        .expect_err("duplicate device insert should fail");
+
+        assert_eq!(
+            map_device_insert_error(err, device_id, user_id).status(),
+            StatusCode::CONFLICT
+        );
     }
 
     // This reuses a captured OPAQUE finalization against the same challenge.
