@@ -19,32 +19,32 @@ flutter_rust_bridge = { version = "=2.12.0", default-features = false, features 
     "user-utils",
     "wasm-start",
 ] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+serde.workspace = true
+serde_json.workspace = true
 strum.workspace = true
-thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["sync"] }
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-uuid = { version = "1.23.1", features = ["js", "v7"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+uuid = { workspace = true, features = ["js", "v7"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-dirs = "6.0.0"
-tokio = { version = "1.52.3", features = ["net", "io-util", "sync", "rt", "time", "macros"] }
+dirs.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "sync", "rt", "time", "macros"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
-hmac = "0.12.1"
-rand = "0.10.1"
-sha2 = "0.10.9"
+hmac.workspace = true
+rand.workspace = true
+sha2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "3.7.0"
+security-framework.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-getrandom = { version = "0.4.2", features = ["wasm_js"] }
+getrandom.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
