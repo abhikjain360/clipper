@@ -47,7 +47,8 @@ post_install do |installer|
     phase_name = 'Build & Embed clipper-daemon'
     phase = runner_target.shell_script_build_phases.find { |p| p.name == phase_name }
     phase ||= runner_target.new_shell_script_build_phase(phase_name)
-    phase.output_paths = ['$(BUILT_PRODUCTS_DIR)/$(PRODUCT_NAME).app/Contents/MacOS/clipper-daemon']
+    phase.always_out_of_date = '1' if phase.respond_to?(:always_out_of_date=)
+    phase.output_paths = []
     phase.shell_script = <<~SCRIPT
       set -e
       WORKSPACE_ROOT="$SRCROOT/../.."

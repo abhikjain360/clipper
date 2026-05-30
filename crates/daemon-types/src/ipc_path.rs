@@ -7,6 +7,8 @@ pub const SOCKET_FILE_MODE: u32 = 0o600;
 pub const SOCKET_PATH_ENV: &str = "CLIPPER_DAEMON_SOCKET_PATH";
 
 const SOCKET_FILE_NAME: &str = "daemon.sock";
+#[cfg(target_os = "macos")]
+const MACOS_APP_CONTAINER_ID: &str = "com.clipper.clipperApp";
 
 pub fn socket_path() -> PathBuf {
     if let Some(path) = env_socket_path() {
@@ -24,6 +26,11 @@ pub fn socket_dir() -> PathBuf {
 
     #[cfg(target_os = "macos")]
     if let Some(path) = macos_sandbox_container_socket_dir() {
+        return path;
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Some(path) = macos_default_container_socket_dir() {
         return path;
     }
 
@@ -100,6 +107,16 @@ fn macos_sandbox_container_socket_dir() -> Option<PathBuf> {
     Some(container_data_dir.join("tmp").join("Clipper"))
 }
 
+#[cfg(target_os = "macos")]
+fn macos_default_container_socket_dir() -> Option<PathBuf> {
+    Some(
+        dirs::home_dir()?
+            .join("Library/Containers")
+            .join(MACOS_APP_CONTAINER_ID)
+            .join("Data/tmp/Clipper"),
+    )
+}
+
 fn current_euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() as u32 }
@@ -114,10 +131,7 @@ mod tests {
     fn macos_socket_path_fits_sockaddr_un() {
         use std::os::unix::ffi::OsStrExt;
 
-        assert_eq!(
-            socket_path(),
-            PathBuf::from(format!("/tmp/clipper-{}/daemon.sock", current_euid()))
-        );
+        assert!(socket_path().ends_with(Path::new("tmp/Clipper/daemon.sock")));
         assert!(socket_path().as_os_str().as_bytes().len() < 104);
     }
 }

@@ -67,40 +67,73 @@ pub(crate) fn install_and_start_daemon() -> DaemonProcessResult<()> {
     };
 
     if needs_install {
-        let _ = std::process::Command::new("launchctl")
-            .args(["unload", &plist_path.to_string_lossy()])
-            .output();
-
-        if let Some(parent) = plist_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&plist_path, &new_plist)?;
-        tracing::info!("Installed LaunchAgent plist at {}", plist_path.display());
-
-        let output = std::process::Command::new("launchctl")
-            .args(["load", &plist_path.to_string_lossy()])
-            .output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("launchctl load warning: {}", stderr);
+        if let Err(error) = install_launchagent(&plist_path, &new_plist) {
+            tracing::warn!(
+                %error,
+                "LaunchAgent install failed; falling back to direct daemon spawn"
+            );
+            spawn_detached(&daemon_path)?;
         }
     } else {
         match crate::transport::socket_path() {
-            Ok(sock) if !sock.exists() => {
-                let output = std::process::Command::new("launchctl")
-                    .args(["start", LAUNCHAGENT_LABEL])
-                    .output()?;
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    tracing::warn!("launchctl start warning: {}", stderr);
+            Ok(sock) if !sock.exists() => match start_launchagent() {
+                Ok(()) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "LaunchAgent start failed; falling back to direct daemon spawn"
+                    );
+                    spawn_detached(&daemon_path)?;
                 }
-            }
+            },
             Ok(_) => {}
             Err(error) => tracing::warn!("cannot locate daemon socket: {}", error),
         }
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_launchagent(plist_path: &Path, new_plist: &str) -> DaemonProcessResult<()> {
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", &plist_path.to_string_lossy()])
+        .output();
+
+    if let Some(parent) = plist_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(plist_path, new_plist)?;
+    tracing::info!("Installed LaunchAgent plist at {}", plist_path.display());
+
+    let output = std::process::Command::new("launchctl")
+        .args(["load", &plist_path.to_string_lossy()])
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        tracing::warn!(
+            "launchctl load warning: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Err(std::io::Error::other("launchctl load failed").into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn start_launchagent() -> DaemonProcessResult<()> {
+    let output = std::process::Command::new("launchctl")
+        .args(["start", LAUNCHAGENT_LABEL])
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        tracing::warn!(
+            "launchctl start warning: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Err(std::io::Error::other("launchctl start failed").into())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -268,7 +301,7 @@ fn run_systemctl(args: &[&str]) -> DaemonProcessResult<()> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn spawn_detached(daemon_path: &Path) -> std::io::Result<()> {
     std::process::Command::new(daemon_path)
         .stdin(std::process::Stdio::null())
