@@ -1,9 +1,10 @@
 use chrono::{Duration, Utc};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 use tracing::info;
+use uuid::Uuid;
 
 use crate::{
-    entity::{clipboard_items, event_log, object_payloads, objects},
+    entity::{event_log, object_payloads, objects},
     state::AppState,
 };
 
@@ -23,8 +24,11 @@ pub async fn run_cleanup_loop(state: AppState) {
 
     loop {
         interval.tick().await;
-        if let Err(e) = cleanup_expired_clipboard(&state).await {
-            tracing::error!(error = %e, "Clipboard cleanup failed");
+        if let Err(e) = cleanup_expired_clipboard_objects(&state).await {
+            tracing::error!(error = %e, "Expired clipboard cleanup failed");
+        }
+        if let Err(e) = cleanup_excess_clipboard_objects(&state).await {
+            tracing::error!(error = %e, "Excess clipboard cleanup failed");
         }
         if let Err(e) = cleanup_old_events(&state).await {
             tracing::error!(error = %e, "Event log cleanup failed");
@@ -35,29 +39,90 @@ pub async fn run_cleanup_loop(state: AppState) {
     }
 }
 
-async fn cleanup_expired_clipboard(state: &AppState) -> CleanupResult<()> {
+async fn cleanup_expired_clipboard_objects(state: &AppState) -> CleanupResult<()> {
     let now = Utc::now().to_rfc3339();
-
-    let expired = clipboard_items::Entity::find()
-        .filter(clipboard_items::Column::ExpiresAt.lt(&now))
+    let expired = objects::Entity::find()
+        .filter(objects::Column::Kind.eq("clipboard"))
+        .filter(objects::Column::ExpiresAt.is_not_null())
+        .filter(objects::Column::ExpiresAt.lt(&now))
         .all(state.db())
         .await?;
 
-    let count = expired.len();
-    for item in &expired {
-        let path = state.clipboard_dir().join(&item.ciphertext_path);
-        let _ = tokio::fs::remove_file(&path).await;
-    }
-
-    if count > 0 {
-        clipboard_items::Entity::delete_many()
-            .filter(clipboard_items::Column::ExpiresAt.lt(&now))
-            .exec(state.db())
-            .await?;
-        info!(count, "Cleaned up expired clipboard items");
+    if !expired.is_empty() {
+        let count = delete_clipboard_objects(state, &expired).await?;
+        info!(count, "Cleaned up expired clipboard objects");
     }
 
     Ok(())
+}
+
+async fn cleanup_excess_clipboard_objects(state: &AppState) -> CleanupResult<()> {
+    let user_ids: Vec<Uuid> = objects::Entity::find()
+        .filter(objects::Column::Kind.eq("clipboard"))
+        .select_only()
+        .column(objects::Column::UserId)
+        .distinct()
+        .into_tuple()
+        .all(state.db())
+        .await?;
+
+    let mut total = 0_usize;
+    for user_id in user_ids {
+        total += trim_user_clipboard(state, user_id).await?;
+    }
+    if total > 0 {
+        info!(count = total, "Trimmed excess clipboard objects");
+    }
+    Ok(())
+}
+
+/// Delete clipboard objects beyond the configured per-user `max_items`, keeping the most recent.
+///
+/// Why pub(crate): the object init/complete handlers spawn this after a successful clipboard
+/// write so the cap is enforced without waiting for the periodic loop.
+pub(crate) async fn trim_user_clipboard(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<usize, sea_orm::DbErr> {
+    let max_items = state.config().clipboard.max_items;
+    let excess = objects::Entity::find()
+        .filter(objects::Column::Kind.eq("clipboard"))
+        .filter(objects::Column::UserId.eq(user_id))
+        .order_by(objects::Column::CreatedAt, Order::Desc)
+        .offset(max_items)
+        // SQLite rejects OFFSET without LIMIT, so bound generously to "all remaining rows".
+        .limit(i64::MAX as u64)
+        .all(state.db())
+        .await?;
+    if excess.is_empty() {
+        return Ok(0);
+    }
+    delete_clipboard_objects(state, &excess).await
+}
+
+async fn delete_clipboard_objects(
+    state: &AppState,
+    items: &[objects::Model],
+) -> Result<usize, sea_orm::DbErr> {
+    if items.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<Uuid> = items.iter().map(|o| o.id).collect();
+
+    let payloads = object_payloads::Entity::find()
+        .filter(object_payloads::Column::ObjectId.is_in(ids.clone()))
+        .all(state.db())
+        .await?;
+    for payload in &payloads {
+        let path = state.objects_dir().join(&payload.ciphertext_path);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    let res = objects::Entity::delete_many()
+        .filter(objects::Column::Id.is_in(ids))
+        .exec(state.db())
+        .await?;
+    Ok(res.rows_affected as usize)
 }
 
 async fn cleanup_old_events(state: &AppState) -> CleanupResult<()> {
@@ -98,7 +163,7 @@ async fn cleanup_orphan_object_uploads(state: &AppState) -> CleanupResult<()> {
             .await?;
         for payload in payloads {
             let path = state.objects_dir().join(&payload.ciphertext_path);
-            let _ = tokio::fs::remove_file(&path).await;
+            let _ = tokio::fs::remove_file(path).await;
         }
     }
 

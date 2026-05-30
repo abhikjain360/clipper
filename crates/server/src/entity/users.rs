@@ -31,8 +31,6 @@ pub enum Relation {
         on_delete = "Restrict"
     )]
     AccessKeys,
-    #[sea_orm(has_many = "super::clipboard_items::Entity")]
-    ClipboardItems,
     #[sea_orm(has_many = "super::devices::Entity")]
     Devices,
     #[sea_orm(has_many = "super::event_log::Entity")]
@@ -46,12 +44,6 @@ pub enum Relation {
 impl Related<super::access_keys::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::AccessKeys.def()
-    }
-}
-
-impl Related<super::clipboard_items::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ClipboardItems.def()
     }
 }
 

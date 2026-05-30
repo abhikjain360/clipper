@@ -18,6 +18,8 @@ pub struct Model {
     pub created_at: String,
     #[sea_orm(column_type = "Text")]
     pub updated_at: String,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub expires_at: Option<String>,
     pub source_device_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub status: String,

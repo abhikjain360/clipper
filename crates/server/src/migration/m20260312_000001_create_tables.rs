@@ -143,63 +143,6 @@ impl MigrationTrait for Migration {
         manager
             .create_table(
                 Table::create()
-                    .table(ClipboardItems::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(ClipboardItems::Id)
-                            .uuid()
-                            .not_null()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(ClipboardItems::UserId).uuid().not_null())
-                    .col(
-                        ColumnDef::new(ClipboardItems::CiphertextPath)
-                            .text()
-                            .not_null()
-                            .unique_key(),
-                    )
-                    .col(ColumnDef::new(ClipboardItems::Nonce).blob().not_null())
-                    .col(
-                        ColumnDef::new(ClipboardItems::CiphertextSize)
-                            .big_integer()
-                            .not_null()
-                            .check(Expr::col(ClipboardItems::CiphertextSize).gte(0)),
-                    )
-                    .col(
-                        ColumnDef::new(ClipboardItems::Sha256Ciphertext)
-                            .blob()
-                            .not_null(),
-                    )
-                    .col(ColumnDef::new(ClipboardItems::CreatedAt).text().not_null())
-                    .col(ColumnDef::new(ClipboardItems::ExpiresAt).text().not_null())
-                    .col(
-                        ColumnDef::new(ClipboardItems::SourceDeviceId)
-                            .uuid()
-                            .not_null(),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_clipboard_items_source_device_id")
-                            .from(ClipboardItems::Table, ClipboardItems::SourceDeviceId)
-                            .to(Devices::Table, Devices::Id)
-                            .on_delete(ForeignKeyAction::Restrict)
-                            .on_update(ForeignKeyAction::Cascade),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_clipboard_items_user_id")
-                            .from(ClipboardItems::Table, ClipboardItems::UserId)
-                            .to(Users::Table, Users::Id)
-                            .on_delete(ForeignKeyAction::Cascade)
-                            .on_update(ForeignKeyAction::Cascade),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_table(
-                Table::create()
                     .table(Objects::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Objects::Id).uuid().not_null().primary_key())
@@ -214,6 +157,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Objects::MetaNonce).blob().not_null())
                     .col(ColumnDef::new(Objects::CreatedAt).text().not_null())
                     .col(ColumnDef::new(Objects::UpdatedAt).text().not_null())
+                    .col(ColumnDef::new(Objects::ExpiresAt).text())
                     .col(ColumnDef::new(Objects::SourceDeviceId).uuid().not_null())
                     .col(
                         ColumnDef::new(Objects::Status)
@@ -371,14 +315,6 @@ impl MigrationTrait for Migration {
             .drop_table(Table::drop().table(Objects::Table).if_exists().to_owned())
             .await?;
         manager
-            .drop_table(
-                Table::drop()
-                    .table(ClipboardItems::Table)
-                    .if_exists()
-                    .to_owned(),
-            )
-            .await?;
-        manager
             .drop_table(Table::drop().table(Sessions::Table).if_exists().to_owned())
             .await?;
         manager
@@ -453,20 +389,6 @@ enum Sessions {
 }
 
 #[derive(DeriveIden)]
-enum ClipboardItems {
-    Table,
-    Id,
-    UserId,
-    CiphertextPath,
-    Nonce,
-    CiphertextSize,
-    Sha256Ciphertext,
-    CreatedAt,
-    ExpiresAt,
-    SourceDeviceId,
-}
-
-#[derive(DeriveIden)]
 enum Objects {
     Table,
     Id,
@@ -476,6 +398,7 @@ enum Objects {
     MetaNonce,
     CreatedAt,
     UpdatedAt,
+    ExpiresAt,
     SourceDeviceId,
     Status,
 }

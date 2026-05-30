@@ -244,65 +244,6 @@ impl ApiClient {
         Ok(())
     }
 
-    // ── Clipboard ──
-
-    pub async fn upload_clipboard(
-        &self,
-        req: &ClipboardUploadRequest,
-    ) -> Result<OkResponse, ClientError> {
-        let resp = self
-            .http
-            .post(self.url("/api/clipboard"))
-            .header("Authorization", self.auth_header().unwrap_or_default())
-            .json(req)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::Api {
-                status,
-                message: body,
-            });
-        }
-
-        Ok(resp.json().await?)
-    }
-
-    pub async fn list_clipboard(
-        &self,
-        limit: Option<u64>,
-        before: Option<&str>,
-    ) -> Result<ClipboardListResponse, ClientError> {
-        let mut url = format!(
-            "{}/api/clipboard?limit={}",
-            self.base_url,
-            limit.unwrap_or(100)
-        );
-        if let Some(b) = before {
-            url.push_str(&format!("&before={}", b));
-        }
-
-        let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", self.auth_header().unwrap_or_default())
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::Api {
-                status,
-                message: body,
-            });
-        }
-
-        Ok(resp.json().await?)
-    }
-
     // ── Objects ──
 
     pub async fn object_init(
@@ -493,26 +434,6 @@ fn is_android_emulator_host(url: &Url) -> bool {
 
 // ── Encryption helpers ──
 
-/// Encrypt clipboard text for upload. Returns the upload request.
-pub fn encrypt_clipboard(
-    text: &str,
-    encryption_key: &[u8; 32],
-    device_id: &str,
-) -> Result<ClipboardUploadRequest, crypto::CryptoError> {
-    let plaintext = text.as_bytes();
-    let (nonce, ciphertext) = crypto::encrypt(encryption_key, plaintext, crypto::AAD_CLIPBOARD_V1)?;
-    let hash = crypto::sha256(&ciphertext);
-
-    Ok(ClipboardUploadRequest {
-        id: uuid::Uuid::now_v7().into(),
-        nonce: nonce.to_vec(),
-        ciphertext,
-        ciphertext_sha256: hash.to_vec(),
-        source_device_id: device_id.to_string(),
-        client_created_at: Some(chrono::Utc::now().to_rfc3339()),
-    })
-}
-
 /// Encrypt clipboard metadata for object upload.
 pub fn encrypt_clipboard_meta(
     meta: &ClipboardMeta,
@@ -563,27 +484,6 @@ pub fn decrypt_clipboard_payload(
         ciphertext,
         crypto::AAD_CLIPBOARD_PAYLOAD_V1,
     )
-}
-
-/// Decrypt a clipboard item. Returns the plaintext string.
-pub fn decrypt_clipboard(
-    item: &ClipboardItem,
-    encryption_key: &[u8; 32],
-) -> Result<String, crypto::CryptoError> {
-    let nonce = B64
-        .decode(&item.nonce_b64)
-        .map_err(|e| crypto::CryptoError::Decrypt(format!("nonce decode: {}", e)))?;
-    let ciphertext = B64
-        .decode(&item.ciphertext_b64)
-        .map_err(|e| crypto::CryptoError::Decrypt(format!("ciphertext decode: {}", e)))?;
-
-    let plaintext = crypto::decrypt(
-        encryption_key,
-        &nonce,
-        &ciphertext,
-        crypto::AAD_CLIPBOARD_V1,
-    )?;
-    String::from_utf8(plaintext).map_err(|e| crypto::CryptoError::Decrypt(format!("utf8: {}", e)))
 }
 
 /// Encrypt file metadata for upload.

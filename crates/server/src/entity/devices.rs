@@ -22,8 +22,6 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_many = "super::clipboard_items::Entity")]
-    ClipboardItems,
     #[sea_orm(has_many = "super::objects::Entity")]
     Objects,
     #[sea_orm(has_many = "super::sessions::Entity")]
@@ -36,12 +34,6 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     Users,
-}
-
-impl Related<super::clipboard_items::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ClipboardItems.def()
-    }
 }
 
 impl Related<super::objects::Entity> for Entity {

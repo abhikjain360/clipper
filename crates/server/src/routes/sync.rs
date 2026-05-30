@@ -4,12 +4,12 @@ use axum::{
     http::StatusCode,
 };
 use base64::Engine;
-use clipper_core::models::{BootstrapResponse, ClipboardItem, DeviceInfo, ServerInfo};
+use clipper_core::models::{BootstrapResponse, DeviceInfo, ServerInfo};
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
 
 use crate::{
     auth::AuthInfo,
-    entity::{clipboard_items, devices, event_log, users},
+    entity::{devices, event_log, users},
     state::AppState,
 };
 
@@ -19,45 +19,18 @@ pub async fn bootstrap(
 ) -> Result<Json<BootstrapResponse>, StatusCode> {
     let b64 = &base64::engine::general_purpose::STANDARD;
 
-    // Get device info
     let dev = devices::Entity::find_by_id(auth.device_id)
         .one(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Get user crypto info
     let user = users::Entity::find_by_id(auth.user_id)
         .one(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Recent clipboard items (last 100)
-    let clips = clipboard_items::Entity::find()
-        .filter(clipboard_items::Column::UserId.eq(auth.user_id))
-        .order_by(clipboard_items::Column::CreatedAt, Order::Desc)
-        .all(state.db())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let clips: Vec<clipboard_items::Model> = clips.into_iter().take(100).collect();
-
-    let mut clipboard_items = Vec::new();
-    for item in &clips {
-        let path = state.clipboard_dir().join(&item.ciphertext_path);
-        if let Ok(ct) = tokio::fs::read(&path).await {
-            clipboard_items.push(ClipboardItem {
-                id: item.id.to_string(),
-                nonce_b64: b64.encode(&item.nonce),
-                ciphertext_b64: b64.encode(&ct),
-                created_at: item.created_at.clone(),
-                source_device_id: item.source_device_id.to_string(),
-            });
-        }
-    }
-
-    // Latest event seq
     let latest_seq = event_log::Entity::find()
         .filter(event_log::Column::UserId.eq(auth.user_id))
         .order_by(event_log::Column::Seq, Order::Desc)
@@ -73,7 +46,6 @@ pub async fn bootstrap(
             name: dev.name,
             platform: dev.platform,
         },
-        clipboard_items,
         latest_seq,
         server: ServerInfo {
             encryption_salt_b64: b64.encode(&user.encryption_salt),

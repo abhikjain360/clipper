@@ -68,68 +68,14 @@ console.log("\n=== 1. Health Check ===");
 
 console.log("\n=== 2. Unauthenticated request rejected ===");
 {
-  const res = await api("GET", "/api/clipboard");
+  const res = await api("GET", "/api/objects");
   assert(res.status === 401, `status 401 (got ${res.status})`);
   await res.body?.cancel();
 }
 
-console.log("\n=== 3. Upload clipboard item ===");
-const clipId = crypto.randomUUID();
-{
-  // Simulate encrypted ciphertext (in real usage this would be XChaCha20-Poly1305 output)
-  const fakeCiphertext = new TextEncoder().encode(
-    "this-is-fake-ciphertext-for-testing",
-  );
-  const fakeNonce = crypto.getRandomValues(new Uint8Array(24));
-  const hash = await sha256(fakeCiphertext);
-
-  const res = await api(
-    "POST",
-    "/api/clipboard",
-    {
-      id: clipId,
-      nonce_b64: b64encode(fakeNonce),
-      ciphertext_b64: b64encode(fakeCiphertext),
-      ciphertext_sha256_b64: b64encode(hash),
-      source_device_id: deviceId,
-      client_created_at: new Date().toISOString(),
-    },
-    token,
-  );
-  assert(res.status === 200, `status 200 (got ${res.status})`);
-  const json = await res.json();
-  assert(json.ok === true, "clipboard upload ok=true");
-}
-
-console.log("\n=== 4. List clipboard items ===");
-{
-  const res = await api("GET", "/api/clipboard?limit=10", undefined, token);
-  assert(res.status === 200, `status 200 (got ${res.status})`);
-  const json = await res.json();
-  assert(Array.isArray(json.items), "items is array");
-  assert(json.items.length >= 1, `got ${json.items.length} item(s)`);
-
-  const found = json.items.find(
-    (i: { id: string }) => i.id === clipId,
-  );
-  assert(found !== undefined, `found uploaded item ${clipId}`);
-  assert(
-    typeof found.ciphertext_b64 === "string",
-    "item has ciphertext (not plaintext)",
-  );
-  assert(typeof found.nonce_b64 === "string", "item has nonce");
-}
-
-console.log("\n=== 5. Verify ciphertext storage on disk ===");
-{
-  // The server should have stored the ciphertext file
-  const res = await api("GET", "/api/clipboard?limit=1", undefined, token);
-  const json = await res.json();
-  assert(json.items.length >= 1, "at least one item returned");
-  // Ciphertext should be base64, not plaintext
-  const ct = json.items[0].ciphertext_b64;
-  assert(!ct.includes("hello"), "ciphertext is not plaintext");
-}
+// Sections 3-5 (clipboard route) removed: clipboards now flow through the
+// objects API (kind=clipboard) which uses postcard, not JSON. Cover via the
+// Rust client instead.
 
 console.log("\n=== 6. File upload flow (init → blob → complete) ===");
 const fileId = crypto.randomUUID();
@@ -241,8 +187,6 @@ console.log("\n=== 10. Sync bootstrap ===");
   assert(res.status === 200, `status 200 (got ${res.status})`);
   const json = await res.json();
   assert(typeof json.device === "object", "has device info");
-  assert(Array.isArray(json.clipboard_items), "has clipboard_items");
-  assert(Array.isArray(json.files), "has files");
   assert(typeof json.latest_seq === "number", "has latest_seq");
   assert(
     typeof json.server.encryption_salt_b64 === "string",
@@ -256,7 +200,7 @@ console.log("\n=== 11. Logout ===");
   assert(res.status === 200, `status 200 (got ${res.status})`);
 
   // Verify token is invalidated
-  const afterRes = await api("GET", "/api/clipboard", undefined, token);
+  const afterRes = await api("GET", "/api/objects", undefined, token);
   assert(
     afterRes.status === 401,
     `post-logout status 401 (got ${afterRes.status})`,

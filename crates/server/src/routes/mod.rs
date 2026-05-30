@@ -11,7 +11,6 @@ use serde::{Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 pub mod auth;
-pub mod clipboard;
 pub mod health;
 pub mod objects;
 pub mod sync;

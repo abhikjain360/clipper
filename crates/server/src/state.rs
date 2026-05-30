@@ -81,10 +81,7 @@ impl AppState {
     }
 
     async fn ensure_storage_dirs(&self) -> ServerResult<()> {
-        tokio::try_join!(
-            tokio::fs::create_dir_all(self.clipboard_dir()),
-            tokio::fs::create_dir_all(self.objects_dir()),
-        )?;
+        tokio::fs::create_dir_all(self.objects_dir()).await?;
         Ok(())
     }
 
@@ -113,10 +110,6 @@ impl AppState {
 
     pub fn config(&self) -> &ServerConfig {
         &self.inner.config
-    }
-
-    pub fn clipboard_dir(&self) -> PathBuf {
-        self.inner.data_dir.join("clipboard")
     }
 
     pub fn objects_dir(&self) -> PathBuf {

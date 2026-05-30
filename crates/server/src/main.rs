@@ -256,8 +256,6 @@ async fn serve(config: ServerConfig) -> ServerResult<()> {
     // private routes
     let authed = Router::new()
         .route("/api/auth/logout", post(routes::auth::logout))
-        .route("/api/clipboard", post(routes::clipboard::upload))
-        .route("/api/clipboard", get(routes::clipboard::list))
         .route("/api/objects/init", post(routes::objects::init_object))
         .route(
             "/api/objects/{id}/payloads/{payload_id}",

@@ -7,7 +7,7 @@ use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
 };
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use clipper_core::{
     crypto::SHA256_BYTES,
     models::{
@@ -81,6 +81,7 @@ pub async fn init_object(
     }
 
     let now = Utc::now().to_rfc3339();
+    let expires_at = object_expires_at(&state, req.kind, &now);
     let txn = state
         .db()
         .begin()
@@ -95,6 +96,7 @@ pub async fn init_object(
         meta_nonce: Set(req.meta_nonce),
         created_at: Set(now.clone()),
         updated_at: Set(now.clone()),
+        expires_at: Set(expires_at),
         source_device_id: Set(auth.device_id),
         status: Set(if all_inline { "complete" } else { "pending" }.into()),
     };
@@ -160,6 +162,9 @@ pub async fn init_object(
             &object_id_text,
             &now,
         );
+        if req.kind == ObjectKind::Clipboard {
+            spawn_clipboard_trim(state.clone(), auth.user_id);
+        }
     }
 
     let upload_urls = req
@@ -420,6 +425,9 @@ pub async fn complete_object(
         &object_id,
         &now,
     );
+    if kind == ObjectKind::Clipboard {
+        spawn_clipboard_trim(state.clone(), auth.user_id);
+    }
 
     info!(device_id = %auth.device_id, object_id = %object_id, kind = kind.as_str(), "Object completed");
     Ok(Postcard(OkResponse { ok: true }))
@@ -668,6 +676,24 @@ fn broadcast_created(
     });
 }
 
+fn object_expires_at(state: &AppState, kind: ObjectKind, created_at: &str) -> Option<String> {
+    match kind {
+        ObjectKind::Clipboard => {
+            let created = chrono::DateTime::parse_from_rfc3339(created_at).ok()?;
+            Some((created + Duration::days(state.config().clipboard.ttl_days)).to_rfc3339())
+        }
+        ObjectKind::File => None,
+    }
+}
+
+fn spawn_clipboard_trim(state: AppState, user_id: Uuid) {
+    tokio::spawn(async move {
+        if let Err(err) = crate::cleanup::trim_user_clipboard(&state, user_id).await {
+            tracing::warn!(user_id = %user_id, error = %err, "Clipboard trim failed");
+        }
+    });
+}
+
 fn object_kind_from_query(kind: &str) -> Result<ObjectKind, ()> {
     match kind {
         "clipboard" => Ok(ObjectKind::Clipboard),
@@ -839,9 +865,16 @@ mod tests {
     use crate::entity::{access_keys, devices, users};
 
     async fn test_state() -> (AppState, TempDir) {
+        test_state_with_max_items(100).await
+    }
+
+    async fn test_state_with_max_items(max_items: u64) -> (AppState, TempDir) {
         let data_dir = tempfile::tempdir().expect("tempdir");
         let db = Database::connect("sqlite::memory:").await.expect("db");
-        let state = AppState::open_with_db(db, data_dir.path().to_path_buf())
+        let mut config = crate::config::ServerConfig::default();
+        config.server.data_dir = data_dir.path().to_path_buf();
+        config.clipboard.max_items = max_items;
+        let state = AppState::open_with_db_and_config(db, config)
             .await
             .expect("state");
         (state, data_dir)
@@ -1139,5 +1172,137 @@ mod tests {
                 .join(object_payload_filename(&object_id, &payload_id))
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn clipboard_object_gets_ttl_and_file_object_does_not() {
+        let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        insert_device(&state, user_id, device_id).await;
+
+        let clip_object_id = Uuid::now_v7().to_string();
+        let clip_payload_id = Uuid::now_v7().to_string();
+        init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                clip_object_id.clone(),
+                clip_payload_id,
+                ObjectKind::Clipboard,
+                b"clip",
+                true,
+            )),
+        )
+        .await
+        .expect("init clipboard");
+
+        let file_object_id = Uuid::now_v7().to_string();
+        let file_payload_id = Uuid::now_v7().to_string();
+        init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                file_object_id.clone(),
+                file_payload_id,
+                ObjectKind::File,
+                b"file",
+                true,
+            )),
+        )
+        .await
+        .expect("init file");
+
+        let clip = objects::Entity::find_by_id(clip_object_id.parse::<Uuid>().expect("uuid"))
+            .one(state.db())
+            .await
+            .expect("query")
+            .expect("clip row");
+        let file = objects::Entity::find_by_id(file_object_id.parse::<Uuid>().expect("uuid"))
+            .one(state.db())
+            .await
+            .expect("query")
+            .expect("file row");
+
+        let clip_expires = clip.expires_at.expect("clipboard objects carry a TTL");
+        let created = chrono::DateTime::parse_from_rfc3339(&clip.created_at).expect("rfc3339");
+        let expires = chrono::DateTime::parse_from_rfc3339(&clip_expires).expect("rfc3339");
+        let delta = expires.signed_duration_since(created);
+        assert_eq!(
+            delta.num_days(),
+            state.config().clipboard.ttl_days,
+            "clipboard expires_at = created_at + ttl_days",
+        );
+        assert!(file.expires_at.is_none(), "file objects have no TTL");
+    }
+
+    #[tokio::test]
+    async fn trim_user_clipboard_keeps_newest_and_drops_files() {
+        let (state, data_dir) = test_state_with_max_items(2).await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        insert_device(&state, user_id, device_id).await;
+
+        let mut ids = Vec::new();
+        for i in 0_u8..4 {
+            let object_id = Uuid::now_v7().to_string();
+            let payload_id = Uuid::now_v7().to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request(
+                    object_id.clone(),
+                    payload_id.clone(),
+                    ObjectKind::Clipboard,
+                    &[i; 8],
+                    true,
+                )),
+            )
+            .await
+            .expect("init");
+            ids.push((object_id, payload_id));
+            // Distinct created_at — RFC3339 second resolution would collide otherwise.
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        }
+
+        crate::cleanup::trim_user_clipboard(&state, user_id)
+            .await
+            .expect("trim");
+
+        let remaining = objects::Entity::find()
+            .filter(objects::Column::UserId.eq(user_id))
+            .filter(objects::Column::Kind.eq("clipboard"))
+            .order_by(objects::Column::CreatedAt, Order::Desc)
+            .all(state.db())
+            .await
+            .expect("query");
+        assert_eq!(remaining.len(), 2, "max_items=2 should retain 2 rows");
+        let kept: std::collections::HashSet<_> = remaining.iter().map(|o| o.id).collect();
+        let last_two: std::collections::HashSet<_> = ids[2..]
+            .iter()
+            .map(|(o, _)| o.parse::<Uuid>().expect("uuid"))
+            .collect();
+        assert_eq!(kept, last_two, "newest two items survive trim");
+
+        for (object_id, payload_id) in &ids[..2] {
+            assert!(
+                !data_dir
+                    .path()
+                    .join("objects")
+                    .join(object_payload_filename(object_id, payload_id))
+                    .exists(),
+                "trimmed payload file was deleted from disk",
+            );
+        }
+        for (object_id, payload_id) in &ids[2..] {
+            assert!(
+                data_dir
+                    .path()
+                    .join("objects")
+                    .join(object_payload_filename(object_id, payload_id))
+                    .exists(),
+                "retained payload file still on disk",
+            );
+        }
     }
 }

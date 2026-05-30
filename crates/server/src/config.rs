@@ -26,7 +26,10 @@ const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
         max_file_meta_ciphertext_bytes: 64 * 1024,
         max_object_meta_ciphertext_bytes: 64 * 1024,
     },
-    clipboard: ClipboardConfig { ttl_days: 7 },
+    clipboard: ClipboardConfig {
+        ttl_days: 7,
+        max_items: 100,
+    },
     list: ListConfig {
         default_limit: 100,
         max_limit: 500,
@@ -237,11 +240,13 @@ impl LimitsConfig {
 pub struct ClipboardConfig {
     #[garde(range(min = 1))]
     pub ttl_days: i64,
+    #[garde(range(min = 1))]
+    pub max_items: u64,
 }
 
 impl ClipboardConfig {
     fn apply_overrides(&mut self, overrides: ClipboardConfigOverrides) {
-        apply_option_overrides!(self, overrides, [ttl_days]);
+        apply_option_overrides!(self, overrides, [ttl_days, max_items]);
     }
 }
 
@@ -436,6 +441,9 @@ pub struct ClipboardConfigOverrides {
     /// Server-side encrypted clipboard item retention.
     #[arg(long = "clipboard-ttl-days")]
     pub ttl_days: Option<i64>,
+    /// Maximum clipboard items retained per user; oldest beyond this are trimmed.
+    #[arg(long = "clipboard-max-items")]
+    pub max_items: Option<u64>,
 }
 
 #[derive(Args, Debug, Clone, Default, Deserialize)]
@@ -582,6 +590,7 @@ mod tests {
 
                 [clipboard]
                 ttl_days = 2
+                max_items = 25
 
                 [list]
                 default_limit = 10
@@ -621,6 +630,7 @@ mod tests {
         assert_eq!(config.limits.max_file_meta_ciphertext_bytes, 2048);
         assert_eq!(config.limits.max_object_meta_ciphertext_bytes, 4096);
         assert_eq!(config.clipboard.ttl_days, 2);
+        assert_eq!(config.clipboard.max_items, 25);
         assert_eq!(config.list.default_limit, 10);
         assert_eq!(config.list.max_limit, 50);
         assert_eq!(config.cleanup.interval_secs, 15);
