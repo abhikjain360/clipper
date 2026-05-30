@@ -54,8 +54,7 @@ pub async fn auth_rate_limit_middleware(
     next: Next,
 ) -> Result<Response, ApiError> {
     if !limiter.check(ip) {
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::RateLimited,
             "Too many requests",
         ));

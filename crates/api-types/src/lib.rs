@@ -473,30 +473,31 @@ impl ApiErrorCode {
             Self::Unauthorized => 401,
             Self::Forbidden | Self::ObjectForbidden => 403,
             Self::NotFound | Self::ObjectNotFound => 404,
-            Self::Conflict | Self::ObjectAlreadyExists => 409,
+            Self::Conflict
+            | Self::ObjectAlreadyExists
+            | Self::ObjectNotReadyToComplete
+            | Self::ObjectPayloadAlreadyUploaded
+            | Self::ObjectPayloadUploadInProgress
+            | Self::ObjectPayloadNotUploaded => 409,
             Self::RateLimited => 429,
             Self::PayloadTooLarge => 413,
             Self::UnsupportedMediaType => 415,
             Self::ServerNotInitialized => 503,
+            Self::ObjectPayloadNotFound => 404,
+            Self::ObjectDeleteUnsupported
+            | Self::DuplicateObjectPayloadId
+            | Self::MissingObjectPayloads
+            | Self::MissingPayloadCompletion
+            | Self::IncompletePayloadCompletion
+            | Self::ObjectPayloadMetadataMismatch
+            | Self::ObjectPayloadIntegrityMismatch
+            | Self::Stream => 400,
             Self::Database
             | Self::ServerSecret
             | Self::Storage
             | Self::PayloadRead
             | Self::PayloadWrite
-            | Self::Stream
-            | Self::Unknown
-            | Self::ObjectDeleteUnsupported
-            | Self::ObjectNotReadyToComplete
-            | Self::DuplicateObjectPayloadId
-            | Self::ObjectPayloadNotFound
-            | Self::ObjectPayloadAlreadyUploaded
-            | Self::ObjectPayloadUploadInProgress
-            | Self::ObjectPayloadNotUploaded
-            | Self::MissingObjectPayloads
-            | Self::MissingPayloadCompletion
-            | Self::IncompletePayloadCompletion
-            | Self::ObjectPayloadMetadataMismatch
-            | Self::ObjectPayloadIntegrityMismatch => 500,
+            | Self::Unknown => 500,
         }
     }
 }
@@ -587,6 +588,31 @@ fn validate_unique_complete_payload_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_error_codes_have_canonical_http_statuses() {
+        let cases = [
+            (ApiErrorCode::ObjectAlreadyExists, 409),
+            (ApiErrorCode::ObjectForbidden, 403),
+            (ApiErrorCode::ObjectDeleteUnsupported, 400),
+            (ApiErrorCode::ObjectNotReadyToComplete, 409),
+            (ApiErrorCode::DuplicateObjectPayloadId, 400),
+            (ApiErrorCode::ObjectPayloadNotFound, 404),
+            (ApiErrorCode::ObjectPayloadAlreadyUploaded, 409),
+            (ApiErrorCode::ObjectPayloadUploadInProgress, 409),
+            (ApiErrorCode::ObjectPayloadNotUploaded, 409),
+            (ApiErrorCode::MissingObjectPayloads, 400),
+            (ApiErrorCode::MissingPayloadCompletion, 400),
+            (ApiErrorCode::IncompletePayloadCompletion, 400),
+            (ApiErrorCode::ObjectPayloadMetadataMismatch, 400),
+            (ApiErrorCode::ObjectPayloadIntegrityMismatch, 400),
+            (ApiErrorCode::Stream, 400),
+        ];
+
+        for (code, status) in cases {
+            assert_eq!(code.http_status(), status, "{code:?}");
+        }
+    }
 
     #[test]
     fn auth_requests_round_trip_none_option_fields_with_postcard() {

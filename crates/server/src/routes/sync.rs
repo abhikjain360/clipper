@@ -1,7 +1,6 @@
 use axum::{
     Json,
     extract::{Extension, State},
-    http::StatusCode,
 };
 use clipper_core::models::{ApiErrorCode, BootstrapResponse, DeviceInfo, ServerInfo};
 use sea_orm::{
@@ -39,22 +38,14 @@ pub async fn bootstrap(
                 error = %e,
                 "Failed to look up device in bootstrap",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?
         .ok_or_else(|| {
             error!(
                 device_id = %auth.device_id,
                 "Authenticated device row missing in bootstrap (data inconsistency)",
             );
-            ApiError::new(
-                StatusCode::NOT_FOUND,
-                ApiErrorCode::NotFound,
-                "Device not found",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::NotFound, "Device not found")
         })?;
 
     let latest_seq = event_log::Entity::find()
@@ -71,11 +62,7 @@ pub async fn bootstrap(
                 error = %e,
                 "Failed to load latest event_log seq in bootstrap",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?
         .unwrap_or(0);
 

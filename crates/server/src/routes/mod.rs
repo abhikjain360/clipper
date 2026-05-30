@@ -27,27 +27,16 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    pub(crate) fn new(status: StatusCode, code: ApiErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            status,
-            body: ErrorResponse::new(code, message),
-        }
-    }
-
     pub(crate) fn from_code(code: ApiErrorCode) -> Self {
-        Self::new(
-            StatusCode::from_u16(code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            code,
-            code.default_message(),
-        )
+        Self::from_code_with_message(code, code.default_message())
     }
 
     pub(crate) fn from_code_with_message(code: ApiErrorCode, message: impl Into<String>) -> Self {
-        Self::new(
-            StatusCode::from_u16(code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            code,
-            message,
-        )
+        Self {
+            status: StatusCode::from_u16(code.http_status())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body: ErrorResponse::new(code, message),
+        }
     }
 
     pub(crate) fn status(&self) -> StatusCode {
@@ -189,11 +178,7 @@ where
 }
 
 pub(crate) fn error_response(status: StatusCode, message: impl Into<String>) -> ApiError {
-    ApiError::new(
-        status,
-        ApiErrorCode::from_http_status(status.as_u16()),
-        message,
-    )
+    ApiError::from_code_with_message(ApiErrorCode::from_http_status(status.as_u16()), message)
 }
 
 fn validate_request<T>(value: &T) -> RouteResult<()>
@@ -202,10 +187,6 @@ where
     T::Context: Default,
 {
     value.validate().map_err(|report| {
-        ApiError::new(
-            StatusCode::BAD_REQUEST,
-            ApiErrorCode::ValidationFailed,
-            report.to_string(),
-        )
+        ApiError::from_code_with_message(ApiErrorCode::ValidationFailed, report.to_string())
     })
 }

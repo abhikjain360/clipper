@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use axum::{
     body::Body,
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
 };
 use chrono::{Duration, Utc};
 use clipper_core::{
@@ -63,8 +62,7 @@ pub async fn init_object(
                 max_blob_bytes,
                 "Rejected object init with oversized payload",
             );
-            return Err(ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
+            return Err(ApiError::from_code_with_message(
                 ApiErrorCode::PayloadTooLarge,
                 "Object payload exceeds maximum size",
             ));
@@ -79,11 +77,7 @@ pub async fn init_object(
         .await
         .map_err(|e| {
             error!(object_id = %object_id, error = %e, "Failed to look up object in init_object");
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?
         .is_some()
     {
@@ -92,8 +86,7 @@ pub async fn init_object(
             user_id = %auth.user_id,
             "Rejected object init for existing object id",
         );
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectAlreadyExists,
             "Object already exists",
         ));
@@ -121,8 +114,7 @@ pub async fn init_object(
                     error = %e,
                     "Failed to write inline payload to disk",
                 );
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                ApiError::from_code_with_message(
                     ApiErrorCode::Storage,
                     "Object payload storage error",
                 )
@@ -143,11 +135,7 @@ pub async fn init_object(
     };
     let txn = state.db().begin().await.map_err(|e| {
         error!(error = %e, "Failed to begin init_object transaction");
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiErrorCode::Database,
-            "Database error",
-        )
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
     let object = objects::ActiveModel {
@@ -174,19 +162,14 @@ pub async fn init_object(
                     constraint = %constraint,
                     "Concurrent init_object lost a race on object id uniqueness",
                 );
-                ApiError::new(
-                    StatusCode::CONFLICT,
+                ApiError::from_code_with_message(
                     ApiErrorCode::ObjectAlreadyExists,
                     "Object already exists",
                 )
             }
             _ => {
                 error!(object_id = %object_id, error = %e, "Failed to insert object row");
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    ApiErrorCode::Database,
-                    "Database error",
-                )
+                ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
             }
         });
     }
@@ -220,8 +203,7 @@ pub async fn init_object(
                         payload_id = %payload_id,
                         "Duplicate payload id in init_object request",
                     );
-                    ApiError::new(
-                        StatusCode::CONFLICT,
+                    ApiError::from_code_with_message(
                         ApiErrorCode::DuplicateObjectPayloadId,
                         "Duplicate object payload id",
                     )
@@ -233,11 +215,7 @@ pub async fn init_object(
                         error = %e,
                         "Failed to insert object payload row",
                     );
-                    ApiError::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        ApiErrorCode::Database,
-                        "Database error",
-                    )
+                    ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
                 }
             });
         }
@@ -264,8 +242,7 @@ pub async fn init_object(
     if let Err(e) = txn.commit().await {
         error!(object_id = %object_id, error = %e, "Failed to commit init_object transaction");
         remove_paths(written_paths).await;
-        return Err(ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::Database,
             "Database error",
         ));
@@ -326,11 +303,7 @@ pub async fn upload_payload(
                 error = %e,
                 "Failed to look up object payload for upload",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?
         .ok_or_else(|| {
             debug!(
@@ -338,8 +311,7 @@ pub async fn upload_payload(
                 payload_id = %payload_uuid,
                 "Rejected upload for missing object payload",
             );
-            ApiError::new(
-                StatusCode::NOT_FOUND,
+            ApiError::from_code_with_message(
                 ApiErrorCode::ObjectPayloadNotFound,
                 "Object payload not found",
             )
@@ -352,16 +324,14 @@ pub async fn upload_payload(
             status = %payload.status,
             "Rejected upload for payload that is not pending",
         );
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectPayloadAlreadyUploaded,
             "Object payload already uploaded",
         ));
     }
 
     if payload.ciphertext_size < 0 {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::InvalidPayloadSize,
             "Invalid payload size",
         ));
@@ -389,11 +359,7 @@ pub async fn upload_payload(
                 error = %e,
                 "Failed to claim payload for upload",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
 
     if claimed.rows_affected != 1 {
@@ -402,8 +368,7 @@ pub async fn upload_payload(
             payload_id = %payload_uuid,
             "Payload upload claim failed because status was no longer pending",
         );
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectPayloadUploadInProgress,
             "Object payload upload in progress",
         ));
@@ -434,8 +399,7 @@ pub async fn upload_payload(
         );
         let _ = tokio::fs::remove_file(&tmp_path).await;
         reset_payload_status(&state, object_uuid, payload_uuid, "uploading", "pending").await;
-        return Err(ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::Storage,
             "Object payload storage error",
         ));
@@ -463,11 +427,7 @@ pub async fn upload_payload(
                 error = %e,
                 "Failed to mark payload uploaded",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
 
     if uploaded.rows_affected != 1 {
@@ -477,8 +437,7 @@ pub async fn upload_payload(
             payload_id = %payload_uuid,
             "Payload upload finalization failed because status was no longer uploading",
         );
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectPayloadUploadInProgress,
             "Object payload upload no longer in progress",
         ));
@@ -519,11 +478,7 @@ pub async fn complete_object(
                 error = %e,
                 "Failed to list payloads in complete_object",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
 
     if payloads.is_empty() {
@@ -531,8 +486,7 @@ pub async fn complete_object(
             object_id = %object_uuid,
             "Rejected complete_object for object with no payload rows",
         );
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::MissingObjectPayloads,
             "Missing object payloads",
         ));
@@ -549,8 +503,7 @@ pub async fn complete_object(
                 payload_id = %payload.id,
                 "Duplicate payload completion in complete_object request",
             );
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
+            return Err(ApiError::from_code_with_message(
                 ApiErrorCode::DuplicateObjectPayloadId,
                 "Duplicate payload id",
             ));
@@ -564,8 +517,7 @@ pub async fn complete_object(
             completed_payloads = completion_by_id.len(),
             "Rejected incomplete complete_object request",
         );
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::IncompletePayloadCompletion,
             "Complete request does not cover all object payloads",
         ));
@@ -578,8 +530,7 @@ pub async fn complete_object(
                 payload_id = %payload.payload_id,
                 "Rejected complete_object request missing payload completion",
             );
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
+            ApiError::from_code_with_message(
                 ApiErrorCode::MissingPayloadCompletion,
                 "Missing payload completion",
             )
@@ -591,8 +542,7 @@ pub async fn complete_object(
                 status = %payload.status,
                 "Rejected complete_object before payload upload finished",
             );
-            return Err(ApiError::new(
-                StatusCode::CONFLICT,
+            return Err(ApiError::from_code_with_message(
                 ApiErrorCode::ObjectPayloadNotUploaded,
                 "Object payload has not been uploaded",
             ));
@@ -607,8 +557,7 @@ pub async fn complete_object(
                 completed_size = complete.ciphertext_size,
                 "Rejected complete_object with mismatched payload metadata",
             );
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
+            return Err(ApiError::from_code_with_message(
                 ApiErrorCode::ObjectPayloadMetadataMismatch,
                 "Payload metadata does not match initialized values",
             ));
@@ -624,11 +573,7 @@ pub async fn complete_object(
                 error_kind = ?e.kind(),
                 "Failed to hash uploaded payload (file missing or unreadable)",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::PayloadRead,
-                "Payload read error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::PayloadRead, "Payload read error")
         })?;
         if actual_size != payload.ciphertext_size as u64
             || computed_hash.as_slice() != payload.sha256_ciphertext.as_slice()
@@ -640,8 +585,7 @@ pub async fn complete_object(
                 actual_size,
                 "Uploaded payload failed completion integrity check",
             );
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
+            return Err(ApiError::from_code_with_message(
                 ApiErrorCode::ObjectPayloadIntegrityMismatch,
                 "Payload size or SHA-256 mismatch",
             ));
@@ -654,20 +598,12 @@ pub async fn complete_object(
             kind = %object.kind,
             "Object row has unknown kind value in database",
         );
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiErrorCode::Database,
-            "Database error",
-        )
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
     let now = Utc::now().to_rfc3339();
     let txn = state.db().begin().await.map_err(|e| {
         error!(error = %e, "Failed to begin complete_object transaction");
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiErrorCode::Database,
-            "Database error",
-        )
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
     object_payloads::Entity::update_many()
@@ -688,11 +624,7 @@ pub async fn complete_object(
                 error = %e,
                 "Failed to mark payloads complete",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
 
     let updated = objects::Entity::update_many()
@@ -716,11 +648,7 @@ pub async fn complete_object(
                 error = %e,
                 "Failed to mark object complete",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
 
     if updated.rows_affected != 1 {
@@ -731,8 +659,7 @@ pub async fn complete_object(
             device_id = %auth.device_id,
             "Object completion update affected no rows",
         );
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectNotReadyToComplete,
             "Object is no longer ready to complete",
         ));
@@ -754,11 +681,7 @@ pub async fn complete_object(
             error = %e,
             "Failed to commit complete_object transaction",
         );
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiErrorCode::Database,
-            "Database error",
-        )
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
     broadcast_created(&state, auth.user_id, inserted.seq, kind, &object_id, &now);
@@ -842,11 +765,7 @@ pub async fn list_objects(
     if let Some(kind) = &query.kind {
         let kind: ObjectKind = kind.parse().map_err(|_| {
             debug!(kind = %kind, "Rejected unknown object kind in list query");
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::InvalidObjectKind,
-                "Invalid object kind",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::InvalidObjectKind, "Invalid object kind")
         })?;
         q = q.filter(objects::Column::Kind.eq(kind.as_ref()));
     }
@@ -866,11 +785,7 @@ pub async fn list_objects(
                 error = %e,
                 "Failed to list objects",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
 
     let has_more = objects.len() as u64 > limit;
@@ -894,11 +809,7 @@ pub async fn list_objects(
                     error = %e,
                     "Failed to load payloads while listing objects",
                 );
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    ApiErrorCode::Database,
-                    "Database error",
-                )
+                ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
             })?
     };
 
@@ -920,11 +831,7 @@ pub async fn list_objects(
                     kind = %object.kind,
                     "Object row has unknown kind value in database",
                 );
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    ApiErrorCode::Database,
-                    "Database error",
-                )
+                ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
             })?,
             meta_nonce: object.meta_nonce.clone(),
             meta_ciphertext: object.meta_ciphertext.clone(),
@@ -986,11 +893,7 @@ pub async fn download_payload(
                 error = %e,
                 "Failed to look up object for download",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
     if object_exists.is_none() {
         debug!(
@@ -998,8 +901,7 @@ pub async fn download_payload(
             user_id = %auth.user_id,
             "Rejected payload download for missing or incomplete object",
         );
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectNotFound,
             "Object not found",
         ));
@@ -1019,11 +921,7 @@ pub async fn download_payload(
                 error = %e,
                 "Failed to look up payload for download",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?
         .ok_or_else(|| {
             debug!(
@@ -1031,8 +929,7 @@ pub async fn download_payload(
                 payload_id = %payload_uuid,
                 "Rejected download for missing or incomplete object payload",
             );
-            ApiError::new(
-                StatusCode::NOT_FOUND,
+            ApiError::from_code_with_message(
                 ApiErrorCode::ObjectPayloadNotFound,
                 "Object payload not found",
             )
@@ -1057,11 +954,7 @@ pub async fn download_payload(
                 "Failed to open payload file for download",
             );
         }
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiErrorCode::Storage,
-            "Object payload storage error",
-        )
+        ApiError::from_code_with_message(ApiErrorCode::Storage, "Object payload storage error")
     })?;
 
     Ok(Body::from_stream(ReaderStream::new(file)))
@@ -1087,11 +980,7 @@ pub async fn delete_object(
                 error = %e,
                 "Failed to look up object for delete",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?
         .ok_or_else(|| {
             debug!(
@@ -1099,11 +988,7 @@ pub async fn delete_object(
                 user_id = %auth.user_id,
                 "Rejected delete for missing object",
             );
-            ApiError::new(
-                StatusCode::NOT_FOUND,
-                ApiErrorCode::ObjectNotFound,
-                "Object not found",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::ObjectNotFound, "Object not found")
         })?;
     let kind: ObjectKind = kind.parse().map_err(|_| {
         error!(
@@ -1111,11 +996,7 @@ pub async fn delete_object(
             kind = %kind,
             "Object row has unknown kind value in database",
         );
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiErrorCode::Database,
-            "Database error",
-        )
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
     if kind != ObjectKind::File {
@@ -1124,8 +1005,7 @@ pub async fn delete_object(
             kind = kind.as_ref(),
             "Rejected delete_object for non-file object",
         );
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectDeleteUnsupported,
             "Only file objects can be deleted",
         ));
@@ -1144,11 +1024,7 @@ pub async fn delete_object(
                 error = %e,
                 "Failed to list payloads for delete",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
     let paths: Vec<_> = payload_paths
         .iter()
@@ -1157,11 +1033,7 @@ pub async fn delete_object(
 
     let txn = state.db().begin().await.map_err(|e| {
         error!(error = %e, "Failed to begin delete_object transaction");
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiErrorCode::Database,
-            "Database error",
-        )
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
     objects::Entity::delete_by_id(object_uuid)
@@ -1173,11 +1045,7 @@ pub async fn delete_object(
                 error = %e,
                 "Failed to delete object row",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
 
     let now = Utc::now().to_rfc3339();
@@ -1199,8 +1067,7 @@ pub async fn delete_object(
                 "Failed to insert file.deleted event",
             );
             let _ = txn.rollback().await;
-            return Err(ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
+            return Err(ApiError::from_code_with_message(
                 ApiErrorCode::Database,
                 "Database error",
             ));
@@ -1213,11 +1080,7 @@ pub async fn delete_object(
             error = %e,
             "Failed to commit delete_object transaction",
         );
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiErrorCode::Database,
-            "Database error",
-        )
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
     remove_paths(paths).await;
@@ -1251,11 +1114,7 @@ async fn object_for_upload(
                 error = %e,
                 "Failed to look up object for upload context",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Database,
-                "Database error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?
         .ok_or_else(|| {
             debug!(
@@ -1263,11 +1122,7 @@ async fn object_for_upload(
                 user_id = %user_id,
                 "Object upload context lookup found no matching object",
             );
-            ApiError::new(
-                StatusCode::NOT_FOUND,
-                ApiErrorCode::ObjectNotFound,
-                "Object not found",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::ObjectNotFound, "Object not found")
         })?;
 
     if object.source_device_id != device_id {
@@ -1278,8 +1133,7 @@ async fn object_for_upload(
             request_device_id = %device_id,
             "Rejected object upload mutation from non-source device",
         );
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectForbidden,
             "Forbidden",
         ));
@@ -1317,11 +1171,7 @@ where
             error = %e,
             "Failed to insert created event",
         );
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiErrorCode::Database,
-            "Database error",
-        )
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })
 }
 
@@ -1384,11 +1234,7 @@ async fn stream_body_to_payload_file(
                 error = %e,
                 "Failed to create tmp payload file",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ApiErrorCode::Storage,
-                "Object payload storage error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Storage, "Object payload storage error")
         })?;
 
     use futures_util::StreamExt;
@@ -1397,11 +1243,7 @@ async fn stream_body_to_payload_file(
     while let Some(chunk) = stream.next().await {
         let data = chunk.map_err(|e| {
             debug!(error = %e, "Payload upload stream error (client disconnect or network)");
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::Stream,
-                "Stream error",
-            )
+            ApiError::from_code_with_message(ApiErrorCode::Stream, "Stream error")
         })?;
         total_size += data.len() as u64;
         if total_size > expected_size {
@@ -1411,8 +1253,7 @@ async fn stream_body_to_payload_file(
                 actual_size = total_size,
                 "Rejected payload upload larger than initialized size",
             );
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
+            return Err(ApiError::from_code_with_message(
                 ApiErrorCode::ObjectPayloadIntegrityMismatch,
                 "Payload size does not match initialized size",
             ));
@@ -1423,8 +1264,7 @@ async fn stream_body_to_payload_file(
                 error = %e,
                 "Failed to write payload chunk to disk",
             );
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::from_code_with_message(
                 ApiErrorCode::PayloadWrite,
                 "Object payload write error",
             )
@@ -1437,11 +1277,7 @@ async fn stream_body_to_payload_file(
             error = %e,
             "Failed to flush tmp payload file",
         );
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiErrorCode::PayloadWrite,
-            "Object payload flush error",
-        )
+        ApiError::from_code_with_message(ApiErrorCode::PayloadWrite, "Object payload flush error")
     })?;
     drop(out_file);
 
@@ -1451,8 +1287,7 @@ async fn stream_body_to_payload_file(
             actual_size = total_size,
             "Rejected payload upload smaller than initialized size",
         );
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
+        return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectPayloadIntegrityMismatch,
             "Payload size does not match initialized size",
         ));
@@ -1529,7 +1364,7 @@ async fn remove_paths(paths: Vec<std::path::PathBuf>) {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::to_bytes;
+    use axum::{body::to_bytes, http::StatusCode};
     use clipper_core::{
         crypto::{XCHACHA20_NONCE_BYTES, sha256},
         models::{ObjectPayloadComplete, ObjectPayloadInit},
