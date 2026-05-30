@@ -24,7 +24,7 @@ use crate::{
     auth::{self as server_auth, AuthInfo},
     entity::{access_keys, devices, server_config, sessions, users},
     rate_limit::ClientIp,
-    routes::{ValidatedJson, error_response},
+    routes::{Postcard, error_response},
     secret_storage,
     state::AppState,
 };
@@ -34,8 +34,8 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 /// OPAQUE login round 1, server side. Math in `docs/opaque.md`.
 pub async fn challenge(
     State(state): State<AppState>,
-    ValidatedJson(req): ValidatedJson<LoginChallengeRequest>,
-) -> Result<Json<LoginChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    Postcard(req): Postcard<LoginChallengeRequest>,
+) -> Result<Postcard<LoginChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
     let user = users::Entity::find()
         .filter(users::Column::Username.eq(&req.username))
         .one(state.db())
@@ -86,9 +86,9 @@ pub async fn challenge(
     // CredentialFinalization (= client_mac) in `login`.
     let challenge_id = state.create_auth_challenge(user.id, server_login_state);
 
-    Ok(Json(LoginChallengeResponse {
+    Ok(Postcard(LoginChallengeResponse {
         challenge_id,
-        credential_response_b64: B64.encode(credential_response),
+        credential_response,
         server: ServerInfo {},
     }))
 }
@@ -96,8 +96,8 @@ pub async fn challenge(
 /// OPAQUE registration round 1, server side. Math in `docs/opaque.md`.
 pub async fn register_start(
     State(state): State<AppState>,
-    ValidatedJson(req): ValidatedJson<RegisterStartRequest>,
-) -> Result<Json<RegisterStartResponse>, (StatusCode, Json<ErrorResponse>)> {
+    Postcard(req): Postcard<RegisterStartRequest>,
+) -> Result<Postcard<RegisterStartResponse>, (StatusCode, Json<ErrorResponse>)> {
     let now = Utc::now().to_rfc3339();
     let db_config = load_server_config(&state).await?;
 
@@ -190,10 +190,10 @@ pub async fn register_start(
         opaque_server_setup,
     );
 
-    Ok(Json(RegisterStartResponse {
+    Ok(Postcard(RegisterStartResponse {
         registration_id,
         user_id: user_id.to_string(),
-        registration_response_b64: B64.encode(registration_response),
+        registration_response,
         server: ServerInfo {},
     }))
 }
@@ -203,8 +203,8 @@ pub async fn register_finish(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
     headers: HeaderMap,
-    ValidatedJson(req): ValidatedJson<RegisterFinishRequest>,
-) -> Result<Json<RegisterFinishResponse>, (StatusCode, Json<ErrorResponse>)> {
+    Postcard(req): Postcard<RegisterFinishRequest>,
+) -> Result<Postcard<RegisterFinishResponse>, (StatusCode, Json<ErrorResponse>)> {
     let pending = state
         .take_pending_registration(&req.registration_id)
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid registration"))?;
@@ -348,7 +348,7 @@ pub async fn register_finish(
 
     info!(user_id = %pending.user_id, device_id = %session.device_id, "Registration successful");
 
-    Ok(Json(RegisterFinishResponse {
+    Ok(Postcard(RegisterFinishResponse {
         token: session.token,
         user_id: pending.user_id.to_string(),
         username: pending.username,
@@ -362,8 +362,8 @@ pub async fn login(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
     headers: HeaderMap,
-    ValidatedJson(req): ValidatedJson<LoginRequest>,
-) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
+    Postcard(req): Postcard<LoginRequest>,
+) -> Result<Postcard<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Pop state_S (single-use) stashed by `challenge`.
     let auth_challenge = state
         .take_auth_challenge(&req.challenge_id)
@@ -420,7 +420,7 @@ pub async fn login(
 
     info!(user_id = %user.id, device_id = %session.device_id, "Login successful");
 
-    Ok(Json(LoginResponse {
+    Ok(Postcard(LoginResponse {
         token: session.token,
         user_id: user.id.to_string(),
         username: user.username,
@@ -615,7 +615,7 @@ mod tests {
 
     use axum::{
         Router,
-        body::Body,
+        body::{Body, to_bytes},
         extract::ConnectInfo,
         http::{Request, header},
         middleware,
@@ -630,8 +630,6 @@ mod tests {
         entity::{access_keys, server_config},
         rate_limit::{RateLimiter, auth_rate_limit_middleware},
     };
-
-    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
     async fn empty_state() -> (AppState, TempDir) {
         let data_dir = tempfile::tempdir().expect("tempdir");
@@ -732,6 +730,8 @@ mod tests {
 
     fn auth_route_app(state: AppState, limiter: std::sync::Arc<RateLimiter>) -> Router {
         Router::new()
+            .route("/api/auth/register/start", post(register_start))
+            .route("/api/auth/register/finish", post(register_finish))
             .route("/api/auth/challenge", post(challenge))
             .route("/api/auth/login", post(login))
             .route_layer(middleware::from_fn_with_state(
@@ -741,11 +741,14 @@ mod tests {
             .with_state(state)
     }
 
-    fn json_request<T: serde::Serialize>(path: &str, value: &T) -> Request<Body> {
+    fn postcard_request<T: serde::Serialize>(path: &str, value: &T) -> Request<Body> {
         let mut request = Request::post(path)
-            .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                header::CONTENT_TYPE,
+                clipper_core::models::POSTCARD_CONTENT_TYPE,
+            )
             .body(Body::from(
-                serde_json::to_vec(value).expect("serialize request"),
+                postcard::to_allocvec(value).expect("serialize request"),
             ))
             .expect("request");
         request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
@@ -755,12 +758,31 @@ mod tests {
         request
     }
 
-    fn validated<T>(value: T) -> ValidatedJson<T>
+    async fn read_postcard_response<T>(response: axum::response::Response) -> T
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .expect("content type")
+                .to_str()
+                .expect("content type value"),
+            clipper_core::models::POSTCARD_CONTENT_TYPE,
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        postcard::from_bytes(&body).expect("postcard response")
+    }
+
+    fn validated<T>(value: T) -> Postcard<T>
     where
         T: garde::Validate,
         T::Context: Default,
     {
-        ValidatedJson::validated(value).expect("valid request")
+        Postcard::validated(value).expect("valid request")
     }
 
     fn challenge_request(username: &str, passphrase: &[u8]) -> (LoginChallengeRequest, Vec<u8>) {
@@ -797,12 +819,12 @@ mod tests {
         client_state: &[u8],
         passphrase: &[u8],
     ) -> RegisterFinishRequest {
-        let registration_response = B64
-            .decode(registration.registration_response_b64)
-            .expect("registration response");
-        let registration_finish =
-            crypto::opaque_client_register_finish(client_state, passphrase, &registration_response)
-                .expect("client register finish");
+        let registration_finish = crypto::opaque_client_register_finish(
+            client_state,
+            passphrase,
+            &registration.registration_response,
+        )
+        .expect("client register finish");
 
         RegisterFinishRequest {
             registration_id: registration.registration_id,
@@ -855,13 +877,13 @@ mod tests {
         insert_access_key(&state, access_key).await;
 
         let (start_req, client_state) = registration_start_request(access_key, "alice", passphrase);
-        let Json(start_resp) = register_start(State(state.clone()), validated(start_req))
+        let Postcard(start_resp) = register_start(State(state.clone()), validated(start_req))
             .await
             .expect("register start");
         let user_id = Uuid::parse_str(&start_resp.user_id).expect("user id");
         let finish_req = registration_finish_request(start_resp, &client_state, passphrase);
 
-        let Json(finish_resp) = register_finish(
+        let Postcard(finish_resp) = register_finish(
             State(state.clone()),
             client_ip(),
             HeaderMap::new(),
@@ -894,7 +916,7 @@ mod tests {
 
         let (challenge_req, client_login_state) =
             crypto::opaque_client_login_start(passphrase).expect("client login start");
-        let Json(challenge_resp) = challenge(
+        let Postcard(challenge_resp) = challenge(
             State(state.clone()),
             validated(LoginChallengeRequest {
                 username: "alice".into(),
@@ -904,7 +926,7 @@ mod tests {
         .await
         .expect("challenge");
         let login_req = login_request(challenge_resp, &client_login_state, passphrase);
-        let Json(login_resp) = login(
+        let Postcard(login_resp) = login(
             State(state),
             client_ip(),
             HeaderMap::new(),
@@ -916,17 +938,49 @@ mod tests {
         assert_eq!(login_resp.username, "alice");
     }
 
+    #[tokio::test]
+    async fn register_routes_roundtrip_postcard_auth_blobs() {
+        let (state, _data_dir) = empty_state().await;
+        let access_key = "invite-key-with-entropy";
+        let passphrase = b"user private passphrase";
+        insert_access_key(&state, access_key).await;
+        let app = auth_route_app(state, limiter());
+
+        let (start_req, client_state) = registration_start_request(access_key, "alice", passphrase);
+        let start_response = app
+            .clone()
+            .oneshot(postcard_request("/api/auth/register/start", &start_req))
+            .await
+            .expect("start response");
+        assert_eq!(start_response.status(), StatusCode::OK);
+        let start_resp: RegisterStartResponse = read_postcard_response(start_response).await;
+        let user_id = start_resp.user_id.clone();
+
+        let finish_req = registration_finish_request(start_resp, &client_state, passphrase);
+        let finish_response = app
+            .oneshot(postcard_request("/api/auth/register/finish", &finish_req))
+            .await
+            .expect("finish response");
+        assert_eq!(finish_response.status(), StatusCode::OK);
+        let finish_resp: RegisterFinishResponse = read_postcard_response(finish_response).await;
+
+        assert_eq!(finish_resp.user_id, user_id);
+        assert_eq!(finish_resp.username, "alice");
+        assert!(!finish_resp.token.is_empty());
+        assert!(!finish_resp.device_id.is_empty());
+    }
+
     fn login_request(
         challenge: LoginChallengeResponse,
         client_state: &[u8],
         passphrase: &[u8],
     ) -> LoginRequest {
-        let credential_response = B64
-            .decode(challenge.credential_response_b64)
-            .expect("credential response");
-        let finish =
-            crypto::opaque_client_login_finish(client_state, passphrase, &credential_response)
-                .expect("client login finish");
+        let finish = crypto::opaque_client_login_finish(
+            client_state,
+            passphrase,
+            &challenge.credential_response,
+        )
+        .expect("client login finish");
 
         LoginRequest {
             challenge_id: challenge.challenge_id,
@@ -946,12 +1000,12 @@ mod tests {
         let (state, _data_dir) = test_state(passphrase).await;
 
         let (challenge_req, client_state) = challenge_request("alice", passphrase);
-        let Json(challenge) = challenge(State(state.clone()), validated(challenge_req))
+        let Postcard(challenge) = challenge(State(state.clone()), validated(challenge_req))
             .await
             .expect("challenge");
         let req = login_request(challenge, &client_state, passphrase);
 
-        let Json(resp) = login(State(state), client_ip(), HeaderMap::new(), validated(req))
+        let Postcard(resp) = login(State(state), client_ip(), HeaderMap::new(), validated(req))
             .await
             .expect("login");
 
@@ -968,7 +1022,7 @@ mod tests {
         let (state, _data_dir) = test_state(passphrase).await;
 
         let (challenge_req, client_state) = challenge_request("alice", passphrase);
-        let Json(challenge) = challenge(State(state.clone()), validated(challenge_req))
+        let Postcard(challenge) = challenge(State(state.clone()), validated(challenge_req))
             .await
             .expect("challenge");
         let req = login_request(challenge, &client_state, passphrase);
@@ -1006,16 +1060,13 @@ mod tests {
         let (state, _data_dir) = test_state(passphrase).await;
 
         let (challenge_req, client_state) = challenge_request("alice", b"wrong passphrase");
-        let Json(challenge) = challenge(State(state.clone()), validated(challenge_req))
+        let Postcard(challenge) = challenge(State(state.clone()), validated(challenge_req))
             .await
             .expect("challenge");
-        let credential_response = B64
-            .decode(challenge.credential_response_b64)
-            .expect("credential response");
         let finish = crypto::opaque_client_login_finish(
             &client_state,
             b"wrong passphrase",
-            &credential_response,
+            &challenge.credential_response,
         );
 
         assert!(finish.is_err());
@@ -1033,7 +1084,7 @@ mod tests {
         {
             let response = app
                 .clone()
-                .oneshot(json_request(
+                .oneshot(postcard_request(
                     "/api/auth/login",
                     &LoginRequest {
                         challenge_id: format!("missing-{i}"),
@@ -1050,7 +1101,7 @@ mod tests {
         }
 
         let response = app
-            .oneshot(json_request(
+            .oneshot(postcard_request(
                 "/api/auth/login",
                 &LoginRequest {
                     challenge_id: "missing-final".into(),
@@ -1082,7 +1133,7 @@ mod tests {
                 challenge_request("alice", b"candidate passphrase");
             let response = app
                 .clone()
-                .oneshot(json_request("/api/auth/challenge", &challenge_req))
+                .oneshot(postcard_request("/api/auth/challenge", &challenge_req))
                 .await
                 .expect("response");
 
@@ -1091,7 +1142,7 @@ mod tests {
 
         let (challenge_req, _client_state) = challenge_request("alice", b"candidate passphrase");
         let response = app
-            .oneshot(json_request("/api/auth/challenge", &challenge_req))
+            .oneshot(postcard_request("/api/auth/challenge", &challenge_req))
             .await;
 
         assert_eq!(
@@ -1111,7 +1162,7 @@ mod tests {
         insert_access_key(&state, access_key).await;
 
         let (start_req, client_state) = registration_start_request(access_key, "alice", passphrase);
-        let Json(start_resp) = register_start(State(state.clone()), validated(start_req))
+        let Postcard(start_resp) = register_start(State(state.clone()), validated(start_req))
             .await
             .expect("register start");
         let user_id = Uuid::parse_str(&start_resp.user_id).expect("user id");

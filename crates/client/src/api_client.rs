@@ -105,28 +105,17 @@ impl ApiClient {
         let challenge_resp = self
             .http
             .post(self.url("/api/auth/challenge"))
-            .json(&challenge_req)
+            .header("Content-Type", POSTCARD_CONTENT_TYPE)
+            .body(Self::postcard_body(&challenge_req)?)
             .send()
             .await?;
 
-        if !challenge_resp.status().is_success() {
-            let status = challenge_resp.status().as_u16();
-            let body = challenge_resp.text().await.unwrap_or_default();
-            return Err(ClientError::Api {
-                status,
-                message: body,
-            });
-        }
-
-        let challenge_resp: LoginChallengeResponse = challenge_resp.json().await?;
-
-        let credential_response = B64
-            .decode(&challenge_resp.credential_response_b64)
-            .map_err(|e| ClientError::Other(format!("credential response decode: {}", e)))?;
+        let challenge_resp: LoginChallengeResponse =
+            Self::postcard_response(challenge_resp).await?;
         let finish = crypto::opaque_client_login_finish(
             &client_login_state,
             passphrase.as_bytes(),
-            &credential_response,
+            &challenge_resp.credential_response,
         )?;
         let encryption_key = crypto::derive_data_key_from_opaque_export_key(&finish.export_key);
 
@@ -140,20 +129,12 @@ impl ApiClient {
         let resp = self
             .http
             .post(self.url("/api/auth/login"))
-            .json(&req)
+            .header("Content-Type", POSTCARD_CONTENT_TYPE)
+            .body(Self::postcard_body(&req)?)
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::Api {
-                status,
-                message: body,
-            });
-        }
-
-        let login_resp: LoginResponse = resp.json().await?;
+        let login_resp: LoginResponse = Self::postcard_response(resp).await?;
         self.token = Some(login_resp.token.clone());
         debug!("Logged in, device_id={}", login_resp.device_id);
         Ok(AuthResult {
@@ -182,27 +163,16 @@ impl ApiClient {
         let resp = self
             .http
             .post(self.url("/api/auth/register/start"))
-            .json(&start_req)
+            .header("Content-Type", POSTCARD_CONTENT_TYPE)
+            .body(Self::postcard_body(&start_req)?)
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::Api {
-                status,
-                message: body,
-            });
-        }
-
-        let start_resp: RegisterStartResponse = resp.json().await?;
-        let registration_response = B64
-            .decode(&start_resp.registration_response_b64)
-            .map_err(|e| ClientError::Other(format!("registration response decode: {}", e)))?;
+        let start_resp: RegisterStartResponse = Self::postcard_response(resp).await?;
         let finish = crypto::opaque_client_register_finish(
             &client_state,
             passphrase.as_bytes(),
-            &registration_response,
+            &start_resp.registration_response,
         )?;
         let encryption_key = crypto::derive_data_key_from_opaque_export_key(&finish.export_key);
 
@@ -216,20 +186,12 @@ impl ApiClient {
         let resp = self
             .http
             .post(self.url("/api/auth/register/finish"))
-            .json(&finish_req)
+            .header("Content-Type", POSTCARD_CONTENT_TYPE)
+            .body(Self::postcard_body(&finish_req)?)
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::Api {
-                status,
-                message: body,
-            });
-        }
-
-        let register_resp: RegisterFinishResponse = resp.json().await?;
+        let register_resp: RegisterFinishResponse = Self::postcard_response(resp).await?;
         self.token = Some(register_resp.token.clone());
         debug!(
             user_id = %register_resp.user_id,

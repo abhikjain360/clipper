@@ -63,28 +63,6 @@ uuid_id!(DeviceId);
 uuid_id!(ObjectId);
 uuid_id!(ObjectPayloadId);
 
-mod base64_vec {
-    use base64::Engine;
-    use serde::{Deserialize, Deserializer, Serializer, de::Error};
-
-    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
-
-    pub fn serialize<S>(value: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&B64.encode(value))
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        B64.decode(value).map_err(D::Error::custom)
-    }
-}
-
 /// Binary request/response body format used by Rust-only object endpoints.
 pub const POSTCARD_CONTENT_TYPE: &str = "application/vnd.clipper.postcard";
 
@@ -138,14 +116,13 @@ pub struct LoginChallengeRequest {
     #[garde(custom(validate_username))]
     pub username: String,
     #[garde(length(min = 1))]
-    #[serde(rename = "credential_request_b64", with = "base64_vec")]
     pub credential_request: Vec<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginChallengeResponse {
     pub challenge_id: String,
-    pub credential_response_b64: String,
+    pub credential_response: Vec<u8>,
     pub server: ServerInfo,
 }
 
@@ -154,16 +131,12 @@ pub struct LoginRequest {
     #[garde(length(min = 1))]
     pub challenge_id: String,
     #[garde(length(min = 1))]
-    #[serde(rename = "credential_finalization_b64", with = "base64_vec")]
     pub credential_finalization: Vec<u8>,
     #[garde(skip)]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub device_id: Option<DeviceId>,
     #[garde(length(min = 1))]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,
     #[garde(length(min = 1))]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
 }
 
@@ -186,7 +159,6 @@ pub struct RegisterStartRequest {
     #[garde(custom(validate_username))]
     pub username: String,
     #[garde(length(min = 1))]
-    #[serde(rename = "registration_request_b64", with = "base64_vec")]
     pub registration_request: Vec<u8>,
 }
 
@@ -194,7 +166,7 @@ pub struct RegisterStartRequest {
 pub struct RegisterStartResponse {
     pub registration_id: String,
     pub user_id: String,
-    pub registration_response_b64: String,
+    pub registration_response: Vec<u8>,
     pub server: ServerInfo,
 }
 
@@ -203,16 +175,12 @@ pub struct RegisterFinishRequest {
     #[garde(length(min = 1))]
     pub registration_id: String,
     #[garde(length(min = 1))]
-    #[serde(rename = "registration_upload_b64", with = "base64_vec")]
     pub registration_upload: Vec<u8>,
     #[garde(skip)]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub device_id: Option<DeviceId>,
     #[garde(length(min = 1))]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,
     #[garde(length(min = 1))]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
 }
 

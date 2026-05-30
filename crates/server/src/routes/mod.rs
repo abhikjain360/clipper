@@ -1,7 +1,7 @@
 use axum::{
     Json,
     body::{Body, Bytes},
-    extract::{FromRequest, rejection::JsonRejection},
+    extract::FromRequest,
     http::{Request, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -60,38 +60,6 @@ where
     }
 }
 
-#[derive(Debug)]
-pub struct ValidatedJson<T>(pub T);
-
-impl<S, T> FromRequest<S> for ValidatedJson<T>
-where
-    S: Send + Sync,
-    T: DeserializeOwned + Validate,
-    T::Context: Default,
-{
-    type Rejection = (StatusCode, Json<ErrorResponse>);
-
-    async fn from_request(req: Request<Body>, state: &S) -> Result<Self, Self::Rejection> {
-        let Json(value) = Json::<T>::from_request(req, state)
-            .await
-            .map_err(json_rejection_response)?;
-        validate_request(&value)?;
-        Ok(Self(value))
-    }
-}
-
-impl<T> ValidatedJson<T>
-where
-    T: Validate,
-    T::Context: Default,
-{
-    #[cfg(test)]
-    pub(crate) fn validated(value: T) -> Result<Self, (StatusCode, Json<ErrorResponse>)> {
-        validate_request(&value)?;
-        Ok(Self(value))
-    }
-}
-
 fn is_postcard_content_type(value: Option<&header::HeaderValue>) -> bool {
     value
         .and_then(|value| value.to_str().ok())
@@ -124,14 +92,6 @@ pub(crate) fn error_response(
             error: message.into(),
         }),
     )
-}
-
-fn json_rejection_response(rejection: JsonRejection) -> (StatusCode, Json<ErrorResponse>) {
-    let status = match rejection.status() {
-        StatusCode::UNPROCESSABLE_ENTITY => StatusCode::BAD_REQUEST,
-        status => status,
-    };
-    error_response(status, "Invalid request body")
 }
 
 fn validate_request<T>(value: &T) -> Result<(), (StatusCode, Json<ErrorResponse>)>
