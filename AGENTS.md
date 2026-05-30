@@ -90,6 +90,10 @@
 - Server schema changes live in `crates/server/src/migration/*.rs`; keep
   SeaORM entities aligned by regenerating them with `sea-orm-cli`. Do not
   hand-edit generated entity files as the final change.
+- This project is not deployed anywhere yet. Do not preserve legacy schema,
+  API, ciphertext, or local-storage compatibility unless explicitly asked;
+  prefer coherent current design over compatibility migrations for abandoned
+  local state.
 - Auth is multi-user: access keys are one-time registration invites stored as
   hashes, while user passphrases must only flow through OPAQUE registration and
   login. Server handlers must scope private data by authenticated `user_id`.
