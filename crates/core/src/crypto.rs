@@ -122,10 +122,10 @@ pub fn derive_key(
     Ok(key)
 }
 
-/// Create the OPAQUE server setup and password file stored by the server.
-///
-/// The password file is a verifier: stealing it allows offline guessing, but
-/// does not give an attacker the material needed to complete a login directly.
+/// Run all four registration steps (client + server) in-process for a single
+/// `pw`, using the legacy single-user `id_U = "clipper:passphrase:v1"`, and
+/// return `(opaque_server_setup, opaque_password_file)`. Used by tests.
+/// See `docs/opaque.md`.
 pub fn opaque_register(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     let server_setup = opaque_new_server_setup();
     let (registration_request, client_state) = opaque_client_register_start(passphrase)?;
@@ -141,7 +141,8 @@ pub fn opaque_register(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoEr
     Ok((server_setup, password_file))
 }
 
-/// Generate a new serialized OPAQUE server setup.
+/// Sample a fresh `opaque_server_setup = oprf_seed ‖ sk_S ‖ fake_sk` for one
+/// user and return it serialized. See `docs/opaque.md`.
 pub fn opaque_new_server_setup() -> Vec<u8> {
     let mut rng = opaque_ke::rand::rngs::OsRng;
     opaque_ke::ServerSetup::<ClipperOpaqueCipherSuite>::new(&mut rng)
@@ -149,10 +150,13 @@ pub fn opaque_new_server_setup() -> Vec<u8> {
         .to_vec()
 }
 
-/// Start an OPAQUE registration on the client.
+/// OPAQUE registration round 1, client side.
 ///
-/// Returns the registration request to send to the server and serialized client
-/// state that must be kept only until registration is finished.
+/// Input: `pw = passphrase`.
+/// Picks blind `r ← Z_q`, computes `M = r · H(pw)`, returns
+/// `(RegistrationRequest = M, state_C)`. `state_C` carries `(r, pw, ...)`
+/// and must be held until `opaque_client_register_finish`.
+/// See `docs/opaque.md`.
 pub fn opaque_client_register_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     let mut rng = opaque_ke::rand::rngs::OsRng;
     let start =
@@ -165,10 +169,14 @@ pub fn opaque_client_register_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u
     ))
 }
 
-/// Finish an OPAQUE registration on the client.
+/// OPAQUE registration round 2, client side.
 ///
-/// Returns the registration upload to send to the server. The upload is a
-/// password-derived verifier payload, not the raw password.
+/// Inputs: `state_C`, `pw`, `RegistrationResponse = (N, pk_S)`.
+/// Computes `Y = r⁻¹ · N`, `rwd = KSF(Y)`, derives
+/// `masking_key, auth_key, sk_C, env_nonce` from `rwd`, sets
+/// `pk_C = sk_C · B`, builds `env = env_nonce ‖ MAC(auth_key, env_nonce ‖ pk_S)`,
+/// and returns `RegistrationUpload = env ‖ masking_key ‖ pk_C`.
+/// See `docs/opaque.md`.
 pub fn opaque_client_register_finish(
     client_state: &[u8],
     passphrase: &[u8],
@@ -194,7 +202,13 @@ pub fn opaque_client_register_finish(
     Ok(finish.message.serialize().to_vec())
 }
 
-/// Start an OPAQUE registration on the server.
+/// OPAQUE registration round 1, server side.
+///
+/// Inputs: `opaque_server_setup` (= `oprf_seed ‖ sk_S ‖ fake_sk`),
+/// `registration_request = M`, `credential_identifier = id_U`.
+/// Derives `k_U = Expand(oprf_seed, id_U)`, computes `N = k_U · M`,
+/// returns `RegistrationResponse = (N, pk_S)`. Stateless on the server.
+/// See `docs/opaque.md`.
 pub fn opaque_server_register_start(
     server_setup: &[u8],
     registration_request: &[u8],
@@ -217,8 +231,12 @@ pub fn opaque_server_register_start(
     Ok(start.message.serialize().to_vec())
 }
 
-/// Finish an OPAQUE registration on the server and return the serialized
-/// password file/verifier to store for future logins.
+/// OPAQUE registration round 2, server side.
+///
+/// Input: `RegistrationUpload = env ‖ masking_key ‖ pk_C`.
+/// Re-serializes it as `opaque_password_file` to store on the user row.
+/// No cryptographic check is performed here.
+/// See `docs/opaque.md`.
 pub fn opaque_server_register_finish(registration_upload: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let upload =
         opaque_ke::RegistrationUpload::<ClipperOpaqueCipherSuite>::deserialize(registration_upload)
@@ -228,10 +246,14 @@ pub fn opaque_server_register_finish(registration_upload: &[u8]) -> Result<Vec<u
     Ok(password_file.serialize().to_vec())
 }
 
-/// Start an OPAQUE login on the client.
+/// OPAQUE login round 1, client side.
 ///
-/// Returns the credential request to send to the server and serialized client
-/// state that must be kept only until the login is finished.
+/// Input: `pw = passphrase`.
+/// Picks blind `r ← Z_q`, client AKE ephemeral `(x_C, X_C = x_C · B)`, and
+/// `nonce_C ← random`; returns
+/// `CredentialRequest = M ‖ ke1` where `M = r · H(pw)` and
+/// `ke1 = nonce_C ‖ X_C`, plus `state_C = (r, pw, x_C, nonce_C, ke1)`.
+/// See `docs/opaque.md`.
 pub fn opaque_client_login_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     let mut rng = opaque_ke::rand::rngs::OsRng;
     let start = opaque_ke::ClientLogin::<ClipperOpaqueCipherSuite>::start(&mut rng, passphrase)
@@ -243,11 +265,18 @@ pub fn opaque_client_login_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>)
     ))
 }
 
-/// Finish an OPAQUE login on the client.
+/// OPAQUE login round 2, client side.
 ///
-/// Returns the credential finalization message to send to the server and the
-/// negotiated session key. The current HTTP API only needs the finalization
-/// message, but returning the key lets tests verify both sides agree.
+/// Inputs: `state_C`, `pw`,
+/// `CredentialResponse = (N, nonce_M, masked, nonce_S, X_S, server_mac)`.
+/// Computes `Y = r⁻¹ · N`, `rwd = KSF(Y)`, re-derives `masking_key` and
+/// unmasks `(pk_S ‖ env) = masked XOR Expand(masking_key, nonce_M ‖ ·)`,
+/// recovers `sk_C` and checks `auth_tag = MAC(auth_key, env_nonce ‖ pk_S)`.
+/// Performs 3DH (`dh1 = x_C · X_S`, `dh2 = sk_C · X_S`, `dh3 = x_C · pk_S`),
+/// derives `(server_mac_key, client_mac_key, session_key)`, verifies
+/// `server_mac`, and returns `(CredentialFinalization = client_mac, session_key)`.
+/// Clipper's HTTP API only sends `client_mac`; the `session_key` is exposed
+/// so tests can assert both sides agreed. See `docs/opaque.md`.
 pub fn opaque_client_login_finish(
     client_state: &[u8],
     passphrase: &[u8],
@@ -275,10 +304,9 @@ pub fn opaque_client_login_finish(
     ))
 }
 
-/// Start an OPAQUE login on the server.
-///
-/// Returns the credential response for the client and serialized server state
-/// that must be retained until the finalization request arrives.
+/// OPAQUE login round 1, server side, using the legacy single-user
+/// `id_U = "clipper:passphrase:v1"`. Multi-user callers use
+/// `opaque_server_login_start_with_identifier`. See `docs/opaque.md`.
 pub fn opaque_server_login_start(
     server_setup: &[u8],
     password_file: &[u8],
@@ -292,7 +320,24 @@ pub fn opaque_server_login_start(
     )
 }
 
-/// Start an OPAQUE login on the server with an explicit credential identifier.
+/// OPAQUE login round 1, server side, with an explicit `id_U`.
+///
+/// Inputs: `opaque_server_setup`,
+/// `opaque_password_file = env ‖ masking_key ‖ pk_C`,
+/// `CredentialRequest = M ‖ ke1` where `ke1 = nonce_C ‖ X_C`,
+/// `credential_identifier = id_U`.
+///
+/// Derives `k_U = Expand(oprf_seed, id_U)`, computes `N = k_U · M`,
+/// samples `nonce_M ← random` and produces
+/// `masked = (pk_S ‖ env) XOR Expand(masking_key, nonce_M ‖ ·)`.
+/// Samples server AKE ephemeral `(x_S, X_S = x_S · B)` and `nonce_S`,
+/// runs 3DH (`dh1 = x_S · X_C`, `dh2 = x_S · pk_C`, `dh3 = sk_S · X_C`),
+/// derives `(server_mac_key, client_mac_key, session_key)` from
+/// `ikm = dh1 ‖ dh2 ‖ dh3` and the transcript, and returns
+/// `(CredentialResponse = (N, nonce_M, masked, nonce_S, X_S, server_mac),
+///   state_S)`.
+/// `state_S` holds `client_mac_key` and the expected MAC base; it must be
+/// kept until `opaque_server_login_finish`. See `docs/opaque.md`.
 pub fn opaque_server_login_start_with_identifier(
     server_setup: &[u8],
     password_file: &[u8],
@@ -325,10 +370,13 @@ pub fn opaque_server_login_start_with_identifier(
     ))
 }
 
-/// Finish an OPAQUE login on the server.
+/// OPAQUE login round 2, server side.
 ///
-/// Returns the negotiated session key. The caller can ignore it when using a
-/// random bearer token after successful password authentication.
+/// Inputs: `state_S`, `CredentialFinalization = client_mac`.
+/// Re-derives `expected_mac = MAC(client_mac_key, transcript_pre ‖ server_mac)`
+/// and verifies it equals `client_mac`; on success returns `session_key`.
+/// Clipper discards `session_key` and authenticates the session via a fresh
+/// random bearer token instead. See `docs/opaque.md`.
 pub fn opaque_server_login_finish(
     server_state: &[u8],
     credential_finalization: &[u8],

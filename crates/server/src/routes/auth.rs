@@ -30,6 +30,7 @@ use crate::{
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
+/// OPAQUE login round 1, server side. Math in `docs/opaque.md`.
 pub async fn challenge(
     State(state): State<AppState>,
     Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
@@ -40,7 +41,19 @@ pub async fn challenge(
 
     let user = resolve_login_user(&state, req.user_id).await?;
 
+    // id_U for this user (legacy single-user rows get the legacy identifier).
     let credential_identifier = opaque_credential_identifier_for_user(&user);
+    // req.credential_request = M ‖ ke1 from the client.
+    // Inside opaque_server_login_start_with_identifier:
+    //   k_U     = Expand(oprf_seed, id_U)
+    //   N       = k_U · M
+    //   masked  = (pk_S ‖ env) XOR Expand(masking_key, nonce_M ‖ ·)
+    //   (x_S, X_S) ← AKE ephemeral, nonce_S ← random
+    //   ikm     = (x_S · X_C) ‖ (x_S · pk_C) ‖ (sk_S · X_C)
+    //   (server_mac_key, client_mac_key, session_key) = Expand(ikm, transcript_pre)
+    //   server_mac = MAC(server_mac_key, transcript_pre)
+    // credential_response = (N, nonce_M, masked, nonce_S, X_S, server_mac).
+    // server_login_state = state_S = (client_mac_key, session_key, transcript_pre ‖ server_mac).
     let (credential_response, server_login_state) =
         crypto::opaque_server_login_start_with_identifier(
             &user.opaque_server_setup,
@@ -49,6 +62,8 @@ pub async fn challenge(
             &credential_identifier,
         )
         .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid login request"))?;
+    // Stash state_S keyed by challenge_id until the client returns its
+    // CredentialFinalization (= client_mac) in `login`.
     let challenge_id = state.create_auth_challenge(user.id, server_login_state);
 
     Ok(Json(LoginChallengeResponse {
@@ -58,6 +73,7 @@ pub async fn challenge(
     }))
 }
 
+/// OPAQUE registration round 1, server side. Math in `docs/opaque.md`.
 pub async fn register_start(
     State(state): State<AppState>,
     Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
@@ -93,10 +109,17 @@ pub async fn register_start(
     }
 
     let user_id = Uuid::now_v7();
+    // Fresh opaque_server_setup = oprf_seed ‖ sk_S ‖ fake_sk for this user.
     let opaque_server_setup = crypto::opaque_new_server_setup();
+    // Salt for the client's separate, non-OPAQUE local-data-encryption KDF.
     let encryption_salt =
         crypto::generate_random_bytes(state.config().crypto.encryption_salt_bytes);
+    // id_U = "clipper:user:{user_id}:passphrase:v1".
     let credential_identifier = opaque_credential_identifier(user_id);
+    // req.registration_request = M. Inside opaque_server_register_start:
+    //   k_U = Expand(oprf_seed, id_U)
+    //   N   = k_U · M
+    // registration_response = RegistrationResponse = (N, pk_S). Stateless.
     let registration_response = crypto::opaque_server_register_start(
         &opaque_server_setup,
         &req.registration_request,
@@ -104,6 +127,9 @@ pub async fn register_start(
     )
     .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid registration request"))?;
 
+    // OPAQUE round 1 needs no server-side state, but THIS server has to remember
+    // the freshly minted user_id and opaque_server_setup (plus the access-key
+    // hash to consume and the encryption_salt) until register_finish.
     let registration_id = state.create_pending_registration(
         user_id,
         access_key_hash,
@@ -122,6 +148,7 @@ pub async fn register_start(
     }))
 }
 
+/// OPAQUE registration round 2, server side. Math in `docs/opaque.md`.
 pub async fn register_finish(
     State(state): State<AppState>,
     Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
@@ -134,6 +161,9 @@ pub async fn register_finish(
     let pending = state
         .take_pending_registration(&req.registration_id)
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid registration"))?;
+    // req.registration_upload = RegistrationUpload = env ‖ masking_key ‖ pk_C.
+    // Server does no math here; opaque_password_file is just the upload
+    // re-serialized for storage. We persist it on the user row below.
     let opaque_password_file = crypto::opaque_server_register_finish(&req.registration_upload)
         .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid registration upload"))?;
 
@@ -229,6 +259,7 @@ pub async fn register_finish(
     }))
 }
 
+/// OPAQUE login round 2, server side. Math in `docs/opaque.md`.
 pub async fn login(
     State(state): State<AppState>,
     Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
@@ -238,7 +269,7 @@ pub async fn login(
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
     check_auth_rate_limit(&limiter, ip)?;
 
-    // Finish the OPAQUE login without receiving the raw passphrase or a DB-reusable secret.
+    // Pop state_S (single-use) stashed by `challenge`.
     let auth_challenge = state
         .take_auth_challenge(&req.challenge_id)
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid challenge"))?;
@@ -247,6 +278,12 @@ pub async fn login(
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid challenge"))?;
+    // req.credential_finalization = client_mac.
+    // opaque_server_login_finish re-derives
+    //   expected_mac = MAC(client_mac_key, transcript_pre ‖ server_mac)
+    // from state_S and checks expected_mac == client_mac. It returns
+    // session_key on success; clipper discards it and issues a fresh random
+    // bearer token via `issue_session` below.
     crypto::opaque_server_login_finish(
         &auth_challenge.server_login_state,
         &req.credential_finalization,
