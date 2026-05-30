@@ -29,7 +29,7 @@ use uuid::Uuid;
 use crate::{
     auth::AuthInfo,
     entity::{event_log, object_payloads, objects},
-    routes::{ApiError, Postcard, validate_client_id},
+    routes::{ApiError, Postcard},
     state::AppState,
     ws::WsBroadcast,
 };
@@ -41,11 +41,12 @@ pub async fn init_object(
 ) -> Result<Postcard<ObjectInitResponse>, ApiError> {
     let object_id = req.id.into_uuid();
     let object_id_text = req.id.to_string();
-    crate::routes::validate_max_byte_len(
-        &req.meta_ciphertext,
-        state.config().limits.max_object_meta_ciphertext_bytes,
-        "Object metadata ciphertext exceeds maximum size",
-    )?;
+    if req.meta_ciphertext.len() > state.config().limits.max_object_meta_ciphertext_bytes {
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::PayloadTooLarge,
+            "Object metadata ciphertext exceeds maximum size",
+        ));
+    }
 
     // Bound each payload's declared ciphertext size. This is the only place the
     // size is gated: `upload_payload` streams up to the stored `ciphertext_size`,
@@ -107,7 +108,9 @@ pub async fn init_object(
         };
 
         let payload_id = payload.id.to_string();
-        let path = object_payload_path(&state, &object_id_text, &payload_id);
+        let path = state
+            .objects_dir()
+            .join(object_payload_filename(&object_id_text, &payload_id));
         write_payload_bytes_create_new(&path, inline_ciphertext)
             .await
             .map_err(|e| {
@@ -129,7 +132,15 @@ pub async fn init_object(
     let all_inline = all_inline;
 
     let now = Utc::now().to_rfc3339();
-    let expires_at = object_expires_at(&state, req.kind, &now);
+    let expires_at = match req.kind {
+        ObjectKind::Clipboard => {
+            let created = chrono::DateTime::parse_from_rfc3339(&now).ok();
+            created.map(|created| {
+                (created + Duration::days(state.config().clipboard.ttl_days)).to_rfc3339()
+            })
+        }
+        ObjectKind::File => None,
+    };
     let txn = state.db().begin().await.map_err(|e| {
         error!(error = %e, "Failed to begin init_object transaction");
         ApiError::new(
@@ -298,8 +309,10 @@ pub async fn upload_payload(
     Path((object_id, payload_id)): Path<(String, String)>,
     body: Body,
 ) -> Result<Postcard<OkResponse>, ApiError> {
-    let object_uuid = validate_client_id(&object_id)?;
-    let payload_uuid = validate_client_id(&payload_id)?;
+    let object_uuid =
+        Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
+    let payload_uuid =
+        Uuid::parse_str(&payload_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
     let object = object_for_upload(&state, auth.user_id, auth.device_id, object_uuid).await?;
 
     let payload = object_payloads::Entity::find_by_id((object_uuid, payload_uuid))
@@ -346,7 +359,14 @@ pub async fn upload_payload(
         ));
     }
 
-    let expected_size = validate_object_payload_size(payload.ciphertext_size)?;
+    if payload.ciphertext_size < 0 {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidPayloadSize,
+            "Invalid payload size",
+        ));
+    }
+    let expected_size = payload.ciphertext_size as u64;
     let now = Utc::now().to_rfc3339();
     let claimed = object_payloads::Entity::update_many()
         .col_expr(
@@ -474,7 +494,8 @@ pub async fn complete_object(
     Path(object_id): Path<String>,
     Postcard(req): Postcard<ObjectCompleteRequest>,
 ) -> Result<Postcard<OkResponse>, ApiError> {
-    let object_uuid = validate_client_id(&object_id)?;
+    let object_uuid =
+        Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
     let object = object_for_upload(&state, auth.user_id, auth.device_id, object_uuid).await?;
 
     if object.status == "complete" {
@@ -946,8 +967,10 @@ pub async fn download_payload(
     Extension(auth): Extension<AuthInfo>,
     Path((object_id, payload_id)): Path<(String, String)>,
 ) -> Result<Body, ApiError> {
-    let object_uuid = validate_client_id(&object_id)?;
-    let payload_uuid = validate_client_id(&payload_id)?;
+    let object_uuid =
+        Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
+    let payload_uuid =
+        Uuid::parse_str(&payload_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
 
     let object_exists = objects::Entity::find_by_id(object_uuid)
         .filter(objects::Column::UserId.eq(auth.user_id))
@@ -1049,7 +1072,8 @@ pub async fn delete_object(
     Extension(auth): Extension<AuthInfo>,
     Path(object_id): Path<String>,
 ) -> Result<Postcard<OkResponse>, ApiError> {
-    let object_uuid = validate_client_id(&object_id)?;
+    let object_uuid =
+        Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
     let kind = objects::Entity::find_by_id(object_uuid)
         .filter(objects::Column::UserId.eq(auth.user_id))
         .select_only()
@@ -1319,16 +1343,6 @@ fn broadcast_created(
     });
 }
 
-fn object_expires_at(state: &AppState, kind: ObjectKind, created_at: &str) -> Option<String> {
-    match kind {
-        ObjectKind::Clipboard => {
-            let created = chrono::DateTime::parse_from_rfc3339(created_at).ok()?;
-            Some((created + Duration::days(state.config().clipboard.ttl_days)).to_rfc3339())
-        }
-        ObjectKind::File => None,
-    }
-}
-
 fn spawn_clipboard_trim(state: AppState, user_id: Uuid) {
     tokio::spawn(async move {
         if let Err(err) = crate::cleanup::trim_user_clipboard(&state, user_id).await {
@@ -1337,26 +1351,8 @@ fn spawn_clipboard_trim(state: AppState, user_id: Uuid) {
     });
 }
 
-fn validate_object_payload_size(size: i64) -> Result<u64, ApiError> {
-    if size < 0 {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            ApiErrorCode::InvalidPayloadSize,
-            "Invalid payload size",
-        ));
-    }
-
-    Ok(size as u64)
-}
-
 fn object_payload_filename(object_id: &str, payload_id: &str) -> String {
     format!("{object_id}.{payload_id}.bin")
-}
-
-fn object_payload_path(state: &AppState, object_id: &str, payload_id: &str) -> std::path::PathBuf {
-    state
-        .objects_dir()
-        .join(object_payload_filename(object_id, payload_id))
 }
 
 async fn write_payload_bytes_create_new(

@@ -462,6 +462,43 @@ impl ApiErrorCode {
             _ => Self::Unknown,
         }
     }
+
+    pub fn http_status(self) -> u16 {
+        match self {
+            Self::BadRequest
+            | Self::ValidationFailed
+            | Self::InvalidId
+            | Self::InvalidObjectKind
+            | Self::InvalidPayloadSize => 400,
+            Self::Unauthorized => 401,
+            Self::Forbidden | Self::ObjectForbidden => 403,
+            Self::NotFound | Self::ObjectNotFound => 404,
+            Self::Conflict | Self::ObjectAlreadyExists => 409,
+            Self::RateLimited => 429,
+            Self::PayloadTooLarge => 413,
+            Self::UnsupportedMediaType => 415,
+            Self::ServerNotInitialized => 503,
+            Self::Database
+            | Self::ServerSecret
+            | Self::Storage
+            | Self::PayloadRead
+            | Self::PayloadWrite
+            | Self::Stream
+            | Self::Unknown
+            | Self::ObjectDeleteUnsupported
+            | Self::ObjectNotReadyToComplete
+            | Self::DuplicateObjectPayloadId
+            | Self::ObjectPayloadNotFound
+            | Self::ObjectPayloadAlreadyUploaded
+            | Self::ObjectPayloadUploadInProgress
+            | Self::ObjectPayloadNotUploaded
+            | Self::MissingObjectPayloads
+            | Self::MissingPayloadCompletion
+            | Self::IncompletePayloadCompletion
+            | Self::ObjectPayloadMetadataMismatch
+            | Self::ObjectPayloadIntegrityMismatch => 500,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

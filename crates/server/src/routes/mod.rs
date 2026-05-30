@@ -9,7 +9,6 @@ use clipper_core::models::{ApiErrorCode, ErrorResponse, POSTCARD_CONTENT_TYPE};
 use garde::Validate;
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::{debug, error, trace};
-use uuid::Uuid;
 
 pub mod auth;
 pub mod health;
@@ -36,7 +35,11 @@ impl ApiError {
     }
 
     pub(crate) fn from_code(code: ApiErrorCode) -> Self {
-        Self::new(code_to_status(code), code, code.default_message())
+        Self::new(
+            StatusCode::from_u16(code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            code,
+            code.default_message(),
+        )
     }
 
     pub(crate) fn from_code_with_message(code: ApiErrorCode, message: impl Into<String>) -> Self {
@@ -76,7 +79,14 @@ where
             .map(str::to_string);
         let type_name = std::any::type_name::<T>();
 
-        if !is_postcard_content_type(req.headers().get(header::CONTENT_TYPE)) {
+        let is_postcard_content_type = req
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case(POSTCARD_CONTENT_TYPE));
+
+        if !is_postcard_content_type {
             debug!(
                 method = %method,
                 uri = %uri,
@@ -148,13 +158,6 @@ where
     }
 }
 
-fn is_postcard_content_type(value: Option<&header::HeaderValue>) -> bool {
-    value
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(POSTCARD_CONTENT_TYPE))
-}
-
 impl<T> IntoResponse for Postcard<T>
 where
     T: Serialize,
@@ -189,43 +192,6 @@ pub(crate) fn error_response(status: StatusCode, message: impl Into<String>) -> 
     )
 }
 
-fn code_to_status(code: ApiErrorCode) -> StatusCode {
-    match code {
-        ApiErrorCode::BadRequest
-        | ApiErrorCode::ValidationFailed
-        | ApiErrorCode::InvalidId
-        | ApiErrorCode::InvalidObjectKind
-        | ApiErrorCode::InvalidPayloadSize => StatusCode::BAD_REQUEST,
-        ApiErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
-        ApiErrorCode::Forbidden | ApiErrorCode::ObjectForbidden => StatusCode::FORBIDDEN,
-        ApiErrorCode::NotFound | ApiErrorCode::ObjectNotFound => StatusCode::NOT_FOUND,
-        ApiErrorCode::Conflict | ApiErrorCode::ObjectAlreadyExists => StatusCode::CONFLICT,
-        ApiErrorCode::RateLimited => StatusCode::TOO_MANY_REQUESTS,
-        ApiErrorCode::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-        ApiErrorCode::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        ApiErrorCode::ServerNotInitialized => StatusCode::SERVICE_UNAVAILABLE,
-        ApiErrorCode::Database
-        | ApiErrorCode::ServerSecret
-        | ApiErrorCode::Storage
-        | ApiErrorCode::PayloadRead
-        | ApiErrorCode::PayloadWrite
-        | ApiErrorCode::Stream
-        | ApiErrorCode::Unknown
-        | ApiErrorCode::ObjectDeleteUnsupported
-        | ApiErrorCode::ObjectNotReadyToComplete
-        | ApiErrorCode::DuplicateObjectPayloadId
-        | ApiErrorCode::ObjectPayloadNotFound
-        | ApiErrorCode::ObjectPayloadAlreadyUploaded
-        | ApiErrorCode::ObjectPayloadUploadInProgress
-        | ApiErrorCode::ObjectPayloadNotUploaded
-        | ApiErrorCode::MissingObjectPayloads
-        | ApiErrorCode::MissingPayloadCompletion
-        | ApiErrorCode::IncompletePayloadCompletion
-        | ApiErrorCode::ObjectPayloadMetadataMismatch
-        | ApiErrorCode::ObjectPayloadIntegrityMismatch => StatusCode::INTERNAL_SERVER_ERROR,
-    }
-}
-
 fn validate_request<T>(value: &T) -> RouteResult<()>
 where
     T: Validate,
@@ -238,24 +204,4 @@ where
             report.to_string(),
         )
     })
-}
-
-pub(crate) fn validate_client_id(id: &str) -> RouteResult<Uuid> {
-    if id.len() != 36 {
-        return Err(ApiError::from_code(ApiErrorCode::InvalidId));
-    }
-
-    Uuid::parse_str(id)
-        .map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))
-}
-
-pub(crate) fn validate_max_byte_len(value: &[u8], max: usize, message: &str) -> RouteResult<()> {
-    if value.len() > max {
-        return Err(ApiError::from_code_with_message(
-            ApiErrorCode::PayloadTooLarge,
-            message,
-        ));
-    }
-
-    Ok(())
 }
