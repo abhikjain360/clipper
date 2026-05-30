@@ -1,27 +1,32 @@
 #!/usr/bin/env -S deno run --allow-net --allow-env
 
 /**
- * Clipper server end-to-end test script (§20 step 6 checkpoint).
+ * Clipper server JSON smoke test.
+ *
+ * Scope is limited to JSON endpoints (health, auth rejection, sync bootstrap,
+ * logout). Objects and clipboard flows now use postcard wire format and are
+ * covered by Rust integration tests in `crates/server/src/routes/objects.rs`
+ * and the Rust client; replicating them here would require a postcard codec in
+ * TypeScript.
  *
  * Usage:
  *   # Start server first:
- *   CLIPPER_PASSPHRASE="test-passphrase-123" cargo run -p clipper-server -- init --data-dir /tmp/clipper-test-data
+ *   cargo run -p clipper-server -- init --data-dir /tmp/clipper-test-data
  *   cargo run -p clipper-server -- serve --data-dir /tmp/clipper-test-data --addr 127.0.0.1:8787
  *
  *   # Then run this script:
  *   # OPAQUE login is implemented in the Rust client because it needs the
- *   # shared Rust crypto stack. This script expects an already-issued token for route testing.
+ *   # shared Rust crypto stack. This script expects an already-issued token.
  *   CLIPPER_TOKEN="..." deno run --allow-net --allow-env test-server.ts
  */
 
 const BASE = "http://127.0.0.1:8787";
 const token = Deno.env.get("CLIPPER_TOKEN") ?? "";
-const deviceId = Deno.env.get("CLIPPER_DEVICE_ID") ?? "deno-test-device";
 assert(token.length > 0, "CLIPPER_TOKEN is set");
 
 // ── Helpers ──
 
-async function api(
+function api(
   method: string,
   path: string,
   body?: unknown,
@@ -45,17 +50,6 @@ function assert(condition: boolean, msg: string) {
   console.log(`  ✓ ${msg}`);
 }
 
-function b64encode(data: Uint8Array): string {
-  return btoa(String.fromCharCode(...data));
-}
-
-async function sha256(data: Uint8Array): Promise<Uint8Array> {
-  const input = new ArrayBuffer(data.byteLength);
-  new Uint8Array(input).set(data);
-  const hash = await crypto.subtle.digest("SHA-256", input);
-  return new Uint8Array(hash);
-}
-
 // ── Tests ──
 
 console.log("\n=== 1. Health Check ===");
@@ -73,115 +67,7 @@ console.log("\n=== 2. Unauthenticated request rejected ===");
   await res.body?.cancel();
 }
 
-// Sections 3-5 (clipboard route) removed: clipboards now flow through the
-// objects API (kind=clipboard) which uses postcard, not JSON. Cover via the
-// Rust client instead.
-
-console.log("\n=== 6. File upload flow (init → blob → complete) ===");
-const fileId = crypto.randomUUID();
-{
-  const fakeMetaCiphertext = new TextEncoder().encode("encrypted-meta");
-  const fakeMetaNonce = crypto.getRandomValues(new Uint8Array(24));
-  const fakeBlobNonce = crypto.getRandomValues(new Uint8Array(24));
-  const fakeBlob = new TextEncoder().encode(
-    "this-is-fake-encrypted-file-content-for-testing",
-  );
-
-  // Step 1: init
-  const initRes = await api(
-    "POST",
-    "/api/files/init",
-    {
-      id: fileId,
-      meta_nonce_b64: b64encode(fakeMetaNonce),
-      meta_ciphertext_b64: b64encode(fakeMetaCiphertext),
-      blob_nonce_b64: b64encode(fakeBlobNonce),
-      blob_size: fakeBlob.length,
-      source_device_id: deviceId,
-    },
-    token,
-  );
-  assert(initRes.status === 200, `init status 200 (got ${initRes.status})`);
-  const initJson = await initRes.json();
-  assert(
-    initJson.upload_url === `/api/files/${fileId}/blob`,
-    `got upload_url: ${initJson.upload_url}`,
-  );
-
-  // Step 2: upload blob
-  const blobRes = await fetch(`${BASE}/api/files/${fileId}/blob`, {
-    method: "PUT",
-    headers: { Authorization: `Bearer ${token}` },
-    body: fakeBlob,
-  });
-  assert(blobRes.status === 200, `blob status 200 (got ${blobRes.status})`);
-  await blobRes.json();
-
-  // Step 3: complete
-  const blobHash = await sha256(fakeBlob);
-  const completeRes = await api(
-    "POST",
-    `/api/files/${fileId}/complete`,
-    {
-      sha256_ciphertext_b64: b64encode(blobHash),
-      blob_size: fakeBlob.length,
-    },
-    token,
-  );
-  assert(
-    completeRes.status === 200,
-    `complete status 200 (got ${completeRes.status})`,
-  );
-  const completeJson = await completeRes.json();
-  assert(completeJson.ok === true, "file complete ok=true");
-}
-
-console.log("\n=== 7. List files ===");
-{
-  const res = await api("GET", "/api/files?limit=10", undefined, token);
-  assert(res.status === 200, `status 200 (got ${res.status})`);
-  const json = await res.json();
-  assert(Array.isArray(json.items), "items is array");
-  const found = json.items.find(
-    (i: { id: string }) => i.id === fileId,
-  );
-  assert(found !== undefined, `found uploaded file ${fileId}`);
-}
-
-console.log("\n=== 8. Download file blob ===");
-{
-  const res = await fetch(`${BASE}/api/files/${fileId}/blob`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  assert(res.status === 200, `status 200 (got ${res.status})`);
-  const body = await res.arrayBuffer();
-  const text = new TextDecoder().decode(body);
-  assert(
-    text === "this-is-fake-encrypted-file-content-for-testing",
-    "downloaded blob matches uploaded blob",
-  );
-}
-
-console.log("\n=== 9. Delete file ===");
-{
-  const res = await fetch(`${BASE}/api/files/${fileId}`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  assert(res.status === 200, `status 200 (got ${res.status})`);
-  const json = await res.json();
-  assert(json.ok === true, "delete ok=true");
-
-  // Verify gone
-  const listRes = await api("GET", "/api/files?limit=10", undefined, token);
-  const listJson = await listRes.json();
-  const found = listJson.items.find(
-    (i: { id: string }) => i.id === fileId,
-  );
-  assert(found === undefined, "file no longer in list after delete");
-}
-
-console.log("\n=== 10. Sync bootstrap ===");
+console.log("\n=== 3. Sync bootstrap ===");
 {
   const res = await api("GET", "/api/sync/bootstrap", undefined, token);
   assert(res.status === 200, `status 200 (got ${res.status})`);
@@ -194,7 +80,7 @@ console.log("\n=== 10. Sync bootstrap ===");
   );
 }
 
-console.log("\n=== 11. Logout ===");
+console.log("\n=== 4. Logout ===");
 {
   const res = await api("POST", "/api/auth/logout", undefined, token);
   assert(res.status === 200, `status 200 (got ${res.status})`);
