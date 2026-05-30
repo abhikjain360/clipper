@@ -24,6 +24,10 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   bool _refreshing = false;
+  bool _addingClipboard = false;
+
+  bool get _supportsManualClipboardImport =>
+      kIsWeb || defaultTargetPlatform == TargetPlatform.android;
 
   Future<void> _refresh() async {
     setState(() => _refreshing = true);
@@ -45,8 +49,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _copyToClipboard(String id) async {
     try {
-      final text = await copyToLocal(id: id);
-      await setSecureClipboardText(text);
+      final payload = await clipboardPayload(id: id);
+      await setSecureClipboardEntry(
+        DeviceClipboardEntry(
+          mimeType: payload.mimeType,
+          bytes: payload.bytes,
+          text: payload.text,
+        ),
+      );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -57,6 +67,27 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } catch (e) {
       _showError(e.toString());
+    }
+  }
+
+  Future<void> _addCurrentClipboard() async {
+    setState(() => _addingClipboard = true);
+    try {
+      final entry = await readDeviceClipboardEntry();
+      if (entry == null) {
+        _showError('Clipboard is empty or unavailable');
+        return;
+      }
+      await sendClipboardPayload(mimeType: entry.mimeType, bytes: entry.bytes);
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Clipboard added')));
+      }
+    } catch (e) {
+      _showError(e.toString());
+    } finally {
+      if (mounted) setState(() => _addingClipboard = false);
     }
   }
 
@@ -200,41 +231,76 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildClipboardTab(BridgeAppState state) {
     final items = state.clipboardItems;
-    if (items.isEmpty) {
-      return const AppStatus(
-        icon: Icons.content_paste_off,
-        title: 'No clipboard items yet',
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.all(8),
-      itemCount: items.length,
-      itemBuilder: (context, index) {
-        final item = items[index];
-        final mime = item.mimeType.toLowerCase().split(';').first.trim();
-        final isText = mime.startsWith('text/');
-        return SyncListTileCard(
-          title: Text(
-            item.text,
-            maxLines: 3,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+    return Column(
+      children: [
+        if (_supportsManualClipboardImport)
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _addingClipboard ? null : _addCurrentClipboard,
+                icon: _addingClipboard
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.add),
+                label: const Text('Add Current Clipboard'),
+              ),
+            ),
           ),
-          subtitle: Text(
-            '${item.mimeType} - ${formatRelativeTimestamp(item.createdAt)}',
-            style: const TextStyle(fontSize: 11, color: Colors.white38),
+        if (items.isEmpty)
+          const Expanded(
+            child: AppStatus(
+              icon: Icons.content_paste_off,
+              title: 'No clipboard items yet',
+            ),
+          )
+        else
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              itemCount: items.length,
+              itemBuilder: (context, index) {
+                final item = items[index];
+                final mime = item.mimeType
+                    .toLowerCase()
+                    .split(';')
+                    .first
+                    .trim();
+                final isText = mime.startsWith('text/');
+                final isImage = mime.startsWith('image/');
+                final canCopy = isText || isImage;
+                return SyncListTileCard(
+                  leading: isImage ? _ClipboardImagePreview(id: item.id) : null,
+                  title: Text(
+                    item.text,
+                    maxLines: isImage ? 1 : 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: isText ? 'monospace' : null,
+                      fontSize: 13,
+                    ),
+                  ),
+                  subtitle: Text(
+                    '${item.mimeType} - ${formatRelativeTimestamp(item.createdAt)}',
+                    style: const TextStyle(fontSize: 11, color: Colors.white38),
+                  ),
+                  trailing: canCopy
+                      ? IconButton(
+                          icon: const Icon(Icons.copy, size: 20),
+                          onPressed: () => _copyToClipboard(item.id),
+                          tooltip: 'Copy to clipboard',
+                        )
+                      : const Icon(Icons.insert_drive_file, size: 20),
+                  onTap: canCopy ? () => _copyToClipboard(item.id) : null,
+                );
+              },
+            ),
           ),
-          trailing: isText
-              ? IconButton(
-                  icon: const Icon(Icons.copy, size: 20),
-                  onPressed: () => _copyToClipboard(item.id),
-                  tooltip: 'Copy to clipboard',
-                )
-              : const Icon(Icons.image, size: 20, color: Colors.white54),
-          onTap: isText ? () => _copyToClipboard(item.id) : null,
-        );
-      },
+      ],
     );
   }
 
@@ -300,6 +366,45 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
       ],
+    );
+  }
+}
+
+class _ClipboardImagePreview extends StatelessWidget {
+  final String id;
+
+  const _ClipboardImagePreview({required this.id});
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<BridgeClipboardPayload>(
+      future: clipboardPayload(id: id),
+      builder: (context, snapshot) {
+        if (snapshot.hasData) {
+          return ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: Image.memory(
+              snapshot.data!.bytes,
+              width: 44,
+              height: 44,
+              fit: BoxFit.cover,
+              errorBuilder: (context, error, stackTrace) =>
+                  const Icon(Icons.image, size: 28),
+            ),
+          );
+        }
+        return const SizedBox(
+          width: 44,
+          height: 44,
+          child: Center(
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
+        );
+      },
     );
   }
 }

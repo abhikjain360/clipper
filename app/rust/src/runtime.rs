@@ -75,7 +75,9 @@ mod imp {
     use clipper_client::engine::SyncEngine;
     #[cfg(not(target_family = "wasm"))]
     use clipper_daemon_types::UploadFileResult;
-    use clipper_daemon_types::{AppState, CopyToLocalResult, DaemonCommand, RegisterResult};
+    use clipper_daemon_types::{
+        AppState, ClipboardPayloadResult, CopyToLocalResult, DaemonCommand, RegisterResult,
+    };
 
     use super::RuntimeResult;
 
@@ -188,9 +190,23 @@ mod imp {
                 engine.send_clipboard(&params.text).await?;
                 Ok(None)
             }
+            DaemonCommand::SendClipboardPayload(params) => {
+                let id = engine
+                    .send_clipboard_payload(&params.mime_type, &params.bytes)
+                    .await?;
+                Ok(Some(serde_json::json!({ "id": id })))
+            }
             DaemonCommand::CopyToLocal(params) => {
                 let text = engine.copy_to_local(&params.item_id).await?;
                 Ok(Some(serde_json::to_value(CopyToLocalResult { text })?))
+            }
+            DaemonCommand::ClipboardPayload(params) => {
+                let payload = engine.clipboard_payload(&params.item_id).await?;
+                Ok(Some(serde_json::to_value(ClipboardPayloadResult {
+                    mime_type: payload.mime_type,
+                    bytes: payload.bytes,
+                    text: payload.text,
+                })?))
             }
             DaemonCommand::UploadFile(params) => {
                 #[cfg(target_family = "wasm")]

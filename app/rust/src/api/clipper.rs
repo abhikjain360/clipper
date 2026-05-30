@@ -57,6 +57,13 @@ pub struct BridgeAppState {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Default)]
+pub struct BridgeClipboardPayload {
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+    pub text: Option<String>,
+}
+
 // ── From conversions (app-types → bridge types) ──
 
 impl From<app_types::AppState> for BridgeAppState {
@@ -217,6 +224,24 @@ pub async fn send_clipboard(text: String) -> Result<(), String> {
     .await
 }
 
+pub async fn send_clipboard_payload(mime_type: String, bytes: Vec<u8>) -> Result<String, String> {
+    bridge_result(async move {
+        let result = runtime::send_command(daemon::DaemonCommand::SendClipboardPayload(
+            daemon::SendClipboardPayloadParams { mime_type, bytes },
+        ))
+        .await?;
+        Ok(result
+            .and_then(|value| {
+                value
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .map(ToOwned::to_owned)
+            })
+            .ok_or_else(|| AppError::missing_daemon_result("id"))?)
+    })
+    .await
+}
+
 pub async fn copy_to_local(id: String) -> Result<String, String> {
     bridge_result(async move {
         let result = runtime::send_command(daemon::DaemonCommand::CopyToLocal(
@@ -227,6 +252,24 @@ pub async fn copy_to_local(id: String) -> Result<String, String> {
             result.ok_or_else(|| AppError::missing_daemon_result("text"))?,
         )?
         .text)
+    })
+    .await
+}
+
+pub async fn clipboard_payload(id: String) -> Result<BridgeClipboardPayload, String> {
+    bridge_result(async move {
+        let result = runtime::send_command(daemon::DaemonCommand::ClipboardPayload(
+            daemon::ClipboardPayloadParams { item_id: id },
+        ))
+        .await?;
+        let payload = serde_json::from_value::<daemon::ClipboardPayloadResult>(
+            result.ok_or_else(|| AppError::missing_daemon_result("clipboard_payload"))?,
+        )?;
+        Ok(BridgeClipboardPayload {
+            mime_type: payload.mime_type,
+            bytes: payload.bytes,
+            text: payload.text,
+        })
     })
     .await
 }

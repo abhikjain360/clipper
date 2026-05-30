@@ -31,6 +31,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BridgeClipboardItem dco_decode_bridge_clipboard_item(dynamic raw);
 
   @protected
+  BridgeClipboardPayload dco_decode_bridge_clipboard_payload(dynamic raw);
+
+  @protected
   BridgeConnectionStatus dco_decode_bridge_connection_status(dynamic raw);
 
   @protected
@@ -74,6 +77,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BridgeClipboardItem sse_decode_bridge_clipboard_item(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BridgeClipboardPayload sse_decode_bridge_clipboard_payload(
     SseDeserializer deserializer,
   );
 
@@ -131,6 +139,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_bridge_clipboard_item(
     BridgeClipboardItem self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_bridge_clipboard_payload(
+    BridgeClipboardPayload self,
     SseSerializer serializer,
   );
 

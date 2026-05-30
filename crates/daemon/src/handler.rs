@@ -20,13 +20,13 @@ use crate::{
     clients::ClientManager,
     keychain::{self, Credentials},
     protocol::{
-        AuthChallenge, CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest,
-        DaemonResponse, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams,
-        RegisterParams, RegisterResult, UploadFileResult, ipc_auth_message,
+        AuthChallenge, ClipboardPayloadResult, CopyToLocalResult, DaemonCommand, DaemonEvent,
+        DaemonRequest, DaemonResponse, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION,
+        LoginParams, RegisterParams, RegisterResult, UploadFileResult, ipc_auth_message,
     },
 };
 
-const MAX_IPC_REQUEST_LINE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_IPC_REQUEST_LINE_BYTES: usize = 32 * 1024 * 1024;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -326,7 +326,13 @@ async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> Daemo
         DaemonCommand::Logout => cmd_logout(id, engine).await,
         DaemonCommand::GetState => cmd_get_state(id, engine).await,
         DaemonCommand::SendClipboard(params) => cmd_send_clipboard(id, params.text, engine).await,
+        DaemonCommand::SendClipboardPayload(params) => {
+            cmd_send_clipboard_payload(id, params.mime_type, params.bytes, engine).await
+        }
         DaemonCommand::CopyToLocal(params) => cmd_copy_to_local(id, params.item_id, engine).await,
+        DaemonCommand::ClipboardPayload(params) => {
+            cmd_clipboard_payload(id, params.item_id, engine).await
+        }
         DaemonCommand::UploadFile(params) => cmd_upload_file(id, params.file_path, engine).await,
         DaemonCommand::DownloadFile(params) => {
             cmd_download_file(id, params.file_id, params.target_path, engine).await
@@ -432,6 +438,18 @@ async fn cmd_send_clipboard(id: String, text: String, engine: &Arc<SyncEngine>) 
     }
 }
 
+async fn cmd_send_clipboard_payload(
+    id: String,
+    mime_type: String,
+    bytes: Vec<u8>,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.send_clipboard_payload(&mime_type, &bytes).await {
+        Ok(item_id) => json_success(id, serde_json::json!({ "id": item_id })),
+        Err(e) => DaemonResponse::error(id, e.to_string()),
+    }
+}
+
 async fn cmd_copy_to_local(
     id: String,
     item_id: String,
@@ -439,6 +457,24 @@ async fn cmd_copy_to_local(
 ) -> DaemonResponse {
     match engine.copy_to_local(&item_id).await {
         Ok(text) => json_success(id, CopyToLocalResult { text }),
+        Err(e) => DaemonResponse::error(id, e.to_string()),
+    }
+}
+
+async fn cmd_clipboard_payload(
+    id: String,
+    item_id: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.clipboard_payload(&item_id).await {
+        Ok(payload) => json_success(
+            id,
+            ClipboardPayloadResult {
+                mime_type: payload.mime_type,
+                bytes: payload.bytes,
+                text: payload.text,
+            },
+        ),
         Err(e) => DaemonResponse::error(id, e.to_string()),
     }
 }

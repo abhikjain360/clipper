@@ -31,7 +31,7 @@ use crate::daemon_process;
 
 pub(crate) type TransportResult<T> = Result<T, TransportError>;
 
-const MAX_DAEMON_LINE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DAEMON_LINE_BYTES: usize = 32 * 1024 * 1024;
 
 type HmacSha256 = Hmac<Sha256>;
 

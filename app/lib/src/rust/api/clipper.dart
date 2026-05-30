@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `bridge_result`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `from`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `from`, `from`, `from`, `from`
 
 Future<void> connectToDaemon() =>
     RustLib.instance.api.crateApiClipperConnectToDaemon();
@@ -44,8 +44,19 @@ Future<BridgeAppState> getState() =>
 Future<void> sendClipboard({required String text}) =>
     RustLib.instance.api.crateApiClipperSendClipboard(text: text);
 
+Future<String> sendClipboardPayload({
+  required String mimeType,
+  required List<int> bytes,
+}) => RustLib.instance.api.crateApiClipperSendClipboardPayload(
+  mimeType: mimeType,
+  bytes: bytes,
+);
+
 Future<String> copyToLocal({required String id}) =>
     RustLib.instance.api.crateApiClipperCopyToLocal(id: id);
+
+Future<BridgeClipboardPayload> clipboardPayload({required String id}) =>
+    RustLib.instance.api.crateApiClipperClipboardPayload(id: id);
 
 Future<String> uploadFile({required String filePath}) =>
     RustLib.instance.api.crateApiClipperUploadFile(filePath: filePath);
@@ -169,6 +180,33 @@ class BridgeClipboardItem {
           payloadSize == other.payloadSize &&
           createdAt == other.createdAt &&
           sourceDeviceId == other.sourceDeviceId;
+}
+
+class BridgeClipboardPayload {
+  final String mimeType;
+  final Uint8List bytes;
+  final String? text;
+
+  const BridgeClipboardPayload({
+    required this.mimeType,
+    required this.bytes,
+    this.text,
+  });
+
+  static Future<BridgeClipboardPayload> default_() =>
+      RustLib.instance.api.crateApiClipperBridgeClipboardPayloadDefault();
+
+  @override
+  int get hashCode => mimeType.hashCode ^ bytes.hashCode ^ text.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BridgeClipboardPayload &&
+          runtimeType == other.runtimeType &&
+          mimeType == other.mimeType &&
+          bytes == other.bytes &&
+          text == other.text;
 }
 
 enum BridgeConnectionStatus {

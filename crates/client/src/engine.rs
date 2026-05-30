@@ -25,6 +25,18 @@ const INLINE_OBJECT_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 const RECENT_CLIPBOARD_LIMIT: usize = 100;
 const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
 
+#[derive(Debug, Clone)]
+pub struct ClipboardPayload {
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+    pub text: Option<String>,
+}
+
+struct DecryptedClipboardObject {
+    item: DecryptedClipboardItem,
+    payload: Vec<u8>,
+}
+
 /// The sync engine that owns all client state.
 pub struct SyncEngine {
     api: Mutex<ApiClient>,
@@ -35,7 +47,7 @@ pub struct SyncEngine {
     state_rx: watch::Receiver<u64>,
     state_version: std::sync::atomic::AtomicU64,
     last_seq: RwLock<i64>,
-    suppressed_text: RwLock<Option<(String, std::time::Instant)>>,
+    suppressed_payload: RwLock<Option<([u8; 32], std::time::Instant)>>,
 }
 
 impl SyncEngine {
@@ -54,7 +66,7 @@ impl SyncEngine {
             state_rx: rx,
             state_version: std::sync::atomic::AtomicU64::new(0),
             last_seq: RwLock::new(0),
-            suppressed_text: RwLock::new(None),
+            suppressed_payload: RwLock::new(None),
         })
     }
 
@@ -249,29 +261,7 @@ impl SyncEngine {
     // ── Clipboard ──
 
     pub async fn send_clipboard(&self, text: &str) -> Result<(), ClientError> {
-        {
-            let suppressed = self.suppressed_text.read().await;
-            if let Some((ref s, at)) = *suppressed
-                && s == text
-                && at.elapsed() < Duration::from_secs(5)
-            {
-                debug!("Suppressed duplicate clipboard upload");
-                return Ok(());
-            }
-        }
-
-        {
-            let state = self.state.read().await;
-            if let Some(first) = state.clipboard_items.first()
-                && first.text == text
-            {
-                debug!("Clipboard text matches most recent item, skipping");
-                return Ok(());
-            }
-        }
-
-        let _ = self
-            .send_clipboard_payload(TEXT_CLIPBOARD_MIME_TYPE, text.as_bytes())
+        self.send_clipboard_payload(TEXT_CLIPBOARD_MIME_TYPE, text.as_bytes())
             .await?;
         debug!("Clipboard text uploaded");
         Ok(())
@@ -286,6 +276,42 @@ impl SyncEngine {
             return Err(ClientError::Other(format!(
                 "Unsupported clipboard MIME type: {mime_type}"
             )));
+        }
+
+        let payload_digest = clipboard_payload_digest(mime_type, data);
+        {
+            let suppressed = self.suppressed_payload.read().await;
+            if let Some((digest, at)) = *suppressed
+                && digest == payload_digest
+                && at.elapsed() < Duration::from_secs(5)
+            {
+                debug!("Suppressed duplicate clipboard upload");
+                return self
+                    .latest_clipboard_item_id_for_digest(&payload_digest)
+                    .await
+                    .ok_or_else(|| ClientError::Other("Suppressed clipboard item missing".into()));
+            }
+        }
+
+        {
+            let first = {
+                let state = self.state.read().await;
+                state.clipboard_items.first().cloned()
+            };
+            if let Some(first) = first
+                && same_mime_type(&first.mime_type, mime_type)
+                && self
+                    .local_store
+                    .clipboard_payload(&first.id)
+                    .await?
+                    .as_deref()
+                    .is_some_and(|payload| {
+                        clipboard_payload_digest(mime_type, payload) == payload_digest
+                    })
+            {
+                debug!("Clipboard payload matches most recent item, skipping");
+                return Ok(first.id.clone());
+            }
         }
 
         let device_id = {
@@ -356,7 +382,9 @@ impl SyncEngine {
             created_at,
             source_device_id: device_id,
         };
-        self.local_store.persist_clipboard_item(&item).await?;
+        self.local_store
+            .persist_clipboard_payload_item(&item, data)
+            .await?;
         let clipboard_items = self
             .local_store
             .recent_clipboard_items(RECENT_CLIPBOARD_LIMIT)
@@ -368,6 +396,55 @@ impl SyncEngine {
         }
         self.bump_version();
         Ok(object_id)
+    }
+
+    async fn latest_clipboard_item_id_for_digest(&self, digest: &[u8; 32]) -> Option<String> {
+        let items = {
+            let state = self.state.read().await;
+            state.clipboard_items.clone()
+        };
+        for item in items {
+            let Ok(Some(payload)) = self.local_store.clipboard_payload(&item.id).await else {
+                continue;
+            };
+            if clipboard_payload_digest(&item.mime_type, &payload) == *digest {
+                return Some(item.id.clone());
+            }
+        }
+        None
+    }
+
+    pub async fn clipboard_payload(&self, id: &str) -> Result<ClipboardPayload, ClientError> {
+        let item = {
+            let state = self.state.read().await;
+            state.clipboard_items.iter().find(|i| i.id == id).cloned()
+        }
+        .ok_or_else(|| ClientError::Other("Item not found".into()))?;
+
+        let bytes = self
+            .local_store
+            .clipboard_payload(id)
+            .await?
+            .ok_or_else(|| ClientError::Other("Item payload not found".into()))?;
+        let text = if is_text_mime_type(&item.mime_type) {
+            Some(
+                String::from_utf8(bytes.clone())
+                    .map_err(|e| ClientError::Other(format!("clipboard text utf8: {e}")))?,
+            )
+        } else {
+            None
+        };
+
+        *self.suppressed_payload.write().await = Some((
+            clipboard_payload_digest(&item.mime_type, &bytes),
+            std::time::Instant::now(),
+        ));
+
+        Ok(ClipboardPayload {
+            mime_type: item.mime_type,
+            bytes,
+            text,
+        })
     }
 
     pub async fn copy_to_local(&self, id: &str) -> Result<String, ClientError> {
@@ -396,7 +473,10 @@ impl SyncEngine {
                 .ok_or_else(|| ClientError::Other("Item not found".into()))?,
         };
 
-        *self.suppressed_text.write().await = Some((text.clone(), std::time::Instant::now()));
+        *self.suppressed_payload.write().await = Some((
+            clipboard_payload_digest(TEXT_CLIPBOARD_MIME_TYPE, text.as_bytes()),
+            std::time::Instant::now(),
+        ));
         Ok(text)
     }
 
@@ -626,11 +706,9 @@ impl SyncEngine {
             api.bootstrap().await?
         };
 
-        let (clipboard_items, files) = self.fetch_object_state(100).await?;
+        let (clipboard_objects, files) = self.fetch_object_state(100).await?;
 
-        self.local_store
-            .persist_clipboard_items(&clipboard_items)
-            .await?;
+        self.persist_clipboard_objects(&clipboard_objects).await?;
         let clipboard_items = self
             .local_store
             .recent_clipboard_items(RECENT_CLIPBOARD_LIMIT)
@@ -656,11 +734,9 @@ impl SyncEngine {
     }
 
     pub async fn refresh(&self) -> Result<(), ClientError> {
-        let (clipboard_items, files) = self.fetch_object_state(100).await?;
+        let (clipboard_objects, files) = self.fetch_object_state(100).await?;
 
-        self.local_store
-            .persist_clipboard_items(&clipboard_items)
-            .await?;
+        self.persist_clipboard_objects(&clipboard_objects).await?;
         let clipboard_items = self
             .local_store
             .recent_clipboard_items(RECENT_CLIPBOARD_LIMIT)
@@ -675,10 +751,22 @@ impl SyncEngine {
         Ok(())
     }
 
+    async fn persist_clipboard_objects(
+        &self,
+        objects: &[DecryptedClipboardObject],
+    ) -> Result<(), ClientError> {
+        for object in objects {
+            self.local_store
+                .persist_clipboard_payload_item(&object.item, &object.payload)
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn fetch_object_state(
         &self,
         limit: u64,
-    ) -> Result<(Vec<DecryptedClipboardItem>, Vec<DecryptedFileItem>), ClientError> {
+    ) -> Result<(Vec<DecryptedClipboardObject>, Vec<DecryptedFileItem>), ClientError> {
         let (clipboard_resp, files_resp) = {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
             let clipboard = api
@@ -727,31 +815,35 @@ impl SyncEngine {
         &self,
         item: &ObjectListItem,
         encryption_key: &[u8; 32],
-    ) -> Result<DecryptedClipboardItem, ClientError> {
+    ) -> Result<DecryptedClipboardObject, ClientError> {
         let meta = decrypt_clipboard_meta(&item.meta_nonce, &item.meta_ciphertext, encryption_key)?;
+        if !is_supported_clipboard_mime_type(&meta.mime_type) {
+            return Err(ClientError::Other(format!(
+                "Unsupported clipboard MIME type: {}",
+                meta.mime_type
+            )));
+        }
         let payload = single_payload(item)?;
         let payload_size = meta.size.unwrap_or(payload.ciphertext_size);
-        let text = if is_text_mime_type(&meta.mime_type) {
-            let encrypted_payload = {
-                let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-                api.download_object_payload(&item.id.to_string(), &payload.id.to_string())
-                    .await?
-            };
-            let plaintext =
-                decrypt_clipboard_payload(&payload.nonce, &encrypted_payload, encryption_key)?;
-            String::from_utf8(plaintext)
-                .map_err(|e| ClientError::Other(format!("clipboard text utf8: {}", e)))?
-        } else {
-            clipboard_display_label(&meta.mime_type, payload_size)
+        let encrypted_payload = {
+            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
+            api.download_object_payload(&item.id.to_string(), &payload.id.to_string())
+                .await?
         };
+        let plaintext =
+            decrypt_clipboard_payload(&payload.nonce, &encrypted_payload, encryption_key)?;
+        let text = clipboard_display_text(&meta.mime_type, &plaintext);
 
-        Ok(DecryptedClipboardItem {
-            id: item.id.to_string(),
-            text,
-            mime_type: meta.mime_type,
-            payload_size,
-            created_at: item.created_at.clone(),
-            source_device_id: item.source_device_id.to_string(),
+        Ok(DecryptedClipboardObject {
+            item: DecryptedClipboardItem {
+                id: item.id.to_string(),
+                text,
+                mime_type: meta.mime_type,
+                payload_size,
+                created_at: item.created_at.clone(),
+                source_device_id: item.source_device_id.to_string(),
+            },
+            payload: plaintext,
         })
     }
 
@@ -1003,24 +1095,41 @@ fn clipboard_display_label(mime_type: &str, size: i64) -> String {
     format!("{mime_type} clipboard payload ({size} bytes)")
 }
 
+fn clipboard_payload_digest(mime_type: &str, data: &[u8]) -> [u8; 32] {
+    let mut bytes = Vec::with_capacity(mime_type.len() + 1 + data.len());
+    bytes.extend_from_slice(normalized_clipboard_mime_type(mime_type).as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(data);
+    crypto::sha256(&bytes)
+}
+
 fn is_supported_clipboard_mime_type(mime_type: &str) -> bool {
     is_text_mime_type(mime_type) || top_level_mime_type(mime_type) == "image"
+}
+
+fn same_mime_type(a: &str, b: &str) -> bool {
+    normalized_clipboard_mime_type(a) == normalized_clipboard_mime_type(b)
 }
 
 fn is_text_mime_type(mime_type: &str) -> bool {
     top_level_mime_type(mime_type) == "text"
 }
 
-fn top_level_mime_type(mime_type: &str) -> String {
+fn normalized_clipboard_mime_type(mime_type: &str) -> String {
     mime_type
         .split(';')
         .next()
         .unwrap_or(mime_type)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn top_level_mime_type(mime_type: &str) -> String {
+    normalized_clipboard_mime_type(mime_type)
         .split('/')
         .next()
         .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase()
+        .to_string()
 }
 
 #[cfg(not(target_family = "wasm"))]

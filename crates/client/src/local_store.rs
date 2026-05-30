@@ -1,16 +1,19 @@
 //! Client-side local plaintext cache.
 //!
 //! The network boundary remains encrypted. This store is for local convenience
-//! and durable UI state, so clipboard text is stored as plaintext.
+//! and durable UI state, so clipboard payloads are stored as plaintext.
 
 #[cfg(not(target_family = "wasm"))]
 use std::path::Path;
 use std::{path::PathBuf, sync::RwLock};
 
+#[cfg(target_family = "wasm")]
+use base64::Engine;
 use clipper_app_types::DecryptedClipboardItem;
-#[cfg(not(target_family = "wasm"))]
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_family = "wasm")]
+const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 const DEFAULT_PROFILE: &str = "default";
 #[cfg(target_family = "wasm")]
 const BROWSER_INDEX_LIMIT: usize = 1_000;
@@ -37,22 +40,14 @@ impl LocalStore {
         *current = Some(profile_id);
     }
 
-    pub async fn persist_clipboard_item(
+    pub async fn persist_clipboard_payload_item(
         &self,
         item: &DecryptedClipboardItem,
+        payload: &[u8],
     ) -> Result<(), LocalStoreError> {
         let item_id = validate_item_id(&item.id)?;
-        self.persist_clipboard_item_inner(&item_id, item).await
-    }
-
-    pub async fn persist_clipboard_items(
-        &self,
-        items: &[DecryptedClipboardItem],
-    ) -> Result<(), LocalStoreError> {
-        for item in items {
-            self.persist_clipboard_item(item).await?;
-        }
-        Ok(())
+        self.persist_clipboard_payload_item_inner(&item_id, item, payload)
+            .await
     }
 
     pub async fn recent_clipboard_items(
@@ -67,6 +62,11 @@ impl LocalStore {
         self.clipboard_text_inner(&item_id).await
     }
 
+    pub async fn clipboard_payload(&self, id: &str) -> Result<Option<Vec<u8>>, LocalStoreError> {
+        let item_id = validate_item_id(id)?;
+        self.clipboard_payload_inner(&item_id).await
+    }
+
     fn profile_id(&self) -> String {
         self.profile_id
             .read()
@@ -78,18 +78,19 @@ impl LocalStore {
 
 #[cfg(not(target_family = "wasm"))]
 impl LocalStore {
-    async fn persist_clipboard_item_inner(
+    async fn persist_clipboard_payload_item_inner(
         &self,
         item_id: &str,
         item: &DecryptedClipboardItem,
+        payload: &[u8],
     ) -> Result<(), LocalStoreError> {
         let dir = self.clipboard_dir();
         tokio::fs::create_dir_all(&dir).await?;
 
-        let text_path = dir.join(format!("{item_id}.txt"));
+        let payload_path = dir.join(format!("{item_id}.payload"));
         let meta_path = dir.join(format!("{item_id}.json"));
 
-        write_file_atomic(&text_path, item.text.as_bytes()).await?;
+        write_file_atomic(&payload_path, payload).await?;
 
         let metadata = ClipboardMetadata {
             id: item.id.clone(),
@@ -136,10 +137,27 @@ impl LocalStore {
     }
 
     async fn clipboard_text_inner(&self, item_id: &str) -> Result<Option<String>, LocalStoreError> {
-        let path = self.clipboard_dir().join(format!("{item_id}.txt"));
-        match tokio::fs::read_to_string(path).await {
-            Ok(text) => Ok(Some(text)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        match self.clipboard_payload_inner(item_id).await? {
+            Some(payload) => Ok(Some(String::from_utf8(payload)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn clipboard_payload_inner(
+        &self,
+        item_id: &str,
+    ) -> Result<Option<Vec<u8>>, LocalStoreError> {
+        let payload_path = self.clipboard_dir().join(format!("{item_id}.payload"));
+        match tokio::fs::read(&payload_path).await {
+            Ok(payload) => Ok(Some(payload)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let legacy_text_path = self.clipboard_dir().join(format!("{item_id}.txt"));
+                match tokio::fs::read(legacy_text_path).await {
+                    Ok(payload) => Ok(Some(payload)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(e.into()),
+                }
+            }
             Err(e) => Err(e.into()),
         }
     }
@@ -159,16 +177,14 @@ impl LocalStore {
         let metadata_bytes = tokio::fs::read(metadata_path).await?;
         let metadata: ClipboardMetadata = serde_json::from_slice(&metadata_bytes)?;
         let item_id = validate_item_id(&metadata.id)?;
-        let text_path = metadata_path.with_file_name(format!("{item_id}.txt"));
-        let text = match tokio::fs::read_to_string(text_path).await {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
+        let payload = match self.clipboard_payload_inner(&item_id).await? {
+            Some(payload) => payload,
+            None => return Ok(None),
         };
 
         Ok(Some(DecryptedClipboardItem {
             id: metadata.id,
-            text,
+            text: clipboard_display_text(&metadata.mime_type, &payload),
             mime_type: metadata.mime_type,
             payload_size: metadata.payload_size,
             created_at: metadata.created_at,
@@ -179,13 +195,18 @@ impl LocalStore {
 
 #[cfg(target_family = "wasm")]
 impl LocalStore {
-    async fn persist_clipboard_item_inner(
+    async fn persist_clipboard_payload_item_inner(
         &self,
         item_id: &str,
         item: &DecryptedClipboardItem,
+        payload: &[u8],
     ) -> Result<(), LocalStoreError> {
         let storage = browser_storage()?;
-        let item_json = serde_json::to_string(item)?;
+        let record = BrowserClipboardRecord {
+            item: item.clone(),
+            payload_b64: B64.encode(payload),
+        };
+        let item_json = serde_json::to_string(&record)?;
         storage
             .set_item(&self.clipboard_item_key(item_id), &item_json)
             .map_err(storage_error)?;
@@ -208,7 +229,7 @@ impl LocalStore {
                 continue;
             };
 
-            match serde_json::from_str::<DecryptedClipboardItem>(&item_json) {
+            match parse_browser_clipboard_record(&item_json) {
                 Ok(item) => items.push(item),
                 Err(e) => {
                     tracing::warn!(item_id = %item_id, "Failed to read local clipboard item: {}", e)
@@ -221,6 +242,16 @@ impl LocalStore {
     }
 
     async fn clipboard_text_inner(&self, item_id: &str) -> Result<Option<String>, LocalStoreError> {
+        match self.clipboard_payload_inner(item_id).await? {
+            Some(payload) => Ok(Some(String::from_utf8(payload)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn clipboard_payload_inner(
+        &self,
+        item_id: &str,
+    ) -> Result<Option<Vec<u8>>, LocalStoreError> {
         let storage = browser_storage()?;
         let item_json = storage
             .get_item(&self.clipboard_item_key(item_id))
@@ -228,8 +259,8 @@ impl LocalStore {
         let Some(item_json) = item_json else {
             return Ok(None);
         };
-        let item: DecryptedClipboardItem = serde_json::from_str(&item_json)?;
-        Ok(Some(item.text))
+
+        parse_browser_clipboard_payload(&item_json).map(Some)
     }
 
     fn prepend_clipboard_index(
@@ -294,9 +325,37 @@ struct ClipboardMetadata {
     source_device_id: String,
 }
 
+#[cfg(target_family = "wasm")]
+#[derive(Debug, Serialize, Deserialize)]
+struct BrowserClipboardRecord {
+    item: DecryptedClipboardItem,
+    payload_b64: String,
+}
+
 #[cfg(not(target_family = "wasm"))]
 fn default_clipboard_mime_type() -> String {
     "text/plain".into()
+}
+
+#[cfg(target_family = "wasm")]
+fn parse_browser_clipboard_record(json: &str) -> Result<DecryptedClipboardItem, LocalStoreError> {
+    match serde_json::from_str::<BrowserClipboardRecord>(json) {
+        Ok(record) => Ok(record.item),
+        Err(_) => Ok(serde_json::from_str::<DecryptedClipboardItem>(json)?),
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn parse_browser_clipboard_payload(json: &str) -> Result<Vec<u8>, LocalStoreError> {
+    match serde_json::from_str::<BrowserClipboardRecord>(json) {
+        Ok(record) => B64
+            .decode(record.payload_b64)
+            .map_err(|e| LocalStoreError::PayloadDecode(e.to_string())),
+        Err(_) => {
+            let item: DecryptedClipboardItem = serde_json::from_str(json)?;
+            Ok(item.text.into_bytes())
+        }
+    }
 }
 
 fn sort_and_truncate(items: &mut Vec<DecryptedClipboardItem>, limit: usize) {
@@ -306,6 +365,24 @@ fn sort_and_truncate(items: &mut Vec<DecryptedClipboardItem>, limit: usize) {
             .then_with(|| b.id.cmp(&a.id))
     });
     items.truncate(limit);
+}
+
+fn clipboard_display_text(mime_type: &str, payload: &[u8]) -> String {
+    if is_text_mime_type(mime_type) {
+        String::from_utf8_lossy(payload).into_owned()
+    } else {
+        format!("{mime_type} clipboard payload ({} bytes)", payload.len())
+    }
+}
+
+fn is_text_mime_type(mime_type: &str) -> bool {
+    mime_type
+        .split(';')
+        .next()
+        .unwrap_or(mime_type)
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("text/")
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -351,6 +428,10 @@ pub enum LocalStoreError {
     Io(#[from] std::io::Error),
     #[error("local store JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("local clipboard payload is not UTF-8: {0}")]
+    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("local clipboard payload decode failed: {0}")]
+    PayloadDecode(String),
     #[error("invalid local clipboard item id: {0}")]
     InvalidId(String),
     #[error("browser local storage error: {0}")]
@@ -389,8 +470,14 @@ mod tests {
             "2026-01-02T00:00:00+00:00",
         );
 
-        store.persist_clipboard_item(&older).await.expect("older");
-        store.persist_clipboard_item(&newer).await.expect("newer");
+        store
+            .persist_clipboard_payload_item(&older, older.text.as_bytes())
+            .await
+            .expect("older");
+        store
+            .persist_clipboard_payload_item(&newer, newer.text.as_bytes())
+            .await
+            .expect("newer");
 
         let items = store.recent_clipboard_items(10).await.expect("recent");
         assert_eq!(items.len(), 2);
@@ -402,6 +489,45 @@ mod tests {
             .await
             .expect("text");
         assert_eq!(text.as_deref(), Some("newer"));
+
+        let payload = store
+            .clipboard_payload("22222222-2222-4222-8222-222222222222")
+            .await
+            .expect("payload")
+            .expect("payload bytes");
+        assert_eq!(payload, b"newer");
+    }
+
+    #[tokio::test]
+    async fn persists_image_payloads_and_uses_display_label() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+
+        let image = DecryptedClipboardItem {
+            id: "33333333-3333-4333-8333-333333333333".into(),
+            text: "image/png clipboard payload (4 bytes)".into(),
+            mime_type: "image/png".into(),
+            payload_size: 4,
+            created_at: "2026-01-03T00:00:00+00:00".into(),
+            source_device_id: "device-a".into(),
+        };
+
+        store
+            .persist_clipboard_payload_item(&image, &[0, 1, 2, 3])
+            .await
+            .expect("image");
+
+        let items = store.recent_clipboard_items(10).await.expect("recent");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "image/png clipboard payload (4 bytes)");
+
+        let payload = store
+            .clipboard_payload("33333333-3333-4333-8333-333333333333")
+            .await
+            .expect("payload")
+            .expect("payload bytes");
+        assert_eq!(payload, vec![0, 1, 2, 3]);
     }
 
     #[tokio::test]
@@ -409,6 +535,11 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = LocalStore::new(tmp.path());
         let bad = item("../escape", "bad", "2026-01-01T00:00:00+00:00");
-        assert!(store.persist_clipboard_item(&bad).await.is_err());
+        assert!(
+            store
+                .persist_clipboard_payload_item(&bad, bad.text.as_bytes())
+                .await
+                .is_err()
+        );
     }
 }

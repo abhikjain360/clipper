@@ -43,7 +43,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 628473948;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1384621941;
 
 // Section: executor
 
@@ -117,6 +117,40 @@ fn wire__crate__api__clipper__bridge_clipboard_item_default_impl(
         },
     )
 }
+fn wire__crate__api__clipper__bridge_clipboard_payload_default_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "bridge_clipboard_payload_default",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok(
+                        crate::api::clipper::BridgeClipboardPayload::default(),
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__clipper__bridge_connection_status_default_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -180,6 +214,42 @@ fn wire__crate__api__clipper__bridge_file_item_default_impl(
                         Result::<_, ()>::Ok(crate::api::clipper::BridgeFileItem::default())?;
                     Ok(output_ok)
                 })())
+            }
+        },
+    )
+}
+fn wire__crate__api__clipper__clipboard_payload_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "clipboard_payload",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok = crate::api::clipper::clipboard_payload(api_id).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
             }
         },
     )
@@ -633,6 +703,45 @@ fn wire__crate__api__clipper__send_clipboard_impl(
         },
     )
 }
+fn wire__crate__api__clipper__send_clipboard_payload_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "send_clipboard_payload",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_mime_type = <String>::sse_decode(&mut deserializer);
+            let api_bytes = <Vec<u8>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::clipper::send_clipboard_payload(api_mime_type, api_bytes)
+                                .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__clipper__upload_file_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -813,6 +922,20 @@ impl SseDecode for crate::api::clipper::BridgeClipboardItem {
     }
 }
 
+impl SseDecode for crate::api::clipper::BridgeClipboardPayload {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_mimeType = <String>::sse_decode(deserializer);
+        let mut var_bytes = <Vec<u8>>::sse_decode(deserializer);
+        let mut var_text = <Option<String>>::sse_decode(deserializer);
+        return crate::api::clipper::BridgeClipboardPayload {
+            mime_type: var_mimeType,
+            bytes: var_bytes,
+            text: var_text,
+        };
+    }
+}
+
 impl SseDecode for crate::api::clipper::BridgeConnectionStatus {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -945,33 +1068,48 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        3 => wire__crate__api__clipper__bridge_connection_status_default_impl(
+        3 => wire__crate__api__clipper__bridge_clipboard_payload_default_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        4 => wire__crate__api__clipper__bridge_file_item_default_impl(
+        4 => wire__crate__api__clipper__bridge_connection_status_default_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        5 => wire__crate__api__clipper__connect_to_daemon_impl(port, ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__clipper__copy_to_local_impl(port, ptr, rust_vec_len, data_len),
-        7 => wire__crate__api__clipper__delete_file_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__clipper__download_file_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__clipper__download_file_bytes_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__clipper__get_state_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__clipper__init_app_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__clipper__login_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__clipper__logout_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__clipper__refresh_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__clipper__register_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__clipper__send_clipboard_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__clipper__upload_file_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__clipper__upload_file_bytes_impl(port, ptr, rust_vec_len, data_len),
-        19 => {
+        5 => wire__crate__api__clipper__bridge_file_item_default_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        6 => wire__crate__api__clipper__clipboard_payload_impl(port, ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__clipper__connect_to_daemon_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__clipper__copy_to_local_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__clipper__delete_file_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__clipper__download_file_impl(port, ptr, rust_vec_len, data_len),
+        11 => {
+            wire__crate__api__clipper__download_file_bytes_impl(port, ptr, rust_vec_len, data_len)
+        }
+        12 => wire__crate__api__clipper__get_state_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__clipper__init_app_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__clipper__login_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__clipper__logout_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__clipper__refresh_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__clipper__register_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__clipper__send_clipboard_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__clipper__send_clipboard_payload_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        20 => wire__crate__api__clipper__upload_file_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__clipper__upload_file_bytes_impl(port, ptr, rust_vec_len, data_len),
+        22 => {
             wire__crate__api__clipper__wait_for_state_change_impl(port, ptr, rust_vec_len, data_len)
         }
         _ => unreachable!(),
@@ -1041,6 +1179,28 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::clipper::BridgeClipboardItem>
     for crate::api::clipper::BridgeClipboardItem
 {
     fn into_into_dart(self) -> crate::api::clipper::BridgeClipboardItem {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::clipper::BridgeClipboardPayload {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.mime_type.into_into_dart().into_dart(),
+            self.bytes.into_into_dart().into_dart(),
+            self.text.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::clipper::BridgeClipboardPayload
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::clipper::BridgeClipboardPayload>
+    for crate::api::clipper::BridgeClipboardPayload
+{
+    fn into_into_dart(self) -> crate::api::clipper::BridgeClipboardPayload {
         self
     }
 }
@@ -1136,6 +1296,15 @@ impl SseEncode for crate::api::clipper::BridgeClipboardItem {
         <i64>::sse_encode(self.payload_size, serializer);
         <String>::sse_encode(self.created_at, serializer);
         <String>::sse_encode(self.source_device_id, serializer);
+    }
+}
+
+impl SseEncode for crate::api::clipper::BridgeClipboardPayload {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.mime_type, serializer);
+        <Vec<u8>>::sse_encode(self.bytes, serializer);
+        <Option<String>>::sse_encode(self.text, serializer);
     }
 }
 

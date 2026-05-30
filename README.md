@@ -31,6 +31,18 @@ The daemon owns sync, clipboard watching, and Keychain-backed profile storage.
 Android runs the same Rust sync engine in-process behind the Flutter bridge.
 The emulator default server URL is `http://10.0.2.2:8787`.
 
+Android can keep the sync engine alive in a foreground service after the app has
+been opened and the user is logged in. The service shows a persistent
+notification with a Stop action and is for network sync only. Android does not
+allow a normal background app or foreground service to continuously read the
+system clipboard; clipboard reads require the app to have input focus unless it
+is the default input method or a privileged system app. For Android clipboard
+push, open Clipper and use **Add Current Clipboard** from the Clipboard tab.
+
+The web client does not watch the clipboard in the background. It can display
+synced clipboard history and can add the current text clipboard entry through
+the Clipboard tab when the browser grants access.
+
 ```sh
 cd app && flutter run -d macos
 cd app && flutter run -d android

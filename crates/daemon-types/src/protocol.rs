@@ -55,7 +55,9 @@ pub enum DaemonCommand {
     Logout,
     GetState,
     SendClipboard(SendClipboardParams),
+    SendClipboardPayload(SendClipboardPayloadParams),
     CopyToLocal(CopyToLocalParams),
+    ClipboardPayload(ClipboardPayloadParams),
     UploadFile(UploadFileParams),
     DownloadFile(DownloadFileParams),
     DeleteFile(DeleteFileParams),
@@ -91,7 +93,18 @@ pub struct SendClipboardParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendClipboardPayloadParams {
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CopyToLocalParams {
+    pub item_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipboardPayloadParams {
     pub item_id: String,
 }
 
@@ -114,6 +127,13 @@ pub struct DeleteFileParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CopyToLocalResult {
     pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipboardPayloadResult {
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => 628473948;
+  int get rustContentHash => 1384621941;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -82,9 +82,15 @@ abstract class RustLibApi extends BaseApi {
 
   Future<BridgeClipboardItem> crateApiClipperBridgeClipboardItemDefault();
 
+  Future<BridgeClipboardPayload> crateApiClipperBridgeClipboardPayloadDefault();
+
   Future<BridgeConnectionStatus> crateApiClipperBridgeConnectionStatusDefault();
 
   Future<BridgeFileItem> crateApiClipperBridgeFileItemDefault();
+
+  Future<BridgeClipboardPayload> crateApiClipperClipboardPayload({
+    required String id,
+  });
 
   Future<void> crateApiClipperConnectToDaemon();
 
@@ -122,6 +128,11 @@ abstract class RustLibApi extends BaseApi {
   });
 
   Future<void> crateApiClipperSendClipboard({required String text});
+
+  Future<String> crateApiClipperSendClipboardPayload({
+    required String mimeType,
+    required List<int> bytes,
+  });
 
   Future<String> crateApiClipperUploadFile({required String filePath});
 
@@ -200,6 +211,37 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<BridgeClipboardPayload>
+  crateApiClipperBridgeClipboardPayloadDefault() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 3,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_clipboard_payload,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiClipperBridgeClipboardPayloadDefaultConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiClipperBridgeClipboardPayloadDefaultConstMeta =>
+      const TaskConstMeta(
+        debugName: "bridge_clipboard_payload_default",
+        argNames: [],
+      );
+
+  @override
   Future<BridgeConnectionStatus>
   crateApiClipperBridgeConnectionStatusDefault() {
     return handler.executeNormal(
@@ -209,7 +251,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 3,
+            funcId: 4,
             port: port_,
           );
         },
@@ -239,7 +281,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 5,
             port: port_,
           );
         },
@@ -258,6 +300,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "bridge_file_item_default", argNames: []);
 
   @override
+  Future<BridgeClipboardPayload> crateApiClipperClipboardPayload({
+    required String id,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(id, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 6,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_clipboard_payload,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiClipperClipboardPayloadConstMeta,
+        argValues: [id],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiClipperClipboardPayloadConstMeta =>
+      const TaskConstMeta(debugName: "clipboard_payload", argNames: ["id"]);
+
+  @override
   Future<void> crateApiClipperConnectToDaemon() {
     return handler.executeNormal(
       NormalTask(
@@ -266,7 +338,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 7,
             port: port_,
           );
         },
@@ -294,7 +366,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 6,
+            funcId: 8,
             port: port_,
           );
         },
@@ -322,7 +394,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 9,
             port: port_,
           );
         },
@@ -354,7 +426,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 10,
             port: port_,
           );
         },
@@ -385,7 +457,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 11,
             port: port_,
           );
         },
@@ -415,7 +487,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 12,
             port: port_,
           );
         },
@@ -442,7 +514,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 13,
             port: port_,
           );
         },
@@ -478,7 +550,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 14,
             port: port_,
           );
         },
@@ -507,7 +579,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 15,
             port: port_,
           );
         },
@@ -534,7 +606,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 16,
             port: port_,
           );
         },
@@ -570,7 +642,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 17,
             port: port_,
           );
         },
@@ -600,7 +672,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 18,
             port: port_,
           );
         },
@@ -619,6 +691,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "send_clipboard", argNames: ["text"]);
 
   @override
+  Future<String> crateApiClipperSendClipboardPayload({
+    required String mimeType,
+    required List<int> bytes,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(mimeType, serializer);
+          sse_encode_list_prim_u_8_loose(bytes, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 19,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiClipperSendClipboardPayloadConstMeta,
+        argValues: [mimeType, bytes],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiClipperSendClipboardPayloadConstMeta =>
+      const TaskConstMeta(
+        debugName: "send_clipboard_payload",
+        argNames: ["mimeType", "bytes"],
+      );
+
+  @override
   Future<String> crateApiClipperUploadFile({required String filePath}) {
     return handler.executeNormal(
       NormalTask(
@@ -628,7 +735,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 17,
+            funcId: 20,
             port: port_,
           );
         },
@@ -662,7 +769,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 18,
+            funcId: 21,
             port: port_,
           );
         },
@@ -692,7 +799,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 19,
+            funcId: 22,
             port: port_,
           );
         },
@@ -753,6 +860,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       payloadSize: dco_decode_i_64(arr[3]),
       createdAt: dco_decode_String(arr[4]),
       sourceDeviceId: dco_decode_String(arr[5]),
+    );
+  }
+
+  @protected
+  BridgeClipboardPayload dco_decode_bridge_clipboard_payload(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return BridgeClipboardPayload(
+      mimeType: dco_decode_String(arr[0]),
+      bytes: dco_decode_list_prim_u_8_strict(arr[1]),
+      text: dco_decode_opt_String(arr[2]),
     );
   }
 
@@ -892,6 +1012,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       payloadSize: var_payloadSize,
       createdAt: var_createdAt,
       sourceDeviceId: var_sourceDeviceId,
+    );
+  }
+
+  @protected
+  BridgeClipboardPayload sse_decode_bridge_clipboard_payload(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_mimeType = sse_decode_String(deserializer);
+    var var_bytes = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_text = sse_decode_opt_String(deserializer);
+    return BridgeClipboardPayload(
+      mimeType: var_mimeType,
+      bytes: var_bytes,
+      text: var_text,
     );
   }
 
@@ -1039,6 +1174,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_64(self.payloadSize, serializer);
     sse_encode_String(self.createdAt, serializer);
     sse_encode_String(self.sourceDeviceId, serializer);
+  }
+
+  @protected
+  void sse_encode_bridge_clipboard_payload(
+    BridgeClipboardPayload self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.mimeType, serializer);
+    sse_encode_list_prim_u_8_strict(self.bytes, serializer);
+    sse_encode_opt_String(self.text, serializer);
   }
 
   @protected
