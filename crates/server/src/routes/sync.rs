@@ -4,8 +4,11 @@ use axum::{
     http::StatusCode,
 };
 use clipper_core::models::{BootstrapResponse, DeviceInfo, ServerInfo};
-use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
+use sea_orm::{
+    ColumnTrait, DerivePartialModel, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect,
+};
 use tracing::error;
+use uuid::Uuid;
 
 use crate::{
     auth::AuthInfo,
@@ -13,11 +16,20 @@ use crate::{
     state::AppState,
 };
 
+#[derive(Debug, DerivePartialModel)]
+#[sea_orm(entity = "devices::Entity", from_query_result)]
+struct BootstrapDeviceRow {
+    id: Uuid,
+    name: String,
+    platform: String,
+}
+
 pub async fn bootstrap(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
 ) -> Result<Json<BootstrapResponse>, StatusCode> {
     let dev = devices::Entity::find_by_id(auth.device_id)
+        .into_partial_model::<BootstrapDeviceRow>()
         .one(state.db())
         .await
         .map_err(|e| {
@@ -39,6 +51,9 @@ pub async fn bootstrap(
     let latest_seq = event_log::Entity::find()
         .filter(event_log::Column::UserId.eq(auth.user_id))
         .order_by(event_log::Column::Seq, Order::Desc)
+        .select_only()
+        .column(event_log::Column::Seq)
+        .into_tuple::<i32>()
         .one(state.db())
         .await
         .map_err(|e| {
@@ -49,7 +64,7 @@ pub async fn bootstrap(
             );
             StatusCode::INTERNAL_SERVER_ERROR
         })?
-        .map(|e| i64::from(e.seq))
+        .map(i64::from)
         .unwrap_or(0);
 
     Ok(Json(BootstrapResponse {

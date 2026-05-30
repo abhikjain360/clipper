@@ -17,8 +17,8 @@ use clipper_core::{
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Set,
-    SqlErr, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DerivePartialModel, EntityTrait, Order, QueryFilter, QueryOrder,
+    QuerySelect, Set, SqlErr, TransactionTrait,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -48,6 +48,9 @@ pub async fn init_object(
     )?;
 
     if objects::Entity::find_by_id(object_id)
+        .select_only()
+        .column(objects::Column::Id)
+        .into_tuple::<Uuid>()
         .one(state.db())
         .await
         .map_err(|e| {
@@ -100,7 +103,7 @@ pub async fn init_object(
     let object = objects::ActiveModel {
         id: Set(object_id),
         user_id: Set(auth.user_id),
-        kind: Set(req.kind.as_str().to_string()),
+        kind: Set(req.kind.to_string()),
         meta_ciphertext: Set(req.meta_ciphertext),
         meta_nonce: Set(req.meta_nonce),
         created_at: Set(now.clone()),
@@ -212,7 +215,7 @@ pub async fn init_object(
         })
         .collect();
 
-    info!(device_id = %auth.device_id, object_id = %object_id_text, kind = req.kind.as_str(), "Object initialized");
+    info!(device_id = %auth.device_id, object_id = %object_id_text, kind = req.kind.as_ref(), "Object initialized");
 
     Ok(Postcard(ObjectInitResponse {
         upload_urls,
@@ -231,6 +234,7 @@ pub async fn upload_payload(
     let object = object_for_upload(&state, auth.user_id, auth.device_id, object_uuid).await?;
 
     let payload = object_payloads::Entity::find_by_id((object_uuid, payload_uuid))
+        .into_partial_model::<PayloadUploadRow>()
         .one(state.db())
         .await
         .map_err(|e| {
@@ -367,6 +371,7 @@ pub async fn complete_object(
 
     let payloads = object_payloads::Entity::find()
         .filter(object_payloads::Column::ObjectId.eq(object_uuid))
+        .into_partial_model::<PayloadCompletionRow>()
         .all(state.db())
         .await
         .map_err(|e| {
@@ -446,7 +451,14 @@ pub async fn complete_object(
         }
     }
 
-    let kind = object_kind_from_db(&object.kind)?;
+    let kind = object.kind.parse().map_err(|_| {
+        error!(
+            object_id = %object_uuid,
+            kind = %object.kind,
+            "Object row has unknown kind value in database",
+        );
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+    })?;
     let now = Utc::now().to_rfc3339();
     let txn = state.db().begin().await.map_err(|e| {
         error!(error = %e, "Failed to begin complete_object transaction");
@@ -529,7 +541,7 @@ pub async fn complete_object(
         spawn_clipboard_trim(state.clone(), auth.user_id);
     }
 
-    info!(device_id = %auth.device_id, object_id = %object_id, kind = kind.as_str(), "Object completed");
+    info!(device_id = %auth.device_id, object_id = %object_id, kind = kind.as_ref(), "Object completed");
     Ok(Postcard(OkResponse { ok: true }))
 }
 
@@ -538,6 +550,54 @@ pub struct ObjectListQuery {
     pub kind: Option<String>,
     pub limit: Option<u64>,
     pub before: Option<String>,
+}
+
+#[derive(Debug, DerivePartialModel)]
+#[sea_orm(entity = "objects::Entity", from_query_result)]
+struct ListedObjectRow {
+    id: Uuid,
+    kind: String,
+    meta_ciphertext: Vec<u8>,
+    meta_nonce: Vec<u8>,
+    created_at: String,
+    source_device_id: Uuid,
+}
+
+#[derive(Debug, DerivePartialModel)]
+#[sea_orm(entity = "object_payloads::Entity", from_query_result)]
+struct ListedPayloadRow {
+    object_id: Uuid,
+    payload_id: Uuid,
+    nonce: Vec<u8>,
+    ciphertext_size: i64,
+    sha256_ciphertext: Vec<u8>,
+}
+
+#[derive(Debug, DerivePartialModel)]
+#[sea_orm(entity = "objects::Entity", from_query_result)]
+struct ObjectUploadRow {
+    id: Uuid,
+    kind: String,
+    source_device_id: Uuid,
+    status: String,
+}
+
+#[derive(Debug, DerivePartialModel)]
+#[sea_orm(entity = "object_payloads::Entity", from_query_result)]
+struct PayloadUploadRow {
+    ciphertext_path: String,
+    ciphertext_size: i64,
+    status: String,
+}
+
+#[derive(Debug, DerivePartialModel)]
+#[sea_orm(entity = "object_payloads::Entity", from_query_result)]
+struct PayloadCompletionRow {
+    payload_id: Uuid,
+    ciphertext_path: String,
+    ciphertext_size: i64,
+    sha256_ciphertext: Vec<u8>,
+    status: String,
 }
 
 pub async fn list_objects(
@@ -555,49 +615,69 @@ pub async fn list_objects(
         .order_by(objects::Column::CreatedAt, Order::Desc);
 
     if let Some(kind) = &query.kind {
-        let kind = object_kind_from_query(kind).map_err(|_| {
+        let kind: ObjectKind = kind.parse().map_err(|_| {
             debug!(kind = %kind, "Rejected unknown object kind in list query");
             StatusCode::BAD_REQUEST
         })?;
-        q = q.filter(objects::Column::Kind.eq(kind.as_str()));
+        q = q.filter(objects::Column::Kind.eq(kind.as_ref()));
     }
 
     if let Some(before) = &query.before {
         q = q.filter(objects::Column::CreatedAt.lt(before.clone()));
     }
 
-    let objects = q.limit(limit + 1).all(state.db()).await.map_err(|e| {
-        error!(
-            user_id = %auth.user_id,
-            error = %e,
-            "Failed to list objects",
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let objects = q
+        .limit(limit + 1)
+        .into_partial_model::<ListedObjectRow>()
+        .all(state.db())
+        .await
+        .map_err(|e| {
+            error!(
+                user_id = %auth.user_id,
+                error = %e,
+                "Failed to list objects",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let has_more = objects.len() as u64 > limit;
-    let objects: Vec<objects::Model> = objects.into_iter().take(limit as usize).collect();
+    let objects: Vec<ListedObjectRow> = objects.into_iter().take(limit as usize).collect();
+    let object_ids: Vec<Uuid> = objects.iter().map(|object| object.id).collect();
 
-    let mut items = Vec::with_capacity(objects.len());
-    for object in &objects {
-        let payloads = object_payloads::Entity::find()
-            .filter(object_payloads::Column::ObjectId.eq(object.id))
+    let payloads = if object_ids.is_empty() {
+        Vec::new()
+    } else {
+        object_payloads::Entity::find()
+            .filter(object_payloads::Column::ObjectId.is_in(object_ids))
             .filter(object_payloads::Column::Status.eq("complete"))
+            .order_by(object_payloads::Column::ObjectId, Order::Asc)
             .order_by(object_payloads::Column::PayloadId, Order::Asc)
+            .into_partial_model::<ListedPayloadRow>()
             .all(state.db())
             .await
             .map_err(|e| {
                 error!(
-                    object_id = %object.id,
+                    user_id = %auth.user_id,
                     error = %e,
                     "Failed to load payloads while listing objects",
                 );
                 StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+            })?
+    };
 
+    let mut payloads_by_object = HashMap::<Uuid, Vec<ListedPayloadRow>>::new();
+    for payload in payloads {
+        payloads_by_object
+            .entry(payload.object_id)
+            .or_default()
+            .push(payload);
+    }
+
+    let mut items = Vec::with_capacity(objects.len());
+    for object in &objects {
         items.push(ObjectListItem {
             id: object.id.into(),
-            kind: object_kind_from_db(&object.kind).map_err(|_| {
+            kind: object.kind.parse().map_err(|_| {
                 error!(
                     object_id = %object.id,
                     kind = %object.kind,
@@ -607,7 +687,9 @@ pub async fn list_objects(
             })?,
             meta_nonce: object.meta_nonce.clone(),
             meta_ciphertext: object.meta_ciphertext.clone(),
-            payloads: payloads
+            payloads: payloads_by_object
+                .remove(&object.id)
+                .unwrap_or_default()
                 .into_iter()
                 .map(|p| ObjectPayloadDescriptor {
                     id: p.payload_id.into(),
@@ -638,9 +720,12 @@ pub async fn download_payload(
     let object_uuid = validate_client_id(&object_id).map_err(|(status, _)| status)?;
     let payload_uuid = validate_client_id(&payload_id).map_err(|(status, _)| status)?;
 
-    objects::Entity::find_by_id(object_uuid)
+    let object_exists = objects::Entity::find_by_id(object_uuid)
         .filter(objects::Column::UserId.eq(auth.user_id))
         .filter(objects::Column::Status.eq("complete"))
+        .select_only()
+        .column(objects::Column::Id)
+        .into_tuple::<Uuid>()
         .one(state.db())
         .await
         .map_err(|e| {
@@ -650,11 +735,16 @@ pub async fn download_payload(
                 "Failed to look up object for download",
             );
             StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        })?;
+    if object_exists.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     let payload = object_payloads::Entity::find_by_id((object_uuid, payload_uuid))
         .filter(object_payloads::Column::Status.eq("complete"))
+        .select_only()
+        .column(object_payloads::Column::CiphertextPath)
+        .into_tuple::<String>()
         .one(state.db())
         .await
         .map_err(|e| {
@@ -668,7 +758,7 @@ pub async fn download_payload(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let path = state.objects_dir().join(&payload.ciphertext_path);
+    let path = state.objects_dir().join(&payload);
     let file = tokio::fs::File::open(&path).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             error!(
@@ -699,8 +789,11 @@ pub async fn delete_object(
     Path(object_id): Path<String>,
 ) -> Result<Postcard<OkResponse>, StatusCode> {
     let object_uuid = validate_client_id(&object_id).map_err(|(status, _)| status)?;
-    let object = objects::Entity::find_by_id(object_uuid)
+    let kind = objects::Entity::find_by_id(object_uuid)
         .filter(objects::Column::UserId.eq(auth.user_id))
+        .select_only()
+        .column(objects::Column::Kind)
+        .into_tuple::<String>()
         .one(state.db())
         .await
         .map_err(|e| {
@@ -712,10 +805,10 @@ pub async fn delete_object(
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
-    let kind = object_kind_from_db(&object.kind).map_err(|_| {
+    let kind: ObjectKind = kind.parse().map_err(|_| {
         error!(
             object_id = %object_uuid,
-            kind = %object.kind,
+            kind = %kind,
             "Object row has unknown kind value in database",
         );
         StatusCode::INTERNAL_SERVER_ERROR
@@ -725,8 +818,11 @@ pub async fn delete_object(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let payloads = object_payloads::Entity::find()
+    let payload_paths: Vec<String> = object_payloads::Entity::find()
         .filter(object_payloads::Column::ObjectId.eq(object_uuid))
+        .select_only()
+        .column(object_payloads::Column::CiphertextPath)
+        .into_tuple()
         .all(state.db())
         .await
         .map_err(|e| {
@@ -737,9 +833,9 @@ pub async fn delete_object(
             );
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    let paths: Vec<_> = payloads
+    let paths: Vec<_> = payload_paths
         .iter()
-        .map(|payload| state.objects_dir().join(&payload.ciphertext_path))
+        .map(|payload_path| state.objects_dir().join(payload_path))
         .collect();
 
     let txn = state.db().begin().await.map_err(|e| {
@@ -808,9 +904,10 @@ async fn object_for_upload(
     user_id: Uuid,
     device_id: Uuid,
     object_id: Uuid,
-) -> Result<objects::Model, (StatusCode, axum::Json<ErrorResponse>)> {
+) -> Result<ObjectUploadRow, (StatusCode, axum::Json<ErrorResponse>)> {
     let object = objects::Entity::find_by_id(object_id)
         .filter(objects::Column::UserId.eq(user_id))
+        .into_partial_model::<ObjectUploadRow>()
         .one(state.db())
         .await
         .map_err(|e| {
@@ -844,8 +941,8 @@ where
     event_log::ActiveModel {
         seq: Default::default(),
         user_id: Set(user_id),
-        event_type: Set(format!("{}.created", kind.as_str())),
-        object_kind: Set(kind.as_str().into()),
+        event_type: Set(format!("{}.created", kind.as_ref())),
+        object_kind: Set(kind.to_string()),
         object_id: Set(object_id),
         created_at: Set(now.into()),
     }
@@ -855,7 +952,7 @@ where
         error!(
             object_id = %object_id,
             user_id = %user_id,
-            kind = kind.as_str(),
+            kind = kind.as_ref(),
             error = %e,
             "Failed to insert created event",
         );
@@ -874,8 +971,8 @@ fn broadcast_created(
     let _ = state.ws_tx().send(WsBroadcast {
         user_id,
         seq,
-        event_type: format!("{}.created", kind.as_str()),
-        object_kind: kind.as_str().into(),
+        event_type: format!("{}.created", kind.as_ref()),
+        object_kind: kind.to_string(),
         object_id: object_id.into(),
         created_at: now.into(),
     });
@@ -897,25 +994,6 @@ fn spawn_clipboard_trim(state: AppState, user_id: Uuid) {
             tracing::warn!(user_id = %user_id, error = %err, "Clipboard trim failed");
         }
     });
-}
-
-fn object_kind_from_query(kind: &str) -> Result<ObjectKind, ()> {
-    match kind {
-        "clipboard" => Ok(ObjectKind::Clipboard),
-        "file" => Ok(ObjectKind::File),
-        _ => Err(()),
-    }
-}
-
-fn object_kind_from_db(kind: &str) -> Result<ObjectKind, (StatusCode, axum::Json<ErrorResponse>)> {
-    match kind {
-        "clipboard" => Ok(ObjectKind::Clipboard),
-        "file" => Ok(ObjectKind::File),
-        _ => Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "Invalid object kind",
-        )),
-    }
 }
 
 fn validate_object_payload_size(size: i64) -> Result<u64, (StatusCode, axum::Json<ErrorResponse>)> {

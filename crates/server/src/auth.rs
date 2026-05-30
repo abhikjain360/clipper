@@ -7,7 +7,7 @@ use axum::{
 use base64::Engine;
 use chrono::Utc;
 use clipper_core::crypto::{self, sha256};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, DerivePartialModel, EntityTrait, QueryFilter};
 use uuid::Uuid;
 
 use crate::{entity::sessions, state::AppState};
@@ -26,6 +26,15 @@ pub fn hash_access_key(
         Some(secret),
         params,
     )?))
+}
+
+#[derive(Debug, DerivePartialModel)]
+#[sea_orm(entity = "sessions::Entity", from_query_result)]
+struct SessionAuthRow {
+    id: Uuid,
+    user_id: Uuid,
+    device_id: Uuid,
+    expires_at: String,
 }
 
 /// Extract bearer token from Authorization header.
@@ -50,6 +59,7 @@ pub async fn auth_middleware(
 
     let sess = sessions::Entity::find()
         .filter(sessions::Column::TokenHash.eq(token_hash.to_vec()))
+        .into_partial_model::<SessionAuthRow>()
         .one(state.db())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -61,9 +71,14 @@ pub async fn auth_middleware(
     }
 
     // Update last_seen_at
-    let mut active: sessions::ActiveModel = sess.clone().into();
-    active.last_seen_at = Set(now);
-    let _ = active.update(state.db()).await;
+    let _ = sessions::Entity::update_many()
+        .col_expr(
+            sessions::Column::LastSeenAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(sessions::Column::Id.eq(sess.id))
+        .exec(state.db())
+        .await;
 
     // Inject device_id and session_id into request extensions
     req.extensions_mut().insert(AuthInfo {

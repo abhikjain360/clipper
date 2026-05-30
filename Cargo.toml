@@ -22,3 +22,4 @@ clipper-api-types = { path = "crates/api-types" }
 clipper-app-types = { path = "crates/app-types" }
 clipper-client = { path = "crates/client" }
 clipper-daemon-types = { path = "crates/daemon-types" }
+strum = { version = "0.26.3", features = ["derive"] }

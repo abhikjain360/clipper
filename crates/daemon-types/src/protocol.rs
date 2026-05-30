@@ -9,6 +9,7 @@
 
 use clipper_app_types::AppState;
 use serde::{Deserialize, Serialize};
+use strum::{AsRefStr, Display, EnumString};
 
 pub const IPC_AUTH_VERSION: u32 = 1;
 pub const IPC_AUTH_NONCE_BYTES: usize = 32;
@@ -195,8 +196,11 @@ pub struct DaemonEvent {
     pub auth_challenge: Option<AuthChallenge>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, Display, EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum DaemonEventKind {
     AuthChallenge,
     StateChanged,

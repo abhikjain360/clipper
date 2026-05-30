@@ -661,6 +661,7 @@ dependencies = [
  "garde",
  "serde",
  "sha2",
+ "strum",
  "uuid",
 ]
 
@@ -669,6 +670,7 @@ name = "clipper-app-types"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "strum",
 ]
 
 [[package]]
@@ -751,6 +753,7 @@ dependencies = [
  "clipper-app-types",
  "serde",
  "serde_json",
+ "strum",
 ]
 
 [[package]]
@@ -3439,6 +3442,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "strum",
  "tempfile",
  "thiserror",
  "tokio",
@@ -4262,6 +4266,22 @@ name = "strum"
 version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
+dependencies = [
+ "strum_macros",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c6bee85a5a24955dc440386795aa378cd9cf82acd5f764469152d2270e581be"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "subtle"

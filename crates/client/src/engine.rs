@@ -956,7 +956,7 @@ impl SyncEngine {
                         }) => {
                             debug!("WS event seq={} type={}", seq, event_type);
                             *self.last_seq.write().await = seq;
-                            match object_kind.as_str() {
+                            match object_kind.as_ref() {
                                 "clipboard" | "file" => {
                                     if let Err(e) = self.refresh().await {
                                         warn!("Failed to refresh after event: {}", e);

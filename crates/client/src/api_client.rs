@@ -289,7 +289,7 @@ impl ApiClient {
             let mut query = url.query_pairs_mut();
             query.append_pair("limit", &limit.unwrap_or(100).to_string());
             if let Some(kind) = kind {
-                query.append_pair("kind", kind.as_str());
+                query.append_pair("kind", kind.as_ref());
             }
             if let Some(before) = before {
                 query.append_pair("before", before);

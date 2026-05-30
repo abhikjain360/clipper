@@ -7,7 +7,9 @@ use axum::{
 };
 use chrono::Utc;
 use clipper_core::models::{WsClientMessage, WsServerMessage};
-use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
+use sea_orm::{
+    ColumnTrait, DerivePartialModel, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect,
+};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -22,6 +24,16 @@ pub struct WsBroadcast {
     pub object_kind: String,
     pub object_id: String,
     pub created_at: String,
+}
+
+#[derive(Debug, DerivePartialModel)]
+#[sea_orm(entity = "event_log::Entity", from_query_result)]
+struct WsEventRow {
+    seq: i32,
+    event_type: String,
+    object_kind: String,
+    object_id: Uuid,
+    created_at: String,
 }
 
 pub async fn ws_handler(
@@ -148,16 +160,19 @@ async fn get_latest_seq(state: &AppState, user_id: Uuid) -> Result<i64, sea_orm:
     let row = event_log::Entity::find()
         .filter(event_log::Column::UserId.eq(user_id))
         .order_by(event_log::Column::Seq, Order::Desc)
+        .select_only()
+        .column(event_log::Column::Seq)
+        .into_tuple::<i32>()
         .one(state.db())
         .await?;
-    Ok(row.map(|r| i64::from(r.seq)).unwrap_or(0))
+    Ok(row.map(i64::from).unwrap_or(0))
 }
 
 async fn get_events_since(
     state: &AppState,
     user_id: Uuid,
     last_seq: i64,
-) -> Result<Vec<event_log::Model>, sea_orm::DbErr> {
+) -> Result<Vec<WsEventRow>, sea_orm::DbErr> {
     let last_seq = match i32::try_from(last_seq) {
         Ok(seq) => seq,
         Err(_) if last_seq.is_negative() => i32::MIN,
@@ -168,6 +183,7 @@ async fn get_events_since(
         .filter(event_log::Column::UserId.eq(user_id))
         .filter(event_log::Column::Seq.gt(last_seq))
         .order_by_asc(event_log::Column::Seq)
+        .into_partial_model::<WsEventRow>()
         .all(state.db())
         .await
 }

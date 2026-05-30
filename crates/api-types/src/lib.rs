@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use strum::{AsRefStr, Display, EnumString};
 use uuid::Uuid;
 
 const SHA256_BYTES: usize = 32;
@@ -203,19 +204,13 @@ pub struct ClipboardMeta {
 
 // -- Objects --
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, Display, EnumString,
+)]
+#[strum(serialize_all = "snake_case")]
 pub enum ObjectKind {
     Clipboard,
     File,
-}
-
-impl ObjectKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Clipboard => "clipboard",
-            Self::File => "file",
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate)]

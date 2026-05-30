@@ -11,6 +11,7 @@ use std::future::Future;
 
 use clipper_app_types as app_types;
 use clipper_daemon_types as daemon;
+use strum::{AsRefStr, Display, EnumString};
 
 use crate::{error::AppError, runtime};
 
@@ -36,7 +37,8 @@ pub struct BridgeFileItem {
     pub source_device_id: String,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, AsRefStr, Display, EnumString)]
+#[strum(serialize_all = "PascalCase")]
 pub enum BridgeConnectionStatus {
     Disconnected,
     Connecting,

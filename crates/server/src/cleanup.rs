@@ -41,15 +41,18 @@ pub async fn run_cleanup_loop(state: AppState) {
 
 async fn cleanup_expired_clipboard_objects(state: &AppState) -> CleanupResult<()> {
     let now = Utc::now().to_rfc3339();
-    let expired = objects::Entity::find()
+    let expired_ids: Vec<Uuid> = objects::Entity::find()
         .filter(objects::Column::Kind.eq("clipboard"))
         .filter(objects::Column::ExpiresAt.is_not_null())
         .filter(objects::Column::ExpiresAt.lt(&now))
+        .select_only()
+        .column(objects::Column::Id)
+        .into_tuple()
         .all(state.db())
         .await?;
 
-    if !expired.is_empty() {
-        let count = delete_clipboard_objects(state, &expired).await?;
+    if !expired_ids.is_empty() {
+        let count = delete_clipboard_objects(state, &expired_ids).await?;
         info!(count, "Cleaned up expired clipboard objects");
     }
 
@@ -85,41 +88,43 @@ pub(crate) async fn trim_user_clipboard(
     user_id: Uuid,
 ) -> Result<usize, sea_orm::DbErr> {
     let max_items = state.config().clipboard.max_items;
-    let excess = objects::Entity::find()
+    let excess_ids: Vec<Uuid> = objects::Entity::find()
         .filter(objects::Column::Kind.eq("clipboard"))
         .filter(objects::Column::UserId.eq(user_id))
         .order_by(objects::Column::CreatedAt, Order::Desc)
         .offset(max_items)
         // SQLite rejects OFFSET without LIMIT, so bound generously to "all remaining rows".
         .limit(i64::MAX as u64)
+        .select_only()
+        .column(objects::Column::Id)
+        .into_tuple()
         .all(state.db())
         .await?;
-    if excess.is_empty() {
+    if excess_ids.is_empty() {
         return Ok(0);
     }
-    delete_clipboard_objects(state, &excess).await
+    delete_clipboard_objects(state, &excess_ids).await
 }
 
-async fn delete_clipboard_objects(
-    state: &AppState,
-    items: &[objects::Model],
-) -> Result<usize, sea_orm::DbErr> {
-    if items.is_empty() {
+async fn delete_clipboard_objects(state: &AppState, ids: &[Uuid]) -> Result<usize, sea_orm::DbErr> {
+    if ids.is_empty() {
         return Ok(0);
     }
-    let ids: Vec<Uuid> = items.iter().map(|o| o.id).collect();
 
-    let payloads = object_payloads::Entity::find()
-        .filter(object_payloads::Column::ObjectId.is_in(ids.clone()))
+    let payload_paths: Vec<String> = object_payloads::Entity::find()
+        .filter(object_payloads::Column::ObjectId.is_in(ids.to_vec()))
+        .select_only()
+        .column(object_payloads::Column::CiphertextPath)
+        .into_tuple()
         .all(state.db())
         .await?;
-    for payload in &payloads {
-        let path = state.objects_dir().join(&payload.ciphertext_path);
+    for payload_path in &payload_paths {
+        let path = state.objects_dir().join(payload_path);
         let _ = tokio::fs::remove_file(path).await;
     }
 
     let res = objects::Entity::delete_many()
-        .filter(objects::Column::Id.is_in(ids))
+        .filter(objects::Column::Id.is_in(ids.to_vec()))
         .exec(state.db())
         .await?;
     Ok(res.rows_affected as usize)
@@ -149,20 +154,26 @@ async fn cleanup_orphan_object_uploads(state: &AppState) -> CleanupResult<()> {
         - Duration::seconds(state.config().cleanup.orphan_upload_ttl_secs as i64))
     .to_rfc3339();
 
-    let orphans = objects::Entity::find()
+    let orphan_ids: Vec<Uuid> = objects::Entity::find()
         .filter(objects::Column::Status.ne("complete"))
         .filter(objects::Column::CreatedAt.lt(&cutoff))
+        .select_only()
+        .column(objects::Column::Id)
+        .into_tuple()
         .all(state.db())
         .await?;
 
-    let count = orphans.len();
-    for object in &orphans {
-        let payloads = object_payloads::Entity::find()
-            .filter(object_payloads::Column::ObjectId.eq(object.id))
+    let count = orphan_ids.len();
+    if !orphan_ids.is_empty() {
+        let payload_paths: Vec<String> = object_payloads::Entity::find()
+            .filter(object_payloads::Column::ObjectId.is_in(orphan_ids.clone()))
+            .select_only()
+            .column(object_payloads::Column::CiphertextPath)
+            .into_tuple()
             .all(state.db())
             .await?;
-        for payload in payloads {
-            let path = state.objects_dir().join(&payload.ciphertext_path);
+        for payload_path in payload_paths {
+            let path = state.objects_dir().join(payload_path);
             let _ = tokio::fs::remove_file(path).await;
         }
     }

@@ -14,8 +14,8 @@ use clipper_core::{
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, SqlErr,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DerivePartialModel, EntityTrait, QueryFilter,
+    QuerySelect, Set, SqlErr, TransactionTrait,
 };
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -31,6 +31,21 @@ use crate::{
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
+#[derive(Debug, DerivePartialModel)]
+#[sea_orm(entity = "users::Entity", from_query_result)]
+struct LoginChallengeUserRow {
+    id: Uuid,
+    opaque_server_setup: Vec<u8>,
+    opaque_password_file: Vec<u8>,
+}
+
+#[derive(Debug, DerivePartialModel)]
+#[sea_orm(entity = "users::Entity", from_query_result)]
+struct LoginUserRow {
+    id: Uuid,
+    username: String,
+}
+
 /// OPAQUE login round 1, server side. Math in `docs/opaque.md`.
 pub async fn challenge(
     State(state): State<AppState>,
@@ -38,6 +53,7 @@ pub async fn challenge(
 ) -> Result<Postcard<LoginChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
     let user = users::Entity::find()
         .filter(users::Column::Username.eq(&req.username))
+        .into_partial_model::<LoginChallengeUserRow>()
         .one(state.db())
         .await
         .map_err(|e| {
@@ -146,6 +162,9 @@ pub async fn register_start(
     // The final guarantee comes from the unique constraint in register_finish.
     let existing = users::Entity::find()
         .filter(users::Column::Username.eq(&req.username))
+        .select_only()
+        .column(users::Column::Id)
+        .into_tuple::<Uuid>()
         .one(state.db())
         .await
         .map_err(|e| {
@@ -369,6 +388,7 @@ pub async fn login(
         .take_auth_challenge(&req.challenge_id)
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid challenge"))?;
     let user = users::Entity::find_by_id(auth_challenge.user_id)
+        .into_partial_model::<LoginUserRow>()
         .one(state.db())
         .await
         .map_err(|e| {
@@ -500,7 +520,10 @@ where
         .unwrap_or_else(|| "Unknown Device".into());
     let platform = options.platform.unwrap_or_else(|| "unknown".into());
 
-    let existing_device = devices::Entity::find_by_id(device_id)
+    let existing_device_user_id = devices::Entity::find_by_id(device_id)
+        .select_only()
+        .column(devices::Column::UserId)
+        .into_tuple::<Uuid>()
         .one(db)
         .await
         .map_err(|e| {
@@ -508,12 +531,12 @@ where
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
         })?;
 
-    if let Some(existing_device) = existing_device {
-        if existing_device.user_id != user_id {
+    if let Some(existing_user_id) = existing_device_user_id {
+        if existing_user_id != user_id {
             warn!(
                 device_id = %device_id,
                 requested_user_id = %user_id,
-                existing_user_id = %existing_device.user_id,
+                existing_user_id = %existing_user_id,
                 "Device id already bound to a different user",
             );
             return Err(error_response(

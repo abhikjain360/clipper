@@ -5,6 +5,7 @@
 //! contains decrypted/display-ready data, not encrypted server API payloads.
 
 use serde::{Deserialize, Serialize};
+use strum::{AsRefStr, Display, EnumString};
 
 /// A decrypted clipboard item for display.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -29,7 +30,10 @@ pub struct DecryptedFileItem {
 }
 
 /// Connection status visible to the UI.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Serialize, Deserialize, AsRefStr, Display, EnumString,
+)]
+#[strum(serialize_all = "PascalCase")]
 pub enum ConnectionStatus {
     #[default]
     Disconnected,
