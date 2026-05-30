@@ -54,6 +54,12 @@ impl MigrationTrait for Migration {
                     .table(Users::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Users::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(Users::Username)
+                            .text()
+                            .not_null()
+                            .unique_key(),
+                    )
                     .col(ColumnDef::new(Users::OpaqueServerSetup).blob().not_null())
                     .col(ColumnDef::new(Users::OpaquePasswordFile).blob().not_null())
                     .col(ColumnDef::new(Users::EncryptionSalt).blob().not_null())
@@ -366,6 +372,7 @@ enum AccessKeys {
 enum Users {
     Table,
     Id,
+    Username,
     OpaqueServerSetup,
     OpaquePasswordFile,
     EncryptionSalt,

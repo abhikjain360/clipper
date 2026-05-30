@@ -84,9 +84,9 @@ impl SyncEngine {
         api.base_url().to_string()
     }
 
-    pub async fn set_saved_profile(&self, user_id: Option<String>, device_name: Option<String>) {
+    pub async fn set_saved_profile(&self, username: Option<String>, device_name: Option<String>) {
         let mut state = self.state.write().await;
-        state.user_id = user_id;
+        state.username = username;
         state.device_name = device_name;
         drop(state);
         self.bump_version();
@@ -109,39 +109,30 @@ impl SyncEngine {
     pub async fn login(
         self: &Arc<Self>,
         passphrase: &str,
+        username: &str,
         device_name: &str,
     ) -> Result<(), ClientError> {
-        self.login_with_platform_and_user(passphrase, None, device_name, "macos")
+        self.login_with_platform(passphrase, username, device_name, "macos")
             .await
     }
 
     pub async fn login_with_platform(
         self: &Arc<Self>,
         passphrase: &str,
-        device_name: &str,
-        platform: &str,
-    ) -> Result<(), ClientError> {
-        self.login_with_platform_and_user(passphrase, None, device_name, platform)
-            .await
-    }
-
-    pub async fn login_with_platform_and_user(
-        self: &Arc<Self>,
-        passphrase: &str,
-        user_id: Option<&str>,
+        username: &str,
         device_name: &str,
         platform: &str,
     ) -> Result<(), ClientError> {
         let login_resp = {
             let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.login(passphrase, user_id, device_name, platform)
+            api.login(passphrase, username, device_name, platform)
                 .await?
         };
 
         self.finish_auth(
             passphrase,
             device_name,
-            login_resp.user_id.clone(),
+            login_resp.username.clone(),
             login_resp.device_id.clone(),
             &login_resp.server,
         )
@@ -154,30 +145,32 @@ impl SyncEngine {
     pub async fn register(
         self: &Arc<Self>,
         access_key: &str,
+        username: &str,
         passphrase: &str,
         device_name: &str,
     ) -> Result<String, ClientError> {
-        self.register_with_platform(access_key, passphrase, device_name, "macos")
+        self.register_with_platform(access_key, username, passphrase, device_name, "macos")
             .await
     }
 
     pub async fn register_with_platform(
         self: &Arc<Self>,
         access_key: &str,
+        username: &str,
         passphrase: &str,
         device_name: &str,
         platform: &str,
     ) -> Result<String, ClientError> {
         let register_resp = {
             let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.register(access_key, passphrase, device_name, platform)
+            api.register(access_key, username, passphrase, device_name, platform)
                 .await?
         };
 
         self.finish_auth(
             passphrase,
             device_name,
-            register_resp.user_id.clone(),
+            register_resp.username.clone(),
             register_resp.device_id.clone(),
             &register_resp.server,
         )
@@ -185,17 +178,18 @@ impl SyncEngine {
 
         info!(
             user_id = %register_resp.user_id,
+            username = %register_resp.username,
             device_id = %register_resp.device_id,
             "Registration complete"
         );
-        Ok(register_resp.user_id)
+        Ok(register_resp.username)
     }
 
     async fn finish_auth(
         self: &Arc<Self>,
         passphrase: &str,
         device_name: &str,
-        user_id: String,
+        username: String,
         device_id: String,
         server: &ServerInfo,
     ) -> Result<(), ClientError> {
@@ -216,7 +210,7 @@ impl SyncEngine {
         {
             let mut state = self.state.write().await;
             state.logged_in = true;
-            state.user_id = Some(user_id);
+            state.username = Some(username);
             state.device_id = Some(device_id);
             state.device_name = Some(device_name.to_string());
             state.error = None;

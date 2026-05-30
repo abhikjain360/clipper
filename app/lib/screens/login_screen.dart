@@ -8,9 +8,9 @@ import '../widgets/responsive_card_scaffold.dart';
 enum _AuthMode { login, register }
 
 class LoginScreen extends StatefulWidget {
-  final String? initialUserId;
+  final String? initialUsername;
 
-  const LoginScreen({super.key, this.initialUserId});
+  const LoginScreen({super.key, this.initialUsername});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -21,7 +21,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _accessKeyController = TextEditingController();
   final _passphraseController = TextEditingController();
   final _confirmPassphraseController = TextEditingController();
-  late final TextEditingController _userIdController;
+  late final TextEditingController _usernameController;
   late final TextEditingController _serverUrlController;
   bool _loading = false;
   String? _error;
@@ -29,7 +29,9 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void initState() {
     super.initState();
-    _userIdController = TextEditingController(text: widget.initialUserId ?? '');
+    _usernameController = TextEditingController(
+      text: widget.initialUsername ?? '',
+    );
     _serverUrlController = TextEditingController(text: defaultServerUrl());
   }
 
@@ -38,7 +40,7 @@ class _LoginScreenState extends State<LoginScreen> {
     _accessKeyController.dispose();
     _passphraseController.dispose();
     _confirmPassphraseController.dispose();
-    _userIdController.dispose();
+    _usernameController.dispose();
     _serverUrlController.dispose();
     super.dispose();
   }
@@ -64,7 +66,12 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _login() async {
+    final username = _usernameController.text.trim();
     final passphrase = _passphraseController.text;
+    if (username.isEmpty) {
+      setState(() => _error = 'Username is required');
+      return;
+    }
     if (passphrase.isEmpty) {
       setState(() => _error = 'Passphrase is required');
       return;
@@ -76,10 +83,9 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      final userId = _userIdController.text.trim();
       await login(
         passphrase: passphrase,
-        userId: userId.isEmpty ? null : userId,
+        username: username,
         deviceName: clipperDeviceName(),
         serverUrl: _resolvedServerUrl,
       );
@@ -95,11 +101,16 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _register() async {
     final accessKey = _accessKeyController.text.trim();
+    final username = _usernameController.text.trim();
     final passphrase = _passphraseController.text;
     final confirmPassphrase = _confirmPassphraseController.text;
 
     if (accessKey.isEmpty) {
       setState(() => _error = 'Access key is required');
+      return;
+    }
+    if (username.isEmpty) {
+      setState(() => _error = 'Username is required');
       return;
     }
     if (passphrase.isEmpty) {
@@ -117,13 +128,14 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      final userId = await register(
+      final registered = await register(
         accessKey: accessKey,
+        username: username,
         passphrase: passphrase,
         deviceName: clipperDeviceName(),
         serverUrl: _resolvedServerUrl,
       );
-      _userIdController.text = userId;
+      _usernameController.text = registered;
       // State change will be picked up by AppRoot's watcher
     } catch (e) {
       setState(() => _error = e.toString());
@@ -206,12 +218,14 @@ class _LoginScreenState extends State<LoginScreen> {
       mainAxisSize: MainAxisSize.min,
       children: [
         TextField(
-          controller: _userIdController,
+          controller: _usernameController,
           decoration: const InputDecoration(
-            labelText: 'User ID',
+            labelText: 'Username',
             border: OutlineInputBorder(),
             prefixIcon: Icon(Icons.person),
           ),
+          autocorrect: false,
+          enableSuggestions: false,
           textInputAction: TextInputAction.next,
         ),
         const SizedBox(height: 16),
@@ -241,6 +255,19 @@ class _LoginScreenState extends State<LoginScreen> {
             border: OutlineInputBorder(),
             prefixIcon: Icon(Icons.vpn_key),
           ),
+          textInputAction: TextInputAction.next,
+        ),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _usernameController,
+          decoration: const InputDecoration(
+            labelText: 'Username',
+            helperText: 'lowercase letters, digits, underscore, hyphen (3-32)',
+            border: OutlineInputBorder(),
+            prefixIcon: Icon(Icons.person),
+          ),
+          autocorrect: false,
+          enableSuggestions: false,
           textInputAction: TextInputAction.next,
         ),
         const SizedBox(height: 16),

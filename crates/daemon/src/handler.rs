@@ -360,9 +360,9 @@ async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) ->
     }
 
     match engine
-        .login_with_platform_and_user(
+        .login_with_platform(
             &params.passphrase,
-            params.user_id.as_deref(),
+            &params.username,
             device_name,
             platform_name(),
         )
@@ -375,7 +375,7 @@ async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) ->
             let creds = Credentials {
                 device_name: device_name.to_string(),
                 server_url: url,
-                user_id: state.user_id,
+                username: state.username,
             };
             if let Err(e) = keychain::store_credentials(&creds) {
                 warn!("Failed to store server profile: {}", e);
@@ -403,23 +403,24 @@ async fn cmd_register(
     match engine
         .register_with_platform(
             &params.access_key,
+            &params.username,
             &params.passphrase,
             device_name,
             platform_name(),
         )
         .await
     {
-        Ok(user_id) => {
+        Ok(username) => {
             let url = engine.base_url().await;
             let creds = Credentials {
                 device_name: device_name.to_string(),
                 server_url: url,
-                user_id: Some(user_id.clone()),
+                username: Some(username.clone()),
             };
             if let Err(e) = keychain::store_credentials(&creds) {
                 warn!("Failed to store server profile: {}", e);
             }
-            json_success(id, RegisterResult { user_id })
+            json_success(id, RegisterResult { username })
         }
         Err(e) => DaemonResponse::error(id, e.to_string()),
     }

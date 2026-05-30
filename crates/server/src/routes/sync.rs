@@ -148,6 +148,7 @@ mod tests {
 
         users::ActiveModel {
             id: Set(user_id),
+            username: Set(user_id.as_simple().to_string()),
             opaque_server_setup: Set(vec![1]),
             opaque_password_file: Set(vec![2]),
             encryption_salt: Set(wrapped_salt.clone()),

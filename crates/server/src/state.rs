@@ -37,6 +37,7 @@ pub struct AuthChallenge {
 
 pub struct PendingRegistration {
     pub user_id: Uuid,
+    pub username: String,
     pub access_key_hash: String,
     pub opaque_server_setup: Vec<u8>,
     pub encryption_salt: Vec<u8>,
@@ -158,14 +159,13 @@ impl AppState {
         let now = Instant::now();
         let mut challenges = self.inner.auth_challenges.lock().expect("lock poisoned");
         challenges.retain(|_, challenge| challenge.expires_at > now);
-        challenges
-            .remove(challenge_id)
-            .filter(|challenge| challenge.expires_at > now)
+        challenges.remove(challenge_id)
     }
 
     pub fn create_pending_registration(
         &self,
         user_id: Uuid,
+        username: String,
         access_key_hash: String,
         opaque_server_setup: Vec<u8>,
         encryption_salt: Vec<u8>,
@@ -191,6 +191,7 @@ impl AppState {
             registration_id.clone(),
             PendingRegistration {
                 user_id,
+                username,
                 access_key_hash,
                 opaque_server_setup,
                 encryption_salt,
@@ -208,8 +209,6 @@ impl AppState {
             .lock()
             .expect("lock poisoned");
         registrations.retain(|_, registration| registration.expires_at > now);
-        registrations
-            .remove(registration_id)
-            .filter(|registration| registration.expires_at > now)
+        registrations.remove(registration_id)
     }
 }

@@ -118,26 +118,26 @@ supplied, so the invite does not need to be passed as a process argument.
 Normal client registration:
 
 1. Client starts OPAQUE registration locally from the user's chosen passphrase.
-2. Client calls `POST /api/auth/register/start` with the access key and OPAQUE registration request.
-3. Server hashes the access key, verifies it exists, is unused, and is unexpired, then creates a pending registration with a new `user_id`, per-user OPAQUE server setup, and per-user encryption salt.
+2. Client calls `POST /api/auth/register/start` with the access key, the chosen `username`, and OPAQUE registration request. Usernames are lowercase ASCII letters/digits/`_-`, 3–32 chars; the server rejects taken usernames at this step.
+3. Server hashes the access key, verifies it exists, is unused, and is unexpired, then creates a pending registration with a new `user_id`, the `username`, per-user OPAQUE server setup, and per-user encryption salt.
 4. Server returns the OPAQUE registration response, `registration_id`, `user_id`, and the server's encryption KDF parameters (from `crypto.encryption_params`, not persisted per-user yet).
 5. Client finishes OPAQUE registration locally and sends `POST /api/auth/register/finish` with the registration upload and device info.
-6. Server consumes the pending registration, re-checks and marks the access key used, stores the per-user OPAQUE password file/verifier in `users`, creates/updates the first device row, and returns a bearer token.
+6. Server consumes the pending registration, re-checks and marks the access key used, stores the per-user OPAQUE password file/verifier (and `username`) in `users` under a unique constraint, creates/updates the first device row, and returns a bearer token plus `user_id` and `username`.
 
 Normal client login:
 
 1. Client starts OPAQUE locally from the passphrase.
-2. Client calls `POST /api/auth/challenge` with `user_id` and an OPAQUE credential request. If exactly one user exists, the server resolves that user as a single-user convenience; once multiple users exist, `user_id` is required.
-3. Server starts OPAQUE from that user's stored password file/verifier, stores short-lived server login state under a random challenge ID, and returns the OPAQUE credential response plus that user's encryption salt and KDF parameters.
+2. Client calls `POST /api/auth/challenge` with `username` and an OPAQUE credential request. The server looks up the user by username; unknown usernames return `401`.
+3. Server starts OPAQUE from that user's stored password file/verifier (OPAQUE `id_U` is bound to the immutable UUID, not the username), stores short-lived server login state under a random challenge ID, and returns the OPAQUE credential response plus that user's encryption salt and KDF parameters.
 4. Client finishes OPAQUE locally and sends `POST /api/auth/login` with challenge ID, OPAQUE credential finalization, and device info.
-5. Server consumes the single-use challenge, finishes OPAQUE, creates/updates a device row for that user, creates a user-scoped session, and returns a bearer token plus `user_id`.
+5. Server consumes the single-use challenge, finishes OPAQUE, creates/updates a device row for that user, creates a user-scoped session, and returns a bearer token plus `user_id` and `username`.
 6. Client uses `Authorization: Bearer <token>` on private HTTP routes and WebSocket connections.
 
 Client runtime notes:
 
 - macOS and Linux registration and login requests are sent to the daemon, which uses the shared Rust client engine.
 - Android and web registration and login requests are handled by the Rust client engine inside the Flutter app process.
-- The Flutter auth screen exposes separate Register and Login modes. Register requires an access key and passphrase; Login sends the saved or entered `user_id` when available.
+- The Flutter auth screen exposes separate Register and Login modes. Register requires an access key, username, and passphrase; Login requires username and passphrase. The most recently used username is prefilled from the saved profile.
 - All paths must produce the same server-facing OPAQUE, bearer-token, encryption, sync, and object/clipboard behavior.
 - Android emulator development uses `http://10.0.2.2:8787` for host loopback. Production and physical-device deployments should use HTTPS.
 

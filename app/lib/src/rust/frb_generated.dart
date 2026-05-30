@@ -111,7 +111,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<void> crateApiClipperLogin({
     required String passphrase,
-    String? userId,
+    required String username,
     required String deviceName,
     required String serverUrl,
   });
@@ -122,6 +122,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<String> crateApiClipperRegister({
     required String accessKey,
+    required String username,
     required String passphrase,
     required String deviceName,
     required String serverUrl,
@@ -535,7 +536,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @override
   Future<void> crateApiClipperLogin({
     required String passphrase,
-    String? userId,
+    required String username,
     required String deviceName,
     required String serverUrl,
   }) {
@@ -544,7 +545,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(passphrase, serializer);
-          sse_encode_opt_String(userId, serializer);
+          sse_encode_String(username, serializer);
           sse_encode_String(deviceName, serializer);
           sse_encode_String(serverUrl, serializer);
           pdeCallFfi(
@@ -559,7 +560,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiClipperLoginConstMeta,
-        argValues: [passphrase, userId, deviceName, serverUrl],
+        argValues: [passphrase, username, deviceName, serverUrl],
         apiImpl: this,
       ),
     );
@@ -567,7 +568,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiClipperLoginConstMeta => const TaskConstMeta(
     debugName: "login",
-    argNames: ["passphrase", "userId", "deviceName", "serverUrl"],
+    argNames: ["passphrase", "username", "deviceName", "serverUrl"],
   );
 
   @override
@@ -627,6 +628,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @override
   Future<String> crateApiClipperRegister({
     required String accessKey,
+    required String username,
     required String passphrase,
     required String deviceName,
     required String serverUrl,
@@ -636,6 +638,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(accessKey, serializer);
+          sse_encode_String(username, serializer);
           sse_encode_String(passphrase, serializer);
           sse_encode_String(deviceName, serializer);
           sse_encode_String(serverUrl, serializer);
@@ -651,7 +654,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiClipperRegisterConstMeta,
-        argValues: [accessKey, passphrase, deviceName, serverUrl],
+        argValues: [accessKey, username, passphrase, deviceName, serverUrl],
         apiImpl: this,
       ),
     );
@@ -659,7 +662,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiClipperRegisterConstMeta => const TaskConstMeta(
     debugName: "register",
-    argNames: ["accessKey", "passphrase", "deviceName", "serverUrl"],
+    argNames: [
+      "accessKey",
+      "username",
+      "passphrase",
+      "deviceName",
+      "serverUrl",
+    ],
   );
 
   @override
@@ -837,7 +846,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return BridgeAppState(
       loggedIn: dco_decode_bool(arr[0]),
-      userId: dco_decode_opt_String(arr[1]),
+      username: dco_decode_opt_String(arr[1]),
       deviceId: dco_decode_opt_String(arr[2]),
       deviceName: dco_decode_opt_String(arr[3]),
       connectionStatus: dco_decode_bridge_connection_status(arr[4]),
@@ -971,7 +980,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   BridgeAppState sse_decode_bridge_app_state(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_loggedIn = sse_decode_bool(deserializer);
-    var var_userId = sse_decode_opt_String(deserializer);
+    var var_username = sse_decode_opt_String(deserializer);
     var var_deviceId = sse_decode_opt_String(deserializer);
     var var_deviceName = sse_decode_opt_String(deserializer);
     var var_connectionStatus = sse_decode_bridge_connection_status(
@@ -984,7 +993,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_error = sse_decode_opt_String(deserializer);
     return BridgeAppState(
       loggedIn: var_loggedIn,
-      userId: var_userId,
+      username: var_username,
       deviceId: var_deviceId,
       deviceName: var_deviceName,
       connectionStatus: var_connectionStatus,
@@ -1153,7 +1162,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_bool(self.loggedIn, serializer);
-    sse_encode_opt_String(self.userId, serializer);
+    sse_encode_opt_String(self.username, serializer);
     sse_encode_opt_String(self.deviceId, serializer);
     sse_encode_opt_String(self.deviceName, serializer);
     sse_encode_bridge_connection_status(self.connectionStatus, serializer);

@@ -191,6 +191,6 @@ class _AppRootState extends State<AppRoot> {
     if (_state!.loggedIn) {
       return HomeScreen(state: _state!);
     }
-    return LoginScreen(initialUserId: _state!.userId);
+    return LoginScreen(initialUsername: _state!.username);
   }
 }

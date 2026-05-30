@@ -84,7 +84,7 @@ impl ApiClient {
     pub async fn login(
         &mut self,
         passphrase: &str,
-        user_id: Option<&str>,
+        username: &str,
         device_name: &str,
         platform: &str,
     ) -> Result<LoginResponse, ClientError> {
@@ -93,10 +93,7 @@ impl ApiClient {
         let (credential_request, client_login_state) =
             crypto::opaque_client_login_start(passphrase.as_bytes())?;
         let challenge_req = LoginChallengeRequest {
-            user_id: user_id
-                .map(str::parse)
-                .transpose()
-                .map_err(|e| ClientError::Other(format!("Invalid user id: {e}")))?,
+            username: username.to_string(),
             credential_request,
         };
         let challenge_resp = self
@@ -158,6 +155,7 @@ impl ApiClient {
     pub async fn register(
         &mut self,
         access_key: &str,
+        username: &str,
         passphrase: &str,
         device_name: &str,
         platform: &str,
@@ -168,6 +166,7 @@ impl ApiClient {
             crypto::opaque_client_register_start(passphrase.as_bytes())?;
         let start_req = RegisterStartRequest {
             access_key: access_key.to_string(),
+            username: username.to_string(),
             registration_request,
         };
         let resp = self

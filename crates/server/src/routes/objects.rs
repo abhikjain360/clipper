@@ -434,10 +434,7 @@ pub async fn complete_object(
                 error_kind = ?e.kind(),
                 "Failed to hash uploaded payload (file missing or unreadable)",
             );
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Payload read error",
-            )
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Payload read error")
         })?;
         if actual_size != payload.ciphertext_size as u64
             || computed_hash.as_slice() != payload.sha256_ciphertext.as_slice()
@@ -569,18 +566,14 @@ pub async fn list_objects(
         q = q.filter(objects::Column::CreatedAt.lt(before.clone()));
     }
 
-    let objects = q
-        .limit(limit + 1)
-        .all(state.db())
-        .await
-        .map_err(|e| {
-            error!(
-                user_id = %auth.user_id,
-                error = %e,
-                "Failed to list objects",
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let objects = q.limit(limit + 1).all(state.db()).await.map_err(|e| {
+        error!(
+            user_id = %auth.user_id,
+            error = %e,
+            "Failed to list objects",
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let has_more = objects.len() as u64 > limit;
     let objects: Vec<objects::Model> = objects.into_iter().take(limit as usize).collect();
@@ -1156,6 +1149,7 @@ mod tests {
         .expect("insert access key");
         users::ActiveModel {
             id: Set(user_id),
+            username: Set(user_id.as_simple().to_string()),
             opaque_server_setup: Set(vec![1]),
             opaque_password_file: Set(vec![2]),
             encryption_salt: Set(vec![3]),

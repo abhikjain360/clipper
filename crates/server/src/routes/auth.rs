@@ -14,8 +14,8 @@ use clipper_core::{
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, Set,
-    SqlErr, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, SqlErr,
+    TransactionTrait,
 };
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -36,7 +36,15 @@ pub async fn challenge(
     State(state): State<AppState>,
     ValidatedJson(req): ValidatedJson<LoginChallengeRequest>,
 ) -> Result<Json<LoginChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let user = resolve_login_user(&state, req.user_id).await?;
+    let user = users::Entity::find()
+        .filter(users::Column::Username.eq(&req.username))
+        .one(state.db())
+        .await
+        .map_err(|e| {
+            error!(username = %req.username, error = %e, "Failed to look up user by username");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unknown user"))?;
 
     let opaque_server_setup =
         secret_storage::unwrap_opaque_server_setup(state.secrets(), &user.opaque_server_setup)
@@ -92,6 +100,9 @@ pub async fn register_start(
 ) -> Result<Json<RegisterStartResponse>, (StatusCode, Json<ErrorResponse>)> {
     let now = Utc::now().to_rfc3339();
     let db_config = load_server_config(&state).await?;
+
+    // verify access key
+
     let access_key_hash_salt = secret_storage::unwrap_access_key_hash_salt(
         state.secrets(),
         &db_config.access_key_hash_salt,
@@ -131,6 +142,25 @@ pub async fn register_start(
         ));
     }
 
+    // Reject obviously-taken usernames before we expend any OPAQUE work.
+    // The final guarantee comes from the unique constraint in register_finish.
+    let existing = users::Entity::find()
+        .filter(users::Column::Username.eq(&req.username))
+        .one(state.db())
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Failed to look up username in register_start");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
+    if existing.is_some() {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "Username already taken",
+        ));
+    }
+
+    // start OPAQUE
+
     let user_id = Uuid::now_v7();
     // Fresh opaque_server_setup = oprf_seed ‖ sk_S ‖ fake_sk for this user.
     let opaque_server_setup = crypto::opaque_new_server_setup();
@@ -158,6 +188,7 @@ pub async fn register_start(
     // hash to consume and the encryption_salt) until register_finish.
     let registration_id = state.create_pending_registration(
         user_id,
+        req.username,
         access_key_hash,
         opaque_server_setup,
         encryption_salt.clone(),
@@ -246,6 +277,7 @@ pub async fn register_finish(
 
     users::ActiveModel {
         id: Set(pending.user_id),
+        username: Set(pending.username.clone()),
         opaque_server_setup: Set(wrapped_opaque_server_setup),
         opaque_password_file: Set(wrapped_opaque_password_file),
         encryption_salt: Set(wrapped_encryption_salt),
@@ -259,9 +291,10 @@ pub async fn register_finish(
         Some(SqlErr::UniqueConstraintViolation(_)) => {
             warn!(
                 user_id = %pending.user_id,
-                "Concurrent register_finish lost a race on access_key_hash uniqueness",
+                username = %pending.username,
+                "Concurrent register_finish lost a uniqueness race (access_key_hash or username)",
             );
-            error_response(StatusCode::CONFLICT, "Access key already used")
+            error_response(StatusCode::CONFLICT, "Registration conflict")
         }
         _ => {
             error!(error = %e, "Failed to insert user row");
@@ -325,6 +358,7 @@ pub async fn register_finish(
     Ok(Json(RegisterFinishResponse {
         token: session.token,
         user_id: pending.user_id.to_string(),
+        username: pending.username,
         device_id: session.device_id.to_string(),
         server: ServerInfo {
             encryption_salt_b64: B64.encode(pending.encryption_salt),
@@ -400,6 +434,7 @@ pub async fn login(
     Ok(Json(LoginResponse {
         token: session.token,
         user_id: user.id.to_string(),
+        username: user.username,
         device_id: session.device_id.to_string(),
         server,
     }))
@@ -468,40 +503,6 @@ fn server_info(
         encryption_salt_b64: B64.encode(&encryption_salt),
         encryption_params: state.config().crypto.encryption_params,
     })
-}
-
-async fn resolve_login_user(
-    state: &AppState,
-    user_id: Option<clipper_core::models::UserId>,
-) -> Result<users::Model, (StatusCode, Json<ErrorResponse>)> {
-    if let Some(user_id) = user_id {
-        let user_uuid = user_id.into_uuid();
-        return users::Entity::find_by_id(user_uuid)
-            .one(state.db())
-            .await
-            .map_err(|e| {
-                error!(user_id = %user_uuid, error = %e, "Failed to look up user by id");
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
-            })?
-            .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unknown user"));
-    }
-
-    let mut users = users::Entity::find()
-        .limit(2)
-        .all(state.db())
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Failed to list users for implicit login");
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
-        })?;
-    match users.len() {
-        1 => Ok(users.remove(0)),
-        0 => Err(error_response(StatusCode::UNAUTHORIZED, "Unknown user")),
-        _ => Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "user_id is required",
-        )),
-    }
 }
 
 struct IssuedSession {
@@ -731,6 +732,7 @@ mod tests {
 
         users::ActiveModel {
             id: Set(user_id),
+            username: Set("alice".into()),
             opaque_server_setup: Set(wrapped_opaque_server_setup),
             opaque_password_file: Set(wrapped_opaque_password_file),
             encryption_salt: Set(wrapped_encryption_salt),
@@ -788,12 +790,12 @@ mod tests {
         ValidatedJson::validated(value).expect("valid request")
     }
 
-    fn challenge_request(passphrase: &[u8]) -> (LoginChallengeRequest, Vec<u8>) {
+    fn challenge_request(username: &str, passphrase: &[u8]) -> (LoginChallengeRequest, Vec<u8>) {
         let (credential_request, client_state) =
             crypto::opaque_client_login_start(passphrase).expect("client login start");
         (
             LoginChallengeRequest {
-                user_id: None,
+                username: username.into(),
                 credential_request,
             },
             client_state,
@@ -802,6 +804,7 @@ mod tests {
 
     fn registration_start_request(
         access_key: &str,
+        username: &str,
         passphrase: &[u8],
     ) -> (RegisterStartRequest, Vec<u8>) {
         let (registration_request, client_state) =
@@ -809,6 +812,7 @@ mod tests {
         (
             RegisterStartRequest {
                 access_key: access_key.into(),
+                username: username.into(),
                 registration_request,
             },
             client_state,
@@ -877,7 +881,7 @@ mod tests {
         let passphrase = b"user private passphrase";
         insert_access_key(&state, access_key).await;
 
-        let (start_req, client_state) = registration_start_request(access_key, passphrase);
+        let (start_req, client_state) = registration_start_request(access_key, "alice", passphrase);
         let Json(start_resp) = register_start(State(state.clone()), validated(start_req))
             .await
             .expect("register start");
@@ -894,6 +898,7 @@ mod tests {
         .expect("register finish");
 
         assert_eq!(finish_resp.user_id, user_id.to_string());
+        assert_eq!(finish_resp.username, "alice");
         assert!(!finish_resp.token.is_empty());
         assert!(!finish_resp.device_id.is_empty());
 
@@ -919,7 +924,7 @@ mod tests {
         let Json(challenge_resp) = challenge(
             State(state.clone()),
             validated(LoginChallengeRequest {
-                user_id: Some(user_id.into()),
+                username: "alice".into(),
                 credential_request: challenge_req,
             }),
         )
@@ -935,6 +940,7 @@ mod tests {
         .await
         .expect("login");
         assert_eq!(login_resp.user_id, user_id.to_string());
+        assert_eq!(login_resp.username, "alice");
     }
 
     fn login_request(
@@ -966,7 +972,7 @@ mod tests {
         let passphrase = b"correct horse battery staple";
         let (state, _data_dir) = test_state(passphrase).await;
 
-        let (challenge_req, client_state) = challenge_request(passphrase);
+        let (challenge_req, client_state) = challenge_request("alice", passphrase);
         let Json(challenge) = challenge(State(state.clone()), validated(challenge_req))
             .await
             .expect("challenge");
@@ -988,7 +994,7 @@ mod tests {
         let passphrase = b"correct horse battery staple";
         let (state, _data_dir) = test_state(passphrase).await;
 
-        let (challenge_req, client_state) = challenge_request(passphrase);
+        let (challenge_req, client_state) = challenge_request("alice", passphrase);
         let Json(challenge) = challenge(State(state.clone()), validated(challenge_req))
             .await
             .expect("challenge");
@@ -1026,7 +1032,7 @@ mod tests {
         let passphrase = b"correct horse battery staple";
         let (state, _data_dir) = test_state(passphrase).await;
 
-        let (challenge_req, client_state) = challenge_request(b"wrong passphrase");
+        let (challenge_req, client_state) = challenge_request("alice", b"wrong passphrase");
         let Json(challenge) = challenge(State(state.clone()), validated(challenge_req))
             .await
             .expect("challenge");
@@ -1099,7 +1105,8 @@ mod tests {
             .rate_limit
             .auth_per_client_per_minute
         {
-            let (challenge_req, _client_state) = challenge_request(b"candidate passphrase");
+            let (challenge_req, _client_state) =
+                challenge_request("alice", b"candidate passphrase");
             let response = app
                 .clone()
                 .oneshot(json_request("/api/auth/challenge", &challenge_req))
@@ -1109,7 +1116,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
         }
 
-        let (challenge_req, _client_state) = challenge_request(b"candidate passphrase");
+        let (challenge_req, _client_state) = challenge_request("alice", b"candidate passphrase");
         let response = app
             .oneshot(json_request("/api/auth/challenge", &challenge_req))
             .await;
@@ -1130,7 +1137,7 @@ mod tests {
         let passphrase = b"user private passphrase";
         insert_access_key(&state, access_key).await;
 
-        let (start_req, client_state) = registration_start_request(access_key, passphrase);
+        let (start_req, client_state) = registration_start_request(access_key, "alice", passphrase);
         let Json(start_resp) = register_start(State(state.clone()), validated(start_req))
             .await
             .expect("register start");

@@ -111,11 +111,32 @@ impl Default for Argon2Params {
 
 // -- Auth --
 
+pub const USERNAME_MIN_LEN: usize = 3;
+pub const USERNAME_MAX_LEN: usize = 32;
+
+/// Validate the wire format for a username: lowercase ASCII letters, digits,
+/// underscore, or hyphen; `USERNAME_MIN_LEN..=USERNAME_MAX_LEN` chars.
+pub fn validate_username(value: &str, _: &()) -> garde::Result {
+    if value.len() < USERNAME_MIN_LEN || value.len() > USERNAME_MAX_LEN {
+        return Err(garde::Error::new(format!(
+            "must be {USERNAME_MIN_LEN}..={USERNAME_MAX_LEN} characters",
+        )));
+    }
+    if !value
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    {
+        return Err(garde::Error::new(
+            "must contain only lowercase ascii letters, digits, '_' or '-'",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct LoginChallengeRequest {
-    #[garde(skip)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<UserId>,
+    #[garde(custom(validate_username))]
+    pub username: String,
     #[garde(length(min = 1))]
     #[serde(rename = "credential_request_b64", with = "base64_vec")]
     pub credential_request: Vec<u8>,
@@ -150,6 +171,7 @@ pub struct LoginRequest {
 pub struct LoginResponse {
     pub token: String,
     pub user_id: String,
+    pub username: String,
     pub device_id: String,
     pub server: ServerInfo,
 }
@@ -164,6 +186,8 @@ pub struct ServerInfo {
 pub struct RegisterStartRequest {
     #[garde(length(min = 1))]
     pub access_key: String,
+    #[garde(custom(validate_username))]
+    pub username: String,
     #[garde(length(min = 1))]
     #[serde(rename = "registration_request_b64", with = "base64_vec")]
     pub registration_request: Vec<u8>,
@@ -199,6 +223,7 @@ pub struct RegisterFinishRequest {
 pub struct RegisterFinishResponse {
     pub token: String,
     pub user_id: String,
+    pub username: String,
     pub device_id: String,
     pub server: ServerInfo,
 }

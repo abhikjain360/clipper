@@ -44,7 +44,7 @@ pub enum ConnectionStatus {
 pub struct AppState {
     pub logged_in: bool,
     #[serde(default)]
-    pub user_id: Option<String>,
+    pub username: Option<String>,
     pub device_id: Option<String>,
     pub device_name: Option<String>,
     pub connection_status: ConnectionStatus,

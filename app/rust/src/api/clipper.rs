@@ -48,7 +48,7 @@ pub enum BridgeConnectionStatus {
 #[derive(Clone, Default)]
 pub struct BridgeAppState {
     pub logged_in: bool,
-    pub user_id: Option<String>,
+    pub username: Option<String>,
     pub device_id: Option<String>,
     pub device_name: Option<String>,
     pub connection_status: BridgeConnectionStatus,
@@ -70,7 +70,7 @@ impl From<app_types::AppState> for BridgeAppState {
     fn from(s: app_types::AppState) -> Self {
         let app_types::AppState {
             logged_in,
-            user_id,
+            username,
             device_id,
             device_name,
             connection_status,
@@ -80,7 +80,7 @@ impl From<app_types::AppState> for BridgeAppState {
         } = s;
         Self {
             logged_in,
-            user_id,
+            username,
             device_id,
             device_name,
             connection_status: connection_status.into(),
@@ -161,14 +161,14 @@ pub async fn connect_to_daemon() -> Result<(), String> {
 
 pub async fn login(
     passphrase: String,
-    user_id: Option<String>,
+    username: String,
     device_name: String,
     server_url: String,
 ) -> Result<(), String> {
     bridge_result(async move {
         runtime::send_command(daemon::DaemonCommand::Login(daemon::LoginParams {
             passphrase,
-            user_id,
+            username,
             device_name: Some(device_name),
             server_url: Some(server_url),
         }))
@@ -180,6 +180,7 @@ pub async fn login(
 
 pub async fn register(
     access_key: String,
+    username: String,
     passphrase: String,
     device_name: String,
     server_url: String,
@@ -188,15 +189,16 @@ pub async fn register(
         let result =
             runtime::send_command(daemon::DaemonCommand::Register(daemon::RegisterParams {
                 access_key,
+                username,
                 passphrase,
                 device_name: Some(device_name),
                 server_url: Some(server_url),
             }))
             .await?;
         Ok(serde_json::from_value::<daemon::RegisterResult>(
-            result.ok_or_else(|| AppError::missing_daemon_result("user_id"))?,
+            result.ok_or_else(|| AppError::missing_daemon_result("username"))?,
         )?
-        .user_id)
+        .username)
     })
     .await
 }
