@@ -109,6 +109,9 @@
           nightlyEnv = ''
             export CLIPPER_RUST_NIGHTLY_BIN="${toolchains.nightly}/bin"
           '';
+          stableEnv = ''
+            export CLIPPER_STABLE_BIN="${toolchains.stable}/bin"
+          '';
           wasmEnv = ''
             export CLIPPER_WASM_TARGET="${wasmRustTarget}"
           '';
@@ -147,6 +150,20 @@
             description = "Regenerate Flutter Rust Bridge bindings";
             runtimeInputs = frbGenerateRuntimeInputs;
             env = flutterEnv;
+          };
+
+          server-entities = {
+            program = "clipper-server-entities";
+            script = "server-entities.sh";
+            description = "Regenerate SeaORM server entities from the current schema";
+            runtimeInputs =
+              baseRuntimeInputs
+              ++ (with pkgs; [
+                sea-orm-cli
+                sqlite
+              ])
+              ++ [ toolchains.stable ];
+            env = stableEnv;
           };
 
           frb-build-web = {
