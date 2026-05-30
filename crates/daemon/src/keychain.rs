@@ -9,6 +9,8 @@ const SERVICE: &str = "com.clipper.daemon";
 const ACCOUNT: &str = "credentials";
 const IPC_SECRET_ACCOUNT: &str = "ipc-secret-v1";
 const IPC_SECRET_BYTES: usize = 32;
+#[cfg(target_os = "macos")]
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Credentials {
@@ -30,12 +32,8 @@ pub enum KeychainError {
     Utf8(#[from] std::string::FromUtf8Error),
     #[error("keychain store failed: {0}")]
     Store(String),
-    #[allow(dead_code)]
     #[error("keychain read failed: {0}")]
     Read(String),
-    #[allow(dead_code)]
-    #[error("IPC secret has invalid length: expected {expected} bytes, got {actual}")]
-    InvalidIpcSecretLength { expected: usize, actual: usize },
     #[cfg(not(target_os = "macos"))]
     #[error("keychain is not supported on this platform")]
     UnsupportedPlatform,
@@ -66,7 +64,8 @@ pub fn load_credentials() -> KeychainResult<Option<Credentials>> {
             }
             Ok(Some(creds))
         }
-        Err(_) => Ok(None),
+        Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
+        Err(e) => Err(KeychainError::Read(e.to_string())),
     }
 }
 
@@ -100,7 +99,7 @@ pub fn load_or_create_ipc_secret(_data_dir: &Path) -> KeychainResult<Vec<u8>> {
             }
             Ok(secret)
         }
-        Err(_) => {
+        Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => {
             let secret = new_ipc_secret();
             security_framework::passwords::set_generic_password(
                 SERVICE,
@@ -110,6 +109,7 @@ pub fn load_or_create_ipc_secret(_data_dir: &Path) -> KeychainResult<Vec<u8>> {
             .map_err(|e| KeychainError::Store(e.to_string()))?;
             Ok(secret)
         }
+        Err(e) => Err(KeychainError::Read(e.to_string())),
     }
 }
 
