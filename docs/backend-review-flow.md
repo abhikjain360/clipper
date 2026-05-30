@@ -28,7 +28,7 @@ then send encrypted records and non-decrypted metadata to the server.
 - `crates/server/src/routes/health.rs`
   - unauthenticated `GET /api/health` liveness probe.
 - `crates/server/src/routes/sync.rs` and `crates/server/src/ws.rs`
-  - provide bootstrap state and event notification. `bootstrap` returns device info, `latest_seq`, and `ServerInfo` (the unwrapped `encryption_salt` plus encryption KDF parameters) only; the client rebuilds clipboard/file state from `GET /api/objects`. WebSocket replay reads `event_log` and falls back to `Invalidate` only when the replay query errors — it does not yet detect pruned-event gaps or cap replay size (see `docs/rust-code-review.md` P1).
+  - provide bootstrap state and event notification. `bootstrap` returns device info, `latest_seq`, and an empty reserved `ServerInfo`; the client rebuilds clipboard/file state from `GET /api/objects`. WebSocket replay reads `event_log` and falls back to `Invalidate` only when the replay query errors — it does not yet detect pruned-event gaps or cap replay size (see `docs/rust-code-review.md` P1).
 - `crates/server/src/state.rs`
   - owns shared DB connection, data directories, WebSocket broadcast channel, in-memory auth challenges, and in-memory pending registrations.
 - `crates/server/src/cleanup.rs`
@@ -119,17 +119,17 @@ Normal client registration:
 
 1. Client starts OPAQUE registration locally from the user's chosen passphrase.
 2. Client calls `POST /api/auth/register/start` with the access key, the chosen `username`, and OPAQUE registration request. Usernames are lowercase ASCII letters/digits/`_-`, 3–32 chars; the server rejects taken usernames at this step.
-3. Server hashes the access key, verifies it exists, is unused, and is unexpired, then creates a pending registration with a new `user_id`, the `username`, per-user OPAQUE server setup, and per-user encryption salt.
-4. Server returns the OPAQUE registration response, `registration_id`, `user_id`, and the server's encryption KDF parameters (from `crypto.encryption_params`, not persisted per-user yet).
-5. Client finishes OPAQUE registration locally and sends `POST /api/auth/register/finish` with the registration upload and device info.
+3. Server hashes the access key, verifies it exists, is unused, and is unexpired, then creates a pending registration with a new `user_id`, the `username`, and per-user OPAQUE server setup.
+4. Server returns the OPAQUE registration response, `registration_id`, and `user_id`.
+5. Client finishes OPAQUE registration locally, derives its object-encryption key from OPAQUE's `export_key`, and sends `POST /api/auth/register/finish` with the registration upload and device info.
 6. Server consumes the pending registration, re-checks and marks the access key used, stores the per-user OPAQUE password file/verifier (and `username`) in `users` under a unique constraint, creates/updates the first device row, and returns a bearer token plus `user_id` and `username`.
 
 Normal client login:
 
 1. Client starts OPAQUE locally from the passphrase.
 2. Client calls `POST /api/auth/challenge` with `username` and an OPAQUE credential request. The server looks up the user by username; unknown usernames return `401`.
-3. Server starts OPAQUE from that user's stored password file/verifier (OPAQUE `id_U` is bound to the immutable UUID, not the username), stores short-lived server login state under a random challenge ID, and returns the OPAQUE credential response plus that user's encryption salt and KDF parameters.
-4. Client finishes OPAQUE locally and sends `POST /api/auth/login` with challenge ID, OPAQUE credential finalization, and device info.
+3. Server starts OPAQUE from that user's stored password file/verifier (OPAQUE `id_U` is bound to the immutable UUID, not the username), stores short-lived server login state under a random challenge ID, and returns the OPAQUE credential response.
+4. Client finishes OPAQUE locally, derives its object-encryption key from OPAQUE's `export_key`, and sends `POST /api/auth/login` with challenge ID, OPAQUE credential finalization, and device info.
 5. Server consumes the single-use challenge, finishes OPAQUE, creates/updates a device row for that user, creates a user-scoped session, and returns a bearer token plus `user_id` and `username`.
 6. Client uses `Authorization: Bearer <token>` on private HTTP routes and WebSocket connections.
 
@@ -161,7 +161,7 @@ user request. Future LAN P2P must follow the same on-demand payload rule.
 
 Sync flow:
 
-1. Client calls `GET /api/sync/bootstrap` after login. The response includes device info, the user's plaintext `encryption_salt` unwrapped from the database, `encryption_params`, and the latest `event_log.seq`. The client rebuilds clipboard/file state from `GET /api/objects` (see `SyncEngine::fetch_object_state`).
+1. Client calls `GET /api/sync/bootstrap` after login. The response includes device info and the latest `event_log.seq`. The client rebuilds clipboard/file state from `GET /api/objects` (see `SyncEngine::fetch_object_state`).
 2. Client opens `GET /api/ws` with bearer auth.
 3. Client sends `hello { last_seq }`.
 4. Server replies with `hello_ack { server_time, latest_seq }`, then replays that user's `event_log` rows after `last_seq`. If the replay query errors, the server sends `Invalidate { target: "all" }` so the client refreshes from list endpoints.
@@ -242,7 +242,7 @@ Review `clipper-core` and `clipper-client` when server API shapes change.
 - Server responses must never include plaintext content.
 - Server-side logs and errors must not include decrypted data, passphrases, OPAQUE messages, or bearer tokens.
 - Server process errors should stay typed and composable. Do not add direct `anyhow` usage or forced stderr printing; log through `tracing` and let the entrypoint exit with the mapped error code.
-- The server stores per-user OPAQUE password files/verifiers, so weak passphrases remain vulnerable to offline guessing by anyone with DB access. A verifier must not be usable directly as a login secret. Strong passphrases still matter.
+- The server stores per-user OPAQUE password files/verifiers. DB-only dumps cannot test passphrase guesses without the server pepper, but DB+pepper or live-server compromise degrades to offline guessing. A verifier must not be usable directly as a login secret. Strong passphrases still matter.
 - Access keys are authorization invites, not encryption keys. They should still be high entropy even though the DB stores only Argon2id verifiers, because possession of an unused access key permits account registration.
 - TLS is still required in real deployments; OPAQUE avoids sending the raw passphrase but does not make plain HTTP safe for bearer tokens or metadata.
 

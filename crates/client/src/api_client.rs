@@ -6,6 +6,7 @@ use reqwest::Client;
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::{debug, warn};
 use url::Url;
+use zeroize::Zeroizing;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -14,6 +15,11 @@ pub struct ApiClient {
     http: Client,
     base_url: String,
     token: Option<String>,
+}
+
+pub struct AuthResult<T> {
+    pub response: T,
+    pub encryption_key: Zeroizing<[u8; 32]>,
 }
 
 impl ApiClient {
@@ -87,7 +93,7 @@ impl ApiClient {
         username: &str,
         device_name: &str,
         platform: &str,
-    ) -> Result<LoginResponse, ClientError> {
+    ) -> Result<AuthResult<LoginResponse>, ClientError> {
         validate_server_url(&self.base_url)?;
 
         let (credential_request, client_login_state) =
@@ -117,15 +123,16 @@ impl ApiClient {
         let credential_response = B64
             .decode(&challenge_resp.credential_response_b64)
             .map_err(|e| ClientError::Other(format!("credential response decode: {}", e)))?;
-        let (credential_finalization, _) = crypto::opaque_client_login_finish(
+        let finish = crypto::opaque_client_login_finish(
             &client_login_state,
             passphrase.as_bytes(),
             &credential_response,
         )?;
+        let encryption_key = crypto::derive_data_key_from_opaque_export_key(&finish.export_key);
 
         let req = LoginRequest {
             challenge_id: challenge_resp.challenge_id,
-            credential_finalization,
+            credential_finalization: finish.credential_finalization,
             device_id: None,
             device_name: Some(device_name.to_string()),
             platform: Some(platform.to_string()),
@@ -149,7 +156,10 @@ impl ApiClient {
         let login_resp: LoginResponse = resp.json().await?;
         self.token = Some(login_resp.token.clone());
         debug!("Logged in, device_id={}", login_resp.device_id);
-        Ok(login_resp)
+        Ok(AuthResult {
+            response: login_resp,
+            encryption_key,
+        })
     }
 
     pub async fn register(
@@ -159,7 +169,7 @@ impl ApiClient {
         passphrase: &str,
         device_name: &str,
         platform: &str,
-    ) -> Result<RegisterFinishResponse, ClientError> {
+    ) -> Result<AuthResult<RegisterFinishResponse>, ClientError> {
         validate_server_url(&self.base_url)?;
 
         let (registration_request, client_state) =
@@ -189,15 +199,16 @@ impl ApiClient {
         let registration_response = B64
             .decode(&start_resp.registration_response_b64)
             .map_err(|e| ClientError::Other(format!("registration response decode: {}", e)))?;
-        let registration_upload = crypto::opaque_client_register_finish(
+        let finish = crypto::opaque_client_register_finish(
             &client_state,
             passphrase.as_bytes(),
             &registration_response,
         )?;
+        let encryption_key = crypto::derive_data_key_from_opaque_export_key(&finish.export_key);
 
         let finish_req = RegisterFinishRequest {
             registration_id: start_resp.registration_id,
-            registration_upload,
+            registration_upload: finish.registration_upload,
             device_id: None,
             device_name: Some(device_name.to_string()),
             platform: Some(platform.to_string()),
@@ -225,7 +236,10 @@ impl ApiClient {
             device_id = %register_resp.device_id,
             "Registered"
         );
-        Ok(register_resp)
+        Ok(AuthResult {
+            response: register_resp,
+            encryption_key,
+        })
     }
 
     pub async fn logout(&mut self) -> Result<(), ClientError> {

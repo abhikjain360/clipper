@@ -42,8 +42,8 @@ Rules:
 - HTTP and WebSocket JSON payloads live in `clipper-api-types`.
 - Database entities, decrypted UI state, and daemon IPC commands do not belong
   in this crate.
-- `Argon2Params` lives here because the server sends encryption KDF parameters
-  to clients and `clipper-core` uses the same type for key derivation.
+- `Argon2Params` lives here because access-key hashing configuration is shared
+  between server config and `clipper-core`.
 - Auth payloads must preserve the boundary between invite-key authorization,
   OPAQUE registration/login messages, bearer sessions, and client-side
   encryption keys.

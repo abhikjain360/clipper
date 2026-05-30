@@ -15,6 +15,7 @@ pub const SHA256_BYTES: usize = <<Sha256 as OutputSizeUser>::OutputSize as Unsig
 pub const ACCESS_KEY_HASH_SALT_BYTES: usize = 16;
 pub const ACCESS_KEY_HASH_BYTES: usize = 32;
 pub const SERVER_SECRET_BYTES: usize = 32;
+const OPAQUE_EXPORT_DATA_KEY_LABEL: &[u8] = b"clipper:opaque-export:data-key:v1";
 
 const ACCESS_KEY_HASH_PARAMS_DEFAULT: Argon2Params = Argon2Params {
     m_cost: 19 * 1024,
@@ -30,7 +31,18 @@ impl opaque_ke::CipherSuite for ClipperOpaqueCipherSuite {
     type Ksf = opaque_ke::argon2::Argon2<'static>;
 }
 
-/// Generate a random 16-byte salt for client-side encryption key derivation.
+pub struct OpaqueRegistrationFinish {
+    pub registration_upload: Vec<u8>,
+    pub export_key: Zeroizing<Vec<u8>>,
+}
+
+pub struct OpaqueLoginFinish {
+    pub credential_finalization: Vec<u8>,
+    pub session_key: Vec<u8>,
+    pub export_key: Zeroizing<Vec<u8>>,
+}
+
+/// Generate a random 16-byte salt for the legacy passphrase+salt data-key KDF.
 pub fn generate_encryption_salt() -> [u8; 16] {
     generate_bytes::<16>()
 }
@@ -120,7 +132,7 @@ fn build_argon2<'a>(
     }
 }
 
-/// Derive a 32-byte key from passphrase + salt using Argon2id.
+/// Derive a legacy 32-byte key from passphrase + salt using Argon2id.
 pub fn derive_key(
     passphrase: &[u8],
     salt: &[u8],
@@ -132,6 +144,15 @@ pub fn derive_key(
         .hash_password_into(passphrase, salt, key.as_mut())
         .map_err(|e| CryptoError::Kdf(e.to_string()))?;
     Ok(key)
+}
+
+/// Derive the client-side object encryption key from OPAQUE's stable export key.
+pub fn derive_data_key_from_opaque_export_key(export_key: &[u8]) -> Zeroizing<[u8; 32]> {
+    let hkdf = Hkdf::<Sha256>::new(None, export_key);
+    let mut key = Zeroizing::new([0u8; 32]);
+    hkdf.expand(OPAQUE_EXPORT_DATA_KEY_LABEL, key.as_mut())
+        .expect("HKDF-SHA256 output of 32 bytes is within limits");
+    key
 }
 
 /// HKDF-SHA256-derive a 32-byte subkey from the root server pepper.
@@ -176,9 +197,8 @@ pub fn opaque_register(
     let (registration_request, client_state) = opaque_client_register_start(passphrase)?;
     let registration_response =
         opaque_server_register_start(&server_setup, &registration_request, credential_identifier)?;
-    let registration_upload =
-        opaque_client_register_finish(&client_state, passphrase, &registration_response)?;
-    let password_file = opaque_server_register_finish(&registration_upload)?;
+    let finish = opaque_client_register_finish(&client_state, passphrase, &registration_response)?;
+    let password_file = opaque_server_register_finish(&finish.registration_upload)?;
 
     Ok((server_setup, password_file))
 }
@@ -223,7 +243,7 @@ pub fn opaque_client_register_finish(
     client_state: &[u8],
     passphrase: &[u8],
     registration_response: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
+) -> Result<OpaqueRegistrationFinish, CryptoError> {
     let mut rng = opaque_ke::rand::rngs::OsRng;
     let client_registration =
         opaque_ke::ClientRegistration::<ClipperOpaqueCipherSuite>::deserialize(client_state)
@@ -241,7 +261,10 @@ pub fn opaque_client_register_finish(
         )
         .map_err(opaque_error)?;
 
-    Ok(finish.message.serialize().to_vec())
+    Ok(OpaqueRegistrationFinish {
+        registration_upload: finish.message.serialize().to_vec(),
+        export_key: Zeroizing::new(finish.export_key.to_vec()),
+    })
 }
 
 /// OPAQUE registration round 1, server side.
@@ -316,14 +339,16 @@ pub fn opaque_client_login_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>)
 /// recovers `sk_C` and checks `auth_tag = MAC(auth_key, env_nonce ‖ pk_S)`.
 /// Performs 3DH (`dh1 = x_C · X_S`, `dh2 = sk_C · X_S`, `dh3 = x_C · pk_S`),
 /// derives `(server_mac_key, client_mac_key, session_key)`, verifies
-/// `server_mac`, and returns `(CredentialFinalization = client_mac, session_key)`.
-/// Clipper's HTTP API only sends `client_mac`; the `session_key` is exposed
-/// so tests can assert both sides agreed. See `docs/opaque.md`.
+/// `server_mac`, and returns `(CredentialFinalization = client_mac,
+/// session_key, export_key)`. Clipper's HTTP API only sends `client_mac`;
+/// the client derives its data-encryption key from `export_key`, and
+/// `session_key` is exposed so tests can assert both sides agreed.
+/// See `docs/opaque.md`.
 pub fn opaque_client_login_finish(
     client_state: &[u8],
     passphrase: &[u8],
     credential_response: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+) -> Result<OpaqueLoginFinish, CryptoError> {
     let mut rng = opaque_ke::rand::rngs::OsRng;
     let client_login =
         opaque_ke::ClientLogin::<ClipperOpaqueCipherSuite>::deserialize(client_state)
@@ -340,10 +365,11 @@ pub fn opaque_client_login_finish(
         )
         .map_err(opaque_error)?;
 
-    Ok((
-        finish.message.serialize().to_vec(),
-        finish.session_key.to_vec(),
-    ))
+    Ok(OpaqueLoginFinish {
+        credential_finalization: finish.message.serialize().to_vec(),
+        session_key: finish.session_key.to_vec(),
+        export_key: Zeroizing::new(finish.export_key.to_vec()),
+    })
 }
 
 /// OPAQUE login round 1, server side.
@@ -618,6 +644,17 @@ mod tests {
     }
 
     #[test]
+    fn test_data_key_from_opaque_export_key_is_stable_and_separated() {
+        let export_key = b"opaque export key material";
+        let key1 = derive_data_key_from_opaque_export_key(export_key);
+        let key2 = derive_data_key_from_opaque_export_key(export_key);
+        let key3 = derive_data_key_from_opaque_export_key(b"different export key material");
+
+        assert_eq!(*key1, *key2);
+        assert_ne!(*key1, *key3);
+    }
+
+    #[test]
     fn test_wrap_unwrap_roundtrip() {
         let key = [0x42_u8; 32];
         let aad = AAD_WRAP_OPAQUE_SERVER_SETUP_V1;
@@ -682,11 +719,49 @@ mod tests {
             TEST_CREDENTIAL_IDENTIFIER,
         )
         .unwrap();
-        let (finalization, client_session_key) =
-            opaque_client_login_finish(&client_state, password, &response).unwrap();
-        let server_session_key = opaque_server_login_finish(&server_state, &finalization).unwrap();
+        let finish = opaque_client_login_finish(&client_state, password, &response).unwrap();
+        let server_session_key =
+            opaque_server_login_finish(&server_state, &finish.credential_finalization).unwrap();
 
-        assert_eq!(client_session_key, server_session_key);
+        assert_eq!(finish.session_key, server_session_key);
+    }
+
+    #[test]
+    fn test_opaque_export_key_matches_registration_and_login() {
+        let password = b"correct horse battery staple";
+        let server_setup = opaque_new_server_setup();
+        let (registration_request, registration_state) =
+            opaque_client_register_start(password).unwrap();
+        let registration_response = opaque_server_register_start(
+            &server_setup,
+            &registration_request,
+            TEST_CREDENTIAL_IDENTIFIER,
+        )
+        .unwrap();
+        let registration_finish =
+            opaque_client_register_finish(&registration_state, password, &registration_response)
+                .unwrap();
+        let password_file =
+            opaque_server_register_finish(&registration_finish.registration_upload).unwrap();
+
+        let (request, client_state) = opaque_client_login_start(password).unwrap();
+        let (response, _server_state) = opaque_server_login_start(
+            &server_setup,
+            &password_file,
+            &request,
+            TEST_CREDENTIAL_IDENTIFIER,
+        )
+        .unwrap();
+        let login_finish = opaque_client_login_finish(&client_state, password, &response).unwrap();
+
+        assert_eq!(
+            registration_finish.export_key.as_slice(),
+            login_finish.export_key.as_slice()
+        );
+        assert_eq!(
+            *derive_data_key_from_opaque_export_key(&registration_finish.export_key),
+            *derive_data_key_from_opaque_export_key(&login_finish.export_key)
+        );
     }
 
     #[test]

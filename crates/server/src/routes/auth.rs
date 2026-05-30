@@ -89,7 +89,7 @@ pub async fn challenge(
     Ok(Json(LoginChallengeResponse {
         challenge_id,
         credential_response_b64: B64.encode(credential_response),
-        server: server_info(&state, &user)?,
+        server: ServerInfo {},
     }))
 }
 
@@ -164,9 +164,6 @@ pub async fn register_start(
     let user_id = Uuid::now_v7();
     // Fresh opaque_server_setup = oprf_seed ‖ sk_S ‖ fake_sk for this user.
     let opaque_server_setup = crypto::opaque_new_server_setup();
-    // Salt for the client's separate, non-OPAQUE local-data-encryption KDF.
-    let encryption_salt =
-        crypto::generate_random_bytes(state.config().crypto.encryption_salt_bytes);
     // id_U = "clipper:user:{user_id}:passphrase:v1".
     let credential_identifier = opaque_credential_identifier(user_id);
     // req.registration_request = M. Inside opaque_server_register_start:
@@ -185,23 +182,19 @@ pub async fn register_start(
 
     // OPAQUE round 1 needs no server-side state, but THIS server has to remember
     // the freshly minted user_id and opaque_server_setup (plus the access-key
-    // hash to consume and the encryption_salt) until register_finish.
+    // hash to consume) until register_finish.
     let registration_id = state.create_pending_registration(
         user_id,
         req.username,
         access_key_hash,
         opaque_server_setup,
-        encryption_salt.clone(),
     );
 
     Ok(Json(RegisterStartResponse {
         registration_id,
         user_id: user_id.to_string(),
         registration_response_b64: B64.encode(registration_response),
-        server: ServerInfo {
-            encryption_salt_b64: B64.encode(encryption_salt),
-            encryption_params: state.config().crypto.encryption_params,
-        },
+        server: ServerInfo {},
     }))
 }
 
@@ -267,13 +260,13 @@ pub async fn register_finish(
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
             },
         )?;
-    let wrapped_encryption_salt =
-        secret_storage::wrap_encryption_salt(state.secrets(), &pending.encryption_salt).map_err(
-            |e| {
-                error!(error = %e, "Failed to wrap encryption_salt");
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
-            },
-        )?;
+    // Legacy non-null column. New clients derive object-encryption keys from
+    // OPAQUE's export_key, so the server no longer generates or returns a salt.
+    let wrapped_encryption_salt = secret_storage::wrap_encryption_salt(state.secrets(), &[])
+        .map_err(|e| {
+            error!(error = %e, "Failed to wrap legacy encryption_salt placeholder");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
+        })?;
 
     users::ActiveModel {
         id: Set(pending.user_id),
@@ -360,10 +353,7 @@ pub async fn register_finish(
         user_id: pending.user_id.to_string(),
         username: pending.username,
         device_id: session.device_id.to_string(),
-        server: ServerInfo {
-            encryption_salt_b64: B64.encode(pending.encryption_salt),
-            encryption_params: state.config().crypto.encryption_params,
-        },
+        server: ServerInfo {},
     }))
 }
 
@@ -430,13 +420,12 @@ pub async fn login(
 
     info!(user_id = %user.id, device_id = %session.device_id, "Login successful");
 
-    let server = server_info(&state, &user)?;
     Ok(Json(LoginResponse {
         token: session.token,
         user_id: user.id.to_string(),
         username: user.username,
         device_id: session.device_id.to_string(),
-        server,
+        server: ServerInfo {},
     }))
 }
 
@@ -486,23 +475,6 @@ async fn load_server_config(
 
 fn opaque_credential_identifier(user_id: Uuid) -> Vec<u8> {
     format!("clipper:user:{user_id}:passphrase:v1").into_bytes()
-}
-
-fn server_info(
-    state: &AppState,
-    user: &users::Model,
-) -> Result<ServerInfo, (StatusCode, Json<ErrorResponse>)> {
-    let encryption_salt =
-        secret_storage::unwrap_encryption_salt(state.secrets(), &user.encryption_salt).map_err(
-            |e| {
-                error!(user_id = %user.id, error = %e, "Failed to unwrap encryption_salt");
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
-            },
-        )?;
-    Ok(ServerInfo {
-        encryption_salt_b64: B64.encode(&encryption_salt),
-        encryption_params: state.config().crypto.encryption_params,
-    })
 }
 
 struct IssuedSession {
@@ -697,14 +669,15 @@ mod tests {
             &opaque_credential_identifier(user_id),
         )
         .expect("server register start");
-        let registration_upload = crypto::opaque_client_register_finish(
+        let registration_finish = crypto::opaque_client_register_finish(
             &client_state,
             passphrase,
             &registration_response,
         )
         .expect("client register finish");
         let opaque_password_file =
-            crypto::opaque_server_register_finish(&registration_upload).expect("server finish");
+            crypto::opaque_server_register_finish(&registration_finish.registration_upload)
+                .expect("server finish");
         let encryption_salt = crypto::generate_encryption_salt();
         let now = Utc::now().to_rfc3339();
         let access_key_hash = Uuid::now_v7().to_string();
@@ -827,13 +800,13 @@ mod tests {
         let registration_response = B64
             .decode(registration.registration_response_b64)
             .expect("registration response");
-        let registration_upload =
+        let registration_finish =
             crypto::opaque_client_register_finish(client_state, passphrase, &registration_response)
                 .expect("client register finish");
 
         RegisterFinishRequest {
             registration_id: registration.registration_id,
-            registration_upload,
+            registration_upload: registration_finish.registration_upload,
             device_id: None,
             device_name: Some("test-device".into()),
             platform: Some("test".into()),
@@ -951,13 +924,13 @@ mod tests {
         let credential_response = B64
             .decode(challenge.credential_response_b64)
             .expect("credential response");
-        let (credential_finalization, _) =
+        let finish =
             crypto::opaque_client_login_finish(client_state, passphrase, &credential_response)
                 .expect("client login finish");
 
         LoginRequest {
             challenge_id: challenge.challenge_id,
-            credential_finalization,
+            credential_finalization: finish.credential_finalization,
             device_id: None,
             device_name: Some("test-device".into()),
             platform: Some("test".into()),
@@ -1128,8 +1101,8 @@ mod tests {
     }
 
     // We test that registration persists wrapped — not plaintext — OPAQUE
-    // state and encryption_salt, because the whole point of the pepper is
-    // that a DB dump leaks ciphertext, not the underlying secrets.
+    // state. The legacy encryption_salt column is still populated with a
+    // wrapped placeholder until a schema migration removes it.
     #[tokio::test]
     async fn register_persists_auth_blobs_wrapped() {
         let (state, _data_dir) = empty_state().await;
@@ -1142,9 +1115,6 @@ mod tests {
             .await
             .expect("register start");
         let user_id = Uuid::parse_str(&start_resp.user_id).expect("user id");
-        let plaintext_salt = B64
-            .decode(&start_resp.server.encryption_salt_b64)
-            .expect("decode salt");
         let finish_req = registration_finish_request(start_resp, &client_state, passphrase);
 
         let _ = register_finish(
@@ -1162,14 +1132,12 @@ mod tests {
             .expect("query user")
             .expect("user");
 
-        // The stored salt is wrapped: it must not match the plaintext
-        // salt the client received over the wire, and it must unwrap
-        // back to that same plaintext via the server's pepper subkeys.
-        assert_ne!(stored.encryption_salt, plaintext_salt);
+        // The legacy salt column is still wrapped, but it unwraps to an
+        // empty placeholder and is no longer returned to clients.
         let recovered =
             secret_storage::unwrap_encryption_salt(state.secrets(), &stored.encryption_salt)
                 .expect("unwrap encryption_salt");
-        assert_eq!(recovered, plaintext_salt);
+        assert!(recovered.is_empty());
 
         // OPAQUE blobs must not survive in cleartext, and must unwrap
         // with the same pepper.

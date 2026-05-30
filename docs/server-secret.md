@@ -2,9 +2,11 @@
 
 `clipper-server` requires a 32-byte secret ("pepper") at startup. It is
 used to AEAD-wrap the auth blobs that live in the database
-(`opaque_server_setup`, `opaque_password_file`, `encryption_salt`,
+(`opaque_server_setup`, `opaque_password_file`,
 `access_key_hash_salt`) and to pepper Argon2id when hashing invite
-access keys.
+access keys. The current schema also has a legacy `encryption_salt`
+column; new accounts store only a wrapped placeholder there because
+client data keys now come from OPAQUE's `export_key`.
 
 The point: an attacker with a database dump (sqlite file, leaked
 backup, snapshot exfil) and no pepper cannot brute-force passphrases
@@ -68,10 +70,10 @@ for the lifetime of the database.
 ## Loss
 
 If you lose the pepper you lose **all** users — there is no recovery
-path. Stored OPAQUE state cannot be unwrapped, `encryption_salt`
-cannot be unwrapped, and clients can no longer derive their data
-keys. Back the pepper up (separately from the DB), and document where
-it lives in your runbook.
+path. Stored OPAQUE state cannot be unwrapped, clients cannot complete
+login, and they cannot rederive their OPAQUE-exported data-key root
+through this server. Back the pepper up (separately from the DB), and
+document where it lives in your runbook.
 
 ## What the pepper is not
 

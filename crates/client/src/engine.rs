@@ -2,7 +2,6 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use base64::Engine;
 pub use clipper_app_types::{
     AppState, ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem,
 };
@@ -20,7 +19,6 @@ use crate::{
     local_store::LocalStore,
 };
 
-const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 const INLINE_OBJECT_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 const RECENT_CLIPBOARD_LIMIT: usize = 100;
 const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
@@ -123,18 +121,18 @@ impl SyncEngine {
         device_name: &str,
         platform: &str,
     ) -> Result<(), ClientError> {
-        let login_resp = {
+        let auth = {
             let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
             api.login(passphrase, username, device_name, platform)
                 .await?
         };
+        let login_resp = auth.response;
 
         self.finish_auth(
-            passphrase,
             device_name,
             login_resp.username.clone(),
             login_resp.device_id.clone(),
-            &login_resp.server,
+            auth.encryption_key,
         )
         .await?;
 
@@ -161,18 +159,18 @@ impl SyncEngine {
         device_name: &str,
         platform: &str,
     ) -> Result<String, ClientError> {
-        let register_resp = {
+        let auth = {
             let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
             api.register(access_key, username, passphrase, device_name, platform)
                 .await?
         };
+        let register_resp = auth.response;
 
         self.finish_auth(
-            passphrase,
             device_name,
             register_resp.username.clone(),
             register_resp.device_id.clone(),
-            &register_resp.server,
+            auth.encryption_key,
         )
         .await?;
 
@@ -187,23 +185,13 @@ impl SyncEngine {
 
     async fn finish_auth(
         self: &Arc<Self>,
-        passphrase: &str,
         device_name: &str,
         username: String,
         device_id: String,
-        server: &ServerInfo,
+        encryption_key: Zeroizing<[u8; 32]>,
     ) -> Result<(), ClientError> {
-        let encryption_salt = B64
-            .decode(&server.encryption_salt_b64)
-            .map_err(|e| ClientError::Other(format!("encryption_salt decode: {}", e)))?;
         self.local_store
-            .set_profile(profile_id_from_encryption_salt(&encryption_salt));
-        let encryption_key = crypto::derive_key(
-            passphrase.as_bytes(),
-            &encryption_salt,
-            &server.encryption_params,
-        )
-        .map_err(ClientError::Crypto)?;
+            .set_profile(profile_id_from_encryption_key(&encryption_key));
 
         *self.encryption_key.write().await = Some(encryption_key);
 
@@ -1138,8 +1126,8 @@ fn default_data_dir() -> PathBuf {
     PathBuf::from("web")
 }
 
-fn profile_id_from_encryption_salt(encryption_salt: &[u8]) -> String {
-    hex_string(&crypto::sha256(encryption_salt))
+fn profile_id_from_encryption_key(encryption_key: &[u8; 32]) -> String {
+    hex_string(&crypto::sha256(encryption_key))
 }
 
 fn hex_string(bytes: &[u8]) -> String {

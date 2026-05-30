@@ -3,15 +3,13 @@ use axum::{
     extract::{Extension, State},
     http::StatusCode,
 };
-use base64::Engine;
 use clipper_core::models::{BootstrapResponse, DeviceInfo, ServerInfo};
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
 use tracing::error;
 
 use crate::{
     auth::AuthInfo,
-    entity::{devices, event_log, users},
-    secret_storage,
+    entity::{devices, event_log},
     state::AppState,
 };
 
@@ -19,8 +17,6 @@ pub async fn bootstrap(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
 ) -> Result<Json<BootstrapResponse>, StatusCode> {
-    let b64 = &base64::engine::general_purpose::STANDARD;
-
     let dev = devices::Entity::find_by_id(auth.device_id)
         .one(state.db())
         .await
@@ -40,25 +36,6 @@ pub async fn bootstrap(
             StatusCode::NOT_FOUND
         })?;
 
-    let user = users::Entity::find_by_id(auth.user_id)
-        .one(state.db())
-        .await
-        .map_err(|e| {
-            error!(
-                user_id = %auth.user_id,
-                error = %e,
-                "Failed to look up user in bootstrap",
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or_else(|| {
-            error!(
-                user_id = %auth.user_id,
-                "Authenticated user row missing in bootstrap (data inconsistency)",
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
     let latest_seq = event_log::Entity::find()
         .filter(event_log::Column::UserId.eq(auth.user_id))
         .order_by(event_log::Column::Seq, Order::Desc)
@@ -75,18 +52,6 @@ pub async fn bootstrap(
         .map(|e| i64::from(e.seq))
         .unwrap_or(0);
 
-    let encryption_salt =
-        secret_storage::unwrap_encryption_salt(state.secrets(), &user.encryption_salt).map_err(
-            |e| {
-                error!(
-                    user_id = %auth.user_id,
-                    error = %e,
-                    "Failed to unwrap encryption_salt in bootstrap",
-                );
-                StatusCode::INTERNAL_SERVER_ERROR
-            },
-        )?;
-
     Ok(Json(BootstrapResponse {
         device: DeviceInfo {
             id: dev.id.into(),
@@ -94,24 +59,21 @@ pub async fn bootstrap(
             platform: dev.platform,
         },
         latest_seq,
-        server: ServerInfo {
-            encryption_salt_b64: b64.encode(&encryption_salt),
-            encryption_params: state.config().crypto.encryption_params,
-        },
+        server: ServerInfo {},
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use clipper_core::crypto;
     use sea_orm::{ActiveModelTrait, Database, Set};
     use uuid::Uuid;
 
     use super::*;
-    use crate::{entity::access_keys, secret::ServerSecrets};
-
-    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+    use crate::{
+        entity::{access_keys, users},
+        secret::ServerSecrets,
+    };
 
     async fn empty_state() -> (AppState, tempfile::TempDir) {
         let data_dir = tempfile::tempdir().expect("tempdir");
@@ -125,15 +87,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bootstrap_returns_plaintext_encryption_salt() {
+    async fn bootstrap_returns_device_and_latest_seq() {
         let (state, _data_dir) = empty_state().await;
         let now = Utc::now().to_rfc3339();
         let user_id = Uuid::now_v7();
         let device_id = Uuid::now_v7();
         let access_key_hash = "bootstrap-test-access-key".to_string();
-        let plaintext_salt = crypto::generate_encryption_salt();
-        let wrapped_salt = secret_storage::wrap_encryption_salt(state.secrets(), &plaintext_salt)
-            .expect("wrap salt");
 
         access_keys::ActiveModel {
             key_hash: Set(access_key_hash.clone()),
@@ -151,7 +110,7 @@ mod tests {
             username: Set(user_id.as_simple().to_string()),
             opaque_server_setup: Set(vec![1]),
             opaque_password_file: Set(vec![2]),
-            encryption_salt: Set(wrapped_salt.clone()),
+            encryption_salt: Set(Vec::new()),
             access_key_hash: Set(access_key_hash),
             created_at: Set(now.clone()),
             updated_at: Set(now.clone()),
@@ -184,10 +143,7 @@ mod tests {
         .await
         .expect("bootstrap");
 
-        let returned_salt = B64
-            .decode(response.server.encryption_salt_b64)
-            .expect("decode salt");
-        assert_eq!(returned_salt, plaintext_salt);
-        assert_ne!(returned_salt, wrapped_salt);
+        assert_eq!(response.device.id, device_id.into());
+        assert_eq!(response.latest_seq, 0);
     }
 }

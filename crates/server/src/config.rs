@@ -45,13 +45,7 @@ const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
             t_cost: 2,
             p_cost: 1,
         },
-        encryption_params: Argon2Params {
-            m_cost: 65536, // 64 MiB
-            t_cost: 3,
-            p_cost: 1,
-        },
         access_key_hash_salt_bytes: 16,
-        encryption_salt_bytes: 16,
         session_token_bytes: 32,
     },
 };
@@ -292,12 +286,8 @@ impl CleanupConfig {
 pub struct CryptoConfig {
     #[garde(dive)]
     pub access_key_hash_params: Argon2Params,
-    #[garde(dive)]
-    pub encryption_params: Argon2Params,
     #[garde(range(min = 1))]
     pub access_key_hash_salt_bytes: usize,
-    #[garde(range(min = 1))]
-    pub encryption_salt_bytes: usize,
     #[garde(range(min = 1))]
     pub session_token_bytes: usize,
 }
@@ -314,21 +304,8 @@ impl CryptoConfig {
             self.access_key_hash_params.p_cost = value;
         }
 
-        if let Some(value) = overrides.encryption_m_cost {
-            self.encryption_params.m_cost = value;
-        }
-        if let Some(value) = overrides.encryption_t_cost {
-            self.encryption_params.t_cost = value;
-        }
-        if let Some(value) = overrides.encryption_p_cost {
-            self.encryption_params.p_cost = value;
-        }
-
         if let Some(value) = overrides.access_key_hash_salt_bytes {
             self.access_key_hash_salt_bytes = value;
-        }
-        if let Some(value) = overrides.encryption_salt_bytes {
-            self.encryption_salt_bytes = value;
         }
         if let Some(value) = overrides.session_token_bytes {
             self.session_token_bytes = value;
@@ -483,21 +460,9 @@ pub struct CryptoConfigOverrides {
     /// Argon2 p-cost for access-key hashing.
     #[arg(long = "access-key-hash-p-cost")]
     pub access_key_hash_p_cost: Option<u32>,
-    /// Argon2 m-cost for client-side encryption key derivation.
-    #[arg(long = "encryption-m-cost")]
-    pub encryption_m_cost: Option<u32>,
-    /// Argon2 t-cost for client-side encryption key derivation.
-    #[arg(long = "encryption-t-cost")]
-    pub encryption_t_cost: Option<u32>,
-    /// Argon2 p-cost for client-side encryption key derivation.
-    #[arg(long = "encryption-p-cost")]
-    pub encryption_p_cost: Option<u32>,
     /// Access-key hash salt size in bytes.
     #[arg(long = "access-key-hash-salt-bytes")]
     pub access_key_hash_salt_bytes: Option<usize>,
-    /// Encryption salt size in bytes.
-    #[arg(long = "encryption-salt-bytes")]
-    pub encryption_salt_bytes: Option<usize>,
     /// Session token size in bytes.
     #[arg(long = "session-token-bytes")]
     pub session_token_bytes: Option<usize>,
@@ -605,11 +570,7 @@ mod tests {
                 access_key_hash_m_cost = 4096
                 access_key_hash_t_cost = 1
                 access_key_hash_p_cost = 2
-                encryption_m_cost = 32768
-                encryption_t_cost = 1
-                encryption_p_cost = 1
                 access_key_hash_salt_bytes = 32
-                encryption_salt_bytes = 24
                 session_token_bytes = 48
             "#,
         )
@@ -639,11 +600,7 @@ mod tests {
         assert_eq!(config.crypto.access_key_hash_params.m_cost, 4096);
         assert_eq!(config.crypto.access_key_hash_params.t_cost, 1);
         assert_eq!(config.crypto.access_key_hash_params.p_cost, 2);
-        assert_eq!(config.crypto.encryption_params.m_cost, 32768);
-        assert_eq!(config.crypto.encryption_params.t_cost, 1);
-        assert_eq!(config.crypto.encryption_params.p_cost, 1);
         assert_eq!(config.crypto.access_key_hash_salt_bytes, 32);
-        assert_eq!(config.crypto.encryption_salt_bytes, 24);
         assert_eq!(config.crypto.session_token_bytes, 48);
     }
 

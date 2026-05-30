@@ -40,7 +40,6 @@ pub struct PendingRegistration {
     pub username: String,
     pub access_key_hash: String,
     pub opaque_server_setup: Vec<u8>,
-    pub encryption_salt: Vec<u8>,
     expires_at: Instant,
 }
 
@@ -168,7 +167,6 @@ impl AppState {
         username: String,
         access_key_hash: String,
         opaque_server_setup: Vec<u8>,
-        encryption_salt: Vec<u8>,
     ) -> String {
         let now = Instant::now();
         let mut registrations = self
@@ -194,7 +192,6 @@ impl AppState {
                 username,
                 access_key_hash,
                 opaque_server_setup,
-                encryption_salt,
                 expires_at: now + Duration::from_secs(self.config().auth.challenge_ttl_secs),
             },
         );

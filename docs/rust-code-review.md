@@ -27,9 +27,9 @@ The crate boundaries are sound:
 - `app/rust` bridge structs are thin adapter types.
 
 The server auth model is directionally good. Passphrases go through OPAQUE; the
-per-user `opaque_server_setup` / `opaque_password_file` / `encryption_salt` and
-the server-wide `access_key_hash_salt` are AEAD-wrapped at rest with a server
-pepper; session tokens are random and stored as hashes; private routes derive
+per-user `opaque_server_setup` / `opaque_password_file` and the server-wide
+`access_key_hash_salt` are AEAD-wrapped at rest with a server pepper; session
+tokens are random and stored as hashes; private routes derive
 `user_id` and `device_id` from authenticated middleware instead of trusting
 request-body provenance; registration is gated by a one-time Argon2id-verified
 access key consumed atomically. The object upload state machine is solid:
@@ -165,13 +165,13 @@ Recommended fix:
 ## P2: Crypto Config Floors Permit A Trivially Insecure Deployment
 
 `CryptoConfig` validation only requires `range(min = 1)` for
-`session_token_bytes`, `encryption_salt_bytes`, and `access_key_hash_salt_bytes`
-(`crates/server/src/config.rs:297-302`), and `Argon2Params` only requires
+`session_token_bytes` and `access_key_hash_salt_bytes`
+(`crates/server/src/config.rs`), and `Argon2Params` only requires
 `range(min = 1)` for `m_cost`, `t_cost`, `p_cost`
 (`crates/api-types/src/lib.rs:92-100`, reached via `#[garde(dive)]`). A TOML/CLI
 deployment can therefore start with 1-byte session tokens (≈8 bits, remotely
-guessable → account takeover), 1-byte salts, and Argon2 reduced to 1 KiB / 1
-pass. Validation accepts all of it.
+guessable → account takeover), 1-byte access-key salts, and Argon2 reduced to
+1 KiB / 1 pass. Validation accepts all of it.
 
 Recommended fix: enforce hard security floors (e.g. session tokens ≥ 32 bytes,
 salts ≥ 16 bytes, documented Argon2 minimums) unless an explicit, clearly named
@@ -215,17 +215,11 @@ Recommended fix: store integer Unix milliseconds, or normalize one fixed-width
 UTC string everywhere and validate `before`, or parse to `DateTime<Utc>` before
 comparing.
 
-## P2: Encryption KDF Parameters Are Not Persisted Per User
+## Resolved: Encryption KDF Parameters Are Not Persisted Per User
 
-Server responses return `state.config().crypto.encryption_params`
-(`auth.rs:504`, bootstrap `sync.rs:99`) rather than per-user stored parameters.
-After a config change (or a hostile/buggy server response) existing users
-either derive the wrong content key and lose access to old data, or derive
-future keys under weaker parameters.
-
-Recommended fix: store `Argon2Params` (plus a KDF name/version tag) per user;
-return the stored values on login challenge and bootstrap; have clients
-validate/pin them.
+Client object keys now derive from OPAQUE's stable `export_key`, so the server
+no longer returns encryption KDF parameters or salts. A future schema cleanup
+can remove the legacy `users.encryption_salt` column.
 
 ## P2: File Download Only Finds Metadata In The First Page
 

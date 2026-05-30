@@ -51,6 +51,7 @@ pub const ENV_SECRET_FILE: &str = "CLIPPER_SERVER_SECRET_FILE";
 pub struct ServerSecrets {
     pub opaque_server_setup: [u8; 32],
     pub opaque_password_file: [u8; 32],
+    // Legacy column wrapper retained until `users.encryption_salt` is removed.
     pub encryption_salt: [u8; 32],
     pub access_key_hash_salt: [u8; 32],
     pub access_key_pepper: [u8; 32],

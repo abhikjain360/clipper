@@ -93,7 +93,7 @@ Y           = r⁻¹ · N                                (= k_U · H(pw), the OP
 rwd         = KSF(Y)                                 (randomized password; Y already binds pw via OPRF)
 
 masking_key = Expand(rwd, "MaskingKey")
-export_key  = Expand(rwd, "ExportKey")               (returned to caller; clipper ignores it)
+export_key  = Expand(rwd, "ExportKey")               (client data-key root)
 
 env_nonce   ← random
 auth_key    = Expand(rwd, env_nonce ‖ "AuthKey")
@@ -196,7 +196,7 @@ check  server_mac = MAC(server_mac_key, transcript_pre)        else abort  (bad 
 
 client_mac = MAC(client_mac_key, transcript_pre ‖ server_mac)
 send client_mac                                                ⟶ CredentialFinalization
-output session_key
+output session_key, export_key
 ```
 
 ### Round 2 — server (`opaque_server_login_finish(state_S, CredentialFinalization)`)
@@ -219,10 +219,10 @@ output session_key
 - `session_key` is discarded after login; clipper authenticates the session
   with a fresh random bearer token issued by `issue_session` after
   `opaque_server_login_finish` succeeds.
-- `export_key` is unused. Clipper derives its local data-encryption key
-  separately via Argon2id over `pw` and a server-stored
-  `encryption_salt`; that salt rides in the same response payload but has
-  no relation to OPAQUE.
+- `export_key` is used only on the client. Clipper derives its local
+  data-encryption key as `HKDF-SHA256(export_key,
+  "clipper:opaque-export:data-key:v1")`; the server never receives this
+  key and no longer returns a separate encryption salt/KDF parameter set.
 - Access keys are an invite-gate that lives entirely outside OPAQUE.
 
 ## At-rest wrapping (server pepper)
@@ -239,7 +239,8 @@ Wrapped on disk:
 
 - `users.opaque_server_setup`
 - `users.opaque_password_file`
-- `users.encryption_salt`
+- `users.encryption_salt` (legacy non-null placeholder until a schema
+  migration removes it)
 - `server_config.access_key_hash_salt`
 
 Access keys:
@@ -252,17 +253,12 @@ Plaintext on disk:
 
 - `sessions.token_hash` — 32-byte random tokens; not brute-forceable.
 - `objects.meta_ciphertext` and `object_payloads/*.bin` — already
-  client-encrypted with a key bound to the wrapped `encryption_salt`.
-
-The client receives the plaintext `encryption_salt` in `ServerInfo`
-during registration, login, and `/api/sync/bootstrap`; only the
-database column is wrapped.
+  client-encrypted with a key derived from the OPAQUE `export_key`.
 
 Wrap format and key derivation live in `clipper_core::crypto`
 (`wrap_with_key`, `derive_subkey`, `HKDF_LABEL_*`, `AAD_WRAP_*`); the
 column-to-subkey/AAD bindings live in
 `crates/server/src/secret_storage.rs`.
 The server unwraps these columns only at storage boundaries: before
-calling OPAQUE helpers, before hashing/checking access keys, before
-returning `ServerInfo`, and during startup validation of the stored
-`server_config.access_key_hash_salt`.
+calling OPAQUE helpers, before hashing/checking access keys, and during
+startup validation of the stored `server_config.access_key_hash_salt`.

@@ -64,6 +64,7 @@ pub fn wrap_encryption_salt(
     )
 }
 
+#[cfg(test)]
 pub fn unwrap_encryption_salt(
     secrets: &ServerSecrets,
     blob: &[u8],

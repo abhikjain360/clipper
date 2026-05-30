@@ -88,7 +88,7 @@ mod base64_vec {
 /// Binary request/response body format used by Rust-only object endpoints.
 pub const POSTCARD_CONTENT_TYPE: &str = "application/vnd.clipper.postcard";
 
-/// Argon2id parameters used for client-side encryption key derivation.
+/// Argon2id parameters used for server-side verifier derivation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Validate)]
 pub struct Argon2Params {
     #[garde(range(min = 1))]
@@ -176,11 +176,8 @@ pub struct LoginResponse {
     pub server: ServerInfo,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ServerInfo {
-    pub encryption_salt_b64: String,
-    pub encryption_params: Argon2Params,
-}
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ServerInfo {}
 
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct RegisterStartRequest {
