@@ -21,25 +21,27 @@ fi
 
 clipper_setup_android_env
 
-echo "clipper dev shell"
-if [ -n "${CLIPPER_STABLE_BIN:-}" ]; then
-  echo "  rust stable: $("$CLIPPER_STABLE_BIN/rustc" --version)"
-else
-  echo "  rust stable: unavailable"
+if [ "${CLIPPER_DEV_SHELL_BANNER:-0}" = "1" ]; then
+  echo "clipper dev shell"
+  if [ -n "${CLIPPER_STABLE_BIN:-}" ]; then
+    echo "  rust stable: $("$CLIPPER_STABLE_BIN/rustc" --version)"
+  else
+    echo "  rust stable: unavailable"
+  fi
+  if [ -n "${CLIPPER_RUST_NIGHTLY_BIN:-}" ]; then
+    echo "  rust nightly: $("$CLIPPER_RUST_NIGHTLY_BIN/rustc" --version)"
+  else
+    echo "  rust nightly: unavailable"
+  fi
+  echo "  flutter: $(flutter --version | sed -n '1p')"
+  echo "  sea-orm-cli: $(sea-orm-cli --version)"
+  if [ -n "${ANDROID_HOME:-}" ]; then
+    echo "  android sdk: $ANDROID_HOME"
+  fi
+  if [ -n "${ANDROID_NDK_HOME:-}" ]; then
+    echo "  android ndk: $ANDROID_NDK_HOME"
+  else
+    echo "  android ndk: not configured"
+  fi
+  echo "host Xcode, Android SDK/NDK installs, and emulators remain platform setup"
 fi
-if [ -n "${CLIPPER_RUST_NIGHTLY_BIN:-}" ]; then
-  echo "  rust nightly: $("$CLIPPER_RUST_NIGHTLY_BIN/rustc" --version)"
-else
-  echo "  rust nightly: unavailable"
-fi
-echo "  flutter: $(flutter --version | sed -n '1p')"
-echo "  sea-orm-cli: $(sea-orm-cli --version)"
-if [ -n "${ANDROID_HOME:-}" ]; then
-  echo "  android sdk: $ANDROID_HOME"
-fi
-if [ -n "${ANDROID_NDK_HOME:-}" ]; then
-  echo "  android ndk: $ANDROID_NDK_HOME"
-else
-  echo "  android ndk: not configured"
-fi
-echo "host Xcode, Android SDK/NDK installs, and emulators remain platform setup"

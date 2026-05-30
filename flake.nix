@@ -31,7 +31,7 @@
       ];
       wasmRustTarget = "wasm32-unknown-unknown";
       # Interpolate the directory so every script shares one /nix/store path
-      # and the BASH_SOURCE-derived SCRIPT_DIR can resolve sibling helpers.
+      # and can resolve sibling helpers.
       scriptsDir = ./scripts;
       mkPkgs = system: import nixpkgs { inherit system; };
       mkRustToolchains =
@@ -103,6 +103,7 @@
           frbWebRuntimeInputs =
             frbGenerateRuntimeInputs
             ++ (with pkgs; [
+              deno
               wasm-pack
             ])
             ++ [ toolchains.nightly ];
@@ -134,18 +135,37 @@
         {
           fmt = {
             program = "clipper-fmt";
-            script = "fmt.sh";
             description = "Format all Clipper sources";
             runtimeInputs = fmtRuntimeInputs;
             env = nightlyEnv;
+            text = ''
+              # shellcheck disable=SC1091
+              source ${scriptsDir}/common.sh
+
+              clipper_enter_repo
+              clipper_use_nightly
+
+              nixfmt flake.nix
+              cargo fmt --all
+              deno fmt scripts/*.ts test-server.ts
+              dart format app/lib app/test app/integration_test app/test_driver
+            '';
           };
 
           rustfmt = {
             program = "clipper-rustfmt";
-            script = "rustfmt.sh";
             description = "Format Rust sources with the pinned nightly toolchain";
             runtimeInputs = rustRuntimeInputs;
             env = nightlyEnv;
+            text = ''
+              # shellcheck disable=SC1091
+              source ${scriptsDir}/common.sh
+
+              clipper_enter_repo
+              clipper_use_nightly
+
+              exec cargo fmt --all "$@"
+            '';
           };
 
           audit = {
@@ -175,27 +195,52 @@
 
           wasm-check = {
             program = "clipper-wasm-check";
-            script = "wasm-check.sh";
             description = "Check the Rust app crate for wasm32-unknown-unknown";
             runtimeInputs = rustRuntimeInputs;
             env = nightlyEnv + wasmEnv;
+            text = ''
+              # shellcheck disable=SC1091
+              source ${scriptsDir}/common.sh
+
+              clipper_require_env CLIPPER_WASM_TARGET
+              clipper_enter_repo
+              clipper_use_nightly
+
+              exec cargo check -p rust_lib_clipper_app --target "$CLIPPER_WASM_TARGET" "$@"
+            '';
           };
 
           frb-generate = {
             program = "clipper-frb-generate";
-            script = "frb-generate.sh";
             description = "Regenerate Flutter Rust Bridge bindings";
             runtimeInputs = frbGenerateRuntimeInputs;
             env = flutterEnv;
+            text = ''
+              # shellcheck disable=SC1091
+              source ${scriptsDir}/common.sh
+
+              clipper_require_env FLUTTER_ROOT
+              clipper_enter_app
+
+              export FLUTTER_ROOT
+              exec flutter_rust_bridge_codegen generate "$@"
+            '';
           };
 
           server-entities = {
             program = "clipper-server-entities";
-            script = "server-entities.sh";
+            denoScript = "server-entities.ts";
+            denoPermissions = [
+              "--allow-env"
+              "--allow-read"
+              "--allow-write"
+              "--allow-run"
+            ];
             description = "Regenerate SeaORM server entities from the current schema";
             runtimeInputs =
               baseRuntimeInputs
               ++ (with pkgs; [
+                deno
                 sea-orm-cli
                 sqlite
               ])
@@ -205,7 +250,13 @@
 
           frb-build-web = {
             program = "clipper-frb-build-web";
-            script = "frb-build-web.sh";
+            denoScript = "frb-build-web.ts";
+            denoPermissions = [
+              "--allow-env"
+              "--allow-read"
+              "--allow-write"
+              "--allow-run"
+            ];
             description = "Build Flutter Rust Bridge wasm artifacts";
             runtimeInputs = frbWebRuntimeInputs;
             env = nightlyEnv + flutterEnv;
@@ -213,7 +264,13 @@
 
           web-build = {
             program = "clipper-web-build";
-            script = "web-build.sh";
+            denoScript = "web-build.ts";
+            denoPermissions = [
+              "--allow-env"
+              "--allow-read"
+              "--allow-write"
+              "--allow-run"
+            ];
             description = "Build the Flutter web application";
             runtimeInputs = frbWebRuntimeInputs;
             env = nightlyEnv + wasmEnv + flutterEnv;
@@ -264,7 +321,10 @@
             else if cfg ? denoScript then
               ''
                 ${cfg.env or ""}
-                deno run ${denoPermissions} ${scriptsDir}/${cfg.denoScript} "$@"
+                # shellcheck disable=SC1091
+                source ${scriptsDir}/common.sh
+
+                deno run ${denoPermissions} "$CLIPPER_REPO_ROOT/scripts/${cfg.denoScript}" "$@"
               ''
             else
               ''
@@ -341,6 +401,7 @@
             };
 
             shellHook = ''
+              # Set CLIPPER_DEV_SHELL_BANNER=1 before entering the shell to print tool versions.
               source ${scriptsDir}/dev-shell-env.sh
             '';
           };
