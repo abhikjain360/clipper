@@ -12,6 +12,8 @@ with ciphertext, or (for daemon IPC) be same-user local malware.
 
 Scope: `crates/core`, `crates/server`, `crates/client` (including
 `src/local_store.rs`), `crates/daemon`, `crates/daemon-types`, `app/rust`.
+Release-readiness notes at the bottom also mention Flutter, Android, and CI
+metadata when they affect whether the project is safe to publish.
 
 Highest-priority open risks: AEAD AAD does not bind object identity; WebSocket
 replay can silently miss pruned events and is uncapped; the client advances its
@@ -148,6 +150,25 @@ a duplicate-refresh-storm vector), and `logout` does not cancel them.
 Recommended fix: track background task handles in `SyncEngine`; cancel/replace
 existing sync and watcher tasks on re-auth, logout, and server switch.
 
+## P2: Logout Can Fail To Clear Local Auth State
+
+`ApiClient::logout` (`crates/client/src/api_client.rs:233-245`) sends the server
+logout request and returns `Err` before clearing `self.token` when the request
+itself fails. `SyncEngine::logout` (`crates/client/src/engine.rs:231-244`)
+awaits that call before clearing the encryption key and app state, and the
+Flutter logout button currently swallows the error
+(`app/lib/screens/home_screen.dart:47-51`).
+
+If the server is down, the network is unavailable, or the session revoke request
+times out, the user can appear to have pressed logout while the client remains
+locally logged in with token/key material and background work still alive. This
+is a correctness and privacy issue, especially on shared devices.
+
+Recommended fix: make logout local-first. Clear the local token, encryption key,
+app state, profile-sensitive local state, and background task handles regardless
+of server reachability; then best-effort revoke the server session and surface a
+non-blocking warning if revocation failed.
+
 ## P2: Client File Upload/Download Is All In Memory
 
 The server streams payload uploads to disk, but the client reads full plaintext
@@ -256,6 +277,26 @@ Recommended fix: restrict to the known web-client origin(s).
   flag (leaks to shell history / process list); the `rpassword` prompt is the
   safe path. Consider stdin-only.
 
+## Release Readiness Gaps
+
+These are not all Rust backend defects, but they matter before making a public
+release or advertising the app as secure:
+
+- **Flutter app version says stable 1.0.0.** `app/pubspec.yaml` uses
+  `version: 1.0.0+1` while the README and SECURITY policy correctly call the
+  project early, experimental, and pre-1.0. Use a pre-release/current version
+  such as `0.1.0+N` until there is a real stable release.
+- **Flutter lockfile is ignored but CI keys on it.** `.gitignore` excludes
+  `app/pubspec.lock`, while `.github/workflows/ci.yml` uses
+  `hashFiles('app/pubspec.lock')` for the pub cache key. For an application,
+  commit the lockfile for reproducibility, or stop treating it as a CI cache
+  key/source of truth.
+- **Android release manifest allows cleartext traffic globally.**
+  `app/android/app/src/main/AndroidManifest.xml` sets
+  `android:usesCleartextTraffic="true"`, even though the documented production
+  model requires HTTPS outside loopback/emulator development. Move cleartext
+  allowance to debug/dev configuration or a narrow network security config.
+
 ## Accepted / Intentional Tradeoffs (Residual Risks By Design)
 
 - **Same-user local IPC trust (P0, out of scope).** The daemon hardens the
@@ -293,9 +334,11 @@ Recommended fix: restrict to the known web-client origin(s).
 3. Crypto config floors and local-cache `0600`/`0700` permissions — cheap,
    high-value hardening (P2).
 4. Orphan-cleanup race, payload-count cap, explicit SQLite pragmas (P2).
-5. Background task cancellation on re-auth/logout; object-by-ID metadata lookup
-   for download; client file-size checks (P2).
-6. Hardening/cleanup: validated `before` cursor and integer timestamps; redact
+5. Background task cancellation on re-auth/logout; make logout local-first;
+   object-by-ID metadata lookup for download; client file-size checks (P2).
+6. Release readiness: align app versioning, commit or intentionally drop the
+   Flutter lockfile, and restrict Android cleartext traffic.
+7. Hardening/cleanup: validated `before` cursor and integer timestamps; redact
    `Debug` on secret-bearing IPC structs; validate in `set_base_url`; ordered
    challenge eviction; restrict CORS; uniform challenge/register responses (or
    accept username enumeration explicitly).

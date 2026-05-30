@@ -246,7 +246,12 @@ Review every route that reads, writes, or deletes files.
 
 For object and clipboard ingestion:
 
-- Per-payload streaming upload (`PUT /api/objects/{id}/payloads/{payload_id}`) refuses any byte beyond the `ciphertext_size` declared during init, then rejects the request if the final byte count does not match. But the declared `ciphertext_size` is itself unbounded — `limits.max_file_blob_bytes` is defined but enforced nowhere, so a client can declare and stream an arbitrarily large payload to disk. Treat this as a known P1 gap (see `docs/rust-code-review.md`).
+- Per-payload streaming upload
+  (`PUT /api/objects/{id}/payloads/{payload_id}`) refuses any byte beyond the
+  `ciphertext_size` declared during init, then rejects the request if the final
+  byte count does not match. `init_object` rejects any declared payload
+  `ciphertext_size` above `limits.max_file_blob_bytes`, so both inline and
+  streamed writes are bounded by the same configured ceiling.
 - `init_object` validates encrypted metadata against `limits.max_object_meta_ciphertext_bytes`, and `garde` now validates that each inline payload's length equals its declared `ciphertext_size` and matches `sha256_ciphertext`. There is no explicit `DefaultBodyLimit`, so buffered (`init`/`complete`) routes are bounded only by axum's implicit 2 MiB request-body default — a framework default, not an explicit policy.
 - Enforce that uploaded blob size matches initialized metadata. Hash large blobs incrementally on disk before completion.
 - Delete corrupt or mismatched partial blobs.
