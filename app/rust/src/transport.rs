@@ -45,8 +45,6 @@ pub(crate) enum TransportError {
         #[source]
         source: std::io::Error,
     },
-    #[error("daemon socket directory is unavailable")]
-    DataDirUnavailable,
     #[error("not connected to daemon")]
     NotConnected,
     #[error("daemon connection lost")]
@@ -96,9 +94,7 @@ pub(crate) static BRIDGE: LazyLock<DaemonBridge> = LazyLock::new(|| {
 });
 
 pub(crate) fn socket_path() -> TransportResult<PathBuf> {
-    dirs::data_dir()
-        .map(|base| base.join("Clipper").join("daemon.sock"))
-        .ok_or(TransportError::DataDirUnavailable)
+    Ok(dt::ipc_path::socket_path())
 }
 
 // ── Public transport API ──

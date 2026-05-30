@@ -3,6 +3,8 @@
 //! Contains state types (AppState, etc.) and protocol types
 //! shared between clipper-daemon and the app bridge.
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod ipc_path;
 mod protocol;
 mod state;
 

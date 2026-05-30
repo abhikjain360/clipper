@@ -63,11 +63,13 @@ validation floors permit a trivially insecure deployment.
 
 ## P0: Local Daemon IPC Trusts Any Same-User Process
 
-The daemon hardens the socket against *cross-user* access: `crates/daemon/src/main.rs`
-creates the platform data dir (`~/Library/Application Support/Clipper`, or the
-XDG data dir on Linux) with `0700` and the socket with `0600`, refuses `/tmp`,
-caps each IPC line at `MAX_IPC_REQUEST_LINE_BYTES = 32 MiB`, and runs an
-HMAC-SHA256 challenge/response (`handler.rs` `authenticate_connection` /
+The daemon hardens the socket against *cross-user* access:
+`crates/daemon-types/src/ipc_path.rs` puts the socket in a short per-user
+private runtime directory (`/tmp/clipper-$uid` on macOS, `XDG_RUNTIME_DIR` with
+the same fallback on Linux), verifies ownership, keeps the directory at `0700`,
+and `crates/daemon/src/main.rs` sets the socket to `0600`. IPC also caps each
+line at `MAX_IPC_REQUEST_LINE_BYTES = 32 MiB` and runs an HMAC-SHA256
+challenge/response (`handler.rs` `authenticate_connection` /
 `verify_auth_request`, constant-time `verify_slice`) binding protocol version,
 daemon nonce, and client nonce before accepting any command. `app/rust`
 mirrors the protocol.

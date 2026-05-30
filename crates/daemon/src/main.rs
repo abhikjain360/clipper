@@ -31,6 +31,8 @@ use std::{
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use clipper_client::engine::SyncEngine;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+use clipper_daemon_types::ipc_path;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use tokio::net::UnixListener;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use tracing::{error, info, warn};
@@ -45,18 +47,10 @@ use crate::{
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const PRIVATE_DIR_MODE: u32 = 0o700;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-const SOCKET_FILE_MODE: u32 = 0o600;
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn app_data_dir() -> DaemonResult<PathBuf> {
     dirs::data_dir()
         .map(|base| base.join("Clipper"))
         .ok_or(DaemonError::DataDirUnavailable)
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn socket_path() -> DaemonResult<PathBuf> {
-    Ok(app_data_dir()?.join("daemon.sock"))
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -141,9 +135,12 @@ async fn run() -> DaemonResult<()> {
         .try_init()
         .ok();
 
-    let sock_path = socket_path()?;
+    let sock_path = ipc_path::socket_path();
     let data_dir = data_dir()?;
     ensure_private_dir(&data_dir)?;
+    if let Some(sock_dir) = sock_path.parent() {
+        ipc_path::ensure_private_socket_dir(sock_dir)?;
+    }
 
     // Check for existing daemon
     if sock_path.exists() {
@@ -211,7 +208,7 @@ async fn run() -> DaemonResult<()> {
     let listener = UnixListener::bind(&sock_path)?;
     std::fs::set_permissions(
         &sock_path,
-        std::fs::Permissions::from_mode(SOCKET_FILE_MODE),
+        std::fs::Permissions::from_mode(ipc_path::SOCKET_FILE_MODE),
     )?;
     info!("Daemon listening on {}", sock_path.display());
 
