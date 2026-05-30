@@ -7,6 +7,7 @@ members = [
     "crates/client",
     "crates/daemon",
     "crates/daemon-types",
+    "crates/fs-txn",
     "app/rust",
 ]
 resolver = "3"
@@ -22,6 +23,7 @@ clipper-api-types = { path = "crates/api-types" }
 clipper-app-types = { path = "crates/app-types" }
 clipper-client = { path = "crates/client" }
 clipper-daemon-types = { path = "crates/daemon-types" }
+clipper-fs-txn = { path = "crates/fs-txn" }
 
 # shared third-party crates
 argon2 = "0.5.3"

@@ -15,6 +15,7 @@ base64.workspace = true
 chrono.workspace = true
 clap = { version = "4.6.1", features = ["derive"] }
 clipper-core.workspace = true
+clipper-fs-txn.workspace = true
 futures-util.workspace = true
 garde.workspace = true
 governor = "0.10.4"

@@ -734,6 +734,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipper-fs-txn"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "clipper-server"
 version = "0.1.0"
 dependencies = [
@@ -744,6 +753,7 @@ dependencies = [
  "chrono",
  "clap",
  "clipper-core",
+ "clipper-fs-txn",
  "futures-util",
  "garde",
  "governor",

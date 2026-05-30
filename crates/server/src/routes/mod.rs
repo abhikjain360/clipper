@@ -7,8 +7,9 @@ use axum::{
 };
 use clipper_core::models::{ApiErrorCode, ErrorResponse, POSTCARD_CONTENT_TYPE};
 use garde::Validate;
+use sea_orm::{DatabaseConnection, DatabaseTransaction, DbErr, TransactionTrait};
 use serde::{Serialize, de::DeserializeOwned};
-use tracing::{debug, error, trace};
+use tracing::{debug, error, trace, warn};
 
 pub mod auth;
 pub mod health;
@@ -179,6 +180,46 @@ where
 
 pub(crate) fn error_response(status: StatusCode, message: impl Into<String>) -> ApiError {
     ApiError::from_code_with_message(ApiErrorCode::from_http_status(status.as_u16()), message)
+}
+
+/// Run `f` inside a database transaction, committing on `Ok` and rolling back
+/// on `Err`. `operation` labels the transaction in failure logs.
+///
+/// Begin and commit failures are logged and mapped to a generic database
+/// `ApiError`; every other error is whatever `f` returns. The rollback is
+/// awaited and logged on failure, so callers never roll back by hand — an early
+/// return inside `f` rolls back automatically.
+pub(crate) async fn with_txn<F, T>(
+    db: &DatabaseConnection,
+    operation: &str,
+    f: F,
+) -> Result<T, ApiError>
+where
+    F: AsyncFnOnce(&DatabaseTransaction) -> Result<T, ApiError>,
+{
+    let txn = db
+        .begin()
+        .await
+        .map_err(|e| txn_db_error(operation, "begin", e))?;
+    match f(&txn).await {
+        Ok(value) => {
+            txn.commit()
+                .await
+                .map_err(|e| txn_db_error(operation, "commit", e))?;
+            Ok(value)
+        }
+        Err(err) => {
+            if let Err(rollback_err) = txn.rollback().await {
+                warn!(operation, error = %rollback_err, "Failed to roll back transaction");
+            }
+            Err(err)
+        }
+    }
+}
+
+fn txn_db_error(operation: &str, phase: &str, error: DbErr) -> ApiError {
+    error!(operation, phase, error = %error, "Database transaction error");
+    ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
 }
 
 fn validate_request<T>(value: &T) -> RouteResult<()>

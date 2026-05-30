@@ -15,6 +15,7 @@ use clipper_core::{
         OkResponse,
     },
 };
+use clipper_fs_txn::FsTransaction;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DerivePartialModel, EntityTrait, Order, QueryFilter, QueryOrder,
     QuerySelect, Set, SqlErr, TransactionTrait,
@@ -28,7 +29,7 @@ use uuid::Uuid;
 use crate::{
     auth::AuthInfo,
     entity::{event_log, object_payloads, objects},
-    routes::{ApiError, Postcard},
+    routes::{ApiError, Postcard, with_txn},
     state::AppState,
     ws::WsBroadcast,
 };
@@ -93,7 +94,10 @@ pub async fn init_object(
     }
 
     let mut all_inline = true;
-    let mut written_paths = Vec::new();
+    // Inline payload files are written before the transaction. `staged` removes
+    // them on drop, so any early return below (including a failed write or a
+    // rolled-back transaction) cleans them up without explicit bookkeeping.
+    let mut staged = FsTransaction::new();
     for payload in &req.payloads {
         let Some(inline_ciphertext) = &payload.inline_ciphertext else {
             all_inline = false;
@@ -104,7 +108,8 @@ pub async fn init_object(
         let path = state
             .objects_dir()
             .join(object_payload_filename(&object_id_text, &payload_id));
-        write_payload_bytes_create_new(&path, inline_ciphertext)
+        staged
+            .write_new(&path, inline_ciphertext)
             .await
             .map_err(|e| {
                 error!(
@@ -119,7 +124,6 @@ pub async fn init_object(
                     "Object payload storage error",
                 )
             })?;
-        written_paths.push(path);
     }
     let all_inline = all_inline;
 
@@ -133,32 +137,42 @@ pub async fn init_object(
         }
         ObjectKind::File => None,
     };
-    let txn = state.db().begin().await.map_err(|e| {
-        error!(error = %e, "Failed to begin init_object transaction");
-        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-    })?;
+    // Response data derived from the request, computed before the request is
+    // moved into the transaction closure.
+    let kind = req.kind;
+    let user_id = auth.user_id;
+    let device_id = auth.device_id;
+    let upload_urls: Vec<ObjectPayloadUpload> = req
+        .payloads
+        .iter()
+        .filter(|p| p.inline_ciphertext.is_none())
+        .map(|p| ObjectPayloadUpload {
+            id: p.id,
+            upload_url: format!("/api/objects/{}/payloads/{}", object_id_text, p.id),
+        })
+        .collect();
 
-    let object = objects::ActiveModel {
-        id: Set(object_id),
-        user_id: Set(auth.user_id),
-        kind: Set(req.kind.to_string()),
-        meta_ciphertext: Set(req.meta_ciphertext),
-        meta_nonce: Set(req.meta_nonce),
-        created_at: Set(now.clone()),
-        updated_at: Set(now.clone()),
-        expires_at: Set(expires_at),
-        source_device_id: Set(auth.device_id),
-        status: Set(if all_inline { "complete" } else { "pending" }.into()),
-    };
-
-    if let Err(e) = object.insert(&txn).await {
-        _ = txn.rollback().await;
-        remove_paths(written_paths).await;
-        return Err(match e.sql_err() {
+    let now_str = now.as_str();
+    let object_id_text_ref = object_id_text.as_str();
+    let state_ref = &state;
+    let inserted_event = with_txn(state.db(), "init_object", async move |txn| {
+        let object = objects::ActiveModel {
+            id: Set(object_id),
+            user_id: Set(user_id),
+            kind: Set(kind.to_string()),
+            meta_ciphertext: Set(req.meta_ciphertext),
+            meta_nonce: Set(req.meta_nonce),
+            created_at: Set(now_str.to_owned()),
+            updated_at: Set(now_str.to_owned()),
+            expires_at: Set(expires_at),
+            source_device_id: Set(device_id),
+            status: Set(if all_inline { "complete" } else { "pending" }.into()),
+        };
+        object.insert(txn).await.map_err(|e| match e.sql_err() {
             Some(SqlErr::UniqueConstraintViolation(constraint)) => {
                 warn!(
                     object_id = %object_id,
-                    user_id = %auth.user_id,
+                    user_id = %user_id,
                     constraint = %constraint,
                     "Concurrent init_object lost a race on object id uniqueness",
                 );
@@ -171,108 +185,84 @@ pub async fn init_object(
                 error!(object_id = %object_id, error = %e, "Failed to insert object row");
                 ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
             }
-        });
-    }
+        })?;
 
-    for payload in &req.payloads {
-        let payload_id = payload.id.to_string();
-        let payload_model = object_payloads::ActiveModel {
-            object_id: Set(object_id),
-            payload_id: Set(payload.id.into_uuid()),
-            ciphertext_path: Set(object_payload_filename(&object_id_text, &payload_id)),
-            nonce: Set(payload.nonce.clone()),
-            ciphertext_size: Set(payload.ciphertext_size),
-            sha256_ciphertext: Set(payload.sha256_ciphertext.clone()),
-            created_at: Set(now.clone()),
-            updated_at: Set(now.clone()),
-            status: Set(if payload.inline_ciphertext.is_some() {
-                "complete"
-            } else {
-                "pending"
-            }
-            .into()),
-        };
+        for payload in &req.payloads {
+            let payload_id = payload.id.to_string();
+            let payload_model = object_payloads::ActiveModel {
+                object_id: Set(object_id),
+                payload_id: Set(payload.id.into_uuid()),
+                ciphertext_path: Set(object_payload_filename(object_id_text_ref, &payload_id)),
+                nonce: Set(payload.nonce.clone()),
+                ciphertext_size: Set(payload.ciphertext_size),
+                sha256_ciphertext: Set(payload.sha256_ciphertext.clone()),
+                created_at: Set(now_str.to_owned()),
+                updated_at: Set(now_str.to_owned()),
+                status: Set(if payload.inline_ciphertext.is_some() {
+                    "complete"
+                } else {
+                    "pending"
+                }
+                .into()),
+            };
 
-        if let Err(e) = payload_model.insert(&txn).await {
-            let _ = txn.rollback().await;
-            remove_paths(written_paths).await;
-            return Err(match e.sql_err() {
-                Some(SqlErr::UniqueConstraintViolation(_)) => {
-                    warn!(
-                        object_id = %object_id,
-                        payload_id = %payload_id,
-                        "Duplicate payload id in init_object request",
-                    );
-                    ApiError::from_code_with_message(
-                        ApiErrorCode::DuplicateObjectPayloadId,
-                        "Duplicate object payload id",
-                    )
-                }
-                _ => {
-                    error!(
-                        object_id = %object_id,
-                        payload_id = %payload_id,
-                        error = %e,
-                        "Failed to insert object payload row",
-                    );
-                    ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-                }
-            });
+            payload_model
+                .insert(txn)
+                .await
+                .map_err(|e| match e.sql_err() {
+                    Some(SqlErr::UniqueConstraintViolation(_)) => {
+                        warn!(
+                            object_id = %object_id,
+                            payload_id = %payload_id,
+                            "Duplicate payload id in init_object request",
+                        );
+                        ApiError::from_code_with_message(
+                            ApiErrorCode::DuplicateObjectPayloadId,
+                            "Duplicate object payload id",
+                        )
+                    }
+                    _ => {
+                        error!(
+                            object_id = %object_id,
+                            payload_id = %payload_id,
+                            error = %e,
+                            "Failed to insert object payload row",
+                        );
+                        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+                    }
+                })?;
         }
-    }
 
-    let inserted_event = if all_inline {
         // Allocated here, after the object/payload inserts above have taken the
         // write lock, so seq order matches commit order.
-        Some(
-            insert_created_event(
-                &txn,
-                auth.user_id,
-                req.kind,
+        if all_inline {
+            let inserted = insert_created_event(
+                txn,
+                user_id,
+                kind,
                 object_id,
-                &now,
-                state.next_event_seq(),
+                now_str,
+                state_ref.next_event_seq(),
             )
-            .await?,
-        )
-    } else {
-        None
-    };
+            .await?;
+            Ok(Some(inserted))
+        } else {
+            Ok(None)
+        }
+    })
+    .await?;
 
-    if let Err(e) = txn.commit().await {
-        error!(object_id = %object_id, error = %e, "Failed to commit init_object transaction");
-        remove_paths(written_paths).await;
-        return Err(ApiError::from_code_with_message(
-            ApiErrorCode::Database,
-            "Database error",
-        ));
-    }
+    // The transaction committed; keep the inline payload files on disk.
+    staged.commit();
 
     if let Some(inserted) = inserted_event {
-        broadcast_created(
-            &state,
-            auth.user_id,
-            inserted.seq,
-            req.kind,
-            &object_id_text,
-            &now,
-        );
-        if req.kind == ObjectKind::Clipboard {
-            spawn_clipboard_trim(state.clone(), auth.user_id);
+        broadcast_created(&state, user_id, inserted.seq, kind, &object_id_text, &now);
+        if kind == ObjectKind::Clipboard {
+            spawn_clipboard_trim(state.clone(), user_id);
         }
     }
 
-    let upload_urls = req
-        .payloads
-        .iter()
-        .filter(|p| p.inline_ciphertext.is_none())
-        .map(|p| ObjectPayloadUpload {
-            id: p.id,
-            upload_url: format!("/api/objects/{}/payloads/{}", object_id_text, p.id),
-        })
-        .collect();
-
-    info!(device_id = %auth.device_id, object_id = %object_id_text, kind = req.kind.as_ref(), "Object initialized");
+    info!(device_id = %device_id, object_id = %object_id_text, kind = kind.as_ref(), "Object initialized");
 
     Ok(Postcard(ObjectInitResponse {
         upload_urls,
@@ -1203,19 +1193,6 @@ fn spawn_clipboard_trim(state: AppState, user_id: Uuid) {
 
 fn object_payload_filename(object_id: &str, payload_id: &str) -> String {
     format!("{object_id}.{payload_id}.bin")
-}
-
-async fn write_payload_bytes_create_new(
-    path: &std::path::Path,
-    data: &[u8],
-) -> std::io::Result<()> {
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .await?;
-    file.write_all(data).await?;
-    file.flush().await
 }
 
 async fn stream_body_to_payload_file(
