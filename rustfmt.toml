@@ -1,4 +1,5 @@
 # Import grouping and per-crate merging are currently unstable rustfmt options.
-# They are applied by `cargo +nightly fmt`; stable `cargo fmt` ignores them.
+# Run `nix run .#fmt` or `nix run .#rustfmt`; the flake wrapper selects the
+# pinned nightly toolchain before invoking `cargo fmt`.
 group_imports = "StdExternalCrate"
 imports_granularity = "Crate"

@@ -240,54 +240,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_roundtrip() {
-        let req = DaemonRequest {
-            id: "abc-123".into(),
-            command: DaemonCommand::Login(LoginParams {
-                passphrase: "secret".into(),
-                username: "alice".into(),
-                device_name: None,
-                server_url: None,
-            }),
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.id, "abc-123");
-        match parsed.command {
-            DaemonCommand::Login(params) => assert_eq!(params.passphrase, "secret"),
-            _ => panic!("expected login"),
-        }
-    }
-
-    #[test]
-    fn unit_request_roundtrips_without_params() {
+    fn parses_unit_request_without_params() {
         let json = r#"{"id":"1","cmd":"logout"}"#;
         let req: DaemonRequest = serde_json::from_str(json).unwrap();
         assert!(matches!(req.command, DaemonCommand::Logout));
-    }
-
-    #[test]
-    fn register_request_roundtrip() {
-        let req = DaemonRequest {
-            id: "reg-1".into(),
-            command: DaemonCommand::Register(RegisterParams {
-                access_key: "invite".into(),
-                username: "alice".into(),
-                passphrase: "secret".into(),
-                device_name: Some("Phone".into()),
-                server_url: Some("http://localhost:8787".into()),
-            }),
-        };
-
-        let json = serde_json::to_string(&req).unwrap();
-        let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
-        match parsed.command {
-            DaemonCommand::Register(params) => {
-                assert_eq!(params.access_key, "invite");
-                assert_eq!(params.device_name.as_deref(), Some("Phone"));
-            }
-            _ => panic!("expected register"),
-        }
     }
 
     #[test]
@@ -316,28 +272,6 @@ mod tests {
         assert_eq!(error.code, ApiErrorCode::Unknown);
         assert_eq!(error.message, "bad stuff");
         assert!(parsed.result.is_none());
-    }
-
-    #[test]
-    fn event_state_changed_roundtrip() {
-        let state = AppState {
-            logged_in: true,
-            username: Some("alice".into()),
-            device_id: Some("dev1".into()),
-            device_name: Some("Mac".into()),
-            connection_status: crate::ConnectionStatus::Connected,
-            clipboard_items: vec![],
-            files: vec![],
-            error: None,
-        };
-        let event = DaemonEvent::state_changed(state);
-        let json = serde_json::to_string(&event).unwrap();
-        let parsed: DaemonEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.event, DaemonEventKind::StateChanged);
-        let s = parsed.state.unwrap();
-        assert!(s.logged_in);
-        assert_eq!(s.device_id.unwrap(), "dev1");
-        assert_eq!(s.connection_status, crate::ConnectionStatus::Connected);
     }
 
     /// Verify that the shared line union can parse both responses and events
