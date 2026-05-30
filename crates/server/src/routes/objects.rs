@@ -47,6 +47,21 @@ pub async fn init_object(
         "Object metadata ciphertext exceeds maximum size",
     )?;
 
+    // Bound each payload's declared ciphertext size. This is the only place the
+    // size is gated: `upload_payload` streams up to the stored `ciphertext_size`,
+    // so rejecting an oversized declaration here keeps every downstream write
+    // (inline and streamed) under the configured ceiling.
+    let max_blob_bytes = state.config().limits.max_file_blob_bytes;
+    for payload in &req.payloads {
+        // `ciphertext_size` is garde-validated `>= 0`, so the cast is lossless.
+        if payload.ciphertext_size as u64 > max_blob_bytes {
+            return Err(error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Object payload exceeds maximum size",
+            ));
+        }
+    }
+
     if objects::Entity::find_by_id(object_id)
         .select_only()
         .column(objects::Column::Id)
@@ -179,7 +194,19 @@ pub async fn init_object(
     }
 
     let inserted_event = if all_inline {
-        Some(insert_created_event(&txn, auth.user_id, req.kind, object_id, &now).await?)
+        // Allocated here, after the object/payload inserts above have taken the
+        // write lock, so seq order matches commit order.
+        Some(
+            insert_created_event(
+                &txn,
+                auth.user_id,
+                req.kind,
+                object_id,
+                &now,
+                state.next_event_seq(),
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -197,7 +224,7 @@ pub async fn init_object(
         broadcast_created(
             &state,
             auth.user_id,
-            i64::from(inserted.seq),
+            inserted.seq,
             req.kind,
             &object_id_text,
             &now,
@@ -520,7 +547,15 @@ pub async fn complete_object(
         ));
     }
 
-    let inserted = insert_created_event(&txn, auth.user_id, kind, object_uuid, &now).await?;
+    let inserted = insert_created_event(
+        &txn,
+        auth.user_id,
+        kind,
+        object_uuid,
+        &now,
+        state.next_event_seq(),
+    )
+    .await?;
 
     txn.commit().await.map_err(|e| {
         error!(
@@ -531,14 +566,7 @@ pub async fn complete_object(
         error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
     })?;
 
-    broadcast_created(
-        &state,
-        auth.user_id,
-        i64::from(inserted.seq),
-        kind,
-        &object_id,
-        &now,
-    );
+    broadcast_created(&state, auth.user_id, inserted.seq, kind, &object_id, &now);
     if kind == ObjectKind::Clipboard {
         spawn_clipboard_trim(state.clone(), auth.user_id);
     }
@@ -859,7 +887,8 @@ pub async fn delete_object(
 
     let now = Utc::now().to_rfc3339();
     let event = event_log::ActiveModel {
-        seq: Default::default(),
+        // Allocated after the object delete above has taken the write lock.
+        seq: Set(state.next_event_seq()),
         user_id: Set(auth.user_id),
         event_type: Set("file.deleted".into()),
         object_kind: Set("file".into()),
@@ -891,7 +920,7 @@ pub async fn delete_object(
     remove_paths(paths).await;
     let _ = state.ws_tx().send(WsBroadcast {
         user_id: auth.user_id,
-        seq: i64::from(inserted.seq),
+        seq: inserted.seq,
         event_type: "file.deleted".into(),
         object_kind: "file".into(),
         object_id,
@@ -936,12 +965,13 @@ async fn insert_created_event<C>(
     kind: ObjectKind,
     object_id: Uuid,
     now: &str,
+    seq: i64,
 ) -> Result<event_log::Model, (StatusCode, axum::Json<ErrorResponse>)>
 where
     C: sea_orm::ConnectionTrait,
 {
     event_log::ActiveModel {
-        seq: Default::default(),
+        seq: Set(seq),
         user_id: Set(user_id),
         event_type: Set(format!("{}.created", kind.as_ref())),
         object_kind: Set(kind.to_string()),
@@ -1483,6 +1513,53 @@ mod tests {
         .await;
 
         assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert!(
+            !data_dir
+                .path()
+                .join("objects")
+                .join(object_payload_filename(&object_id, &payload_id))
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn init_rejects_payload_exceeding_max_blob_bytes() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::connect("sqlite::memory:").await.expect("db");
+        let mut config = crate::config::ServerConfig::default();
+        config.server.data_dir = data_dir.path().to_path_buf();
+        config.limits.max_file_blob_bytes = 8;
+        let state = AppState::open_with_db_and_config(
+            db,
+            config,
+            crate::secret::ServerSecrets::test_fixture(),
+        )
+        .await
+        .expect("state");
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        insert_device(&state, user_id, device_id).await;
+
+        let object_id = Uuid::now_v7().to_string();
+        let payload_id = Uuid::now_v7().to_string();
+        // Declared ciphertext_size (9) exceeds the 8-byte ceiling. Use a
+        // streaming payload so nothing is written before the size gate.
+        let req = init_request(
+            object_id.clone(),
+            payload_id.clone(),
+            ObjectKind::File,
+            b"123456789",
+            false,
+        );
+
+        let result = init_object(
+            State(state),
+            Extension(auth(user_id, device_id)),
+            postcard(req),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().0, StatusCode::PAYLOAD_TOO_LARGE);
         assert!(
             !data_dir
                 .path()

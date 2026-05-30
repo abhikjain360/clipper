@@ -127,12 +127,25 @@ pub async fn register_start(
         error!(error = %e, "Failed to unwrap access_key_hash_salt");
         error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
     })?;
-    let access_key_hash = access_key_hash(
-        &req.access_key,
-        &access_key_hash_salt,
-        &state.secrets().access_key_pepper,
-        &state.config().crypto.access_key_hash_params,
-    )
+    // Argon2id is memory-hard and blocks for tens of milliseconds, so run it on
+    // the blocking pool instead of stalling an async worker for every (even
+    // invalid) registration attempt.
+    let access_key_attempt = req.access_key.clone();
+    let access_key_pepper = state.secrets().access_key_pepper;
+    let access_key_hash_params = state.config().crypto.access_key_hash_params;
+    let access_key_hash = tokio::task::spawn_blocking(move || {
+        access_key_hash(
+            &access_key_attempt,
+            &access_key_hash_salt,
+            &access_key_pepper,
+            &access_key_hash_params,
+        )
+    })
+    .await
+    .map_err(|e| {
+        error!(error = %e, "Access key hash task failed to join");
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error")
+    })?
     .map_err(|e| {
         error!(error = %e, "Failed to hash access key");
         error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error")

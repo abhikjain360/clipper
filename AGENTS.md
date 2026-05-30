@@ -90,6 +90,11 @@
 - Server schema changes live in `crates/server/src/migration/*.rs`; keep
   SeaORM entities aligned by regenerating them with `sea-orm-cli`. Do not
   hand-edit generated entity files as the final change.
+- `event_log.seq` is an application-assigned monotonic microsecond timestamp
+  (see `AppState::next_event_seq`), not a database autoincrement. It is the
+  sync cursor, so it must stay strictly increasing and unique; allocate it
+  only while the surrounding transaction already holds the write lock so seq
+  order matches commit order.
 - This project is not deployed anywhere yet. Do not preserve legacy schema,
   API, ciphertext, or local-storage compatibility unless explicitly asked;
   prefer coherent current design over compatibility migrations for abandoned

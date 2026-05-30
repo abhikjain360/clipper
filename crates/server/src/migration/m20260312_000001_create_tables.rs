@@ -256,9 +256,8 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(EventLog::Seq)
-                            .integer()
+                            .big_integer()
                             .not_null()
-                            .auto_increment()
                             .primary_key(),
                     )
                     .col(ColumnDef::new(EventLog::UserId).uuid().not_null())

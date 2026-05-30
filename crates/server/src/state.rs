@@ -1,17 +1,22 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
-use sea_orm::{Database, DatabaseConnection};
+use chrono::Utc;
+use sea_orm::{Database, DatabaseConnection, EntityTrait, QueryOrder, QuerySelect};
 use sea_orm_migration::MigratorTrait;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
-    config::ServerConfig, error::ServerResult, migration, secret::ServerSecrets, ws::WsBroadcast,
+    config::ServerConfig, entity::event_log, error::ServerResult, migration, secret::ServerSecrets,
+    ws::WsBroadcast,
 };
 
 #[derive(Clone)]
@@ -27,6 +32,8 @@ pub struct AppStateInner {
     pub ws_tx: broadcast::Sender<WsBroadcast>,
     auth_challenges: std::sync::Mutex<HashMap<String, AuthChallenge>>,
     pending_registrations: std::sync::Mutex<HashMap<String, PendingRegistration>>,
+    /// High-water mark for the application-assigned `event_log.seq` clock.
+    event_seq: AtomicI64,
 }
 
 pub struct AuthChallenge {
@@ -68,8 +75,26 @@ impl AppState {
     ) -> ServerResult<Self> {
         let state = Self::new(db, config, secrets);
         state.run_migrations().await?;
+        state.seed_event_seq().await?;
         state.ensure_storage_dirs().await?;
         Ok(state)
+    }
+
+    /// Seed the in-memory `event_log.seq` clock from the largest seq already
+    /// persisted, so a restart (or a wall clock that jumped backward) can never
+    /// reissue a value at or below one a client has already observed.
+    async fn seed_event_seq(&self) -> ServerResult<()> {
+        let max_seq: Option<i64> = event_log::Entity::find()
+            .select_only()
+            .column(event_log::Column::Seq)
+            .order_by_desc(event_log::Column::Seq)
+            .into_tuple()
+            .one(self.db())
+            .await?;
+        self.inner
+            .event_seq
+            .store(max_seq.unwrap_or(0), Ordering::SeqCst);
+        Ok(())
     }
 
     async fn connect_db(data_dir: impl AsRef<Path>) -> ServerResult<DatabaseConnection> {
@@ -101,7 +126,30 @@ impl AppState {
                 ws_tx,
                 auth_challenges: std::sync::Mutex::new(HashMap::new()),
                 pending_registrations: std::sync::Mutex::new(HashMap::new()),
+                event_seq: AtomicI64::new(0),
             }),
+        }
+    }
+
+    /// Allocate the next `event_log.seq`: the current Unix time in microseconds,
+    /// forced strictly above the previous value so it never collides or moves
+    /// backward (even under concurrent inserts or a backward clock step). Callers
+    /// must allocate this while their transaction already holds the write lock so
+    /// seq order matches commit order.
+    pub fn next_event_seq(&self) -> i64 {
+        let now = Utc::now().timestamp_micros();
+        let mut prev = self.inner.event_seq.load(Ordering::Relaxed);
+        loop {
+            let candidate = now.max(prev + 1);
+            match self.inner.event_seq.compare_exchange_weak(
+                prev,
+                candidate,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return candidate,
+                Err(actual) => prev = actual,
+            }
         }
     }
 
@@ -207,5 +255,33 @@ impl AppState {
             .expect("lock poisoned");
         registrations.retain(|_, registration| registration.expires_at > now);
         registrations.remove(registration_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::Database;
+
+    use super::*;
+
+    async fn test_state() -> AppState {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::connect("sqlite::memory:").await.expect("db");
+        AppState::open_with_db(db, dir.path().to_path_buf())
+            .await
+            .expect("state")
+    }
+
+    // A tight loop forces many allocations into the same microsecond, exercising
+    // the monotonic `prev + 1` path that keeps the sync cursor unique.
+    #[tokio::test]
+    async fn next_event_seq_is_strictly_increasing_and_unique() {
+        let state = test_state().await;
+        let mut prev = state.next_event_seq();
+        for _ in 0..10_000 {
+            let next = state.next_event_seq();
+            assert!(next > prev, "seq must strictly increase: {next} !> {prev}");
+            prev = next;
+        }
     }
 }

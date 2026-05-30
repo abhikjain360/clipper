@@ -53,7 +53,7 @@ pub async fn bootstrap(
         .order_by(event_log::Column::Seq, Order::Desc)
         .select_only()
         .column(event_log::Column::Seq)
-        .into_tuple::<i32>()
+        .into_tuple::<i64>()
         .one(state.db())
         .await
         .map_err(|e| {
@@ -64,7 +64,6 @@ pub async fn bootstrap(
             );
             StatusCode::INTERNAL_SERVER_ERROR
         })?
-        .map(i64::from)
         .unwrap_or(0);
 
     Ok(Json(BootstrapResponse {

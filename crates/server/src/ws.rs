@@ -29,7 +29,7 @@ pub struct WsBroadcast {
 #[derive(Debug, DerivePartialModel)]
 #[sea_orm(entity = "event_log::Entity", from_query_result)]
 struct WsEventRow {
-    seq: i32,
+    seq: i64,
     event_type: String,
     object_kind: String,
     object_id: Uuid,
@@ -87,7 +87,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: Option<Auth
         if let Ok(events) = get_events_since(&state, auth.user_id, last_seq).await {
             for evt in events {
                 let msg = WsServerMessage::Event {
-                    seq: i64::from(evt.seq),
+                    seq: evt.seq,
                     event_type: evt.event_type,
                     object_kind: evt.object_kind,
                     object_id: evt.object_id.to_string(),
@@ -162,10 +162,10 @@ async fn get_latest_seq(state: &AppState, user_id: Uuid) -> Result<i64, sea_orm:
         .order_by(event_log::Column::Seq, Order::Desc)
         .select_only()
         .column(event_log::Column::Seq)
-        .into_tuple::<i32>()
+        .into_tuple::<i64>()
         .one(state.db())
         .await?;
-    Ok(row.map(i64::from).unwrap_or(0))
+    Ok(row.unwrap_or(0))
 }
 
 async fn get_events_since(
@@ -173,12 +173,6 @@ async fn get_events_since(
     user_id: Uuid,
     last_seq: i64,
 ) -> Result<Vec<WsEventRow>, sea_orm::DbErr> {
-    let last_seq = match i32::try_from(last_seq) {
-        Ok(seq) => seq,
-        Err(_) if last_seq.is_negative() => i32::MIN,
-        Err(_) => i32::MAX,
-    };
-
     event_log::Entity::find()
         .filter(event_log::Column::UserId.eq(user_id))
         .filter(event_log::Column::Seq.gt(last_seq))

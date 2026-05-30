@@ -4,7 +4,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    entity::{event_log, object_payloads, objects},
+    entity::{event_log, object_payloads, objects, sessions},
     state::AppState,
 };
 
@@ -36,7 +36,27 @@ pub async fn run_cleanup_loop(state: AppState) {
         if let Err(e) = cleanup_orphan_object_uploads(&state).await {
             tracing::error!(error = %e, "Orphan upload cleanup failed");
         }
+        if let Err(e) = cleanup_expired_sessions(&state).await {
+            tracing::error!(error = %e, "Expired session cleanup failed");
+        }
     }
+}
+
+/// Delete sessions whose bearer token has expired. They are already rejected at
+/// auth time (`expires_at < now`), so this is housekeeping to stop the table
+/// from growing without bound.
+async fn cleanup_expired_sessions(state: &AppState) -> CleanupResult<()> {
+    let now = Utc::now().to_rfc3339();
+    let result = sessions::Entity::delete_many()
+        .filter(sessions::Column::ExpiresAt.lt(&now))
+        .exec(state.db())
+        .await?;
+
+    if result.rows_affected > 0 {
+        info!(count = result.rows_affected, "Cleaned up expired sessions");
+    }
+
+    Ok(())
 }
 
 async fn cleanup_expired_clipboard_objects(state: &AppState) -> CleanupResult<()> {

@@ -5,8 +5,8 @@ use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
 #[sea_orm(table_name = "event_log")]
 pub struct Model {
-    #[sea_orm(primary_key)]
-    pub seq: i32,
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub seq: i64,
     pub user_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub event_type: String,
