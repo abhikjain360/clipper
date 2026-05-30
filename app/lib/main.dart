@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'platform/web_runtime.dart';
+import 'services/background_sync.dart';
 import 'src/rust/api/clipper.dart';
 import 'src/rust/frb_generated.dart';
 import 'screens/login_screen.dart';
@@ -21,6 +24,9 @@ Future<void> main() async {
 
   runApp(ClipperApp(startupError: startupError));
 }
+
+@pragma('vm:entry-point')
+Future<void> backgroundSyncMain() => runAndroidBackgroundSyncService();
 
 class ClipperApp extends StatelessWidget {
   final String? startupError;
@@ -79,6 +85,7 @@ class AppRoot extends StatefulWidget {
 class _AppRootState extends State<AppRoot> {
   BridgeAppState? _state;
   String? _connectError;
+  bool _backgroundSyncRequested = false;
 
   @override
   void initState() {
@@ -97,6 +104,7 @@ class _AppRootState extends State<AppRoot> {
         final state = await getState();
         if (!mounted) return;
         setState(() => _state = state);
+        _configureBackgroundSync(state);
       } catch (e) {
         if (!mounted) return;
         setState(() {
@@ -125,7 +133,24 @@ class _AppRootState extends State<AppRoot> {
         }
 
         setState(() => _state = state);
+        _configureBackgroundSync(state);
       }
+    }
+  }
+
+  void _configureBackgroundSync(BridgeAppState state) {
+    if (state.loggedIn == _backgroundSyncRequested) return;
+
+    _backgroundSyncRequested = state.loggedIn;
+    if (state.loggedIn) {
+      unawaited(
+        startBackgroundSync().catchError((_) {
+          _backgroundSyncRequested = false;
+          return false;
+        }),
+      );
+    } else {
+      unawaited(stopBackgroundSync());
     }
   }
 
