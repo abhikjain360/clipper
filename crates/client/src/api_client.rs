@@ -2,13 +2,14 @@
 
 use base64::Engine;
 use clipper_core::{crypto, models::*};
-use reqwest::Client;
+use reqwest::{Client, header};
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::{debug, warn};
 use url::Url;
 use zeroize::Zeroizing;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+const POSTCARD_ERROR_PREVIEW_BYTES: usize = 64;
 
 /// Clipper API client.
 pub struct ApiClient {
@@ -80,9 +81,38 @@ impl ApiClient {
         resp: reqwest::Response,
     ) -> Result<T, ClientError> {
         let resp = Self::checked_response(resp).await?;
+        let url = resp.url().clone();
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let bytes = resp.bytes().await?;
+
+        if !is_postcard_content_type(content_type.as_deref()) {
+            return Err(ClientError::Other(format!(
+                "expected postcard response from {}, got content-type {}; status={}; body-bytes={}; body-prefix={}",
+                url,
+                content_type.as_deref().unwrap_or("<missing>"),
+                status.as_u16(),
+                bytes.len(),
+                body_preview(&bytes),
+            )));
+        }
+
         postcard::from_bytes(&bytes)
-            .map_err(|e| ClientError::Other(format!("postcard decode: {}", e)))
+            .map_err(|e| {
+                ClientError::Other(format!(
+                    "postcard decode from {} failed: {}; status={}; content-type={}; body-bytes={}; body-prefix={}",
+                    url,
+                    e,
+                    status.as_u16(),
+                    content_type.as_deref().unwrap_or("<missing>"),
+                    bytes.len(),
+                    body_preview(&bytes),
+                ))
+            })
     }
 
     // ── Auth ──
@@ -407,6 +437,29 @@ fn is_android_emulator_host(url: &Url) -> bool {
     )
 }
 
+fn is_postcard_content_type(value: Option<&str>) -> bool {
+    value
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case(POSTCARD_CONTENT_TYPE))
+}
+
+fn body_preview(bytes: &[u8]) -> String {
+    let preview = &bytes[..bytes.len().min(POSTCARD_ERROR_PREVIEW_BYTES)];
+    if preview.is_empty() {
+        return "<empty>".to_string();
+    }
+
+    if let Ok(text) = std::str::from_utf8(preview) {
+        return text.chars().flat_map(char::escape_default).collect();
+    }
+
+    preview
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 // ── Encryption helpers ──
 
 /// Encrypt clipboard metadata for object upload.
@@ -606,5 +659,21 @@ mod tests {
     #[test]
     fn server_url_rejects_embedded_credentials() {
         assert!(validate_server_url("https://user:pass@example.com").is_err());
+    }
+
+    #[test]
+    fn postcard_content_type_accepts_parameters_case_insensitively() {
+        assert!(is_postcard_content_type(Some(POSTCARD_CONTENT_TYPE)));
+        assert!(is_postcard_content_type(Some(
+            "Application/Vnd.Clipper.Postcard; charset=binary"
+        )));
+        assert!(!is_postcard_content_type(Some("application/json")));
+        assert!(!is_postcard_content_type(None));
+    }
+
+    #[test]
+    fn body_preview_marks_empty_and_escapes_text() {
+        assert_eq!(body_preview(b""), "<empty>");
+        assert_eq!(body_preview(b"not found\n"), "not found\\n");
     }
 }

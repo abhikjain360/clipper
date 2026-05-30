@@ -106,4 +106,60 @@ clipper_use_wasm_shared_memory_rustflags() {
   export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$shared_flags"
 }
 
+clipper_use_wasm_rustc_warning_filter() {
+  local wrapper_dir
+  local wrapper
+
+  wrapper_dir="$(mktemp -d "${TMPDIR:-/tmp}/clipper-rustc-wasm-filter.XXXXXX")"
+  wrapper="$wrapper_dir/rustc"
+  cat > "$wrapper" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -z "${CLIPPER_REAL_RUSTC:-}" ]; then
+  echo "CLIPPER_REAL_RUSTC is required" >&2
+  exit 1
+fi
+
+stderr_file="$(mktemp "${TMPDIR:-/tmp}/clipper-rustc-stderr.XXXXXX")"
+stdout_file="$(mktemp "${TMPDIR:-/tmp}/clipper-rustc-stdout.XXXXXX")"
+trap 'rm -f "$stderr_file" "$stdout_file"' EXIT
+
+set +e
+"$CLIPPER_REAL_RUSTC" "$@" >"$stdout_file" 2>"$stderr_file"
+status=$?
+set -e
+
+perl -0pe '
+  s/^\{"\$message_type":"diagnostic","message":"unstable feature specified for `-Ctarget-feature`: `atomics`".*\n//mg;
+  my $without_summary = $_;
+  $without_summary =~ s/^\{"\$message_type":"diagnostic","message":"\d+ warnings? emitted".*\n//mg;
+  if ($without_summary !~ /"\$message_type":"diagnostic".*"level":"warning"/s) {
+    $_ = $without_summary;
+  }
+' "$stdout_file"
+
+perl -0pe '
+  s/^\{"\$message_type":"diagnostic","message":"unstable feature specified for `-Ctarget-feature`: `atomics`".*\n//mg;
+  s/warning: unstable feature specified for `-Ctarget-feature`: `atomics`\n  \|\n  = note: this feature is not stably supported; its behavior can change in the future\n\n//g;
+  my $without_summary = $_;
+  $without_summary =~ s/^\{"\$message_type":"diagnostic","message":"\d+ warnings? emitted".*\n//mg;
+  $without_summary =~ s/warning: \d+ warnings? emitted\n\n?//g;
+  if (
+    $without_summary !~ /(?:^|\n)warning:/
+    && $without_summary !~ /"\$message_type":"diagnostic".*"level":"warning"/s
+  ) {
+    $_ = $without_summary;
+  }
+' "$stderr_file" >&2
+
+exit "$status"
+EOF
+  chmod +x "$wrapper"
+
+  export CLIPPER_REAL_RUSTC="$(command -v rustc)"
+  export PATH="$wrapper_dir:$PATH"
+  trap "rm -rf '$wrapper_dir'" EXIT
+}
+
 clipper_init_repo_root

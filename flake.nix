@@ -148,6 +148,31 @@
             env = nightlyEnv;
           };
 
+          audit = {
+            program = "clipper-audit";
+            description = "Scan dependency manifests with OSV-Scanner";
+            runtimeInputs =
+              baseRuntimeInputs
+              ++ (with pkgs; [
+                osv-scanner
+              ])
+              ++ [ toolchains.stable ];
+            env = stableEnv;
+            text = ''
+              # shellcheck disable=SC1091
+              source ${scriptsDir}/common.sh
+
+              clipper_enter_repo
+              clipper_use_stable
+
+              if [ "$#" -eq 0 ]; then
+                set -- scan source -r "$CLIPPER_REPO_ROOT"
+              fi
+
+              exec osv-scanner "$@"
+            '';
+          };
+
           wasm-check = {
             program = "clipper-wasm-check";
             script = "wasm-check.sh";
@@ -231,7 +256,12 @@
             let
               denoPermissions = pkgs.lib.escapeShellArgs (cfg.denoPermissions or [ ]);
             in
-            if cfg ? denoScript then
+            if cfg ? text then
+              ''
+                ${cfg.env or ""}
+                ${cfg.text}
+              ''
+            else if cfg ? denoScript then
               ''
                 ${cfg.env or ""}
                 deno run ${denoPermissions} ${scriptsDir}/${cfg.denoScript} "$@"
@@ -285,6 +315,7 @@
                 ninja
                 nixfmt
                 openssl
+                osv-scanner
                 pkg-config
                 sea-orm-cli
                 sqlite

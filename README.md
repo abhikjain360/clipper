@@ -80,6 +80,7 @@ One-off checks:
 
 ```sh
 nix run .#fmt
+nix run .#audit
 cargo test --workspace
 cd app && flutter analyze && flutter test
 nix run .#wasm-check

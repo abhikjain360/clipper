@@ -67,6 +67,11 @@ uuid_id!(ObjectPayloadId);
 /// Binary request/response body format used by Rust-only object endpoints.
 pub const POSTCARD_CONTENT_TYPE: &str = "application/vnd.clipper.postcard";
 
+// Postcard is a positional binary format. Shared request/response structs that
+// may cross postcard endpoints must serialize `Option::None` explicitly; omitting
+// a field with `skip_serializing_if` leaves the decoder waiting for bytes that
+// are not present.
+
 /// Argon2id parameters used for server-side verifier derivation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Validate)]
 pub struct Argon2Params {
@@ -227,7 +232,6 @@ pub struct ObjectPayloadInit {
         self.ciphertext_size,
         &self.sha256_ciphertext
     )))]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub inline_ciphertext: Option<Vec<u8>>,
 }
 
@@ -295,7 +299,6 @@ pub struct ObjectListItem {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ObjectListResponse {
     pub items: Vec<ObjectListItem>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_before: Option<String>,
 }
 
@@ -367,7 +370,6 @@ pub struct ErrorResponse {
 pub struct FileMeta {
     pub filename: String,
     pub mime_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<i64>,
 }
 
@@ -394,6 +396,105 @@ fn validate_inline_ciphertext<'a>(
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_requests_round_trip_none_option_fields_with_postcard() {
+        let login = LoginRequest {
+            challenge_id: "challenge".to_string(),
+            credential_finalization: vec![1, 2, 3],
+            device_id: None,
+            device_name: None,
+            platform: None,
+        };
+
+        let bytes = postcard::to_allocvec(&login).expect("serialize login request");
+        let decoded: LoginRequest = postcard::from_bytes(&bytes).expect("deserialize login");
+        assert!(decoded.device_id.is_none());
+        assert!(decoded.device_name.is_none());
+        assert!(decoded.platform.is_none());
+
+        let register_finish = RegisterFinishRequest {
+            registration_id: "registration".to_string(),
+            registration_upload: vec![4, 5, 6],
+            device_id: None,
+            device_name: None,
+            platform: None,
+        };
+
+        let bytes =
+            postcard::to_allocvec(&register_finish).expect("serialize register finish request");
+        let decoded: RegisterFinishRequest =
+            postcard::from_bytes(&bytes).expect("deserialize register finish");
+        assert!(decoded.device_id.is_none());
+        assert!(decoded.device_name.is_none());
+        assert!(decoded.platform.is_none());
+    }
+
+    #[test]
+    fn object_list_response_round_trips_none_cursor_with_postcard() {
+        let response = ObjectListResponse {
+            items: Vec::new(),
+            next_before: None,
+        };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize response");
+        let decoded: ObjectListResponse =
+            postcard::from_bytes(&bytes).expect("deserialize response");
+
+        assert!(decoded.items.is_empty());
+        assert!(decoded.next_before.is_none());
+    }
+
+    #[test]
+    fn object_init_request_round_trips_non_inline_payload_with_postcard() {
+        let request = ObjectInitRequest {
+            id: ObjectId::from(Uuid::nil()),
+            kind: ObjectKind::File,
+            meta_nonce: vec![1; XCHACHA20_NONCE_BYTES],
+            meta_ciphertext: vec![2, 3],
+            payloads: vec![ObjectPayloadInit {
+                id: ObjectPayloadId::from(Uuid::nil()),
+                nonce: vec![4; XCHACHA20_NONCE_BYTES],
+                ciphertext_size: 12,
+                sha256_ciphertext: vec![5; SHA256_BYTES],
+                inline_ciphertext: None,
+            }],
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize request");
+        let decoded: ObjectInitRequest = postcard::from_bytes(&bytes).expect("deserialize request");
+
+        assert_eq!(decoded.payloads.len(), 1);
+        assert!(decoded.payloads[0].inline_ciphertext.is_none());
+    }
+
+    #[test]
+    fn encrypted_metadata_round_trips_none_size_with_postcard() {
+        let clipboard = ClipboardMeta {
+            mime_type: "text/plain".to_string(),
+            size: None,
+        };
+
+        let bytes = postcard::to_allocvec(&clipboard).expect("serialize clipboard meta");
+        let decoded: ClipboardMeta =
+            postcard::from_bytes(&bytes).expect("deserialize clipboard meta");
+        assert!(decoded.size.is_none());
+
+        let file = FileMeta {
+            filename: "example.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            size: None,
+        };
+
+        let bytes = postcard::to_allocvec(&file).expect("serialize file meta");
+        let decoded: FileMeta = postcard::from_bytes(&bytes).expect("deserialize file meta");
+        assert!(decoded.size.is_none());
     }
 }
 

@@ -377,6 +377,12 @@ impl SyncEngine {
             state.clipboard_items = clipboard_items;
         }
         self.bump_version();
+        info!(
+            clipboard_id = %object_id,
+            mime_type,
+            bytes = data.len(),
+            "Clipboard uploaded",
+        );
         Ok(object_id)
     }
 

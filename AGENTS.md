@@ -8,7 +8,7 @@
   wrap routine commands in `nix develop`.
 - The flake provides Flutter, Dart, Java, Android helper environment, C/C++
   toolchain pieces, `cargo-edit`, `flutter_rust_bridge_codegen`, CocoaPods,
-  `sea-orm-cli`, `wasm-pack`, and `nixfmt`. Rust comes from
+  `sea-orm-cli`, `osv-scanner`, `wasm-pack`, and `nixfmt`. Rust comes from
   [fenix](https://github.com/nix-community/fenix): the stable channel (the
   default toolchain on `$PATH`, with `rustfmt`, `clippy`, `rust-src`,
   `rust-analyzer`, and the Android + `wasm32-unknown-unknown` `rust-std`
@@ -30,6 +30,7 @@
 ## Common Commands
 
 - Format everything: `nix run .#fmt`
+- Dependency vulnerability scan: `nix run .#audit`
 - Rust workspace check: `cargo check --workspace`
 - Rust tests: `cargo test --workspace`
 - WASM bridge check: `nix run .#wasm-check`

@@ -738,6 +738,15 @@ pub async fn list_objects(
     } else {
         None
     };
+    debug!(
+        user_id = %auth.user_id,
+        device_id = %auth.device_id,
+        kind = query.kind.as_deref().unwrap_or("<all>"),
+        limit,
+        items = items.len(),
+        has_more,
+        "Listed objects",
+    );
 
     Ok(Postcard(ObjectListResponse { items, next_before }))
 }

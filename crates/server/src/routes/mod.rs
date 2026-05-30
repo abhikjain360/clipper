@@ -8,7 +8,7 @@ use axum::{
 use clipper_core::models::{ErrorResponse, POSTCARD_CONTENT_TYPE};
 use garde::Validate;
 use serde::{Serialize, de::DeserializeOwned};
-use tracing::{debug, error};
+use tracing::{debug, error, trace};
 use uuid::Uuid;
 
 pub mod auth;
@@ -28,7 +28,24 @@ where
     type Rejection = (StatusCode, Json<ErrorResponse>);
 
     async fn from_request(req: Request<Body>, state: &S) -> Result<Self, Self::Rejection> {
+        let method = req.method().clone();
+        let uri = req.uri().clone();
+        let content_type = req
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let type_name = std::any::type_name::<T>();
+
         if !is_postcard_content_type(req.headers().get(header::CONTENT_TYPE)) {
+            debug!(
+                method = %method,
+                uri = %uri,
+                content_type = content_type.as_deref().unwrap_or("<missing>"),
+                expected = POSTCARD_CONTENT_TYPE,
+                type_name,
+                "Rejected postcard request with unexpected content type",
+            );
             return Err(error_response(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "Expected postcard body",
@@ -36,14 +53,46 @@ where
         }
 
         let bytes = Bytes::from_request(req, state).await.map_err(|e| {
-            debug!(error = %e, "Failed to read postcard request body");
+            debug!(
+                method = %method,
+                uri = %uri,
+                type_name,
+                error = %e,
+                "Failed to read postcard request body",
+            );
             error_response(StatusCode::BAD_REQUEST, "Invalid request body")
         })?;
         let value = postcard::from_bytes(&bytes).map_err(|e| {
-            debug!(error = %e, "Failed to decode postcard body");
+            debug!(
+                method = %method,
+                uri = %uri,
+                type_name,
+                bytes = bytes.len(),
+                error = %e,
+                "Failed to decode postcard body",
+            );
             error_response(StatusCode::BAD_REQUEST, "Invalid postcard body")
         })?;
-        validate_request(&value)?;
+        if let Err(err) = validate_request(&value) {
+            let (status, Json(body)) = &err;
+            debug!(
+                method = %method,
+                uri = %uri,
+                type_name,
+                bytes = bytes.len(),
+                status = %status,
+                error = %body.error,
+                "Rejected invalid postcard request",
+            );
+            return Err(err);
+        }
+        trace!(
+            method = %method,
+            uri = %uri,
+            type_name,
+            bytes = bytes.len(),
+            "Decoded postcard request",
+        );
         Ok(Self(value))
     }
 }
@@ -73,9 +122,20 @@ where
 {
     fn into_response(self) -> Response {
         match postcard::to_allocvec(&self.0) {
-            Ok(bytes) => ([(header::CONTENT_TYPE, POSTCARD_CONTENT_TYPE)], bytes).into_response(),
+            Ok(bytes) => {
+                trace!(
+                    type_name = std::any::type_name::<T>(),
+                    bytes = bytes.len(),
+                    "Serialized postcard response",
+                );
+                ([(header::CONTENT_TYPE, POSTCARD_CONTENT_TYPE)], bytes).into_response()
+            }
             Err(e) => {
-                error!(error = %e, "Failed to serialize postcard response");
+                error!(
+                    type_name = std::any::type_name::<T>(),
+                    error = %e,
+                    "Failed to serialize postcard response",
+                );
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
             }
         }

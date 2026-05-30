@@ -13,7 +13,7 @@ flake tools automatically; do not wrap routine commands in `nix develop`.
 Nix provides the CLI, codegen, dependency, and build tools: Flutter, Dart,
 Rust (via [fenix](https://github.com/nix-community/fenix)), rust-analyzer,
 Flutter Rust Bridge codegen, cargo-edit, SeaORM CLI, CocoaPods, SQLite, CMake,
-Ninja, JDK, OpenSSL, libclang, pkg-config, nixfmt, and wasm-pack.
+Ninja, JDK, OpenSSL, libclang, pkg-config, nixfmt, osv-scanner, and wasm-pack.
 
 Rust toolchains come from fenix as proper Nix derivations — no `~/.rustup`,
 no first-run downloads. The stable channel is the default `cargo`/`rustc` on
@@ -67,6 +67,7 @@ Useful checks:
 
 ```sh
 nix run .#fmt
+nix run .#audit
 cargo test --workspace
 cd app/rust && cargo check
 cd app && flutter analyze && flutter test
