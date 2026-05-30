@@ -1,6 +1,8 @@
 # Rust Code Review Findings
 
-Date: 2026-05-25
+Original review: 2026-05-25.
+Re-verification: 2026-05-25 (this revision). The re-verification was static and
+did not run `cargo test` or `cargo clippy`.
 
 Scope reviewed:
 
@@ -11,22 +13,10 @@ Scope reviewed:
 - `crates/daemon-types`
 - `app/rust`
 
-This document merges the in-depth review findings with a second static review.
-Some items are intentional product tradeoffs or future-facing risks, but they
-are still tracked here so the security and compatibility decisions stay
-explicit.
-
-## Verification
-
-Commands run during the in-depth review:
-
-```sh
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-```
-
-Both passed at the time of review. The second review was static-only and did not
-run tests or clippy.
+Each finding records both the historical status and the verified status against
+the current tree. Some items are intentional product tradeoffs or future-facing
+risks, but they are still tracked here so the security and compatibility
+decisions stay explicit.
 
 ## Overall Read
 
@@ -38,52 +28,30 @@ The crate boundaries are sound:
 - `app/rust` bridge structs are thin adapter types.
 
 The server auth model is directionally good. Passphrases go through OPAQUE,
-session tokens are random and stored as hashes, and private routes generally
-derive `user_id` and `device_id` from authenticated middleware instead of
-trusting request body provenance. The file upload state machine is also a good
-base: pending -> uploading -> uploaded -> complete, with hash and size
-validation before visibility.
+session tokens are random and stored as hashes, and private routes derive
+`user_id` and `device_id` from authenticated middleware instead of trusting
+request body provenance. The object upload state machine is also a good base:
+per-payload `pending` -> `uploading` -> `uploaded` -> `complete`, gated by the
+authenticated source device, with hash and size validation on the disk file
+before completion.
 
-The highest-priority risks are local daemon IPC authority, malformed encrypted
-records, missing request limits, event replay gaps, and persistence/versioning
-choices that can break old data.
+The highest-priority remaining risks are missing request-body and init-time
+size limits on the new object route, AAD that still does not bind object
+metadata, WebSocket replay gaps when events have been pruned, and the dual
+clipboard write path that is now dead but still mounted.
 
 ## P0: Local Daemon IPC Is Too Powerful For A Bare Unix Socket
 
-Status: addressed for the current local IPC threat model. The current patch
-removes the `/tmp` socket fallback, requires a platform data directory, creates
-the Clipper directory with `0700`, sets the socket file to `0600`, caps daemon
-request lines, and requires an HMAC-based IPC auth handshake before state or
-commands are accepted. The daemon IPC path is macOS-only, and the IPC secret is
-stored in macOS Keychain. Peer UID checks are intentionally not used because IPC
-auth is the explicit trust boundary.
+Status: addressed for the current local IPC threat model. Verified.
 
-The daemon socket is the local control plane. A client that can connect can get
-initial decrypted state and issue commands for login/register, sending/copying
-clipboard text, uploading local files, downloading synced files to an arbitrary
-path, deleting files, and refreshing state.
-
-Relevant code:
-
-- `crates/daemon/src/main.rs`
-- `crates/daemon/src/handler.rs`
-- `app/rust/src/transport.rs`
-
-Risk:
-
-- Same-user local processes are effectively trusted.
-- The previous `/tmp` fallback for the socket/data directory is too risky for
-  sensitive IPC.
-- The request reader accepted unbounded newline-delimited JSON lines.
-
-Immediate remediation already applied:
-
-- Never place the daemon socket under `/tmp`.
-- Require a platform data directory for the daemon socket and client data.
-- Create the socket directory with owner-only permissions, `0700`.
-- Cap daemon IPC request lines.
-- Authenticate each app connection before sending initial state, broadcasts, or
-  accepting commands.
+`crates/daemon/src/main.rs` requires the platform data directory (creates
+`~/Library/Application Support/Clipper` with `0700`, socket file with `0600`)
+and refuses to use `/tmp`. `crates/daemon/src/handler.rs` caps each IPC line at
+`MAX_IPC_REQUEST_LINE_BYTES = 4 MiB` and runs an HMAC-SHA256 handshake against a
+Keychain-stored 32-byte secret (`ipc_auth_message` binds protocol version,
+daemon nonce, and client nonce) before accepting any command or sending state.
+`app/rust/src/transport.rs` and `app/rust/src/ipc_auth.rs` mirror that protocol
+on the client side and also cap inbound lines.
 
 Remaining hardening to consider:
 
@@ -91,185 +59,259 @@ Remaining hardening to consider:
   stronger platform identity controls such as signing/sandboxing/entitlements
   are needed.
 - Consider separate authorization for commands that can read/write arbitrary
-  local files.
+  local files (`UploadFile { file_path }`, `DownloadFile { target_path }`).
 
 ## P1: Malformed Nonce Input Can Crash Clients
 
-Status: confirmed. The current worktree already has staged/uncommitted changes
-that appear to address nonce/hash length validation and no-panic decrypt paths.
+Status: fixed. Verified.
 
-`crypto::decrypt` previously called `XNonce::from_slice(nonce)` directly. For
-XChaCha20-Poly1305, the nonce must be exactly 24 bytes. A wrong-length nonce
-can panic in the generic-array layer instead of returning `CryptoError`.
+`crypto::decrypt` now rejects any nonce whose length is not
+`XCHACHA20_NONCE_BYTES` before calling `XNonce::from_slice`
+(`crates/core/src/crypto.rs`). The API types enforce
+`length(equal = XCHACHA20_NONCE_BYTES)` and `length(equal = SHA256_BYTES)` via
+`garde` for both clipboard (`ClipboardUploadRequest`) and object payload
+(`ObjectPayloadInit`, `ObjectPayloadComplete`) requests, so the server rejects
+malformed values before any disk write. Tests in `routes::clipboard::tests`,
+`routes::objects::tests`, and `crypto::tests` cover the wrong-length cases.
 
-The server accepted decoded clipboard and file nonces without length checks, so
-an authenticated client could store a malformed encrypted record that crashes
-other clients during bootstrap or refresh.
-
-Required invariant:
+Keep the invariants:
 
 - XChaCha20-Poly1305 nonce length is 24 bytes.
 - SHA-256 fields are 32 bytes.
 - Malformed server records must become decrypt errors, not process panics.
 
-Tests worth keeping:
-
-- `decrypt` rejects malformed nonce lengths.
-- Clipboard upload rejects malformed nonce/hash fields before disk writes.
-- File init rejects malformed metadata/blob nonces.
-- File completion rejects malformed hash fields without deleting a valid blob.
-
 ## P1: Encrypted Payload Authentication Does Not Bind Object Metadata
 
-Status: open.
+Status: open. Verified.
 
-The current AEAD associated data is type-level only, such as
-`clipper:clipboard:v1`, `clipper:file-meta:v1`, and `clipper:file-blob:v1`.
-That proves the ciphertext belongs to a broad object type, but it does not bind
-object ID, source device, timestamps, operation/version, or the metadata/blob
-relationship.
-
-Risk:
-
-- A malicious or buggy server/relay can replay or mix ciphertext, nonces, IDs,
-  timestamps, device attribution, and file metadata/blob pairs without AEAD
-  detecting the metadata tamper.
+AAD constants remain type-level only: `clipper:clipboard:v1`,
+`clipper:clipboard-meta:v1`, `clipper:clipboard-payload:v1`,
+`clipper:file-meta:v1`, `clipper:file-blob:v1`. The new object split made the
+mix-up risk worse: an object header now decouples metadata (`AAD_*_META_V1`)
+from payload bytes (`AAD_*_PAYLOAD_V1` / `AAD_FILE_BLOB_V1`), but AAD never
+references the object ID, payload ID, source device, timestamps, or the
+metadata/payload pairing. A malicious or buggy server/relay can still mix
+ciphertext, nonces, IDs, timestamps, device attribution, and metadata/payload
+pairs without AEAD detecting the metadata tamper.
 
 Recommended fix:
 
-- Bind stable object metadata into AAD, or introduce signed object envelopes as
-  described in `docs/local-store-p2p-roadmap.md`.
-- For future P2P, signed envelopes should bind object ID, object kind, source
-  device, created time, operation type, nonce set, ciphertext hash, and version.
+- Bind stable object metadata into AAD (at minimum: object ID, payload ID,
+  object kind, source device).
+- For future P2P, signed object envelopes as described in
+  `docs/local-store-p2p-roadmap.md` should bind object ID, object kind, source
+  device, created time, operation type, payload set, ciphertext hash, and
+  version.
 
 ## P1: WebSocket Replay Can Silently Miss Pruned Events
 
-Status: open.
+Status: partially addressed. Verified.
 
-The cleanup job prunes old event rows. WebSocket replay returns all events after
-`last_seq` that still exist, but it does not prove the replay is complete. The
-server only sends `Invalidate` when the query errors, not when the requested
-sequence is older than the retained event window.
+`ws::handle_socket` now sends `Invalidate { target: "all" }` when
+`get_events_since` errors, and `SyncEngine::ws_connect` reacts to that by
+running a full `refresh()`. The remaining gap: the server still does not know
+the oldest retained sequence per user, so a successful query that returns rows
+younger than the actual `last_seq` is treated as a complete replay. Cleanup
+runs every `cleanup.interval_secs` (default 1 h) and prunes events older than
+`event_log_retention_days` (default 3 d), so a client that misses that window
+silently advances past pruned events.
 
-The client also advances `last_seq` before refresh succeeds. If refresh fails,
-the next reconnect may skip the failed event.
+The client side also still advances `last_seq` from the WS event itself before
+running `refresh()`. If `refresh()` fails, the next reconnect will skip the
+failed event.
 
 Recommended fix:
 
-- Track oldest available event sequence per user.
-- If `last_seq` is older than the retained range, send `Invalidate`.
+- Track oldest available event sequence per user and send `Invalidate` when
+  `last_seq` is older than the retained range.
 - Cap replay count; if the gap is too large, send `Invalidate`.
-- On `Invalidate`, run a full bootstrap rather than a shallow refresh.
-- Advance client `last_seq` only after the refresh/bootstrap caused by the event
-  succeeds, or persist an explicit "needs bootstrap" state.
+- Advance client `last_seq` only after the refresh/bootstrap caused by the
+  event succeeds, or persist an explicit "needs bootstrap" state.
+
+## P1: Object Init Has No Size Cap (New Finding)
+
+Status: open. Introduced with the multi-payload object route.
+
+`routes::objects::init_object` only validates `meta_ciphertext` against
+`limits.max_object_meta_ciphertext_bytes`. It does not check:
+
+- `payload.ciphertext_size` declared during init (only `garde(range(min = 0))`,
+  no upper bound). A client can declare a payload of `i64::MAX` bytes and the
+  streaming upload will then accept up to that many bytes.
+- The size of any `inline_ciphertext` carried inside the init request. Inline
+  payloads are written straight to disk with `create_new`, and there is no
+  Axum body limit middleware on the route, so a single `POST /api/objects/init`
+  can write arbitrarily large attacker-controlled bytes to `objects/`.
+- The aggregate size of multiple inline payloads in one request.
+- `limits.max_file_blob_bytes` against any payload at all.
+
+This regresses the file-blob limit that the legacy `/api/files/blob` path was
+designed around.
+
+Recommended fix:
+
+- Validate each declared `payload.ciphertext_size` against
+  `limits.max_file_blob_bytes` during init.
+- Validate every `inline_ciphertext.len()` against the same cap (and reject
+  inline payloads that should have been streamed, e.g. enforce a small inline
+  cap such as the client's 64 KiB threshold).
+- Add an Axum `DefaultBodyLimit` for the object init/complete routes that is
+  comfortably larger than the inline cap but bounded.
 
 ## P1/P2: Request And Payload Size Limits Are Incomplete
 
-Status: partially in progress.
+Status: partially in progress. Verified.
 
-File blob upload is capped at 512 MiB and streamed on the server, which is good.
-Other paths are less bounded:
+Streaming object payload upload (`PUT /api/objects/{id}/payloads/{payload_id}`)
+enforces the declared size during the stream and rejects mismatches, which is
+good. Other paths are still loose:
 
-- Clipboard upload decodes JSON/base64 ciphertext into memory.
-- File init decodes encrypted metadata into memory and stores it in SQLite.
-- Device name, platform, access key, and auth payload fields do not have clear
-  application-level length caps.
-- Daemon IPC request lines were unbounded.
+- Clipboard upload (legacy `/api/clipboard`) still decodes the JSON/base64
+  ciphertext into memory and has no application-level cap.
+- `ObjectInitRequest` is not size-capped (see the dedicated P1 entry above).
+- Device name, platform, access key, and OPAQUE payload fields have only
+  `length(min = 1)` checks — no upper caps.
+- Daemon IPC request lines are capped at 4 MiB on both sides.
 
 Recommended fix:
 
-- Add Axum request body limits for JSON routes.
-- Add application-level caps for clipboard ciphertext, file metadata
-  ciphertext, device name, platform, access key, and OPAQUE payload sizes.
-- Keep the streamed file blob path.
+- Add Axum `DefaultBodyLimit` per-route for JSON and postcard routes.
+- Add application-level caps for clipboard ciphertext, encrypted metadata,
+  device name, platform, access key, and OPAQUE payload sizes.
+- Keep the streamed object payload path.
 - Align reverse proxy request-size limits with server limits.
+
+## P2: Legacy Clipboard Route Is Still Mounted But Unused (New Finding)
+
+Status: open. Introduced when the client moved to the object route.
+
+`SyncEngine::send_clipboard_payload` now creates clipboard items via
+`ObjectInitRequest { kind: Clipboard, .. }`, and
+`SyncEngine::fetch_object_state` lists clipboard items via
+`list_objects(Some(ObjectKind::Clipboard), ..)`. The bootstrap response field
+`clipboard_items` (sourced from the legacy `clipboard_items` table) is read into
+a local but never used. The Axum router still wires `POST /api/clipboard`,
+`GET /api/clipboard`, and bootstrap still queries `clipboard_items`; the only
+caller is the test suite.
+
+This is a parallel write path that is currently dormant. Risks:
+
+- If anything (a future build, an old client, a misconfigured proxy, a test
+  utility) writes through the legacy route, those rows will not show up in the
+  client UI and the server will retain plaintext-shaped paths and orphaned
+  blobs.
+- Bootstrap continues to read all rows then truncate to 100, wasting work and
+  carrying the P2 fetch-then-truncate cost forever.
+- Two cleanup paths (`cleanup_expired_clipboard` and
+  `cleanup_orphan_object_uploads`) walk two different tables.
+
+Recommended fix:
+
+- Either remove the legacy route + table + bootstrap field + cleanup branch,
+  or document the legacy route as a deprecated compatibility shim and rate-
+  limit / disable it for new deployments. Pick one; do not leave a dual write
+  path live.
 
 ## P2: List And Bootstrap Queries Fetch All Rows Before Truncating
 
-Status: open.
+Status: partially addressed. Verified.
 
-Clipboard list, file list, and sync bootstrap query all matching rows, then
-truncate in Rust. That weakens the value of the `limit` parameter and becomes a
-scaling/DoS problem as history grows.
+`routes::objects::list_objects` applies `.limit(limit + 1)` at SQL level.
+`routes::clipboard::list` and `routes::sync::bootstrap` still call
+`.all(state.db())` and truncate in Rust. No DB indexes have been added for the
+expected access patterns either; the only indexes today are primary keys and a
+few `UNIQUE` constraints on `ciphertext_path` / `token_hash` /
+`access_key_hash`.
 
 Recommended fix:
 
-- Apply SQL `limit + 1` before `.all(...)`.
-- Add DB indexes matching access patterns:
-  - `clipboard_items(user_id, created_at)`
-  - `files(user_id, status, created_at)`
-  - `event_log(user_id, seq)`
-- Verify `sessions(token_hash)` has an effective unique index.
+- Apply SQL `limit + 1` to the remaining list/bootstrap reads.
+- Add DB indexes:
+  - `clipboard_items(user_id, created_at)` (if the legacy table stays);
+  - `objects(user_id, kind, status, created_at)`;
+  - `object_payloads(object_id)` (covered by PK already) and
+    `(object_id, status)`;
+  - `event_log(user_id, seq)`;
+  - `sessions(token_hash)` (covered by UNIQUE) and `(expires_at)` for cleanup.
 
 ## P2: Timestamps Are Stored And Compared As Text
 
-Status: open.
+Status: open. Verified.
 
 The schema stores timestamps as text and code compares them lexicographically
-for sessions, access keys, cleanup, and pagination. This is safe only if every
-stored timestamp is normalized to one fixed-width representation. The docs and
-code can produce mixed `Z`, `+00:00`, and fractional-second forms.
+for sessions (`sess.expires_at < now`), access keys (`expires_at <= now`),
+cleanup (`ExpiresAt.lt(&now)`, `CreatedAt.lt(&cutoff)`), and pagination
+(`CreatedAt.lt(before)`). All server-generated timestamps come from
+`chrono::Utc::now().to_rfc3339()`, which is a fixed `+00:00` form, so the
+intra-server compare is stable today. The risk is cross-source mixing: the
+pagination `before` parameter and any future migration that backfills with a
+different format (`Z`, fractional seconds, non-UTC offsets) silently changes
+ordering.
 
 Recommended fix:
 
-- Store integer Unix timestamps in seconds or milliseconds, or
-- Normalize one fixed-width UTC string format everywhere, or
+- Store integer Unix timestamps in milliseconds, or
+- Normalize one fixed-width UTC string format everywhere and validate inputs
+  to `before` accordingly, or
 - Parse into `DateTime<Utc>` before comparing.
-
-For SQLite, integer milliseconds is usually simplest.
 
 ## P2: Encryption KDF Parameters Are Not Persisted Per User
 
-Status: open.
+Status: partially addressed. Verified.
 
-The API exposes `Argon2Params`, and clients derive encryption keys from
-passphrase + salt + params. The `users` table stores the salt, but server
-responses currently return `Argon2Params::default()` rather than stored per-user
-parameters.
-
-Risk:
-
-- Changing defaults later can make old users derive different keys and lose
-  access to existing encrypted data.
+Server responses now return `state.config().crypto.encryption_params` instead
+of `Argon2Params::default()`, so a single deployment can change the Argon2
+defaults without immediately breaking existing users — as long as the operator
+keeps the running config aligned with what users originally registered with.
+The parameters are still not stored per-user, so a config change after some
+users have registered will silently lock them out.
 
 Recommended fix:
 
-- Store KDF name/version and params per user.
-- Return stored params on login and bootstrap.
+- Store `Argon2Params` per user (and ideally a KDF name/version tag).
+- Return stored params on login challenge and bootstrap.
 
-## P2: Client Pagination URLs Are Not URL-Encoded
+## P2: Client Pagination URLs Are Not Fully URL-Encoded
 
-Status: open.
+Status: partially addressed. Verified.
 
-`ApiClient::list_clipboard` and `ApiClient::list_files` concatenate `before`
-directly into the query string. RFC3339 timestamps can contain `+`, which query
-parsing can treat as a space.
+`ApiClient::list_objects` now builds the query string with
+`Url::query_pairs_mut`. `ApiClient::list_clipboard` still concatenates the
+`before` parameter into the query string by hand. As long as the legacy
+clipboard route stays mounted, this remains a real bug for any caller (RFC3339
+timestamps can contain `+`, which percent-decodes to a space).
 
 Recommended fix:
 
-- Use `reqwest` query building instead of manual string concatenation.
+- Either delete `list_clipboard` along with the rest of the legacy clipboard
+  surface, or move it onto `Url::query_pairs_mut` like `list_objects`.
 
 ## P2: File Download Only Finds Metadata In The First Page
 
-Status: open.
+Status: open. Verified.
 
-`SyncEngine::download_file` lists up to 500 files and searches that page for the
-requested ID before downloading the blob. Older files can become undownloadable
-from the client despite the server having `GET /api/files/{id}/blob`.
+`SyncEngine::download_file_bytes` calls `list_objects(Some(File), Some(500),
+None)` and searches that page for the requested ID before downloading. Older
+files become undownloadable from the client despite the server retaining the
+object. The server already exposes `GET /api/objects/{id}/payloads/{payload_id}`
+but does not expose object metadata by ID.
 
 Recommended fix:
 
-- Add a file metadata-by-ID endpoint, or
-- Use durable local file metadata and look up the nonce there.
+- Add an object-by-ID endpoint (returning kind, metadata nonce + ciphertext,
+  and payload descriptors), or
+- Use durable local object metadata and look up the nonce there.
 
 ## P2: Client File Upload/Download Is All In Memory
 
-Status: open.
+Status: open. Verified.
 
-The server streams blob uploads to disk, but the client reads full plaintext
-files into memory, encrypts to a full ciphertext buffer, uploads that buffer,
-downloads blob bytes into a full buffer, decrypts into another full buffer, and
-then writes the plaintext file.
+The server streams object payload uploads to disk, but the client reads full
+plaintext files into memory, encrypts to a full ciphertext buffer, uploads that
+buffer, downloads payload bytes into a full buffer, decrypts into another full
+buffer, and then writes the plaintext file. The new inline-vs-streamed split
+(`INLINE_OBJECT_PAYLOAD_MAX_BYTES = 64 KiB`) only affects which API call
+carries the bytes, not the in-memory cost.
 
 Recommended fix:
 
@@ -279,28 +321,30 @@ Recommended fix:
 
 ## P2: Repeated Login/Register Can Spawn Duplicate Background Work
 
-Status: open.
+Status: open. Verified.
 
-Successful auth spawns a WebSocket loop and, on macOS, a clipboard watcher. The
-engine does not cancel existing loops/watchers before starting new ones.
+`SyncEngine::finish_auth` unconditionally spawns a new `ws_loop` task (on
+non-wasm targets) and, on macOS, a new clipboard watcher. The engine does not
+track handles and does not cancel the previous instances on re-login, logout,
+or server switching. Each re-auth doubles the number of background WebSocket
+loops, which is both a leak and a way to trigger duplicate refresh storms.
 
 Recommended fix:
 
-- Track background task handles.
+- Track background task handles in `SyncEngine`.
 - Cancel or replace existing sync and clipboard watcher tasks during re-auth,
   logout, and server switching.
 
 ## P2/P3: Auth Rate Limiting And Proxy IPs
 
-Status: fixed for trusted-proxy-aware client IP extraction; follow-up remains
-open for optional per-user and per-access-key limits.
+Status: addressed for trusted-proxy-aware IP extraction. Verified.
 
 The server uses a `governor`-backed in-memory limiter for auth routes, keyed by
 resolved client IP, plus a configurable global auth cap. By default it uses the
 direct TCP peer IP. When running behind a reverse proxy, operators can configure
 trusted proxy IPs or CIDR ranges in TOML, with `--trusted-proxy`, or with
 `CLIPPER_TRUSTED_PROXIES`; only then will `X-Forwarded-For`, `X-Real-IP`, or
-`Forwarded` be used.
+`Forwarded` be honored, with the rightmost untrusted hop selected.
 
 Remaining hardening:
 
@@ -308,12 +352,15 @@ Remaining hardening:
 
 ## P3: Secret-Bearing Types Derive Or Use Ordinary `String`
 
-Status: open.
+Status: open. Verified.
 
-Daemon IPC auth params contain passphrases and access keys as ordinary
-`String`s, and some secret-bearing structs derive `Debug`. The code is not
-currently logging those structs directly, but it is an accidental leak risk.
-Bearer tokens are also stored in `String` on the client.
+`LoginParams` and `RegisterParams` in `crates/daemon-types/src/protocol.rs`
+still carry `passphrase: String` and `access_key: String` and derive `Debug`.
+They cross the bridge (Dart) → app/rust → daemon IPC boundary and through
+`SyncEngine::login_with_platform_and_user`. Bearer tokens are stored as
+`Option<String>` on `ApiClient`. The code is not currently logging those
+structs directly, but it remains an accidental leak risk and they are not
+zeroized when dropped.
 
 Recommended fix:
 
@@ -323,16 +370,53 @@ Recommended fix:
 
 ## P3: Server URL Validation Is Not Encapsulated
 
-Status: open.
+Status: open. Verified.
 
 `validate_server_url` rejects embedded credentials and plain HTTP except for
-loopback/Android emulator hosts, which is good. The setter still accepts any
-string and validation only happens on login/register paths.
+loopback/Android emulator hosts (now also `10.0.3.2`), which is good. The
+`ApiClient::set_base_url` setter still accepts any string, and validation
+only runs on login/register paths.
 
 Recommended fix:
 
 - Validate in `set_base_url`, or use a `ServerUrl` newtype so invalid URLs are
   not representable in the client.
+
+## P3: Legacy Single-User OPAQUE Identifier Is Implicit (New Finding)
+
+Status: open. Introduced during the multi-user migration.
+
+`opaque_credential_identifier_for_user` switches to the older
+`clipper:passphrase:v1` credential identifier when
+`user.access_key_hash == "_legacy_single_user"`, but that sentinel string is
+not defined anywhere as a constant, not documented in the migration, and has
+no foreign key into `access_keys`. It is purely a magic value in business
+logic. If a migration ever rewrites that column, every legacy user silently
+loses login compatibility.
+
+Recommended fix:
+
+- Promote the sentinel into a typed constant in `crates/server/src/auth.rs`
+  (or use a `users.opaque_identifier_version` column) so the compatibility
+  contract is searchable and reviewable.
+- Or write a small migration that converts legacy users to the per-user
+  identifier and removes the branch.
+
+## P3: Auth Challenge Eviction Is Order-Dependent (New Finding)
+
+Status: open.
+
+`AppState::create_auth_challenge` and `create_pending_registration` drop
+entries via `challenges.keys().next().cloned()` once the map hits
+`auth.max_pending_challenges`. Since `HashMap` iteration order is randomized,
+the evicted entry under pressure may be a fresh challenge whose owner has not
+yet replied. Under sustained auth pressure this looks like sporadic
+"Invalid challenge" / "Invalid registration" responses to legitimate users.
+
+Recommended fix:
+
+- Track insertion order (e.g. `BTreeMap` keyed by expiry, or a small ring) so
+  eviction always drops the oldest entry first.
 
 ## Intentional Or Product-Dependent Tradeoffs
 
@@ -340,21 +424,36 @@ Recommended fix:
   local-device tradeoff, but the UI/docs should make it explicit. Server
   clipboard retention is configurable; local cache retention should remain a
   client-side decision.
-- Plain HTTP is still allowed for loopback and Android emulator development.
-  Production and physical-device deployments need HTTPS.
+- Plain HTTP is still allowed for loopback (`127.0.0.1`, `::1`, `localhost`)
+  and Android emulator hosts (`10.0.2.2`, `10.0.3.2`). Production and
+  physical-device deployments need HTTPS.
 - Server-visible plaintext/MCP support is planned separately in
   `docs/server-visible-mcp.md`; private-mode sync must continue to keep
   clipboard text, file metadata, and file blobs encrypted before leaving the
   client.
+- Clipboard objects cannot be deleted through `DELETE /api/objects/{id}` —
+  only `kind = "file"` is accepted. Clipboard retention is handled exclusively
+  by the server-side TTL cleanup today.
+- `SyncEngine` only supports a single payload per object
+  (`fn single_payload(item)` errors otherwise), even though the server schema
+  allows many. Multi-payload reads are reserved for a future client.
 
 ## Suggested PR Order
 
-1. Daemon IPC hardening: no `/tmp` socket fallback, owner-only socket directory,
-   bounded request lines, then peer UID or IPC secret.
-2. Crypto hardening: no-panic decrypt, nonce/hash length validation, malformed
-   record tests.
-3. Server limits: JSON body limits and field-specific caps.
-4. Query performance: SQL limits and indexes for list/bootstrap/replay.
-5. Compatibility persistence: per-user KDF params and integer timestamps.
-6. Client robustness: encoded query params, file-size checks, metadata-by-ID
-   download path, and background task cancellation.
+1. Object init size limits: validate `ciphertext_size`, `inline_ciphertext`
+   length, and total request body against `limits.max_file_blob_bytes` and a
+   small inline cap; add Axum body limits per route.
+2. Crypto AAD binding: include at least object ID, payload ID, kind, and source
+   device in AEAD AAD, or move to signed object envelopes.
+3. Decide the fate of the legacy clipboard route: delete the dual write path
+   or deprecate it explicitly and rate-limit it.
+4. WS replay correctness: track oldest retained seq per user, send `Invalidate`
+   on gap, advance client `last_seq` only after refresh succeeds.
+5. Query performance: SQL limits and indexes for the remaining list/bootstrap
+   reads; fix `list_clipboard` query encoding (or delete it).
+6. Compatibility persistence: per-user KDF params, named legacy-OPAQUE
+   constant, integer timestamps.
+7. Client robustness: object-by-ID metadata endpoint, file-size checks before
+   reading, background task cancellation on re-auth/logout.
+8. Daemon IPC follow-ups: redact `Debug` on secret-bearing IPC structs,
+   evaluate scoped authorization for file-path commands.
