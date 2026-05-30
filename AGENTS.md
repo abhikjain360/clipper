@@ -55,6 +55,23 @@
   - It defaults `FLUTTER_SWIFT_PACKAGE_MANAGER=false` so newer host Flutter
     versions do not rewrite the current CocoaPods-based macOS project.
 
+- Local server setup and serve:
+
+  ```sh
+  mkdir -p data
+  test -f data/clipper-server.secret || \
+    cargo run -p clipper-server -- generate-secret > data/clipper-server.secret
+  chmod 600 data/clipper-server.secret
+
+  export CLIPPER_SERVER_SECRET_FILE="$PWD/data/clipper-server.secret"
+  cargo run -p clipper-server -- init --data-dir data/clipper-server
+  cargo run -p clipper-server -- serve --data-dir data/clipper-server
+  ```
+
+  Keep the same `CLIPPER_SERVER_SECRET_FILE` value for `init`, `serve`, and
+  `add-access-key`; the server database cannot be opened with a different
+  pepper.
+
 - Regenerate SeaORM entities after server schema changes:
 
   ```sh

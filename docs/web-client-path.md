@@ -1,7 +1,8 @@
 # Web Client Path
 
-This note records the preferred direction for adding a Flutter Web client that
-uses the shared Rust client code compiled to WebAssembly.
+This note records the current shape and remaining design constraints for the
+Flutter Web client, which uses the shared Rust client code compiled to
+WebAssembly.
 
 The goal is not native parity. The web client should reuse the same auth,
 encryption, object encoding, and app-state behavior where that is valuable, but
@@ -14,25 +15,29 @@ The codebase currently has one shared Rust client crate:
 - `crates/client` owns `ApiClient`, `SyncEngine`, encryption helpers, and local
   client state.
 - `app/rust` exposes Flutter Rust Bridge functions to Dart.
-- macOS uses `app/rust` -> daemon IPC -> `clipper-client::SyncEngine`.
-- Android uses `app/rust` -> in-process `clipper-client::SyncEngine`.
+- macOS and Linux use `app/rust` -> daemon IPC -> `clipper-client::SyncEngine`.
+- Android and web use `app/rust` -> in-process `clipper-client::SyncEngine`.
 - `crates/api-types` owns the server/client payload types.
 - `crates/app-types` owns decrypted display state exposed to the UI.
 - `crates/daemon-types` owns app/daemon commands and events.
+- Web builds use the same bridge surface with byte-oriented file
+  upload/download helpers and browser `localStorage` for the current local
+  clipboard cache.
 
-This is the right broad architecture for web: keep one shared Rust client logic
-surface and place platform differences around it.
+The broad architecture is: keep one shared Rust client logic surface and place
+platform differences around it.
 
 ## Web Product Scope
 
-The web client does not need realtime clipboard support.
+The web client does not need realtime clipboard support or background clipboard
+watching.
 
-Target web behavior:
+Current web behavior:
 
 - login and register;
 - derive the same client-side encryption key in WASM;
 - list synced clipboard items and file metadata;
-- explicitly refresh or poll on a conservative interval;
+- explicitly refresh after user action;
 - copy selected text through browser clipboard APIs from Dart;
 - upload selected files through browser file picker bytes;
 - download selected files through browser download APIs;
@@ -44,7 +49,7 @@ Browser limitations are product constraints, not implementation bugs:
 - clipboard writes generally require a user gesture;
 - files are selected or downloaded through browser APIs, not paths;
 - browser WebSockets cannot set arbitrary `Authorization` headers;
-- durable local storage is IndexedDB/localStorage, not a filesystem path.
+- durable local storage is browser storage, not a filesystem path.
 
 ## Web Hosting Requirement
 
@@ -79,8 +84,8 @@ Flutter UI
         filesystem local store
         native WebSocket
       web runtime
-        browser fetch transport
-        web local store or memory store
+        reqwest/browser fetch HTTP
+        browser localStorage store
         no realtime transport initially
     shared client logic
       auth flow
@@ -97,8 +102,9 @@ and storage traits, not directly on `reqwest`, `tokio::fs`, or
 
 ## Transport Boundary
 
-`ApiClient` currently owns a `reqwest::Client`. That is fine for native, but it
-should become an implementation detail of a native transport adapter.
+`ApiClient` currently owns a `reqwest::Client`. That works for native and web
+today, but an explicit transport boundary may still be useful if web size,
+browser behavior, or testability becomes painful.
 
 Introduce a small HTTP transport shape:
 
@@ -123,7 +129,7 @@ Native implementation:
 
 Web implementation:
 
-- calls a JS/browser fetch function from WASM, or uses a thin web-sys wrapper;
+- currently relies on the browser-backed WASM path used by `reqwest`;
 - lets browser fetch own CORS, credentials mode, and TLS;
 - returns raw status and body bytes to Rust;
 - keeps postcard serialization/deserialization in Rust.
@@ -134,8 +140,10 @@ code.
 
 ## Storage Boundary
 
-The current `LocalStore` is filesystem based. That should remain the native
-implementation, not the universal client storage model.
+`LocalStore` has platform-specific implementations. Native builds use the
+filesystem; web builds use browser `localStorage` with a bounded clipboard
+index. The network boundary remains encrypted, while the local cache stores
+decrypted clipboard payloads for UI convenience.
 
 Define a client store boundary with only the operations the sync engine needs:
 
@@ -152,17 +160,17 @@ Native implementation:
 
 Web implementation:
 
-- start with an in-memory store if that is enough for the first web client;
-- move to IndexedDB once offline reload or durable web history matters;
-- avoid persisting the passphrase or derived encryption key;
-- consider not persisting decrypted clipboard history by default.
+- currently uses `localStorage`;
+- should move to IndexedDB if durable web history needs larger binary payloads;
+- must not persist the passphrase or derived encryption key;
+- should keep decrypted clipboard persistence an explicit product decision.
 
 The storage decision should not leak into crypto or server API code.
 
 ## Runtime Boundary
 
-`app/rust/src/runtime.rs` should gain a web branch that mirrors Android more
-than macOS:
+`app/rust/src/runtime.rs` has a web branch that mirrors Android more than
+macOS/Linux:
 
 - one in-process engine;
 - no daemon process;
@@ -170,15 +178,15 @@ than macOS:
 - web-specific default server URL handling;
 - no platform clipboard watcher.
 
-The existing Flutter Rust Bridge surface can remain mostly stable for login,
-register, refresh, copy, and state. File APIs need web-specific byte-oriented
-entry points because browser files are not local paths.
+The Flutter Rust Bridge surface stays shared for login, register, refresh,
+copy, and state. File APIs include web-specific byte-oriented entry points
+because browser files are not local paths.
 
-Recommended bridge split:
+Current bridge split:
 
 - keep native `upload_file(file_path)` and `download_file(file_id, target_path)`;
 - add web-friendly `upload_file_bytes(filename, mime_type, bytes)`;
-- add web-friendly `download_file_bytes(file_id) -> bytes + metadata`;
+- add web-friendly `download_file_bytes(file_id) -> bytes`;
 - let Dart handle browser file picker and browser download.
 
 ## Realtime Sync
@@ -209,12 +217,9 @@ oriented for HTTP.
 
 ## Server API Direction
 
-Finish the postcard/object endpoint migration before treating web as a serious
-target.
-
-Avoid making the web client support both the legacy clipboard/file endpoint
-model and the new object model as first-class paths. The sustainable endpoint
-contract should be:
+The web client consumes the same object API as native. Avoid adding any
+browser-only legacy clipboard/file endpoint path. The sustainable endpoint
+contract is:
 
 - shared request/response structs in `crates/api-types`;
 - postcard for Rust-only binary object endpoints;
@@ -222,49 +227,41 @@ contract should be:
 - JSON only where browser/native compatibility or human debugging is more
   valuable than binary efficiency.
 
-Once the object model is stable, the web client can consume the same object API
-as native with only the HTTP transport swapped.
-
 ## Build Integration
 
-Flutter Rust Bridge already has generated web glue in `app/lib/src/rust`, and
-the Rust crate enables FRB's `wasm-start` feature. The app itself is not yet
-configured as a Flutter Web app.
+Flutter Rust Bridge has generated web glue in `app/lib/src/rust`, and the Rust
+crate enables FRB's `wasm-start` feature. Use the flake wrappers:
 
-Expected build direction:
-
-- add Flutter web platform files using Flutter's project generator;
-- build the Rust bridge with `flutter_rust_bridge_codegen build-web`;
-- keep generated WASM artifacts under the expected `pkg/` path for FRB;
-- configure Rust WASM entropy support for browser crypto randomness;
-- keep native cargokit build flow intact for Android/macOS.
+- `nix run .#frb-build-web` builds the Rust bridge WASM package.
+- `nix run .#web-build` builds the bridge package and Flutter web app.
+- `nix run .#web-serve` serves `app/build/web` with the required
+  cross-origin-isolation headers.
 
 The WASM build should be treated as another platform target, not as a separate
 application architecture.
 
 ## Dependency Cleanup Needed
 
-The shared client currently pulls in native assumptions that should be isolated:
+Remaining cleanup:
 
-- `tokio::fs` belongs behind native local storage;
-- `tokio-tungstenite` belongs behind native realtime transport;
-- `reqwest` belongs behind native HTTP transport;
-- random number generation needs browser-compatible WASM configuration;
-- file path APIs need byte-oriented web alternatives.
+- keep `tokio-tungstenite` behind native realtime transport;
+- consider a smaller explicit HTTP transport boundary if `reqwest` becomes too
+  heavy for web;
+- keep filesystem-only behavior out of WASM paths;
+- move web local storage to IndexedDB if `localStorage` size limits become a
+  product issue.
 
 These are separable cleanups. They should be done as boundary extractions, not
 as a web fork.
 
-## Recommended Order
+## Remaining Order
 
-1. Stabilize the object/postcard server contract.
-2. Move `ApiClient` onto an HTTP transport abstraction.
-3. Move local cache operations behind a store abstraction.
-4. Add byte-oriented file operations to the shared engine.
-5. Add a web runtime branch in `app/rust`.
-6. Add Flutter Web platform files and FRB WASM build integration.
-7. Start web with manual refresh and no realtime transport.
-8. Add IndexedDB or browser WebSocket only after the basic web client is useful.
+1. Keep manual refresh as the baseline web sync model.
+2. Add IndexedDB only if `localStorage` is too small or too awkward.
+3. Add browser WebSocket only after the basic web client remains useful without
+   realtime transport.
+4. If browser WebSocket is added, use browser-native WebSocket plus a dedicated
+   server auth shape; do not reuse the native `tokio-tungstenite` path.
 
 ## Non-Goals
 

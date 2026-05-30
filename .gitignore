@@ -10,6 +10,7 @@ result-*
 .direnv/
 .env
 .clipper-server.secret
+.clipper-server/
 
 # Local data
 *.db

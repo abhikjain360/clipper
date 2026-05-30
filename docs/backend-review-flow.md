@@ -11,10 +11,15 @@ then send encrypted records and non-decrypted metadata to the server.
 
 - `crates/server/src/main.rs`
   - boots the Axum HTTP server;
-  - loads built-in defaults, optional TOML config, environment overrides, and CLI overrides;
+  - loads built-in defaults, optional TOML config, environment overrides, and
+    CLI overrides;
+  - loads the required server pepper from `CLIPPER_SERVER_SECRET` or
+    `CLIPPER_SERVER_SECRET_FILE`;
   - runs migrations;
-  - checks `server_config` exists;
-  - wires public registration/login routes, authenticated routes, tracing, cleanup, rate-limit pruning, and typed process-level error handling.
+  - checks `server_config` exists and verifies the supplied pepper can unwrap
+    server configuration before binding;
+  - wires public registration/login routes, authenticated routes, tracing,
+    cleanup, rate-limit pruning, and typed process-level error handling.
 - `crates/server/src/error.rs`
   - owns server process error variants, display text, and exit-code mapping.
 - `crates/server/src/config.rs`
@@ -95,25 +100,50 @@ schema and should not be treated as the schema owner.
 
 First-run server setup:
 
-1. Operator runs `clipper-server init`.
-2. Server creates the database, runs migrations, inserts the singleton `server_config` initialization marker and a wrapped access-key hashing salt, and creates the `objects/` data directory (the only on-disk blob directory).
-3. No user passphrase is entered during server init.
-
-Access-key provisioning:
-
-1. Operator creates one high-entropy access key per intended user outside the app.
-2. Operator adds the access key with `clipper-server add-access-key`, which unwraps `server_config.access_key_hash_salt`, hashes with Argon2id using the server pepper as Argon2's `secret` input, and stores the base64 verifier in `access_keys.key_hash`, with `created_at` set and optional `expires_at`.
-3. The access key is a one-time registration authorization secret only. It is not the user's passphrase and is not used for data encryption.
+1. Operator generates a 32-byte server pepper with
+   `clipper-server generate-secret` and stores it outside the database backup
+   path.
+2. Operator sets exactly one of `CLIPPER_SERVER_SECRET` or
+   `CLIPPER_SERVER_SECRET_FILE`.
+3. Operator runs `clipper-server init`.
+4. Server creates the database, runs migrations, inserts the singleton
+   `server_config` initialization marker and a wrapped access-key hashing salt,
+   and creates the `objects/` data directory (the only on-disk blob directory).
+5. No user passphrase is entered during server init.
 
 Example:
 
 ```sh
-openssl rand -base64 32
+test -f /path/outside/db-backups/clipper.secret || \
+  clipper-server generate-secret > /path/outside/db-backups/clipper.secret
+chmod 600 /path/outside/db-backups/clipper.secret
+export CLIPPER_SERVER_SECRET_FILE=/path/outside/db-backups/clipper.secret
+clipper-server init --data-dir /path/to/data-dir
+```
+
+Access-key provisioning:
+
+1. Operator creates one high-entropy access key per intended user outside the app.
+2. Operator adds the access key with `clipper-server add-access-key` while
+   providing the same server pepper. The command unwraps
+   `server_config.access_key_hash_salt`, hashes with Argon2id using the server
+   pepper as Argon2's `secret` input, and stores the base64 verifier in
+   `access_keys.key_hash`, with `created_at` set and optional `expires_at`.
+3. The access key is a one-time registration authorization secret only. It is
+   not the user's passphrase and is not used for data encryption.
+
+Example:
+
+```sh
+export CLIPPER_SERVER_SECRET_FILE=/path/outside/db-backups/clipper.secret
+ACCESS_KEY="$(openssl rand -base64 32)"
+printf 'Access key: %s\n' "$ACCESS_KEY"
 clipper-server add-access-key --data-dir /path/to/data-dir
 ```
 
 The `add-access-key` command prompts for the raw key when `--access-key` is not
-supplied, so the invite does not need to be passed as a process argument.
+supplied, so the invite does not need to be passed as a process argument. Paste
+the generated key at the prompt, then give it to the user out of band.
 
 Normal client registration:
 

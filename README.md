@@ -17,13 +17,13 @@ bearer tokens or sync metadata from plain HTTP.
 
 `crates/server` is the Axum API and SQLite storage.
 `crates/client` is the shared Rust sync client.
-`crates/daemon` is the local macOS background process.
+`crates/daemon` is the local macOS/Linux background process.
 `app` is the Flutter app and Flutter Rust Bridge adapter.
 `docs` has the longer notes.
 
 ## Platforms
 
-The Flutter bridge is wired for macOS, Linux, and Android.
+The Flutter bridge is wired for macOS, Linux, Android, and web.
 
 macOS runs the Flutter app against a local `clipper-daemon` over a Unix socket.
 The daemon owns sync, clipboard watching, and Keychain-backed profile storage.
@@ -107,12 +107,20 @@ page or startup error.
 ## Local Server
 
 ```sh
-cargo run -p clipper-server -- init --data-dir .clipper-server
-cargo run -p clipper-server -- serve --data-dir .clipper-server
+mkdir -p data
+test -f data/clipper-server.secret || \
+  cargo run -p clipper-server -- generate-secret > data/clipper-server.secret
+chmod 600 data/clipper-server.secret
+
+export CLIPPER_SERVER_SECRET_FILE="$PWD/data/clipper-server.secret"
+cargo run -p clipper-server -- init --data-dir data/clipper-server
+cargo run -p clipper-server -- serve --data-dir data/clipper-server
 ```
 
 The app defaults to `http://127.0.0.1:8787`.
 Android emulator loopback is `http://10.0.2.2:8787`.
+Keep the same server secret for `init`, `add-access-key`, and `serve`; the
+database cannot be opened with a different secret.
 
 ## Access
 
@@ -121,12 +129,16 @@ only an Argon2id verifier in `access_keys`, and gives the raw key to the user
 out of band. The key is only for first registration. It is not the passphrase
 and it is not used for encryption. Add keys after `init`, because the server
 generates the access-key hashing salt during initialization.
-The `add-access-key` command prompts for the raw key; keep the generated key
-and give it to the user out of band.
+Without `--access-key`, the `add-access-key` command prompts for the raw key;
+keep the generated key and give it to the user out of band.
 
 ```sh
-openssl rand -base64 32
-cargo run -p clipper-server -- add-access-key --data-dir .clipper-server
+export CLIPPER_SERVER_SECRET_FILE="$PWD/data/clipper-server.secret"
+ACCESS_KEY="$(openssl rand -base64 32)"
+echo "Access key: $ACCESS_KEY"
+cargo run -p clipper-server -- add-access-key \
+  --data-dir data/clipper-server \
+  --access-key "$ACCESS_KEY"
 ```
 
 There is no admin UI here yet.
@@ -143,9 +155,17 @@ service files in this repo yet.
 
 ```sh
 cargo build --release -p clipper-server
+test -f /path/outside/db-backups/clipper.secret || \
+  target/release/clipper-server generate-secret > /path/outside/db-backups/clipper.secret
+chmod 600 /path/outside/db-backups/clipper.secret
+export CLIPPER_SERVER_SECRET_FILE=/path/outside/db-backups/clipper.secret
 target/release/clipper-server init --data-dir /var/lib/clipper
 target/release/clipper-server serve --data-dir /var/lib/clipper --addr 127.0.0.1:8787
 ```
+
+`CLIPPER_SERVER_SECRET` can hold the base64 secret directly, but
+`CLIPPER_SERVER_SECRET_FILE` is usually safer for services. Set exactly one of
+those variables before `init`, `add-access-key`, or `serve`.
 
 Server configuration can also live in a TOML file. Built-in defaults are used
 when no config file is supplied; config file values override those defaults,
@@ -193,6 +213,7 @@ orphan_upload_ttl_secs = 3600
 ```
 
 ```sh
+export CLIPPER_SERVER_SECRET_FILE=/path/outside/db-backups/clipper.secret
 target/release/clipper-server --config /etc/clipper/server.toml init
 target/release/clipper-server --config /etc/clipper/server.toml serve
 ```
@@ -206,6 +227,7 @@ so auth rate limiting uses the real client IP from `X-Forwarded-For`,
 restart when changed.
 
 ```sh
+CLIPPER_SERVER_SECRET_FILE=/path/outside/db-backups/clipper.secret \
 CLIPPER_TRUSTED_PROXIES=127.0.0.1,::1 \
   target/release/clipper-server serve --data-dir /var/lib/clipper --addr 127.0.0.1:8787
 ```
