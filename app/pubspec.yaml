@@ -11,6 +11,7 @@ dependencies:
     sdk: flutter
   flutter_rust_bridge: ^2.12.0
   file_picker: ^11.0.2
+  cupertino_icons: ^1.0.8
   path: ^1.9.1
   rust_lib_clipper_app:
     path: rust_builder

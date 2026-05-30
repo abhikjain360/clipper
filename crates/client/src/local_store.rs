@@ -367,6 +367,7 @@ fn sort_and_truncate(items: &mut Vec<DecryptedClipboardItem>, limit: usize) {
     items.truncate(limit);
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn clipboard_display_text(mime_type: &str, payload: &[u8]) -> String {
     if is_text_mime_type(mime_type) {
         String::from_utf8_lossy(payload).into_owned()
@@ -375,6 +376,7 @@ fn clipboard_display_text(mime_type: &str, payload: &[u8]) -> String {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn is_text_mime_type(mime_type: &str) -> bool {
     mime_type
         .split(';')

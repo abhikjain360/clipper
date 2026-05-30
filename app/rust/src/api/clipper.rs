@@ -230,14 +230,14 @@ pub async fn send_clipboard_payload(mime_type: String, bytes: Vec<u8>) -> Result
             daemon::SendClipboardPayloadParams { mime_type, bytes },
         ))
         .await?;
-        Ok(result
+        result
             .and_then(|value| {
                 value
                     .get("id")
                     .and_then(|id| id.as_str())
                     .map(ToOwned::to_owned)
             })
-            .ok_or_else(|| AppError::missing_daemon_result("id"))?)
+            .ok_or_else(|| AppError::missing_daemon_result("id"))
     })
     .await
 }
