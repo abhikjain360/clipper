@@ -4,19 +4,25 @@
 
 I am not accepting pull requests right now.
 
-Clipper is in an early, fast-moving phase while I work heavily with AI tools and
-experiment with large-scale agentic coding workflows. In practice, reviewing and
-coordinating pull requests would be slower than implementing the same features
-myself, and it would add process before the design has settled.
+Clipper is experimental in two related senses. The product is early: the final
+feature set is not decided, the design is still moving, and the code has not
+been security audited. The development process is also part of the experiment:
+I am using this project to see how far I can write high-quality software while
+relying heavily on agentic coding, without handing off the design judgment,
+review responsibility, or maintenance ownership that quality still requires.
+
+That makes outside pull requests a poor fit for now. Reviewing and coordinating
+PRs would change the experiment as much as it would change the project, and it
+would add process before either the product or the contribution model has
+settled.
 
 You are still welcome to read the code, run it locally, fork it, experiment, and
 send feedback. This guide documents the development setup and checks so the
-project is easy to work with even while upstream PRs are closed.
+project is easy to work with even while upstream pull requests are closed.
 
 ## Project Status
 
-Clipper is early and experimental. It has not been security audited, and it
-should not be trusted with secrets you cannot afford to lose. See
+Clipper should not be trusted with secrets you cannot afford to lose. See
 [README.md](README.md), [SECURITY.md](SECURITY.md), and
 [docs/rust-code-review.md](docs/rust-code-review.md) before treating the code as
 anything other than experimental software.
