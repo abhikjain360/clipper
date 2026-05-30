@@ -561,6 +561,29 @@ fn validate_inline_ciphertext<'a>(
     }
 }
 
+fn validate_unique_init_payload_ids(value: &Vec<ObjectPayloadInit>, _: &()) -> garde::Result {
+    let mut seen = HashSet::new();
+    for payload in value {
+        if !seen.insert(payload.id) {
+            return Err(garde::Error::new("must not contain duplicate payload ids"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_unique_complete_payload_ids(
+    value: &Vec<ObjectPayloadComplete>,
+    _: &(),
+) -> garde::Result {
+    let mut seen = HashSet::new();
+    for payload in value {
+        if !seen.insert(payload.id) {
+            return Err(garde::Error::new("must not contain duplicate payload ids"));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,27 +681,4 @@ mod tests {
         let decoded: FileMeta = postcard::from_bytes(&bytes).expect("deserialize file meta");
         assert!(decoded.size.is_none());
     }
-}
-
-fn validate_unique_init_payload_ids(value: &Vec<ObjectPayloadInit>, _: &()) -> garde::Result {
-    let mut seen = HashSet::new();
-    for payload in value {
-        if !seen.insert(payload.id) {
-            return Err(garde::Error::new("must not contain duplicate payload ids"));
-        }
-    }
-    Ok(())
-}
-
-fn validate_unique_complete_payload_ids(
-    value: &Vec<ObjectPayloadComplete>,
-    _: &(),
-) -> garde::Result {
-    let mut seen = HashSet::new();
-    for payload in value {
-        if !seen.insert(payload.id) {
-            return Err(garde::Error::new("must not contain duplicate payload ids"));
-        }
-    }
-    Ok(())
 }
