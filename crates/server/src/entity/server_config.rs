@@ -11,6 +11,8 @@ pub struct Model {
     pub created_at: String,
     #[sea_orm(column_type = "Text")]
     pub updated_at: String,
+    #[sea_orm(column_type = "Blob")]
+    pub access_key_hash_salt: Vec<u8>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

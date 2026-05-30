@@ -296,8 +296,8 @@ impl SyncEngine {
                 .ok_or_else(|| ClientError::Other("No device_id".into()))?
         };
 
-        let object_uuid = uuid::Uuid::new_v4();
-        let payload_uuid = uuid::Uuid::new_v4();
+        let object_uuid = uuid::Uuid::now_v7();
+        let payload_uuid = uuid::Uuid::now_v7();
         let object_id = object_uuid.to_string();
         let payload_id = payload_uuid.to_string();
         let plaintext_size = data.len() as i64;
@@ -491,8 +491,8 @@ impl SyncEngine {
             size: Some(data.len() as i64),
         };
 
-        let file_uuid = uuid::Uuid::new_v4();
-        let payload_uuid = uuid::Uuid::new_v4();
+        let file_uuid = uuid::Uuid::now_v7();
+        let payload_uuid = uuid::Uuid::now_v7();
         let file_id = file_uuid.to_string();
         let payload_id = payload_uuid.to_string();
         let (meta_nonce, meta_ciphertext, blob_nonce, encrypted_blob) = {

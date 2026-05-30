@@ -51,10 +51,7 @@
 - Regenerate SeaORM entities after server schema changes:
 
   ```sh
-  tmpdir=$(mktemp -d)
-  cargo run -q -p clipper-server -- init -d "$tmpdir/data"
-  sea-orm-cli generate entity -u "sqlite:$tmpdir/data/clipper.db" -o crates/server/src/entity --with-prelude none
-  rm -rf "$tmpdir"
+  nix run .#server-entities
   ```
 
 ## Dependency Notes

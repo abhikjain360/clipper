@@ -4,12 +4,22 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use base64::Engine;
 use chrono::Utc;
-use clipper_core::crypto::sha256;
+use clipper_core::crypto::{self, sha256};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use uuid::Uuid;
 
 use crate::{entity::sessions, state::AppState};
+
+const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+pub fn hash_access_key(
+    access_key: &str,
+    salt: &[u8],
+) -> Result<String, clipper_core::crypto::CryptoError> {
+    Ok(B64.encode(crypto::access_key_hash(access_key.as_bytes(), salt)?))
+}
 
 /// Extract bearer token from Authorization header.
 fn extract_bearer(req: &Request) -> Option<String> {

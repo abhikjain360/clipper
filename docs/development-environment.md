@@ -99,10 +99,7 @@ the schema owner; generated entity files should not be hand-edited as the final
 change.
 
 ```sh
-tmpdir=$(mktemp -d)
-cargo run -q -p clipper-server -- init -d "$tmpdir/data"
-sea-orm-cli generate entity -u "sqlite:$tmpdir/data/clipper.db" -o crates/server/src/entity --with-prelude none
-rm -rf "$tmpdir"
+nix run .#server-entities
 ```
 
 Direnv can print a long environment diff for Nix shells. To hide only that diff,

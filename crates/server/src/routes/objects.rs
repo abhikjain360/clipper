@@ -232,7 +232,7 @@ pub async fn upload_payload(
     let tmp_path = state.objects_dir().join(format!(
         "{}.{}.tmp",
         payload.ciphertext_path,
-        uuid::Uuid::new_v4()
+        uuid::Uuid::now_v7()
     ));
 
     if let Err(response) = stream_body_to_payload_file(body, expected_size, &tmp_path).await {
@@ -849,7 +849,7 @@ mod tests {
 
     fn auth(user_id: Uuid, device_id: Uuid) -> AuthInfo {
         AuthInfo {
-            session_id: Uuid::new_v4(),
+            session_id: Uuid::now_v7(),
             user_id,
             device_id,
         }
@@ -865,8 +865,8 @@ mod tests {
 
     async fn insert_user(state: &AppState) -> Uuid {
         let now = Utc::now().to_rfc3339();
-        let user_id = Uuid::new_v4();
-        let access_key_hash = Uuid::new_v4().to_string();
+        let user_id = Uuid::now_v7();
+        let access_key_hash = Uuid::now_v7().to_string();
         access_keys::ActiveModel {
             key_hash: Set(access_key_hash.clone()),
             created_at: Set(now.clone()),
@@ -933,8 +933,8 @@ mod tests {
     #[tokio::test]
     async fn init_rejects_wrong_payload_nonce_length_before_writing() {
         let (_state, data_dir) = test_state().await;
-        let object_id = Uuid::new_v4().to_string();
-        let payload_id = Uuid::new_v4().to_string();
+        let object_id = Uuid::now_v7().to_string();
+        let payload_id = Uuid::now_v7().to_string();
         let mut req = init_request(
             object_id.clone(),
             payload_id.clone(),
@@ -959,8 +959,8 @@ mod tests {
     #[tokio::test]
     async fn init_rejects_wrong_payload_sha256_length_before_writing() {
         let (_state, data_dir) = test_state().await;
-        let object_id = Uuid::new_v4().to_string();
-        let payload_id = Uuid::new_v4().to_string();
+        let object_id = Uuid::now_v7().to_string();
+        let payload_id = Uuid::now_v7().to_string();
         let mut req = init_request(
             object_id.clone(),
             payload_id.clone(),
@@ -986,10 +986,10 @@ mod tests {
     async fn inline_init_completes_lists_and_downloads_object() {
         let (state, _data_dir) = test_state().await;
         let user_id = insert_user(&state).await;
-        let device_id = Uuid::new_v4();
+        let device_id = Uuid::now_v7();
         insert_device(&state, user_id, device_id).await;
-        let object_id = Uuid::new_v4().to_string();
-        let payload_id = Uuid::new_v4().to_string();
+        let object_id = Uuid::now_v7().to_string();
+        let payload_id = Uuid::now_v7().to_string();
         let ciphertext = b"encrypted clipboard payload";
 
         let Postcard(resp) = init_object(
@@ -1038,10 +1038,10 @@ mod tests {
     async fn streaming_upload_completes_after_exact_size_and_hash_check() {
         let (state, _data_dir) = test_state().await;
         let user_id = insert_user(&state).await;
-        let device_id = Uuid::new_v4();
+        let device_id = Uuid::now_v7();
         insert_device(&state, user_id, device_id).await;
-        let object_id = Uuid::new_v4().to_string();
-        let payload_id = Uuid::new_v4().to_string();
+        let object_id = Uuid::now_v7().to_string();
+        let payload_id = Uuid::now_v7().to_string();
         let ciphertext = b"encrypted file payload";
 
         let Postcard(resp) = init_object(
@@ -1104,10 +1104,10 @@ mod tests {
     async fn streaming_upload_rejects_size_mismatch_without_final_file() {
         let (state, data_dir) = test_state().await;
         let user_id = insert_user(&state).await;
-        let device_id = Uuid::new_v4();
+        let device_id = Uuid::now_v7();
         insert_device(&state, user_id, device_id).await;
-        let object_id = Uuid::new_v4().to_string();
-        let payload_id = Uuid::new_v4().to_string();
+        let object_id = Uuid::now_v7().to_string();
+        let payload_id = Uuid::now_v7().to_string();
 
         init_object(
             State(state.clone()),

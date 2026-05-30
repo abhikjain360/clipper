@@ -20,6 +20,11 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(ServerConfig::CreatedAt).text().not_null())
                     .col(ColumnDef::new(ServerConfig::UpdatedAt).text().not_null())
+                    .col(
+                        ColumnDef::new(ServerConfig::AccessKeyHashSalt)
+                            .blob()
+                            .not_null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -408,6 +413,7 @@ enum ServerConfig {
     Id,
     CreatedAt,
     UpdatedAt,
+    AccessKeyHashSalt,
 }
 
 #[derive(DeriveIden)]

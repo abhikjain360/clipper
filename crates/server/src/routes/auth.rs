@@ -21,8 +21,8 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthInfo,
-    entity::{access_keys, devices, sessions, users},
+    auth::{self as server_auth, AuthInfo},
+    entity::{access_keys, devices, server_config, sessions, users},
     rate_limit::{ClientIp, RateLimiter},
     routes::{ValidatedJson, error_response},
     state::AppState,
@@ -67,7 +67,9 @@ pub async fn register_start(
     check_auth_rate_limit(&limiter, ip)?;
 
     let now = Utc::now().to_rfc3339();
-    let access_key_hash = access_key_hash(&req.access_key);
+    let config = load_server_config(&state).await?;
+    let access_key_hash = access_key_hash(&req.access_key, &config.access_key_hash_salt)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error"))?;
     let access_key = access_keys::Entity::find_by_id(access_key_hash.clone())
         .one(state.db())
         .await
@@ -86,7 +88,7 @@ pub async fn register_start(
         ));
     }
 
-    let user_id = Uuid::new_v4();
+    let user_id = Uuid::now_v7();
     let opaque_server_setup = crypto::opaque_new_server_setup();
     let encryption_salt = crypto::generate_encryption_salt().to_vec();
     let credential_identifier = opaque_credential_identifier(user_id);
@@ -275,8 +277,21 @@ pub async fn logout(
     Ok(Json(OkResponse { ok: true }))
 }
 
-fn access_key_hash(access_key: &str) -> String {
-    B64.encode(crypto::sha256(access_key.as_bytes()))
+fn access_key_hash(
+    access_key: &str,
+    salt: &[u8],
+) -> Result<String, clipper_core::crypto::CryptoError> {
+    server_auth::hash_access_key(access_key, salt)
+}
+
+async fn load_server_config(
+    state: &AppState,
+) -> Result<server_config::Model, (StatusCode, Json<ErrorResponse>)> {
+    server_config::Entity::find_by_id(1)
+        .one(state.db())
+        .await
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+        .ok_or_else(|| error_response(StatusCode::SERVICE_UNAVAILABLE, "Server not initialized"))
 }
 
 fn check_auth_rate_limit(
@@ -359,7 +374,7 @@ where
     let now = Utc::now().to_rfc3339();
     let device_id = requested_device_id
         .map(clipper_core::models::DeviceId::into_uuid)
-        .unwrap_or_else(Uuid::new_v4);
+        .unwrap_or_else(Uuid::now_v7);
     let device_name = device_name.unwrap_or_else(|| "Unknown Device".into());
     let platform = platform.unwrap_or_else(|| "unknown".into());
 
@@ -408,7 +423,7 @@ where
     let token_hash = crypto::sha256(&token_raw);
     let token = B64.encode(token_raw);
 
-    let session_id = Uuid::new_v4();
+    let session_id = Uuid::now_v7();
     let expires_at = (Utc::now() + Duration::days(30)).to_rfc3339();
     let user_agent = headers
         .get("user-agent")
@@ -441,7 +456,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::entity::access_keys;
+    use crate::entity::{access_keys, server_config};
 
     const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -451,12 +466,22 @@ mod tests {
         let state = AppState::open_with_db(db, data_dir.path().to_path_buf())
             .await
             .expect("state");
+        let now = Utc::now().to_rfc3339();
+        server_config::ActiveModel {
+            id: Set(1),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            access_key_hash_salt: Set(crypto::generate_access_key_hash_salt().to_vec()),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert server config");
         (state, data_dir)
     }
 
     async fn test_state(passphrase: &[u8]) -> (AppState, TempDir) {
         let (state, data_dir) = empty_state().await;
-        let user_id = Uuid::new_v4();
+        let user_id = Uuid::now_v7();
         let opaque_server_setup = crypto::opaque_new_server_setup();
         let (registration_request, client_state) =
             crypto::opaque_client_register_start(passphrase).expect("client register start");
@@ -476,7 +501,7 @@ mod tests {
             crypto::opaque_server_register_finish(&registration_upload).expect("server finish");
         let encryption_salt = crypto::generate_encryption_salt();
         let now = Utc::now().to_rfc3339();
-        let access_key_hash = Uuid::new_v4().to_string();
+        let access_key_hash = Uuid::now_v7().to_string();
 
         access_keys::ActiveModel {
             key_hash: Set(access_key_hash.clone()),
@@ -574,7 +599,7 @@ mod tests {
     async fn insert_access_key(state: &AppState, access_key: &str) {
         let now = Utc::now().to_rfc3339();
         access_keys::ActiveModel {
-            key_hash: Set(access_key_hash(access_key)),
+            key_hash: Set(access_key_hash_for_state(state, access_key).await),
             created_at: Set(now),
             expires_at: Set(None),
             used_at: Set(None),
@@ -583,6 +608,15 @@ mod tests {
         .insert(state.db())
         .await
         .expect("insert access key");
+    }
+
+    async fn access_key_hash_for_state(state: &AppState, access_key: &str) -> String {
+        let config = server_config::Entity::find_by_id(1)
+            .one(state.db())
+            .await
+            .expect("query server config")
+            .expect("server config");
+        access_key_hash(access_key, &config.access_key_hash_salt).expect("access key hash")
     }
 
     #[tokio::test]
@@ -626,11 +660,12 @@ mod tests {
         assert!(!stored_user.opaque_password_file.is_empty());
         assert!(!stored_user.encryption_salt.is_empty());
 
-        let used_key = access_keys::Entity::find_by_id(access_key_hash(access_key))
-            .one(state.db())
-            .await
-            .expect("query access key")
-            .expect("access key");
+        let used_key =
+            access_keys::Entity::find_by_id(access_key_hash_for_state(&state, access_key).await)
+                .one(state.db())
+                .await
+                .expect("query access key")
+                .expect("access key");
         assert_eq!(used_key.used_by_user_id, Some(user_id));
         assert!(used_key.used_at.is_some());
 

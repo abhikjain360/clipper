@@ -30,7 +30,9 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::{
+    auth::hash_access_key,
     config::{ConfigOverrides, ServerConfig},
+    entity::access_keys,
     error::{ServerError, ServerResult},
     rate_limit::{RateLimiter, TrustedProxies},
     state::AppState,
@@ -52,6 +54,15 @@ enum Command {
     Init {
         #[arg(long, short = 'd')]
         data_dir: Option<PathBuf>,
+    },
+    /// Add a one-time registration access key
+    AddAccessKey {
+        #[arg(long, short = 'd')]
+        data_dir: Option<PathBuf>,
+        #[arg(long, value_name = "KEY")]
+        access_key: Option<String>,
+        #[arg(long, value_name = "RFC3339")]
+        expires_at: Option<String>,
     },
     /// Run the server
     Serve {
@@ -83,6 +94,17 @@ async fn run() -> ServerResult<()> {
             overrides.server.data_dir = data_dir;
             let config = load_config(cli.config.as_deref(), overrides)?;
             init_server(config).await?;
+        }
+        Command::AddAccessKey {
+            data_dir,
+            access_key,
+            expires_at,
+        } => {
+            let mut overrides = ConfigOverrides::default();
+            overrides.server.data_dir = data_dir;
+            let config = load_config(cli.config.as_deref(), overrides)?;
+            let access_key = read_access_key(access_key)?;
+            add_access_key(config, &access_key, expires_at).await?;
         }
         Command::Serve { overrides } => {
             let config = load_config(cli.config.as_deref(), *overrides)?;
@@ -135,10 +157,59 @@ async fn init_server(config: ServerConfig) -> ServerResult<()> {
         id: Set(1),
         created_at: Set(now.clone()),
         updated_at: Set(now),
+        access_key_hash_salt: Set(clipper_core::crypto::generate_access_key_hash_salt().to_vec()),
     };
     config.insert(state.db()).await?;
 
     info!(data_dir = %state.data_dir().display(), "Server initialized successfully.");
+
+    Ok(())
+}
+
+fn read_access_key(access_key: Option<String>) -> ServerResult<String> {
+    let access_key = match access_key {
+        Some(access_key) => access_key,
+        None => rpassword::prompt_password("Access key: ")?,
+    };
+    if access_key.is_empty() {
+        return Err(ServerError::Config("access key must not be empty".into()));
+    }
+    Ok(access_key)
+}
+
+async fn add_access_key(
+    config: ServerConfig,
+    access_key: &str,
+    expires_at: Option<String>,
+) -> ServerResult<()> {
+    let expires_at = expires_at
+        .map(|expires_at| {
+            chrono::DateTime::parse_from_rfc3339(&expires_at)
+                .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
+                .map_err(|error| ServerError::Config(format!("invalid expires-at: {error}")))
+        })
+        .transpose()?;
+
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+    let state = AppState::open(config).await?;
+    let server_config = entity::server_config::Entity::find_by_id(1)
+        .one(state.db())
+        .await?
+        .ok_or(ServerError::NotInitialized)?;
+    let key_hash = hash_access_key(access_key, &server_config.access_key_hash_salt)?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    access_keys::ActiveModel {
+        key_hash: Set(key_hash),
+        created_at: Set(now),
+        expires_at: Set(expires_at),
+        used_at: Set(None),
+        used_by_user_id: Set(None),
+    }
+    .insert(state.db())
+    .await?;
+
+    info!("Access key added.");
 
     Ok(())
 }

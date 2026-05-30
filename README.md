@@ -85,15 +85,16 @@ Android emulator loopback is `http://10.0.2.2:8787`.
 ## Access
 
 Access is invite-style. The operator creates a high-entropy access key, stores
-only `base64(SHA-256(key))` in `access_keys`, and gives the raw key to the user
+only an Argon2id verifier in `access_keys`, and gives the raw key to the user
 out of band. The key is only for first registration. It is not the passphrase
-and it is not used for encryption.
+and it is not used for encryption. Add keys after `init`, because the server
+generates the access-key hashing salt during initialization.
+The `add-access-key` command prompts for the raw key; keep the generated key
+and give it to the user out of band.
 
 ```sh
-ACCESS_KEY='replace-with-a-long-random-invite'
-KEY_HASH=$(printf %s "$ACCESS_KEY" | openssl dgst -sha256 -binary | base64)
-sqlite3 .clipper-server/clipper.db \
-  "insert into access_keys (key_hash, created_at) values ('$KEY_HASH', '$(date -u +%Y-%m-%dT%H:%M:%SZ)');"
+openssl rand -base64 32
+cargo run -p clipper-server -- add-access-key --data-dir .clipper-server
 ```
 
 There is no admin UI here yet.

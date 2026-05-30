@@ -18,6 +18,7 @@ use clipper_daemon_types::{
     DaemonResponse, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, ipc_auth_message,
 };
 use hmac::{Hmac, Mac};
+use rand::RngExt;
 use sha2::Sha256;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -183,7 +184,7 @@ pub(crate) async fn connect() -> TransportResult<()> {
 pub(crate) async fn send_command(
     command: DaemonCommand,
 ) -> TransportResult<Option<serde_json::Value>> {
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = uuid::Uuid::now_v7().to_string();
     let req = DaemonRequest::new(id.clone(), command);
 
     let (tx, rx) = oneshot::channel();
@@ -270,7 +271,7 @@ async fn authenticate_connection(
         ));
     }
 
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = uuid::Uuid::now_v7().to_string();
     let req = DaemonRequest::new(
         id.clone(),
         DaemonCommand::Authenticate(AuthenticateParams {
@@ -402,10 +403,7 @@ async fn route_daemon_line(
 
 fn random_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
-    for chunk in bytes.chunks_mut(16) {
-        let random = *uuid::Uuid::new_v4().as_bytes();
-        chunk.copy_from_slice(&random[..chunk.len()]);
-    }
+    rand::rng().fill(&mut bytes);
     bytes
 }
 

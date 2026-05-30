@@ -65,10 +65,10 @@ SQLite stores durable metadata. The filesystem stores larger encrypted blobs:
 
 - `server_config`
   - one row;
-  - marks server initialization;
+  - marks server initialization and stores the server-wide access-key hashing salt;
   - new users' OPAQUE material lives in `users`, not in this table.
 - `access_keys`
-  - stores invite/access keys as `base64(SHA-256(access_key_bytes))`, never as plaintext;
+  - stores invite/access keys as server-salted Argon2id verifiers, never as plaintext;
   - tracks creation, optional expiry, and one-time use by a user.
 - `users`
   - stores per-user `opaque_server_setup`, OPAQUE password file/verifier, encryption salt, and access-key hash;
@@ -93,23 +93,24 @@ schema and should not be treated as the schema owner.
 First-run server setup:
 
 1. Operator runs `clipper-server init`.
-2. Server creates the database, runs migrations, inserts the singleton `server_config` initialization marker, and creates `clipboard/` and `files/` data directories.
+2. Server creates the database, runs migrations, inserts the singleton `server_config` initialization marker and access-key hashing salt, and creates `clipboard/` and `files/` data directories.
 3. No user passphrase is entered during server init.
 
 Access-key provisioning:
 
 1. Operator creates one high-entropy access key per intended user outside the app.
-2. Operator inserts `base64(SHA-256(access_key_bytes))` into `access_keys.key_hash`, with `created_at` set and optional `expires_at`.
+2. Operator adds the access key with `clipper-server add-access-key`, which stores `base64(Argon2id(access_key_bytes, server_access_key_hash_salt))` in `access_keys.key_hash`, with `created_at` set and optional `expires_at`.
 3. The access key is a one-time registration authorization secret only. It is not the user's passphrase and is not used for data encryption.
 
-Example manual insert:
+Example:
 
 ```sh
-ACCESS_KEY='replace-with-high-entropy-invite'
-KEY_HASH=$(printf %s "$ACCESS_KEY" | openssl dgst -sha256 -binary | base64)
-sqlite3 /path/to/clipper.db \
-  "insert into access_keys (key_hash, created_at) values ('$KEY_HASH', '2026-05-24T00:00:00Z');"
+openssl rand -base64 32
+clipper-server add-access-key --data-dir /path/to/data-dir
 ```
+
+The `add-access-key` command prompts for the raw key so the invite does not
+need to be passed as a process argument.
 
 Normal client registration:
 
@@ -245,7 +246,7 @@ Review `clipper-core` and `clipper-client` when server API shapes change.
   `anyhow` usage or forced stderr printing; log through `tracing` and let the
   entrypoint exit with the mapped error code.
 - The server stores per-user OPAQUE password files/verifiers, so weak passphrases remain vulnerable to offline guessing by anyone with DB access. A verifier must not be usable directly as a login secret. Strong passphrases still matter.
-- Access keys are authorization invites, not encryption keys. They must be high entropy because the DB stores only their hashes, but possession of an unused access key permits account registration.
+- Access keys are authorization invites, not encryption keys. They should still be high entropy even though the DB stores only Argon2id verifiers, because possession of an unused access key permits account registration.
 - TLS is still required in real deployments; OPAQUE avoids sending the raw passphrase but does not make plain HTTP safe for bearer tokens or metadata.
 
 ## 9. Sync And Event Replay

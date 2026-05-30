@@ -240,7 +240,7 @@ mod tests {
 
     fn auth(user_id: Uuid, device_id: Uuid) -> AuthInfo {
         AuthInfo {
-            session_id: Uuid::new_v4(),
+            session_id: Uuid::now_v7(),
             user_id,
             device_id,
         }
@@ -256,8 +256,8 @@ mod tests {
 
     async fn insert_user(state: &AppState) -> Uuid {
         let now = Utc::now().to_rfc3339();
-        let user_id = Uuid::new_v4();
-        let access_key_hash = Uuid::new_v4().to_string();
+        let user_id = Uuid::now_v7();
+        let access_key_hash = Uuid::now_v7().to_string();
         access_keys::ActiveModel {
             key_hash: Set(access_key_hash.clone()),
             created_at: Set(now.clone()),
@@ -346,7 +346,7 @@ mod tests {
     #[tokio::test]
     async fn upload_rejects_wrong_nonce_length_before_writing() -> TestResult {
         let (_state, data_dir) = test_state().await?;
-        let id = Uuid::new_v4();
+        let id = Uuid::now_v7();
         let mut req = upload_request(id, "device-a");
         req.nonce = vec![1_u8; 12];
 
@@ -366,7 +366,7 @@ mod tests {
     #[tokio::test]
     async fn upload_rejects_wrong_sha256_length_before_writing() -> TestResult {
         let (_state, data_dir) = test_state().await?;
-        let id = Uuid::new_v4();
+        let id = Uuid::now_v7();
         let mut req = upload_request(id, "device-a");
         req.ciphertext_sha256 = vec![1_u8; SHA256_BYTES - 1];
 
@@ -390,9 +390,9 @@ mod tests {
     async fn upload_uses_authenticated_device_as_source() -> TestResult {
         let (state, _data_dir) = test_state().await?;
         let user_id = insert_user(&state).await;
-        let device_auth = Uuid::new_v4();
+        let device_auth = Uuid::now_v7();
         insert_device(&state, user_id, device_auth).await;
-        let id = Uuid::new_v4();
+        let id = Uuid::now_v7();
 
         let _ = upload(
             State(state.clone()),
@@ -418,9 +418,9 @@ mod tests {
     async fn upload_rejects_duplicate_id_without_overwriting_blob() -> TestResult {
         let (state, data_dir) = test_state().await?;
         let user_id = insert_user(&state).await;
-        let device_a = Uuid::new_v4();
+        let device_a = Uuid::now_v7();
         insert_device(&state, user_id, device_a).await;
-        let id = Uuid::new_v4();
+        let id = Uuid::now_v7();
 
         let _ = upload(
             State(state.clone()),
@@ -458,12 +458,12 @@ mod tests {
         let (state, _data_dir) = test_state().await?;
         let user_a = insert_user(&state).await;
         let user_b = insert_user(&state).await;
-        let device_a = Uuid::new_v4();
-        let device_b = Uuid::new_v4();
+        let device_a = Uuid::now_v7();
+        let device_b = Uuid::now_v7();
         insert_device(&state, user_a, device_a).await;
         insert_device(&state, user_b, device_b).await;
-        let item_a = Uuid::new_v4();
-        let item_b = Uuid::new_v4();
+        let item_a = Uuid::now_v7();
+        let item_b = Uuid::now_v7();
 
         let _ = upload(
             State(state.clone()),

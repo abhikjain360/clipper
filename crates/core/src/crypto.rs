@@ -12,6 +12,14 @@ const OPAQUE_CREDENTIAL_IDENTIFIER: &[u8] = b"clipper:passphrase:v1";
 pub const XCHACHA20_NONCE_BYTES: usize =
     <<XChaCha20Poly1305 as AeadCore>::NonceSize as Unsigned>::USIZE;
 pub const SHA256_BYTES: usize = <<Sha256 as OutputSizeUser>::OutputSize as Unsigned>::USIZE;
+pub const ACCESS_KEY_HASH_SALT_BYTES: usize = 16;
+pub const ACCESS_KEY_HASH_BYTES: usize = 32;
+
+const ACCESS_KEY_HASH_PARAMS: Argon2Params = Argon2Params {
+    m_cost: 19 * 1024,
+    t_cost: 2,
+    p_cost: 1,
+};
 
 struct ClipperOpaqueCipherSuite;
 
@@ -23,6 +31,11 @@ impl opaque_ke::CipherSuite for ClipperOpaqueCipherSuite {
 
 /// Generate a random 16-byte salt for client-side encryption key derivation.
 pub fn generate_encryption_salt() -> [u8; 16] {
+    rand::rng().random()
+}
+
+/// Generate a random 16-byte salt for server-side access-key hashing.
+pub fn generate_access_key_hash_salt() -> [u8; ACCESS_KEY_HASH_SALT_BYTES] {
     rand::rng().random()
 }
 
@@ -41,6 +54,19 @@ pub fn sha256(data: &[u8]) -> [u8; SHA256_BYTES] {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().into()
+}
+
+/// Derive the stored verifier for a registration access key using Argon2id.
+pub fn access_key_hash(
+    access_key: &[u8],
+    salt: &[u8],
+) -> Result<[u8; ACCESS_KEY_HASH_BYTES], CryptoError> {
+    let argon2 = build_argon2(&ACCESS_KEY_HASH_PARAMS)?;
+    let mut hash = [0u8; ACCESS_KEY_HASH_BYTES];
+    argon2
+        .hash_password_into(access_key, salt, &mut hash)
+        .map_err(|e| CryptoError::Kdf(e.to_string()))?;
+    Ok(hash)
 }
 
 fn build_argon2(params: &Argon2Params) -> Result<Argon2<'static>, CryptoError> {
@@ -421,6 +447,19 @@ mod tests {
         assert_eq!(hash.len(), 32);
         assert_eq!(hash, sha256(b"hello"));
         assert_ne!(hash, sha256(b"world"));
+    }
+
+    #[test]
+    fn test_access_key_hash_uses_salt() {
+        let salt1 = [1_u8; ACCESS_KEY_HASH_SALT_BYTES];
+        let salt2 = [2_u8; ACCESS_KEY_HASH_SALT_BYTES];
+        let hash1 = access_key_hash(b"invite", &salt1).unwrap();
+        let hash1_again = access_key_hash(b"invite", &salt1).unwrap();
+        let hash2 = access_key_hash(b"invite", &salt2).unwrap();
+
+        assert_eq!(hash1.len(), ACCESS_KEY_HASH_BYTES);
+        assert_eq!(hash1, hash1_again);
+        assert_ne!(hash1, hash2);
     }
 
     #[test]

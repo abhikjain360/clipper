@@ -7,6 +7,7 @@ use std::{
 
 use clipper_client::engine::SyncEngine;
 use hmac::{Hmac, Mac};
+use rand::RngExt;
 use sha2::Sha256;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -337,10 +338,7 @@ async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> Daemo
 
 fn random_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
-    for chunk in bytes.chunks_mut(16) {
-        let random = *uuid::Uuid::new_v4().as_bytes();
-        chunk.copy_from_slice(&random[..chunk.len()]);
-    }
+    rand::rng().fill(&mut bytes);
     bytes
 }
 

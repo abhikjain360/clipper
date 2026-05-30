@@ -140,7 +140,7 @@ impl AppState {
             }
         }
 
-        let challenge_id = uuid::Uuid::new_v4().to_string();
+        let challenge_id = uuid::Uuid::now_v7().to_string();
         challenges.insert(
             challenge_id.clone(),
             AuthChallenge {
@@ -184,7 +184,7 @@ impl AppState {
             }
         }
 
-        let registration_id = uuid::Uuid::new_v4().to_string();
+        let registration_id = uuid::Uuid::now_v7().to_string();
         registrations.insert(
             registration_id.clone(),
             PendingRegistration {

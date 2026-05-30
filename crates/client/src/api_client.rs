@@ -504,7 +504,7 @@ pub fn encrypt_clipboard(
     let hash = crypto::sha256(&ciphertext);
 
     Ok(ClipboardUploadRequest {
-        id: uuid::Uuid::new_v4().into(),
+        id: uuid::Uuid::now_v7().into(),
         nonce: nonce.to_vec(),
         ciphertext,
         ciphertext_sha256: hash.to_vec(),

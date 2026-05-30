@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 const SERVICE: &str = "com.clipper.daemon";
@@ -136,9 +137,6 @@ fn new_ipc_secret() -> Vec<u8> {
 
 fn random_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
-    for chunk in bytes.chunks_mut(16) {
-        let random = *uuid::Uuid::new_v4().as_bytes();
-        chunk.copy_from_slice(&random[..chunk.len()]);
-    }
+    rand::rng().fill(&mut bytes);
     bytes
 }
