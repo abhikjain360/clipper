@@ -287,9 +287,8 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
             auth::auth_middleware,
         ));
 
-    // public routes
-    let app = Router::new()
-        .route("/api/health", get(routes::health::health))
+    // public auth routes share the same limiter at the router layer.
+    let public_auth = Router::new()
         .route(
             "/api/auth/register/start",
             post(routes::auth::register_start),
@@ -300,8 +299,16 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
         )
         .route("/api/auth/challenge", post(routes::auth::challenge))
         .route("/api/auth/login", post(routes::auth::login))
+        .route_layer(middleware::from_fn_with_state(
+            limiter.clone(),
+            rate_limit::auth_rate_limit_middleware,
+        ));
+
+    // public routes
+    let app = Router::new()
+        .route("/api/health", get(routes::health::health))
+        .merge(public_auth)
         .merge(authed)
-        .layer(axum::Extension(limiter.clone()))
         .layer(axum::Extension(trusted_proxies))
         .layer(cors)
         .layer(TraceLayer::new_for_http())

@@ -5,9 +5,13 @@ use std::{
 };
 
 use axum::{
-    extract::{ConnectInfo, FromRequestParts},
+    Json,
+    extract::{ConnectInfo, FromRequestParts, Request, State},
     http::{HeaderMap, StatusCode, header, request::Parts},
+    middleware::Next,
+    response::Response,
 };
+use clipper_core::models::ErrorResponse;
 use governor::{DefaultDirectRateLimiter, DefaultKeyedRateLimiter, Quota, RateLimiter as Governor};
 use ipnet::IpNet;
 
@@ -41,6 +45,25 @@ impl RateLimiter {
     }
 }
 
+pub async fn auth_rate_limit_middleware(
+    State(limiter): State<Arc<RateLimiter>>,
+    ClientIp(ip): ClientIp,
+    mut req: Request,
+    next: Next,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    if !limiter.check(ip) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error: "Too many requests".into(),
+            }),
+        ));
+    }
+
+    req.extensions_mut().insert(ClientIp(ip));
+    Ok(next.run(req).await)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct TrustedProxies {
     networks: Arc<Vec<IpNet>>,
@@ -66,6 +89,7 @@ impl TrustedProxies {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct ClientIp(pub IpAddr);
 
 impl<S> FromRequestParts<S> for ClientIp
@@ -75,6 +99,10 @@ where
     type Rejection = StatusCode;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        if let Some(ip) = parts.extensions.get::<ClientIp>() {
+            return Ok(*ip);
+        }
+
         let peer_addr = parts
             .extensions
             .get::<ConnectInfo<SocketAddr>>()

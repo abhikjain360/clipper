@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::{
     auth::{self as server_auth, AuthInfo},
     entity::{access_keys, devices, server_config, sessions, users},
-    rate_limit::{ClientIp, RateLimiter},
+    rate_limit::ClientIp,
     routes::{ValidatedJson, error_response},
     secret_storage,
     state::AppState,
@@ -34,12 +34,8 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 /// OPAQUE login round 1, server side. Math in `docs/opaque.md`.
 pub async fn challenge(
     State(state): State<AppState>,
-    Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
-    ClientIp(ip): ClientIp,
     ValidatedJson(req): ValidatedJson<LoginChallengeRequest>,
 ) -> Result<Json<LoginChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
-    check_auth_rate_limit(&limiter, ip)?;
-
     let user = resolve_login_user(&state, req.user_id).await?;
 
     let opaque_server_setup =
@@ -87,12 +83,8 @@ pub async fn challenge(
 /// OPAQUE registration round 1, server side. Math in `docs/opaque.md`.
 pub async fn register_start(
     State(state): State<AppState>,
-    Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
-    ClientIp(ip): ClientIp,
     ValidatedJson(req): ValidatedJson<RegisterStartRequest>,
 ) -> Result<Json<RegisterStartResponse>, (StatusCode, Json<ErrorResponse>)> {
-    check_auth_rate_limit(&limiter, ip)?;
-
     let now = Utc::now().to_rfc3339();
     let db_config = load_server_config(&state).await?;
     let access_key_hash_salt = secret_storage::unwrap_access_key_hash_salt(
@@ -168,13 +160,10 @@ pub async fn register_start(
 /// OPAQUE registration round 2, server side. Math in `docs/opaque.md`.
 pub async fn register_finish(
     State(state): State<AppState>,
-    Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
     ClientIp(ip): ClientIp,
     headers: HeaderMap,
     ValidatedJson(req): ValidatedJson<RegisterFinishRequest>,
 ) -> Result<Json<RegisterFinishResponse>, (StatusCode, Json<ErrorResponse>)> {
-    check_auth_rate_limit(&limiter, ip)?;
-
     let pending = state
         .take_pending_registration(&req.registration_id)
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid registration"))?;
@@ -293,13 +282,10 @@ pub async fn register_finish(
 /// OPAQUE login round 2, server side. Math in `docs/opaque.md`.
 pub async fn login(
     State(state): State<AppState>,
-    Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
     ClientIp(ip): ClientIp,
     headers: HeaderMap,
     ValidatedJson(req): ValidatedJson<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
-    check_auth_rate_limit(&limiter, ip)?;
-
     // Pop state_S (single-use) stashed by `challenge`.
     let auth_challenge = state
         .take_auth_challenge(&req.challenge_id)
@@ -380,20 +366,6 @@ async fn load_server_config(
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
         .ok_or_else(|| error_response(StatusCode::SERVICE_UNAVAILABLE, "Server not initialized"))
-}
-
-fn check_auth_rate_limit(
-    limiter: &RateLimiter,
-    ip: std::net::IpAddr,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    if limiter.check(ip) {
-        return Ok(());
-    }
-
-    Err(error_response(
-        StatusCode::TOO_MANY_REQUESTS,
-        "Too many requests",
-    ))
 }
 
 fn opaque_credential_identifier(user_id: Uuid) -> Vec<u8> {
@@ -541,13 +513,25 @@ struct SessionOptions {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+    use axum::{
+        Router,
+        body::Body,
+        extract::ConnectInfo,
+        http::{Request, header},
+        middleware,
+        routing::post,
+    };
     use sea_orm::{ActiveModelTrait, Database, Set};
     use tempfile::TempDir;
+    use tower::ServiceExt;
 
     use super::*;
-    use crate::entity::{access_keys, server_config};
+    use crate::{
+        entity::{access_keys, server_config},
+        rate_limit::{RateLimiter, auth_rate_limit_middleware},
+    };
 
     const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -644,6 +628,31 @@ mod tests {
         std::sync::Arc::new(RateLimiter::new(
             &crate::config::ServerConfig::default().rate_limit,
         ))
+    }
+
+    fn auth_route_app(state: AppState, limiter: std::sync::Arc<RateLimiter>) -> Router {
+        Router::new()
+            .route("/api/auth/challenge", post(challenge))
+            .route("/api/auth/login", post(login))
+            .route_layer(middleware::from_fn_with_state(
+                limiter,
+                auth_rate_limit_middleware,
+            ))
+            .with_state(state)
+    }
+
+    fn json_request<T: serde::Serialize>(path: &str, value: &T) -> Request<Body> {
+        let mut request = Request::post(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(value).expect("serialize request"),
+            ))
+            .expect("request");
+        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            12345,
+        )));
+        request
     }
 
     fn validated<T>(value: T) -> ValidatedJson<T>
@@ -744,20 +753,14 @@ mod tests {
         insert_access_key(&state, access_key).await;
 
         let (start_req, client_state) = registration_start_request(access_key, passphrase);
-        let Json(start_resp) = register_start(
-            State(state.clone()),
-            Extension(limiter()),
-            client_ip(),
-            validated(start_req),
-        )
-        .await
-        .expect("register start");
+        let Json(start_resp) = register_start(State(state.clone()), validated(start_req))
+            .await
+            .expect("register start");
         let user_id = Uuid::parse_str(&start_resp.user_id).expect("user id");
         let finish_req = registration_finish_request(start_resp, &client_state, passphrase);
 
         let Json(finish_resp) = register_finish(
             State(state.clone()),
-            Extension(limiter()),
             client_ip(),
             HeaderMap::new(),
             validated(finish_req),
@@ -790,8 +793,6 @@ mod tests {
             crypto::opaque_client_login_start(passphrase).expect("client login start");
         let Json(challenge_resp) = challenge(
             State(state.clone()),
-            Extension(limiter()),
-            client_ip(),
             validated(LoginChallengeRequest {
                 user_id: Some(user_id.into()),
                 credential_request: challenge_req,
@@ -802,7 +803,6 @@ mod tests {
         let login_req = login_request(challenge_resp, &client_login_state, passphrase);
         let Json(login_resp) = login(
             State(state),
-            Extension(limiter()),
             client_ip(),
             HeaderMap::new(),
             validated(login_req),
@@ -842,25 +842,14 @@ mod tests {
         let (state, _data_dir) = test_state(passphrase).await;
 
         let (challenge_req, client_state) = challenge_request(passphrase);
-        let Json(challenge) = challenge(
-            State(state.clone()),
-            Extension(limiter()),
-            client_ip(),
-            validated(challenge_req),
-        )
-        .await
-        .expect("challenge");
+        let Json(challenge) = challenge(State(state.clone()), validated(challenge_req))
+            .await
+            .expect("challenge");
         let req = login_request(challenge, &client_state, passphrase);
 
-        let Json(resp) = login(
-            State(state),
-            Extension(limiter()),
-            client_ip(),
-            HeaderMap::new(),
-            validated(req),
-        )
-        .await
-        .expect("login");
+        let Json(resp) = login(State(state), client_ip(), HeaderMap::new(), validated(req))
+            .await
+            .expect("login");
 
         assert!(!resp.token.is_empty());
         assert!(!resp.device_id.is_empty());
@@ -875,14 +864,9 @@ mod tests {
         let (state, _data_dir) = test_state(passphrase).await;
 
         let (challenge_req, client_state) = challenge_request(passphrase);
-        let Json(challenge) = challenge(
-            State(state.clone()),
-            Extension(limiter()),
-            client_ip(),
-            validated(challenge_req),
-        )
-        .await
-        .expect("challenge");
+        let Json(challenge) = challenge(State(state.clone()), validated(challenge_req))
+            .await
+            .expect("challenge");
         let req = login_request(challenge, &client_state, passphrase);
         let reused_req = LoginRequest {
             challenge_id: req.challenge_id.clone(),
@@ -894,7 +878,6 @@ mod tests {
 
         let _ = login(
             State(state.clone()),
-            Extension(limiter()),
             client_ip(),
             HeaderMap::new(),
             validated(req),
@@ -904,7 +887,6 @@ mod tests {
 
         let result = login(
             State(state),
-            Extension(limiter()),
             client_ip(),
             HeaderMap::new(),
             validated(reused_req),
@@ -920,14 +902,9 @@ mod tests {
         let (state, _data_dir) = test_state(passphrase).await;
 
         let (challenge_req, client_state) = challenge_request(b"wrong passphrase");
-        let Json(challenge) = challenge(
-            State(state.clone()),
-            Extension(limiter()),
-            client_ip(),
-            validated(challenge_req),
-        )
-        .await
-        .expect("challenge");
+        let Json(challenge) = challenge(State(state.clone()), validated(challenge_req))
+            .await
+            .expect("challenge");
         let credential_response = B64
             .decode(challenge.credential_response_b64)
             .expect("credential response");
@@ -944,73 +921,78 @@ mod tests {
     async fn login_rate_limits_by_client_ip() {
         let passphrase = b"correct horse battery staple";
         let (state, _data_dir) = test_state(passphrase).await;
-        let limiter = limiter();
+        let app = auth_route_app(state, limiter());
 
-        for i in 0..10 {
-            let result = login(
-                State(state.clone()),
-                Extension(limiter.clone()),
-                client_ip(),
-                HeaderMap::new(),
-                validated(LoginRequest {
-                    challenge_id: format!("missing-{i}"),
+        for i in 0..crate::config::ServerConfig::default()
+            .rate_limit
+            .auth_per_client_per_minute
+        {
+            let response = app
+                .clone()
+                .oneshot(json_request(
+                    "/api/auth/login",
+                    &LoginRequest {
+                        challenge_id: format!("missing-{i}"),
+                        credential_finalization: b"not opaque".to_vec(),
+                        device_id: None,
+                        device_name: None,
+                        platform: None,
+                    },
+                ))
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let response = app
+            .oneshot(json_request(
+                "/api/auth/login",
+                &LoginRequest {
+                    challenge_id: "missing-final".into(),
                     credential_finalization: b"not opaque".to_vec(),
                     device_id: None,
                     device_name: None,
                     platform: None,
-                }),
-            )
+                },
+            ))
             .await;
 
-            assert_eq!(result.unwrap_err().0, StatusCode::UNAUTHORIZED);
-        }
-
-        let result = login(
-            State(state),
-            Extension(limiter),
-            client_ip(),
-            HeaderMap::new(),
-            validated(LoginRequest {
-                challenge_id: "missing-final".into(),
-                credential_finalization: b"not opaque".to_vec(),
-                device_id: None,
-                device_name: None,
-                platform: None,
-            }),
-        )
-        .await;
-
-        assert_eq!(result.unwrap_err().0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.expect("response").status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
     }
 
     #[tokio::test]
     async fn challenge_rate_limits_opaque_password_attempts_by_client_ip() {
         let passphrase = b"correct horse battery staple";
         let (state, _data_dir) = test_state(passphrase).await;
-        let limiter = limiter();
+        let app = auth_route_app(state, limiter());
 
-        for _ in 0..10 {
+        for _ in 0..crate::config::ServerConfig::default()
+            .rate_limit
+            .auth_per_client_per_minute
+        {
             let (challenge_req, _client_state) = challenge_request(b"candidate passphrase");
-            let result = challenge(
-                State(state.clone()),
-                Extension(limiter.clone()),
-                client_ip(),
-                validated(challenge_req),
-            )
-            .await;
-            assert!(result.is_ok());
+            let response = app
+                .clone()
+                .oneshot(json_request("/api/auth/challenge", &challenge_req))
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::OK);
         }
 
         let (challenge_req, _client_state) = challenge_request(b"candidate passphrase");
-        let result = challenge(
-            State(state),
-            Extension(limiter),
-            client_ip(),
-            validated(challenge_req),
-        )
-        .await;
+        let response = app
+            .oneshot(json_request("/api/auth/challenge", &challenge_req))
+            .await;
 
-        assert_eq!(result.unwrap_err().0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.expect("response").status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
     }
 
     // We test that registration persists wrapped — not plaintext — OPAQUE
@@ -1024,14 +1006,9 @@ mod tests {
         insert_access_key(&state, access_key).await;
 
         let (start_req, client_state) = registration_start_request(access_key, passphrase);
-        let Json(start_resp) = register_start(
-            State(state.clone()),
-            Extension(limiter()),
-            client_ip(),
-            validated(start_req),
-        )
-        .await
-        .expect("register start");
+        let Json(start_resp) = register_start(State(state.clone()), validated(start_req))
+            .await
+            .expect("register start");
         let user_id = Uuid::parse_str(&start_resp.user_id).expect("user id");
         let plaintext_salt = B64
             .decode(&start_resp.server.encryption_salt_b64)
@@ -1040,7 +1017,6 @@ mod tests {
 
         let _ = register_finish(
             State(state.clone()),
-            Extension(limiter()),
             client_ip(),
             HeaderMap::new(),
             validated(finish_req),
