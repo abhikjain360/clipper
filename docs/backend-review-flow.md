@@ -127,7 +127,7 @@ Normal client registration:
 Normal client login:
 
 1. Client starts OPAQUE locally from the passphrase.
-2. Client calls `POST /api/auth/challenge` with `user_id` and an OPAQUE credential request. If exactly one user exists, the server can resolve that user for backward compatibility; once multiple users exist, `user_id` is required. Pre-multi-user accounts marked with `access_key_hash = "_legacy_single_user"` still resolve via the older OPAQUE credential identifier.
+2. Client calls `POST /api/auth/challenge` with `user_id` and an OPAQUE credential request. If exactly one user exists, the server resolves that user as a single-user convenience; once multiple users exist, `user_id` is required.
 3. Server starts OPAQUE from that user's stored password file/verifier, stores short-lived server login state under a random challenge ID, and returns the OPAQUE credential response plus that user's encryption salt and KDF parameters.
 4. Client finishes OPAQUE locally and sends `POST /api/auth/login` with challenge ID, OPAQUE credential finalization, and device info.
 5. Server consumes the single-use challenge, finishes OPAQUE, creates/updates a device row for that user, creates a user-scoped session, and returns a bearer token plus `user_id`.

@@ -9,7 +9,6 @@ use rand::Rng;
 use sha2::{Digest, Sha256, digest::OutputSizeUser};
 use zeroize::Zeroizing;
 
-const OPAQUE_CREDENTIAL_IDENTIFIER: &[u8] = b"clipper:passphrase:v1";
 pub const XCHACHA20_NONCE_BYTES: usize =
     <<XChaCha20Poly1305 as AeadCore>::NonceSize as Unsigned>::USIZE;
 pub const SHA256_BYTES: usize = <<Sha256 as OutputSizeUser>::OutputSize as Unsigned>::USIZE;
@@ -167,17 +166,16 @@ pub fn unwrap_with_key(key: &[u8; 32], blob: &[u8], aad: &[u8]) -> Result<Vec<u8
 }
 
 /// Run all four registration steps (client + server) in-process for a single
-/// `pw`, using the legacy single-user `id_U = "clipper:passphrase:v1"`, and
-/// return `(opaque_server_setup, opaque_password_file)`. Used by tests.
-/// See `docs/opaque.md`.
-pub fn opaque_register(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+/// `pw` and `id_U`, and return `(opaque_server_setup, opaque_password_file)`.
+/// Used by tests. See `docs/opaque.md`.
+pub fn opaque_register(
+    passphrase: &[u8],
+    credential_identifier: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     let server_setup = opaque_new_server_setup();
     let (registration_request, client_state) = opaque_client_register_start(passphrase)?;
-    let registration_response = opaque_server_register_start(
-        &server_setup,
-        &registration_request,
-        OPAQUE_CREDENTIAL_IDENTIFIER,
-    )?;
+    let registration_response =
+        opaque_server_register_start(&server_setup, &registration_request, credential_identifier)?;
     let registration_upload =
         opaque_client_register_finish(&client_state, passphrase, &registration_response)?;
     let password_file = opaque_server_register_finish(&registration_upload)?;
@@ -348,23 +346,7 @@ pub fn opaque_client_login_finish(
     ))
 }
 
-/// OPAQUE login round 1, server side, using the legacy single-user
-/// `id_U = "clipper:passphrase:v1"`. Multi-user callers use
-/// `opaque_server_login_start_with_identifier`. See `docs/opaque.md`.
-pub fn opaque_server_login_start(
-    server_setup: &[u8],
-    password_file: &[u8],
-    credential_request: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-    opaque_server_login_start_with_identifier(
-        server_setup,
-        password_file,
-        credential_request,
-        OPAQUE_CREDENTIAL_IDENTIFIER,
-    )
-}
-
-/// OPAQUE login round 1, server side, with an explicit `id_U`.
+/// OPAQUE login round 1, server side.
 ///
 /// Inputs: `opaque_server_setup`,
 /// `opaque_password_file = env ‖ masking_key ‖ pk_C`,
@@ -382,7 +364,7 @@ pub fn opaque_server_login_start(
 ///   state_S)`.
 /// `state_S` holds `client_mac_key` and the expected MAC base; it must be
 /// kept until `opaque_server_login_finish`. See `docs/opaque.md`.
-pub fn opaque_server_login_start_with_identifier(
+pub fn opaque_server_login_start(
     server_setup: &[u8],
     password_file: &[u8],
     credential_request: &[u8],
@@ -685,13 +667,21 @@ mod tests {
         assert_ne!(&*key1, &*key2);
     }
 
+    const TEST_CREDENTIAL_IDENTIFIER: &[u8] = b"clipper:test:user";
+
     #[test]
     fn test_opaque_login_roundtrip() {
         let password = b"correct horse battery staple";
-        let (server_setup, password_file) = opaque_register(password).unwrap();
+        let (server_setup, password_file) =
+            opaque_register(password, TEST_CREDENTIAL_IDENTIFIER).unwrap();
         let (request, client_state) = opaque_client_login_start(password).unwrap();
-        let (response, server_state) =
-            opaque_server_login_start(&server_setup, &password_file, &request).unwrap();
+        let (response, server_state) = opaque_server_login_start(
+            &server_setup,
+            &password_file,
+            &request,
+            TEST_CREDENTIAL_IDENTIFIER,
+        )
+        .unwrap();
         let (finalization, client_session_key) =
             opaque_client_login_finish(&client_state, password, &response).unwrap();
         let server_session_key = opaque_server_login_finish(&server_state, &finalization).unwrap();
@@ -701,10 +691,16 @@ mod tests {
 
     #[test]
     fn test_opaque_rejects_wrong_password() {
-        let (server_setup, password_file) = opaque_register(b"correct password").unwrap();
+        let (server_setup, password_file) =
+            opaque_register(b"correct password", TEST_CREDENTIAL_IDENTIFIER).unwrap();
         let (request, client_state) = opaque_client_login_start(b"wrong password").unwrap();
-        let (response, _server_state) =
-            opaque_server_login_start(&server_setup, &password_file, &request).unwrap();
+        let (response, _server_state) = opaque_server_login_start(
+            &server_setup,
+            &password_file,
+            &request,
+            TEST_CREDENTIAL_IDENTIFIER,
+        )
+        .unwrap();
 
         assert!(opaque_client_login_finish(&client_state, b"wrong password", &response).is_err());
     }

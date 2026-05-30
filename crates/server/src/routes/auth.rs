@@ -53,10 +53,10 @@ pub async fn challenge(
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
             })?;
 
-    // id_U for this user (legacy single-user rows get the legacy identifier).
-    let credential_identifier = opaque_credential_identifier_for_user(&user);
+    // id_U = "clipper:user:{user_id}:passphrase:v1".
+    let credential_identifier = opaque_credential_identifier(user.id);
     // req.credential_request = M ‖ ke1 from the client.
-    // Inside opaque_server_login_start_with_identifier:
+    // Inside opaque_server_login_start:
     //   k_U     = Expand(oprf_seed, id_U)
     //   N       = k_U · M
     //   masked  = (pk_S ‖ env) XOR Expand(masking_key, nonce_M ‖ ·)
@@ -66,14 +66,13 @@ pub async fn challenge(
     //   server_mac = MAC(server_mac_key, transcript_pre)
     // credential_response = (N, nonce_M, masked, nonce_S, X_S, server_mac).
     // server_login_state = state_S = (client_mac_key, session_key, transcript_pre ‖ server_mac).
-    let (credential_response, server_login_state) =
-        crypto::opaque_server_login_start_with_identifier(
-            &opaque_server_setup,
-            &opaque_password_file,
-            &req.credential_request,
-            &credential_identifier,
-        )
-        .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid login request"))?;
+    let (credential_response, server_login_state) = crypto::opaque_server_login_start(
+        &opaque_server_setup,
+        &opaque_password_file,
+        &req.credential_request,
+        &credential_identifier,
+    )
+    .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid login request"))?;
     // Stash state_S keyed by challenge_id until the client returns its
     // CredentialFinalization (= client_mac) in `login`.
     let challenge_id = state.create_auth_challenge(user.id, server_login_state);
@@ -399,14 +398,6 @@ fn check_auth_rate_limit(
 
 fn opaque_credential_identifier(user_id: Uuid) -> Vec<u8> {
     format!("clipper:user:{user_id}:passphrase:v1").into_bytes()
-}
-
-fn opaque_credential_identifier_for_user(user: &users::Model) -> Vec<u8> {
-    if user.access_key_hash == "_legacy_single_user" {
-        b"clipper:passphrase:v1".to_vec()
-    } else {
-        opaque_credential_identifier(user.id)
-    }
 }
 
 fn server_info(

@@ -25,10 +25,10 @@ pub(crate) enum DaemonProcessError {
 /// Packaged apps can place it next to the Flutter executable. Development
 /// shells can set CLIPPER_DAEMON_PATH or keep clipper-daemon on PATH.
 fn daemon_binary_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("CLIPPER_DAEMON_PATH").map(PathBuf::from) {
-        if path.exists() {
-            return Some(normalize_existing_path(path));
-        }
+    if let Some(path) = std::env::var_os("CLIPPER_DAEMON_PATH").map(PathBuf::from)
+        && path.exists()
+    {
+        return Some(normalize_existing_path(path));
     }
 
     if let Ok(exe) = std::env::current_exe()

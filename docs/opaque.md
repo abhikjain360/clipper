@@ -43,9 +43,6 @@ id_U = "clipper:user:{user_id}:passphrase:v1"
 k_U  = Expand(oprf_seed, id_U)
 ```
 
-(Legacy single-user rows use `id_U = "clipper:passphrase:v1"`; see
-`opaque_credential_identifier_for_user` in `auth.rs`.)
-
 ### `opaque_password_file` (serialized `RegistrationUpload`)
 
 ```
@@ -128,7 +125,7 @@ X_C     = x_C · B                    (client AKE ephemeral point)
 nonce_C ← random
 ke1     = nonce_C ‖ X_C
 state_C = (r, pw, x_C, nonce_C, ke1)
-send (M ‖ ke1)                       ⟶ CredentialRequest
+send (M ‖ ke1) = (M ‖ nonce_C ‖ X_C) ⟶ CredentialRequest
 ```
 
 ### Round 1 — server (`opaque_server_login_start(opaque_server_setup, opaque_password_file, CredentialRequest, id_U)`)
@@ -225,30 +222,31 @@ still leaks `opaque_server_setup` and `opaque_password_file`, and that
 is enough for offline brute force (compute `k_U`, compute `Y`, derive
 `rwd`, check `auth_tag`). Clipper closes that gap by AEAD-wrapping the
 at-rest blobs with subkeys derived from a server-managed root pepper.
-See `docs/server-secret.md` for ops; the math here is unchanged.
+The OPAQUE protocol itself runs on the unwrapped bytes — the wrap is
+purely a storage-boundary concern. See `docs/server-secret.md` for ops.
 
-What is wrapped on disk:
+Wrapped on disk:
 
 - `users.opaque_server_setup`
 - `users.opaque_password_file`
 - `users.encryption_salt`
 - `server_config.access_key_hash_salt`
 
-What changes for access keys:
+Access keys:
 
 - Argon2id for `access_keys.key_hash` is called with the server pepper
   passed as Argon2's `secret` ("pepper") parameter, so DB-only attackers
-  cannot verify candidate access keys offline either.
+  cannot verify candidate access keys offline.
 
-What does **not** change:
+Plaintext on disk:
 
-- The OPAQUE protocol, message bytes, and session-key derivation.
-- The client's view of `encryption_salt` (it still receives the
-  plaintext salt in `ServerInfo` during registration, login, and
-  `/api/sync/bootstrap`; only the database column is wrapped).
-- `sessions.token_hash` (32-byte random tokens; not brute-forceable).
-- `objects.meta_ciphertext` and `object_payloads/*.bin` (already
-  client-encrypted with a key bound to the wrapped `encryption_salt`).
+- `sessions.token_hash` — 32-byte random tokens; not brute-forceable.
+- `objects.meta_ciphertext` and `object_payloads/*.bin` — already
+  client-encrypted with a key bound to the wrapped `encryption_salt`.
+
+The client receives the plaintext `encryption_salt` in `ServerInfo`
+during registration, login, and `/api/sync/bootstrap`; only the
+database column is wrapped.
 
 Wrap format and key derivation live in `clipper_core::crypto`
 (`wrap_with_key`, `derive_subkey`, `HKDF_LABEL_*`, `AAD_WRAP_*`); the
