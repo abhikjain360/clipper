@@ -32,6 +32,12 @@ backups do not touch — that is the entire point.
 Setting both is an error. Setting neither is an error: `init`,
 `add-access-key`, and `serve` all fail closed.
 
+When a database already exists, `init`, `add-access-key`, and `serve`
+also verify that the supplied pepper can unwrap
+`server_config.access_key_hash_salt`. `serve` performs this check before
+binding the HTTP listener, so a wrong pepper fails at startup instead of
+on the first auth request.
+
 ## Where to put it
 
 The pepper buys nothing if it leaks together with the database. In

@@ -96,13 +96,13 @@ schema and should not be treated as the schema owner.
 First-run server setup:
 
 1. Operator runs `clipper-server init`.
-2. Server creates the database, runs migrations, inserts the singleton `server_config` initialization marker and access-key hashing salt, and creates `clipboard/` and `objects/` data directories.
+2. Server creates the database, runs migrations, inserts the singleton `server_config` initialization marker and a wrapped access-key hashing salt, and creates `clipboard/` and `objects/` data directories.
 3. No user passphrase is entered during server init.
 
 Access-key provisioning:
 
 1. Operator creates one high-entropy access key per intended user outside the app.
-2. Operator adds the access key with `clipper-server add-access-key`, which stores `base64(Argon2id(access_key_bytes, server_access_key_hash_salt))` in `access_keys.key_hash`, with `created_at` set and optional `expires_at`.
+2. Operator adds the access key with `clipper-server add-access-key`, which unwraps `server_config.access_key_hash_salt`, hashes with Argon2id using the server pepper as Argon2's `secret` input, and stores the base64 verifier in `access_keys.key_hash`, with `created_at` set and optional `expires_at`.
 3. The access key is a one-time registration authorization secret only. It is not the user's passphrase and is not used for data encryption.
 
 Example:
@@ -161,7 +161,7 @@ user request. Future LAN P2P must follow the same on-demand payload rule.
 
 Sync flow:
 
-1. Client calls `GET /api/sync/bootstrap` after login. The response includes device info, the user's `encryption_salt` and `encryption_params`, the latest `event_log.seq`, and the user's recent legacy `clipboard_items`. The current client ignores those legacy rows and rebuilds clipboard/file state from `GET /api/objects` (see `SyncEngine::fetch_object_state`).
+1. Client calls `GET /api/sync/bootstrap` after login. The response includes device info, the user's plaintext `encryption_salt` unwrapped from the database, `encryption_params`, and the latest `event_log.seq`. The client rebuilds clipboard/file state from `GET /api/objects` (see `SyncEngine::fetch_object_state`).
 2. Client opens `GET /api/ws` with bearer auth.
 3. Client sends `hello { last_seq }`.
 4. Server replies with `hello_ack { server_time, latest_seq }`, then replays that user's `event_log` rows after `last_seq`. If the replay query errors, the server sends `Invalidate { target: "all" }` so the client refreshes from list endpoints.
@@ -189,7 +189,7 @@ Cleanup flow:
 Review `routes/auth.rs`, `auth.rs`, `state.rs`, and `rate_limit.rs` first.
 
 - Public auth routes are `POST /api/auth/register/start`, `POST /api/auth/register/finish`, `POST /api/auth/challenge`, and `POST /api/auth/login`.
-- Registration must be gated by a one-time access key stored as an Argon2id verifier (`access_keys.key_hash` = `base64(Argon2id(access_key, server_salt))`).
+- Registration must be gated by a one-time access key stored as an Argon2id verifier. The verifier is derived from the access key, the unwrapped server salt, and the server pepper passed as Argon2's `secret` input.
 - Registration and login must use OPAQUE flows; raw user passphrases and reusable authentication secrets must not be sent to the server.
 - Challenge IDs must be random, short-lived, and single-use. Pending registration IDs must be random, short-lived, and single-use. Both maps in `AppState` cap themselves at `auth.max_pending_challenges`; the eviction order under that cap is HashMap iteration order (effectively arbitrary), so high pressure can drop fresh entries.
 - Session tokens must be random, stored server-side only as hashes (`sha256(token)`), and required on all private routes.
