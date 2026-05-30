@@ -7,8 +7,8 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub object_id: Uuid,
-    #[sea_orm(primary_key, auto_increment = false, column_type = "Text")]
-    pub payload_id: String,
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub payload_id: Uuid,
     #[sea_orm(column_type = "Text", unique)]
     pub ciphertext_path: String,
     #[sea_orm(column_type = "Blob")]

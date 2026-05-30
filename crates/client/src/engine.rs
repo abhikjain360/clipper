@@ -296,8 +296,10 @@ impl SyncEngine {
                 .ok_or_else(|| ClientError::Other("No device_id".into()))?
         };
 
-        let object_id = uuid::Uuid::new_v4().to_string();
-        let payload_id = uuid::Uuid::new_v4().to_string();
+        let object_uuid = uuid::Uuid::new_v4();
+        let payload_uuid = uuid::Uuid::new_v4();
+        let object_id = object_uuid.to_string();
+        let payload_id = payload_uuid.to_string();
         let plaintext_size = data.len() as i64;
         let (meta_nonce, meta_ciphertext, payload_nonce, encrypted_payload) = {
             let encryption_key = self.encryption_key.read().await;
@@ -322,12 +324,12 @@ impl SyncEngine {
         let payload_hash = crypto::sha256(&encrypted_payload).to_vec();
         let payload_size = encrypted_payload.len() as i64;
         let init_req = ObjectInitRequest {
-            id: object_id.clone(),
+            id: object_uuid.into(),
             kind: ObjectKind::Clipboard,
             meta_nonce,
             meta_ciphertext,
             payloads: vec![ObjectPayloadInit {
-                id: payload_id.clone(),
+                id: payload_uuid.into(),
                 nonce: payload_nonce,
                 ciphertext_size: payload_size,
                 sha256_ciphertext: payload_hash.clone(),
@@ -409,6 +411,9 @@ impl SyncEngine {
     ) -> Result<(), ClientError> {
         let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
         let init_resp = api.object_init(init_req).await?;
+        let payload_id_typed = payload_id
+            .parse()
+            .map_err(|e| ClientError::Other(format!("Invalid payload id: {e}")))?;
         if init_resp.complete {
             return Ok(());
         }
@@ -416,7 +421,7 @@ impl SyncEngine {
         if !init_resp
             .upload_urls
             .iter()
-            .any(|upload| upload.id == payload_id)
+            .any(|upload| upload.id == payload_id_typed)
         {
             return Err(ClientError::Other(
                 "Object payload upload URL missing".into(),
@@ -429,7 +434,7 @@ impl SyncEngine {
             object_id,
             &ObjectCompleteRequest {
                 payloads: vec![ObjectPayloadComplete {
-                    id: payload_id.to_string(),
+                    id: payload_id_typed,
                     ciphertext_size: payload_size,
                     sha256_ciphertext: payload_hash,
                 }],
@@ -486,8 +491,10 @@ impl SyncEngine {
             size: Some(data.len() as i64),
         };
 
-        let file_id = uuid::Uuid::new_v4().to_string();
-        let payload_id = uuid::Uuid::new_v4().to_string();
+        let file_uuid = uuid::Uuid::new_v4();
+        let payload_uuid = uuid::Uuid::new_v4();
+        let file_id = file_uuid.to_string();
+        let payload_id = payload_uuid.to_string();
         let (meta_nonce, meta_ciphertext, blob_nonce, encrypted_blob) = {
             let encryption_key = self.encryption_key.read().await;
             let encryption_key = encryption_key
@@ -502,12 +509,12 @@ impl SyncEngine {
         let blob_size = encrypted_blob.len() as i64;
 
         let init_req = ObjectInitRequest {
-            id: file_id.clone(),
+            id: file_uuid.into(),
             kind: ObjectKind::File,
             meta_nonce,
             meta_ciphertext,
             payloads: vec![ObjectPayloadInit {
-                id: payload_id.clone(),
+                id: payload_uuid.into(),
                 nonce: blob_nonce,
                 ciphertext_size: blob_size,
                 sha256_ciphertext: blob_hash.clone(),
@@ -553,11 +560,13 @@ impl SyncEngine {
             let file_item = files_resp
                 .items
                 .iter()
-                .find(|f| f.id == file_id)
+                .find(|f| f.id.to_string() == file_id)
                 .ok_or_else(|| ClientError::Other("File not found on server".into()))?;
             let payload = single_payload(file_item)?;
             let nonce = payload.nonce.clone();
-            let blob = api.download_object_payload(file_id, &payload.id).await?;
+            let blob = api
+                .download_object_payload(file_id, &payload.id.to_string())
+                .await?;
             (nonce, blob)
         };
 
@@ -725,7 +734,8 @@ impl SyncEngine {
         let text = if is_text_mime_type(&meta.mime_type) {
             let encrypted_payload = {
                 let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-                api.download_object_payload(&item.id, &payload.id).await?
+                api.download_object_payload(&item.id.to_string(), &payload.id.to_string())
+                    .await?
             };
             let plaintext =
                 decrypt_clipboard_payload(&payload.nonce, &encrypted_payload, encryption_key)?;
@@ -736,12 +746,12 @@ impl SyncEngine {
         };
 
         Ok(DecryptedClipboardItem {
-            id: item.id.clone(),
+            id: item.id.to_string(),
             text,
             mime_type: meta.mime_type,
             payload_size,
             created_at: item.created_at.clone(),
-            source_device_id: item.source_device_id.clone(),
+            source_device_id: item.source_device_id.to_string(),
         })
     }
 
@@ -972,12 +982,12 @@ fn decrypt_file_object_item(
     let meta = decrypt_file_meta_bytes(&item.meta_nonce, &item.meta_ciphertext, encryption_key)?;
     let payload = single_payload(item)?;
     Ok(DecryptedFileItem {
-        id: item.id.clone(),
+        id: item.id.to_string(),
         filename: meta.filename,
         mime_type: meta.mime_type,
         blob_size: meta.size.unwrap_or(payload.ciphertext_size),
         created_at: item.created_at.clone(),
-        source_device_id: item.source_device_id.clone(),
+        source_device_id: item.source_device_id.to_string(),
     })
 }
 

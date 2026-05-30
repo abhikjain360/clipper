@@ -14,9 +14,8 @@ use std::{
 
 use clipper_daemon_types as dt;
 use clipper_daemon_types::{
-    AuthenticateParams, AuthChallenge, DaemonCommand, DaemonEventKind, DaemonLine,
-    DaemonRequest, DaemonResponse, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION,
-    ipc_auth_message,
+    AuthChallenge, AuthenticateParams, DaemonCommand, DaemonEventKind, DaemonLine, DaemonRequest,
+    DaemonResponse, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, ipc_auth_message,
 };
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -266,7 +265,9 @@ async fn authenticate_connection(
     let client_nonce = random_bytes::<IPC_AUTH_NONCE_BYTES>().to_vec();
     let tag = ipc_auth_tag(&secret, &challenge.daemon_nonce, &client_nonce)?;
     if tag.len() != IPC_AUTH_TAG_BYTES {
-        return Err(TransportError::Auth("invalid IPC authentication tag".into()));
+        return Err(TransportError::Auth(
+            "invalid IPC authentication tag".into(),
+        ));
     }
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -297,7 +298,9 @@ async fn authenticate_connection(
     }
     if !response.ok {
         return Err(TransportError::Auth(
-            response.error.unwrap_or_else(|| "daemon rejected IPC auth".into()),
+            response
+                .error
+                .unwrap_or_else(|| "daemon rejected IPC auth".into()),
         ));
     }
 

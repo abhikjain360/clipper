@@ -93,8 +93,11 @@ impl ApiClient {
         let (credential_request, client_login_state) =
             crypto::opaque_client_login_start(passphrase.as_bytes())?;
         let challenge_req = LoginChallengeRequest {
-            user_id: user_id.map(str::to_string),
-            credential_request_b64: B64.encode(credential_request),
+            user_id: user_id
+                .map(str::parse)
+                .transpose()
+                .map_err(|e| ClientError::Other(format!("Invalid user id: {e}")))?,
+            credential_request,
         };
         let challenge_resp = self
             .http
@@ -125,7 +128,7 @@ impl ApiClient {
 
         let req = LoginRequest {
             challenge_id: challenge_resp.challenge_id,
-            credential_finalization_b64: B64.encode(credential_finalization),
+            credential_finalization,
             device_id: None,
             device_name: Some(device_name.to_string()),
             platform: Some(platform.to_string()),
@@ -165,7 +168,7 @@ impl ApiClient {
             crypto::opaque_client_register_start(passphrase.as_bytes())?;
         let start_req = RegisterStartRequest {
             access_key: access_key.to_string(),
-            registration_request_b64: B64.encode(registration_request),
+            registration_request,
         };
         let resp = self
             .http
@@ -195,7 +198,7 @@ impl ApiClient {
 
         let finish_req = RegisterFinishRequest {
             registration_id: start_resp.registration_id,
-            registration_upload_b64: B64.encode(registration_upload),
+            registration_upload,
             device_id: None,
             device_name: Some(device_name.to_string()),
             platform: Some(platform.to_string()),
@@ -501,10 +504,10 @@ pub fn encrypt_clipboard(
     let hash = crypto::sha256(&ciphertext);
 
     Ok(ClipboardUploadRequest {
-        id: uuid::Uuid::new_v4().to_string(),
-        nonce_b64: B64.encode(&nonce),
-        ciphertext_b64: B64.encode(&ciphertext),
-        ciphertext_sha256_b64: B64.encode(hash),
+        id: uuid::Uuid::new_v4().into(),
+        nonce: nonce.to_vec(),
+        ciphertext,
+        ciphertext_sha256: hash.to_vec(),
         source_device_id: device_id.to_string(),
         client_created_at: Some(chrono::Utc::now().to_rfc3339()),
     })

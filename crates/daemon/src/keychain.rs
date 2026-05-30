@@ -80,10 +80,8 @@ pub fn load_or_create_ipc_secret(_data_dir: &Path) -> KeychainResult<Vec<u8>> {
         Ok(secret) => {
             let actual = secret.len();
             let secret = new_ipc_secret();
-            let _ = security_framework::passwords::delete_generic_password(
-                SERVICE,
-                IPC_SECRET_ACCOUNT,
-            );
+            let _ =
+                security_framework::passwords::delete_generic_password(SERVICE, IPC_SECRET_ACCOUNT);
             security_framework::passwords::set_generic_password(
                 SERVICE,
                 IPC_SECRET_ACCOUNT,

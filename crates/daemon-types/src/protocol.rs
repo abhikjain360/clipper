@@ -18,7 +18,10 @@ const IPC_AUTH_CONTEXT: &[u8] = b"clipper-ipc-auth-v1";
 
 pub fn ipc_auth_message(daemon_nonce: &[u8], client_nonce: &[u8]) -> Vec<u8> {
     let mut message = Vec::with_capacity(
-        IPC_AUTH_CONTEXT.len() + std::mem::size_of::<u32>() * 3 + daemon_nonce.len() + client_nonce.len(),
+        IPC_AUTH_CONTEXT.len()
+            + std::mem::size_of::<u32>() * 3
+            + daemon_nonce.len()
+            + client_nonce.len(),
     );
     message.extend_from_slice(IPC_AUTH_CONTEXT);
     message.extend_from_slice(&IPC_AUTH_VERSION.to_be_bytes());

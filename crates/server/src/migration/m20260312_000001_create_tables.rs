@@ -243,7 +243,7 @@ impl MigrationTrait for Migration {
                     .table(ObjectPayloads::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(ObjectPayloads::ObjectId).uuid().not_null())
-                    .col(ColumnDef::new(ObjectPayloads::PayloadId).text().not_null())
+                    .col(ColumnDef::new(ObjectPayloads::PayloadId).uuid().not_null())
                     .col(
                         ColumnDef::new(ObjectPayloads::CiphertextPath)
                             .text()

@@ -1,6 +1,9 @@
 //! Per-connection handler: reads commands, dispatches to SyncEngine, writes responses.
 
-use std::{path::Path, path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use clipper_client::engine::SyncEngine;
 use hmac::{Hmac, Mac};
@@ -257,10 +260,7 @@ fn verify_auth_request(
     Ok(id)
 }
 
-async fn write_response(
-    writer: &Arc<Mutex<OwnedWriteHalf>>,
-    response: DaemonResponse,
-) -> bool {
+async fn write_response(writer: &Arc<Mutex<OwnedWriteHalf>>, response: DaemonResponse) -> bool {
     let Ok(json) = serde_json::to_string(&response) else {
         return false;
     };
@@ -319,9 +319,7 @@ where
 async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> DaemonResponse {
     let id = req.id.clone();
     match req.command {
-        DaemonCommand::Authenticate(_) => {
-            DaemonResponse::error(id, "Already authenticated".into())
-        }
+        DaemonCommand::Authenticate(_) => DaemonResponse::error(id, "Already authenticated".into()),
         DaemonCommand::Login(params) => cmd_login(id, params, engine).await,
         DaemonCommand::Register(params) => cmd_register(id, params, engine).await,
         DaemonCommand::Logout => cmd_logout(id, engine).await,

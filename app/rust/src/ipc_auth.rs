@@ -15,11 +15,8 @@ pub(crate) enum IpcSecretError {
 }
 
 pub(crate) fn load_ipc_secret() -> IpcSecretResult<Vec<u8>> {
-    let secret = security_framework::passwords::get_generic_password(
-        SERVICE,
-        IPC_SECRET_ACCOUNT,
-    )
-    .map_err(|e| IpcSecretError::Read(e.to_string()))?;
+    let secret = security_framework::passwords::get_generic_password(SERVICE, IPC_SECRET_ACCOUNT)
+        .map_err(|e| IpcSecretError::Read(e.to_string()))?;
 
     if secret.len() != IPC_SECRET_BYTES {
         return Err(IpcSecretError::InvalidLength {

@@ -5,11 +5,8 @@ use axum::{
 };
 use base64::Engine;
 use chrono::{Duration, Utc};
-use clipper_core::{
-    crypto::{SHA256_BYTES, XCHACHA20_NONCE_BYTES, sha256},
-    models::{
-        ClipboardItem, ClipboardListResponse, ClipboardUploadRequest, ErrorResponse, OkResponse,
-    },
+use clipper_core::models::{
+    ClipboardItem, ClipboardListResponse, ClipboardUploadRequest, ErrorResponse, OkResponse,
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, Set,
@@ -21,7 +18,7 @@ use tracing::info;
 use crate::{
     auth::AuthInfo,
     entity::{clipboard_items, event_log},
-    routes::{error_response, validate_client_id, validate_exact_byte_len},
+    routes::{ValidatedJson, error_response},
     state::AppState,
     ws::WsBroadcast,
 };
@@ -29,31 +26,12 @@ use crate::{
 pub async fn upload(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
-    Json(req): Json<ClipboardUploadRequest>,
+    ValidatedJson(req): ValidatedJson<ClipboardUploadRequest>,
 ) -> Result<Json<OkResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let b64 = &base64::engine::general_purpose::STANDARD;
-
-    let item_id = validate_client_id(&req.id)?;
-
-    let ciphertext = b64
-        .decode(&req.ciphertext_b64)
-        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid ciphertext_b64"))?;
-
-    let nonce = b64
-        .decode(&req.nonce_b64)
-        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid nonce_b64"))?;
-    validate_exact_byte_len(&nonce, XCHACHA20_NONCE_BYTES, "nonce_b64")?;
-
-    let provided_hash = b64
-        .decode(&req.ciphertext_sha256_b64)
-        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid ciphertext_sha256_b64"))?;
-    validate_exact_byte_len(&provided_hash, SHA256_BYTES, "ciphertext_sha256_b64")?;
-
-    // Verify hash
-    let computed_hash = sha256(&ciphertext);
-    if computed_hash.as_slice() != provided_hash.as_slice() {
-        return Err(error_response(StatusCode::BAD_REQUEST, "SHA-256 mismatch"));
-    }
+    let item_id = req.id.into_uuid();
+    let ciphertext = req.ciphertext;
+    let nonce = req.nonce;
+    let ciphertext_hash = req.ciphertext_sha256;
 
     if clipboard_items::Entity::find_by_id(item_id)
         .one(state.db())
@@ -68,7 +46,7 @@ pub async fn upload(
     }
 
     // Write ciphertext to disk
-    let filename = format!("{}.bin", req.id);
+    let filename = format!("{item_id}.bin");
     let clip_dir = state.clipboard_dir();
     let path = clip_dir.join(&filename);
     let mut file = tokio::fs::OpenOptions::new()
@@ -106,7 +84,7 @@ pub async fn upload(
         ciphertext_path: Set(filename),
         nonce: Set(nonce),
         ciphertext_size: Set(ciphertext.len() as i64),
-        sha256_ciphertext: Set(computed_hash.to_vec()),
+        sha256_ciphertext: Set(ciphertext_hash),
         created_at: Set(now.clone()),
         expires_at: Set(expires),
         source_device_id: Set(auth.device_id),
@@ -155,7 +133,7 @@ pub async fn upload(
         seq: i64::from(inserted.seq),
         event_type: "clipboard.created".into(),
         object_kind: "clipboard".into(),
-        object_id: req.id,
+        object_id: item_id.to_string(),
         created_at: now,
     });
 
@@ -229,7 +207,9 @@ pub async fn list(
 
 #[cfg(test)]
 mod tests {
+    use axum::{body::Body, extract::FromRequest, http::Request};
     use base64::Engine;
+    use clipper_core::crypto::{SHA256_BYTES, XCHACHA20_NONCE_BYTES, sha256};
     use sea_orm::{ActiveModelTrait, Database, EntityTrait, Set};
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -264,6 +244,14 @@ mod tests {
             user_id,
             device_id,
         }
+    }
+
+    fn validated<T>(value: T) -> ValidatedJson<T>
+    where
+        T: garde::Validate,
+        T::Context: Default,
+    {
+        ValidatedJson::validated(value).expect("valid request")
     }
 
     async fn insert_user(state: &AppState) -> Uuid {
@@ -311,20 +299,20 @@ mod tests {
         .expect("insert device");
     }
 
-    fn upload_request(id: String, source_device_id: &str) -> ClipboardUploadRequest {
+    fn upload_request(id: Uuid, source_device_id: &str) -> ClipboardUploadRequest {
         upload_request_with_ciphertext(id, source_device_id, b"encrypted clipboard")
     }
 
     fn upload_request_with_ciphertext(
-        id: String,
+        id: Uuid,
         source_device_id: &str,
         ciphertext: &[u8],
     ) -> ClipboardUploadRequest {
         ClipboardUploadRequest {
-            id,
-            nonce_b64: B64.encode([1_u8; XCHACHA20_NONCE_BYTES]),
-            ciphertext_sha256_b64: B64.encode(sha256(ciphertext)),
-            ciphertext_b64: B64.encode(ciphertext),
+            id: id.into(),
+            nonce: vec![1_u8; XCHACHA20_NONCE_BYTES],
+            ciphertext_sha256: sha256(ciphertext).to_vec(),
+            ciphertext: ciphertext.to_vec(),
             source_device_id: source_device_id.into(),
             client_created_at: None,
         }
@@ -335,14 +323,20 @@ mod tests {
     // would reopen path traversal bugs in the upload path.
     #[tokio::test]
     async fn upload_rejects_non_uuid_id_before_writing() -> TestResult {
-        let (state, data_dir) = test_state().await?;
+        let (_state, data_dir) = test_state().await?;
+        let body = serde_json::json!({
+            "id": "../escape",
+            "nonce_b64": B64.encode([1_u8; XCHACHA20_NONCE_BYTES]),
+            "ciphertext_b64": B64.encode(b"encrypted clipboard"),
+            "ciphertext_sha256_b64": B64.encode(sha256(b"encrypted clipboard")),
+            "source_device_id": "device-a"
+        });
+        let req = Request::builder()
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request");
 
-        let result = upload(
-            State(state),
-            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
-            Json(upload_request("../escape".into(), "device-a")),
-        )
-        .await;
+        let result = ValidatedJson::<ClipboardUploadRequest>::from_request(req, &()).await;
 
         assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
         assert!(!data_dir.path().join("escape.bin").exists());
@@ -351,17 +345,12 @@ mod tests {
 
     #[tokio::test]
     async fn upload_rejects_wrong_nonce_length_before_writing() -> TestResult {
-        let (state, data_dir) = test_state().await?;
-        let id = Uuid::new_v4().to_string();
-        let mut req = upload_request(id.clone(), "device-a");
-        req.nonce_b64 = B64.encode([1_u8; 12]);
+        let (_state, data_dir) = test_state().await?;
+        let id = Uuid::new_v4();
+        let mut req = upload_request(id, "device-a");
+        req.nonce = vec![1_u8; 12];
 
-        let result = upload(
-            State(state),
-            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
-            Json(req),
-        )
-        .await;
+        let result = ValidatedJson::validated(req);
 
         assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
         assert!(
@@ -376,17 +365,12 @@ mod tests {
 
     #[tokio::test]
     async fn upload_rejects_wrong_sha256_length_before_writing() -> TestResult {
-        let (state, data_dir) = test_state().await?;
-        let id = Uuid::new_v4().to_string();
-        let mut req = upload_request(id.clone(), "device-a");
-        req.ciphertext_sha256_b64 = B64.encode([1_u8; SHA256_BYTES - 1]);
+        let (_state, data_dir) = test_state().await?;
+        let id = Uuid::new_v4();
+        let mut req = upload_request(id, "device-a");
+        req.ciphertext_sha256 = vec![1_u8; SHA256_BYTES - 1];
 
-        let result = upload(
-            State(state),
-            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
-            Json(req),
-        )
-        .await;
+        let result = ValidatedJson::validated(req);
 
         assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
         assert!(
@@ -413,7 +397,7 @@ mod tests {
         let _ = upload(
             State(state.clone()),
             Extension(auth(user_id, device_auth)),
-            Json(upload_request(id.to_string(), "device-spoof")),
+            validated(upload_request(id, "device-spoof")),
         )
         .await
         .expect("upload");
@@ -436,13 +420,13 @@ mod tests {
         let user_id = insert_user(&state).await;
         let device_a = Uuid::new_v4();
         insert_device(&state, user_id, device_a).await;
-        let id = Uuid::new_v4().to_string();
+        let id = Uuid::new_v4();
 
         let _ = upload(
             State(state.clone()),
             Extension(auth(user_id, device_a)),
-            Json(upload_request_with_ciphertext(
-                id.clone(),
+            validated(upload_request_with_ciphertext(
+                id,
                 "device-a",
                 b"first encrypted clipboard",
             )),
@@ -453,8 +437,8 @@ mod tests {
         let result = upload(
             State(state),
             Extension(auth(user_id, device_a)),
-            Json(upload_request_with_ciphertext(
-                id.clone(),
+            validated(upload_request_with_ciphertext(
+                id,
                 "device-a",
                 b"second encrypted clipboard",
             )),
@@ -478,14 +462,14 @@ mod tests {
         let device_b = Uuid::new_v4();
         insert_device(&state, user_a, device_a).await;
         insert_device(&state, user_b, device_b).await;
-        let item_a = Uuid::new_v4().to_string();
-        let item_b = Uuid::new_v4().to_string();
+        let item_a = Uuid::new_v4();
+        let item_b = Uuid::new_v4();
 
         let _ = upload(
             State(state.clone()),
             Extension(auth(user_a, device_a)),
-            Json(upload_request_with_ciphertext(
-                item_a.clone(),
+            validated(upload_request_with_ciphertext(
+                item_a,
                 "device-a",
                 b"user a encrypted clipboard",
             )),
@@ -495,7 +479,7 @@ mod tests {
         let _ = upload(
             State(state.clone()),
             Extension(auth(user_b, device_b)),
-            Json(upload_request_with_ciphertext(
+            validated(upload_request_with_ciphertext(
                 item_b,
                 "device-b",
                 b"user b encrypted clipboard",
@@ -516,7 +500,7 @@ mod tests {
         .expect("list");
 
         assert_eq!(resp.items.len(), 1);
-        assert_eq!(resp.items[0].id, item_a);
+        assert_eq!(resp.items[0].id, item_a.to_string());
         Ok(())
     }
 }

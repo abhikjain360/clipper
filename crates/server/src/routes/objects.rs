@@ -1,6 +1,6 @@
 //! Generic encrypted object routes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use axum::{
     body::Body,
@@ -9,7 +9,7 @@ use axum::{
 };
 use chrono::Utc;
 use clipper_core::{
-    crypto::{SHA256_BYTES, XCHACHA20_NONCE_BYTES},
+    crypto::SHA256_BYTES,
     models::{
         ErrorResponse, ObjectCompleteRequest, ObjectInitRequest, ObjectInitResponse, ObjectKind,
         ObjectListItem, ObjectListResponse, ObjectPayloadDescriptor, ObjectPayloadUpload,
@@ -29,7 +29,7 @@ use uuid::Uuid;
 use crate::{
     auth::AuthInfo,
     entity::{event_log, object_payloads, objects},
-    routes::{Postcard, error_response, validate_client_id, validate_exact_byte_len},
+    routes::{Postcard, error_response, validate_client_id},
     state::AppState,
     ws::WsBroadcast,
 };
@@ -39,19 +39,13 @@ pub async fn init_object(
     Extension(auth): Extension<AuthInfo>,
     Postcard(req): Postcard<ObjectInitRequest>,
 ) -> Result<Postcard<ObjectInitResponse>, (StatusCode, axum::Json<ErrorResponse>)> {
-    let object_id = validate_client_id(&req.id)?;
-    validate_exact_byte_len(&req.meta_nonce, XCHACHA20_NONCE_BYTES, "meta_nonce")?;
+    let object_id = req.id.into_uuid();
+    let object_id_text = req.id.to_string();
     crate::routes::validate_max_byte_len(
         &req.meta_ciphertext,
         state.config().limits.max_object_meta_ciphertext_bytes,
         "Object metadata ciphertext exceeds maximum size",
     )?;
-    if req.payloads.is_empty() {
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "Missing object payloads",
-        ));
-    }
 
     if objects::Entity::find_by_id(object_id)
         .one(state.db())
@@ -65,38 +59,6 @@ pub async fn init_object(
         ));
     }
 
-    let mut seen_payload_ids = HashSet::new();
-    for payload in &req.payloads {
-        validate_client_id(&payload.id)?;
-        if !seen_payload_ids.insert(payload.id.clone()) {
-            return Err(error_response(
-                StatusCode::BAD_REQUEST,
-                "Duplicate payload id",
-            ));
-        }
-        validate_exact_byte_len(&payload.nonce, XCHACHA20_NONCE_BYTES, "payload nonce")?;
-        validate_exact_byte_len(
-            &payload.sha256_ciphertext,
-            SHA256_BYTES,
-            "payload sha256_ciphertext",
-        )?;
-        let expected_size = validate_object_payload_size(payload.ciphertext_size)?;
-        if let Some(inline) = &payload.inline_ciphertext {
-            if inline.len() as u64 != expected_size {
-                return Err(error_response(
-                    StatusCode::BAD_REQUEST,
-                    "Inline payload size does not match declared size",
-                ));
-            }
-            if Sha256::digest(inline).as_slice() != payload.sha256_ciphertext.as_slice() {
-                return Err(error_response(
-                    StatusCode::BAD_REQUEST,
-                    "Inline payload SHA-256 mismatch",
-                ));
-            }
-        }
-    }
-
     let all_inline = req.payloads.iter().all(|p| p.inline_ciphertext.is_some());
     let mut written_paths = Vec::new();
     for payload in req
@@ -104,7 +66,8 @@ pub async fn init_object(
         .iter()
         .filter(|p| p.inline_ciphertext.is_some())
     {
-        let path = object_payload_path(&state, &req.id, &payload.id);
+        let payload_id = payload.id.to_string();
+        let path = object_payload_path(&state, &object_id_text, &payload_id);
         let inline = payload.inline_ciphertext.as_ref().expect("inline exists");
         write_payload_bytes_create_new(&path, inline)
             .await
@@ -146,10 +109,11 @@ pub async fn init_object(
     }
 
     for payload in &req.payloads {
+        let payload_id = payload.id.to_string();
         let payload_model = object_payloads::ActiveModel {
             object_id: Set(object_id),
-            payload_id: Set(payload.id.clone()),
-            ciphertext_path: Set(object_payload_filename(&req.id, &payload.id)),
+            payload_id: Set(payload.id.into_uuid()),
+            ciphertext_path: Set(object_payload_filename(&object_id_text, &payload_id)),
             nonce: Set(payload.nonce.clone()),
             ciphertext_size: Set(payload.ciphertext_size),
             sha256_ciphertext: Set(payload.sha256_ciphertext.clone()),
@@ -193,7 +157,7 @@ pub async fn init_object(
             auth.user_id,
             i64::from(inserted.seq),
             req.kind,
-            &req.id,
+            &object_id_text,
             &now,
         );
     }
@@ -203,12 +167,12 @@ pub async fn init_object(
         .iter()
         .filter(|p| p.inline_ciphertext.is_none())
         .map(|p| ObjectPayloadUpload {
-            id: p.id.clone(),
-            upload_url: format!("/api/objects/{}/payloads/{}", req.id, p.id),
+            id: p.id,
+            upload_url: format!("/api/objects/{}/payloads/{}", object_id_text, p.id),
         })
         .collect();
 
-    info!(device_id = %auth.device_id, object_id = %req.id, kind = req.kind.as_str(), "Object initialized");
+    info!(device_id = %auth.device_id, object_id = %object_id_text, kind = req.kind.as_str(), "Object initialized");
 
     Ok(Postcard(ObjectInitResponse {
         upload_urls,
@@ -223,10 +187,10 @@ pub async fn upload_payload(
     body: Body,
 ) -> Result<Postcard<OkResponse>, (StatusCode, axum::Json<ErrorResponse>)> {
     let object_uuid = validate_client_id(&object_id)?;
-    validate_client_id(&payload_id)?;
+    let payload_uuid = validate_client_id(&payload_id)?;
     let object = object_for_upload(&state, auth.user_id, auth.device_id, object_uuid).await?;
 
-    let payload = object_payloads::Entity::find_by_id((object_uuid, payload_id.clone()))
+    let payload = object_payloads::Entity::find_by_id((object_uuid, payload_uuid))
         .one(state.db())
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
@@ -251,7 +215,7 @@ pub async fn upload_payload(
             sea_orm::sea_query::Expr::value(now),
         )
         .filter(object_payloads::Column::ObjectId.eq(object_uuid))
-        .filter(object_payloads::Column::PayloadId.eq(payload_id.clone()))
+        .filter(object_payloads::Column::PayloadId.eq(payload_uuid))
         .filter(object_payloads::Column::Status.eq("pending"))
         .exec(state.db())
         .await
@@ -273,14 +237,14 @@ pub async fn upload_payload(
 
     if let Err(response) = stream_body_to_payload_file(body, expected_size, &tmp_path).await {
         let _ = tokio::fs::remove_file(&tmp_path).await;
-        reset_payload_status(&state, object_uuid, &payload_id, "uploading", "pending").await;
+        reset_payload_status(&state, object_uuid, payload_uuid, "uploading", "pending").await;
         return Err(response);
     }
 
     let _ = tokio::fs::remove_file(&final_path).await;
     if tokio::fs::rename(&tmp_path, &final_path).await.is_err() {
         let _ = tokio::fs::remove_file(&tmp_path).await;
-        reset_payload_status(&state, object_uuid, &payload_id, "uploading", "pending").await;
+        reset_payload_status(&state, object_uuid, payload_uuid, "uploading", "pending").await;
         return Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Object payload storage error",
@@ -298,7 +262,7 @@ pub async fn upload_payload(
             sea_orm::sea_query::Expr::value(now),
         )
         .filter(object_payloads::Column::ObjectId.eq(object_uuid))
-        .filter(object_payloads::Column::PayloadId.eq(payload_id.clone()))
+        .filter(object_payloads::Column::PayloadId.eq(payload_uuid))
         .filter(object_payloads::Column::Status.eq("uploading"))
         .exec(state.db())
         .await
@@ -344,15 +308,8 @@ pub async fn complete_object(
 
     let mut completion_by_id = HashMap::new();
     for payload in &req.payloads {
-        validate_client_id(&payload.id)?;
-        validate_exact_byte_len(
-            &payload.sha256_ciphertext,
-            SHA256_BYTES,
-            "payload sha256_ciphertext",
-        )?;
-        validate_object_payload_size(payload.ciphertext_size)?;
         if completion_by_id
-            .insert(payload.id.clone(), payload)
+            .insert(payload.id.into_uuid(), payload)
             .is_some()
         {
             return Err(error_response(
@@ -518,7 +475,7 @@ pub async fn list_objects(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         items.push(ObjectListItem {
-            id: object.id.to_string(),
+            id: object.id.into(),
             kind: object_kind_from_db(&object.kind)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
             meta_nonce: object.meta_nonce.clone(),
@@ -526,14 +483,14 @@ pub async fn list_objects(
             payloads: payloads
                 .into_iter()
                 .map(|p| ObjectPayloadDescriptor {
-                    id: p.payload_id,
+                    id: p.payload_id.into(),
                     nonce: p.nonce,
                     ciphertext_size: p.ciphertext_size,
                     sha256_ciphertext: p.sha256_ciphertext,
                 })
                 .collect(),
             created_at: object.created_at.clone(),
-            source_device_id: object.source_device_id.to_string(),
+            source_device_id: object.source_device_id.into(),
         });
     }
 
@@ -552,7 +509,7 @@ pub async fn download_payload(
     Path((object_id, payload_id)): Path<(String, String)>,
 ) -> Result<Body, StatusCode> {
     let object_uuid = validate_client_id(&object_id).map_err(|(status, _)| status)?;
-    validate_client_id(&payload_id).map_err(|(status, _)| status)?;
+    let payload_uuid = validate_client_id(&payload_id).map_err(|(status, _)| status)?;
 
     objects::Entity::find_by_id(object_uuid)
         .filter(objects::Column::UserId.eq(auth.user_id))
@@ -562,7 +519,7 @@ pub async fn download_payload(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let payload = object_payloads::Entity::find_by_id((object_uuid, payload_id))
+    let payload = object_payloads::Entity::find_by_id((object_uuid, payload_uuid))
         .filter(object_payloads::Column::Status.eq("complete"))
         .one(state.db())
         .await
@@ -823,7 +780,7 @@ async fn stream_body_to_payload_file(
 async fn reset_payload_status(
     state: &AppState,
     object_id: Uuid,
-    payload_id: &str,
+    payload_id: Uuid,
     from: &str,
     to: &str,
 ) {
@@ -838,7 +795,7 @@ async fn reset_payload_status(
             sea_orm::sea_query::Expr::value(now),
         )
         .filter(object_payloads::Column::ObjectId.eq(object_id))
-        .filter(object_payloads::Column::PayloadId.eq(payload_id.to_string()))
+        .filter(object_payloads::Column::PayloadId.eq(payload_id))
         .filter(object_payloads::Column::Status.eq(from))
         .exec(state.db())
         .await;
@@ -872,7 +829,7 @@ async fn remove_paths(paths: Vec<std::path::PathBuf>) {
 mod tests {
     use axum::body::to_bytes;
     use clipper_core::{
-        crypto::sha256,
+        crypto::{XCHACHA20_NONCE_BYTES, sha256},
         models::{ObjectPayloadComplete, ObjectPayloadInit},
     };
     use sea_orm::Database;
@@ -896,6 +853,14 @@ mod tests {
             user_id,
             device_id,
         }
+    }
+
+    fn postcard<T>(value: T) -> Postcard<T>
+    where
+        T: garde::Validate,
+        T::Context: Default,
+    {
+        Postcard::validated(value).expect("valid request")
     }
 
     async fn insert_user(state: &AppState) -> Uuid {
@@ -951,12 +916,12 @@ mod tests {
         inline: bool,
     ) -> ObjectInitRequest {
         ObjectInitRequest {
-            id: object_id,
+            id: object_id.parse().expect("object id"),
             kind,
             meta_nonce: vec![1_u8; XCHACHA20_NONCE_BYTES],
             meta_ciphertext: b"encrypted metadata".to_vec(),
             payloads: vec![ObjectPayloadInit {
-                id: payload_id,
+                id: payload_id.parse().expect("payload id"),
                 nonce: vec![2_u8; XCHACHA20_NONCE_BYTES],
                 ciphertext_size: ciphertext.len() as i64,
                 sha256_ciphertext: sha256(ciphertext).to_vec(),
@@ -967,7 +932,7 @@ mod tests {
 
     #[tokio::test]
     async fn init_rejects_wrong_payload_nonce_length_before_writing() {
-        let (state, data_dir) = test_state().await;
+        let (_state, data_dir) = test_state().await;
         let object_id = Uuid::new_v4().to_string();
         let payload_id = Uuid::new_v4().to_string();
         let mut req = init_request(
@@ -979,12 +944,7 @@ mod tests {
         );
         req.payloads[0].nonce = vec![2_u8; 12];
 
-        let result = init_object(
-            State(state),
-            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
-            Postcard(req),
-        )
-        .await;
+        let result = Postcard::validated(req);
 
         assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
         assert!(
@@ -998,7 +958,7 @@ mod tests {
 
     #[tokio::test]
     async fn init_rejects_wrong_payload_sha256_length_before_writing() {
-        let (state, data_dir) = test_state().await;
+        let (_state, data_dir) = test_state().await;
         let object_id = Uuid::new_v4().to_string();
         let payload_id = Uuid::new_v4().to_string();
         let mut req = init_request(
@@ -1010,12 +970,7 @@ mod tests {
         );
         req.payloads[0].sha256_ciphertext = vec![3_u8; SHA256_BYTES - 1];
 
-        let result = init_object(
-            State(state),
-            Extension(auth(Uuid::new_v4(), Uuid::new_v4())),
-            Postcard(req),
-        )
-        .await;
+        let result = Postcard::validated(req);
 
         assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
         assert!(
@@ -1040,7 +995,7 @@ mod tests {
         let Postcard(resp) = init_object(
             State(state.clone()),
             Extension(auth(user_id, device_id)),
-            Postcard(init_request(
+            postcard(init_request(
                 object_id.clone(),
                 payload_id.clone(),
                 ObjectKind::Clipboard,
@@ -1066,7 +1021,7 @@ mod tests {
         .await
         .expect("list");
         assert_eq!(list.items.len(), 1);
-        assert_eq!(list.items[0].id, object_id);
+        assert_eq!(list.items[0].id.to_string(), object_id);
 
         let body = download_payload(
             State(state),
@@ -1092,7 +1047,7 @@ mod tests {
         let Postcard(resp) = init_object(
             State(state.clone()),
             Extension(auth(user_id, device_id)),
-            Postcard(init_request(
+            postcard(init_request(
                 object_id.clone(),
                 payload_id.clone(),
                 ObjectKind::File,
@@ -1119,9 +1074,9 @@ mod tests {
             State(state.clone()),
             Extension(auth(user_id, device_id)),
             Path(object_id.clone()),
-            Postcard(ObjectCompleteRequest {
+            postcard(ObjectCompleteRequest {
                 payloads: vec![ObjectPayloadComplete {
-                    id: payload_id,
+                    id: payload_id.parse().expect("payload id"),
                     ciphertext_size: ciphertext.len() as i64,
                     sha256_ciphertext: sha256(ciphertext).to_vec(),
                 }],
@@ -1142,7 +1097,7 @@ mod tests {
         .await
         .expect("list");
         assert_eq!(list.items.len(), 1);
-        assert_eq!(list.items[0].id, object_id);
+        assert_eq!(list.items[0].id.to_string(), object_id);
     }
 
     #[tokio::test]
@@ -1157,7 +1112,7 @@ mod tests {
         init_object(
             State(state.clone()),
             Extension(auth(user_id, device_id)),
-            Postcard(init_request(
+            postcard(init_request(
                 object_id.clone(),
                 payload_id.clone(),
                 ObjectKind::Clipboard,

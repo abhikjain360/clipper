@@ -72,7 +72,7 @@ pub async fn bootstrap(
 
     Ok(Json(BootstrapResponse {
         device: DeviceInfo {
-            id: dev.id.to_string(),
+            id: dev.id.into(),
             name: dev.name,
             platform: dev.platform,
         },

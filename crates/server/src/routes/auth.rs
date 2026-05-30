@@ -24,7 +24,7 @@ use crate::{
     auth::AuthInfo,
     entity::{access_keys, devices, sessions, users},
     rate_limit::{ClientIp, RateLimiter},
-    routes::{error_response, validate_client_id},
+    routes::{ValidatedJson, error_response},
     state::AppState,
 };
 
@@ -34,21 +34,18 @@ pub async fn challenge(
     State(state): State<AppState>,
     Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
     ClientIp(ip): ClientIp,
-    Json(req): Json<LoginChallengeRequest>,
+    ValidatedJson(req): ValidatedJson<LoginChallengeRequest>,
 ) -> Result<Json<LoginChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
     check_auth_rate_limit(&limiter, ip)?;
 
-    let user = resolve_login_user(&state, req.user_id.as_deref()).await?;
+    let user = resolve_login_user(&state, req.user_id).await?;
 
-    let credential_request = B64
-        .decode(&req.credential_request_b64)
-        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid credential_request_b64"))?;
     let credential_identifier = opaque_credential_identifier_for_user(&user);
     let (credential_response, server_login_state) =
         crypto::opaque_server_login_start_with_identifier(
             &user.opaque_server_setup,
             &user.opaque_password_file,
-            &credential_request,
+            &req.credential_request,
             &credential_identifier,
         )
         .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid login request"))?;
@@ -65,16 +62,9 @@ pub async fn register_start(
     State(state): State<AppState>,
     Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
     ClientIp(ip): ClientIp,
-    Json(req): Json<RegisterStartRequest>,
+    ValidatedJson(req): ValidatedJson<RegisterStartRequest>,
 ) -> Result<Json<RegisterStartResponse>, (StatusCode, Json<ErrorResponse>)> {
     check_auth_rate_limit(&limiter, ip)?;
-
-    if req.access_key.is_empty() {
-        return Err(error_response(
-            StatusCode::UNAUTHORIZED,
-            "Invalid access key",
-        ));
-    }
 
     let now = Utc::now().to_rfc3339();
     let access_key_hash = access_key_hash(&req.access_key);
@@ -96,16 +86,13 @@ pub async fn register_start(
         ));
     }
 
-    let registration_request = B64
-        .decode(&req.registration_request_b64)
-        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid registration_request_b64"))?;
     let user_id = Uuid::new_v4();
     let opaque_server_setup = crypto::opaque_new_server_setup();
     let encryption_salt = crypto::generate_encryption_salt().to_vec();
     let credential_identifier = opaque_credential_identifier(user_id);
     let registration_response = crypto::opaque_server_register_start(
         &opaque_server_setup,
-        &registration_request,
+        &req.registration_request,
         &credential_identifier,
     )
     .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid registration request"))?;
@@ -133,17 +120,14 @@ pub async fn register_finish(
     Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
     ClientIp(ip): ClientIp,
     headers: HeaderMap,
-    Json(req): Json<RegisterFinishRequest>,
+    ValidatedJson(req): ValidatedJson<RegisterFinishRequest>,
 ) -> Result<Json<RegisterFinishResponse>, (StatusCode, Json<ErrorResponse>)> {
     check_auth_rate_limit(&limiter, ip)?;
 
     let pending = state
         .take_pending_registration(&req.registration_id)
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid registration"))?;
-    let registration_upload = B64
-        .decode(&req.registration_upload_b64)
-        .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid registration upload"))?;
-    let opaque_password_file = crypto::opaque_server_register_finish(&registration_upload)
+    let opaque_password_file = crypto::opaque_server_register_finish(&req.registration_upload)
         .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid registration upload"))?;
 
     let now = Utc::now().to_rfc3339();
@@ -237,7 +221,7 @@ pub async fn login(
     Extension(limiter): Extension<std::sync::Arc<RateLimiter>>,
     ClientIp(ip): ClientIp,
     headers: HeaderMap,
-    Json(req): Json<LoginRequest>,
+    ValidatedJson(req): ValidatedJson<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
     check_auth_rate_limit(&limiter, ip)?;
 
@@ -250,13 +234,9 @@ pub async fn login(
         .await
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid challenge"))?;
-    let credential_finalization = B64
-        .decode(&req.credential_finalization_b64)
-        .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid credential finalization"))?;
-
     crypto::opaque_server_login_finish(
         &auth_challenge.server_login_state,
-        &credential_finalization,
+        &req.credential_finalization,
     )
     .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid passphrase"))?;
 
@@ -334,11 +314,10 @@ fn server_info(user: &users::Model) -> ServerInfo {
 
 async fn resolve_login_user(
     state: &AppState,
-    user_id: Option<&str>,
+    user_id: Option<clipper_core::models::UserId>,
 ) -> Result<users::Model, (StatusCode, Json<ErrorResponse>)> {
     if let Some(user_id) = user_id {
-        let user_id = validate_client_id(user_id)?;
-        return users::Entity::find_by_id(user_id)
+        return users::Entity::find_by_id(user_id.into_uuid())
             .one(state.db())
             .await
             .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
@@ -368,7 +347,7 @@ struct IssuedSession {
 async fn issue_session<C>(
     db: &C,
     user_id: Uuid,
-    requested_device_id: Option<String>,
+    requested_device_id: Option<clipper_core::models::DeviceId>,
     device_name: Option<String>,
     platform: Option<String>,
     headers: &HeaderMap,
@@ -378,10 +357,9 @@ where
     C: ConnectionTrait,
 {
     let now = Utc::now().to_rfc3339();
-    let device_id = match requested_device_id {
-        Some(id) => validate_client_id(&id)?,
-        None => Uuid::new_v4(),
-    };
+    let device_id = requested_device_id
+        .map(clipper_core::models::DeviceId::into_uuid)
+        .unwrap_or_else(Uuid::new_v4);
     let device_name = device_name.unwrap_or_else(|| "Unknown Device".into());
     let platform = platform.unwrap_or_else(|| "unknown".into());
 
@@ -537,13 +515,21 @@ mod tests {
         ))
     }
 
+    fn validated<T>(value: T) -> ValidatedJson<T>
+    where
+        T: garde::Validate,
+        T::Context: Default,
+    {
+        ValidatedJson::validated(value).expect("valid request")
+    }
+
     fn challenge_request(passphrase: &[u8]) -> (LoginChallengeRequest, Vec<u8>) {
         let (credential_request, client_state) =
             crypto::opaque_client_login_start(passphrase).expect("client login start");
         (
             LoginChallengeRequest {
                 user_id: None,
-                credential_request_b64: B64.encode(credential_request),
+                credential_request,
             },
             client_state,
         )
@@ -558,7 +544,7 @@ mod tests {
         (
             RegisterStartRequest {
                 access_key: access_key.into(),
-                registration_request_b64: B64.encode(registration_request),
+                registration_request,
             },
             client_state,
         )
@@ -578,7 +564,7 @@ mod tests {
 
         RegisterFinishRequest {
             registration_id: registration.registration_id,
-            registration_upload_b64: B64.encode(registration_upload),
+            registration_upload,
             device_id: None,
             device_name: Some("test-device".into()),
             platform: Some("test".into()),
@@ -611,7 +597,7 @@ mod tests {
             State(state.clone()),
             Extension(limiter()),
             client_ip(),
-            Json(start_req),
+            validated(start_req),
         )
         .await
         .expect("register start");
@@ -623,7 +609,7 @@ mod tests {
             Extension(limiter()),
             client_ip(),
             HeaderMap::new(),
-            Json(finish_req),
+            validated(finish_req),
         )
         .await
         .expect("register finish");
@@ -654,9 +640,9 @@ mod tests {
             State(state.clone()),
             Extension(limiter()),
             client_ip(),
-            Json(LoginChallengeRequest {
-                user_id: Some(user_id.to_string()),
-                credential_request_b64: B64.encode(challenge_req),
+            validated(LoginChallengeRequest {
+                user_id: Some(user_id.into()),
+                credential_request: challenge_req,
             }),
         )
         .await
@@ -667,7 +653,7 @@ mod tests {
             Extension(limiter()),
             client_ip(),
             HeaderMap::new(),
-            Json(login_req),
+            validated(login_req),
         )
         .await
         .expect("login");
@@ -688,7 +674,7 @@ mod tests {
 
         LoginRequest {
             challenge_id: challenge.challenge_id,
-            credential_finalization_b64: B64.encode(credential_finalization),
+            credential_finalization,
             device_id: None,
             device_name: Some("test-device".into()),
             platform: Some("test".into()),
@@ -708,7 +694,7 @@ mod tests {
             State(state.clone()),
             Extension(limiter()),
             client_ip(),
-            Json(challenge_req),
+            validated(challenge_req),
         )
         .await
         .expect("challenge");
@@ -719,7 +705,7 @@ mod tests {
             Extension(limiter()),
             client_ip(),
             HeaderMap::new(),
-            Json(req),
+            validated(req),
         )
         .await
         .expect("login");
@@ -741,14 +727,14 @@ mod tests {
             State(state.clone()),
             Extension(limiter()),
             client_ip(),
-            Json(challenge_req),
+            validated(challenge_req),
         )
         .await
         .expect("challenge");
         let req = login_request(challenge, &client_state, passphrase);
         let reused_req = LoginRequest {
             challenge_id: req.challenge_id.clone(),
-            credential_finalization_b64: req.credential_finalization_b64.clone(),
+            credential_finalization: req.credential_finalization.clone(),
             device_id: None,
             device_name: Some("test-device".into()),
             platform: Some("test".into()),
@@ -759,7 +745,7 @@ mod tests {
             Extension(limiter()),
             client_ip(),
             HeaderMap::new(),
-            Json(req),
+            validated(req),
         )
         .await
         .expect("first login");
@@ -769,7 +755,7 @@ mod tests {
             Extension(limiter()),
             client_ip(),
             HeaderMap::new(),
-            Json(reused_req),
+            validated(reused_req),
         )
         .await;
 
@@ -786,7 +772,7 @@ mod tests {
             State(state.clone()),
             Extension(limiter()),
             client_ip(),
-            Json(challenge_req),
+            validated(challenge_req),
         )
         .await
         .expect("challenge");
@@ -814,9 +800,9 @@ mod tests {
                 Extension(limiter.clone()),
                 client_ip(),
                 HeaderMap::new(),
-                Json(LoginRequest {
+                validated(LoginRequest {
                     challenge_id: format!("missing-{i}"),
-                    credential_finalization_b64: B64.encode(b"not opaque"),
+                    credential_finalization: b"not opaque".to_vec(),
                     device_id: None,
                     device_name: None,
                     platform: None,
@@ -832,9 +818,9 @@ mod tests {
             Extension(limiter),
             client_ip(),
             HeaderMap::new(),
-            Json(LoginRequest {
+            validated(LoginRequest {
                 challenge_id: "missing-final".into(),
-                credential_finalization_b64: B64.encode(b"not opaque"),
+                credential_finalization: b"not opaque".to_vec(),
                 device_id: None,
                 device_name: None,
                 platform: None,
@@ -857,7 +843,7 @@ mod tests {
                 State(state.clone()),
                 Extension(limiter.clone()),
                 client_ip(),
-                Json(challenge_req),
+                validated(challenge_req),
             )
             .await;
             assert!(result.is_ok());
@@ -868,7 +854,7 @@ mod tests {
             State(state),
             Extension(limiter),
             client_ip(),
-            Json(challenge_req),
+            validated(challenge_req),
         )
         .await;
 

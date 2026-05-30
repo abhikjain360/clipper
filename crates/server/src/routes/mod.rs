@@ -1,11 +1,12 @@
 use axum::{
     Json,
     body::{Body, Bytes},
-    extract::FromRequest,
+    extract::{FromRequest, rejection::JsonRejection},
     http::{Request, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use clipper_core::models::{ErrorResponse, POSTCARD_CONTENT_TYPE};
+use garde::Validate;
 use serde::{Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
@@ -21,7 +22,8 @@ pub struct Postcard<T>(pub T);
 impl<S, T> FromRequest<S> for Postcard<T>
 where
     S: Send + Sync,
-    T: DeserializeOwned,
+    T: DeserializeOwned + Validate,
+    T::Context: Default,
 {
     type Rejection = (StatusCode, Json<ErrorResponse>);
 
@@ -38,6 +40,51 @@ where
             .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid request body"))?;
         let value = postcard::from_bytes(&bytes)
             .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid postcard body"))?;
+        validate_request(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl<T> Postcard<T>
+where
+    T: Validate,
+    T::Context: Default,
+{
+    #[cfg(test)]
+    pub(crate) fn validated(value: T) -> Result<Self, (StatusCode, Json<ErrorResponse>)> {
+        validate_request(&value)?;
+        Ok(Self(value))
+    }
+}
+
+#[derive(Debug)]
+pub struct ValidatedJson<T>(pub T);
+
+impl<S, T> FromRequest<S> for ValidatedJson<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Validate,
+    T::Context: Default,
+{
+    type Rejection = (StatusCode, Json<ErrorResponse>);
+
+    async fn from_request(req: Request<Body>, state: &S) -> Result<Self, Self::Rejection> {
+        let Json(value) = Json::<T>::from_request(req, state)
+            .await
+            .map_err(json_rejection_response)?;
+        validate_request(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl<T> ValidatedJson<T>
+where
+    T: Validate,
+    T::Context: Default,
+{
+    #[cfg(test)]
+    pub(crate) fn validated(value: T) -> Result<Self, (StatusCode, Json<ErrorResponse>)> {
+        validate_request(&value)?;
         Ok(Self(value))
     }
 }
@@ -73,27 +120,30 @@ pub(crate) fn error_response(
     )
 }
 
+fn json_rejection_response(rejection: JsonRejection) -> (StatusCode, Json<ErrorResponse>) {
+    let status = match rejection.status() {
+        StatusCode::UNPROCESSABLE_ENTITY => StatusCode::BAD_REQUEST,
+        status => status,
+    };
+    error_response(status, "Invalid request body")
+}
+
+fn validate_request<T>(value: &T) -> Result<(), (StatusCode, Json<ErrorResponse>)>
+where
+    T: Validate,
+    T::Context: Default,
+{
+    value
+        .validate()
+        .map_err(|report| error_response(StatusCode::BAD_REQUEST, report.to_string()))
+}
+
 pub(crate) fn validate_client_id(id: &str) -> Result<Uuid, (StatusCode, Json<ErrorResponse>)> {
     if id.len() != 36 {
         return Err(error_response(StatusCode::BAD_REQUEST, "Invalid id"));
     }
 
     Uuid::parse_str(id).map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid id"))
-}
-
-pub(crate) fn validate_exact_byte_len(
-    value: &[u8],
-    expected: usize,
-    field_name: &str,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    if value.len() != expected {
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            format!("Invalid {field_name}"),
-        ));
-    }
-
-    Ok(())
 }
 
 pub(crate) fn validate_max_byte_len(

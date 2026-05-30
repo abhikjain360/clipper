@@ -4,7 +4,87 @@
 //! payloads exchanged by `clipper-server` and `clipper-client`. Keep database
 //! entities and UI state out of this crate; convert at the server/client edges.
 
+use std::collections::HashSet;
+
+use garde::Validate;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+const SHA256_BYTES: usize = 32;
+const XCHACHA20_NONCE_BYTES: usize = 24;
+
+macro_rules! uuid_id {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(Uuid);
+
+        impl $name {
+            pub fn as_uuid(&self) -> &Uuid {
+                &self.0
+            }
+
+            pub fn into_uuid(self) -> Uuid {
+                self.0
+            }
+        }
+
+        impl From<Uuid> for $name {
+            fn from(value: Uuid) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<$name> for Uuid {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = uuid::Error;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Uuid::parse_str(value).map(Self)
+            }
+        }
+    };
+}
+
+uuid_id!(UserId);
+uuid_id!(DeviceId);
+uuid_id!(ClipboardItemId);
+uuid_id!(ObjectId);
+uuid_id!(ObjectPayloadId);
+
+mod base64_vec {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+    pub fn serialize<S>(value: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&B64.encode(value))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        B64.decode(value).map_err(D::Error::custom)
+    }
+}
 
 /// Binary request/response body format used by Rust-only object endpoints.
 pub const POSTCARD_CONTENT_TYPE: &str = "application/vnd.clipper.postcard";
@@ -29,11 +109,14 @@ impl Default for Argon2Params {
 
 // -- Auth --
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct LoginChallengeRequest {
+    #[garde(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<String>,
-    pub credential_request_b64: String,
+    pub user_id: Option<UserId>,
+    #[garde(length(min = 1))]
+    #[serde(rename = "credential_request_b64", with = "base64_vec")]
+    pub credential_request: Vec<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,14 +126,20 @@ pub struct LoginChallengeResponse {
     pub server: ServerInfo,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct LoginRequest {
+    #[garde(length(min = 1))]
     pub challenge_id: String,
-    pub credential_finalization_b64: String,
+    #[garde(length(min = 1))]
+    #[serde(rename = "credential_finalization_b64", with = "base64_vec")]
+    pub credential_finalization: Vec<u8>,
+    #[garde(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub device_id: Option<String>,
+    pub device_id: Option<DeviceId>,
+    #[garde(length(min = 1))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,
+    #[garde(length(min = 1))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
 }
@@ -69,10 +158,13 @@ pub struct ServerInfo {
     pub encryption_params: Argon2Params,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct RegisterStartRequest {
+    #[garde(length(min = 1))]
     pub access_key: String,
-    pub registration_request_b64: String,
+    #[garde(length(min = 1))]
+    #[serde(rename = "registration_request_b64", with = "base64_vec")]
+    pub registration_request: Vec<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,14 +175,20 @@ pub struct RegisterStartResponse {
     pub server: ServerInfo,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct RegisterFinishRequest {
+    #[garde(length(min = 1))]
     pub registration_id: String,
-    pub registration_upload_b64: String,
+    #[garde(length(min = 1))]
+    #[serde(rename = "registration_upload_b64", with = "base64_vec")]
+    pub registration_upload: Vec<u8>,
+    #[garde(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub device_id: Option<String>,
+    pub device_id: Option<DeviceId>,
+    #[garde(length(min = 1))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,
+    #[garde(length(min = 1))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
 }
@@ -111,13 +209,25 @@ pub struct ClipboardMeta {
     pub size: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct ClipboardUploadRequest {
-    pub id: String,
-    pub nonce_b64: String,
-    pub ciphertext_b64: String,
-    pub ciphertext_sha256_b64: String,
+    #[garde(skip)]
+    pub id: ClipboardItemId,
+    #[garde(length(equal = XCHACHA20_NONCE_BYTES))]
+    #[serde(rename = "nonce_b64", with = "base64_vec")]
+    pub nonce: Vec<u8>,
+    #[garde(skip)]
+    #[serde(rename = "ciphertext_b64", with = "base64_vec")]
+    pub ciphertext: Vec<u8>,
+    #[garde(
+        length(equal = SHA256_BYTES),
+        custom(validate_sha256_matches(&self.ciphertext))
+    )]
+    #[serde(rename = "ciphertext_sha256_b64", with = "base64_vec")]
+    pub ciphertext_sha256: Vec<u8>,
+    #[garde(skip)]
     pub source_device_id: String,
+    #[garde(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_created_at: Option<String>,
 }
@@ -155,28 +265,41 @@ impl ObjectKind {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct ObjectPayloadInit {
-    pub id: String,
+    #[garde(skip)]
+    pub id: ObjectPayloadId,
+    #[garde(length(equal = XCHACHA20_NONCE_BYTES))]
     pub nonce: Vec<u8>,
+    #[garde(range(min = 0))]
     pub ciphertext_size: i64,
+    #[garde(length(equal = SHA256_BYTES))]
     pub sha256_ciphertext: Vec<u8>,
+    #[garde(custom(validate_inline_ciphertext(
+        self.ciphertext_size,
+        &self.sha256_ciphertext
+    )))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inline_ciphertext: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct ObjectInitRequest {
-    pub id: String,
+    #[garde(skip)]
+    pub id: ObjectId,
+    #[garde(skip)]
     pub kind: ObjectKind,
+    #[garde(length(equal = XCHACHA20_NONCE_BYTES))]
     pub meta_nonce: Vec<u8>,
+    #[garde(skip)]
     pub meta_ciphertext: Vec<u8>,
+    #[garde(dive, length(min = 1), custom(validate_unique_init_payload_ids))]
     pub payloads: Vec<ObjectPayloadInit>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ObjectPayloadUpload {
-    pub id: String,
+    pub id: ObjectPayloadId,
     pub upload_url: String,
 }
 
@@ -186,21 +309,25 @@ pub struct ObjectInitResponse {
     pub complete: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct ObjectPayloadComplete {
-    pub id: String,
+    #[garde(skip)]
+    pub id: ObjectPayloadId,
+    #[garde(range(min = 0))]
     pub ciphertext_size: i64,
+    #[garde(length(equal = SHA256_BYTES))]
     pub sha256_ciphertext: Vec<u8>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct ObjectCompleteRequest {
+    #[garde(dive, length(min = 1), custom(validate_unique_complete_payload_ids))]
     pub payloads: Vec<ObjectPayloadComplete>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ObjectPayloadDescriptor {
-    pub id: String,
+    pub id: ObjectPayloadId,
     pub nonce: Vec<u8>,
     pub ciphertext_size: i64,
     pub sha256_ciphertext: Vec<u8>,
@@ -208,13 +335,13 @@ pub struct ObjectPayloadDescriptor {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ObjectListItem {
-    pub id: String,
+    pub id: ObjectId,
     pub kind: ObjectKind,
     pub meta_nonce: Vec<u8>,
     pub meta_ciphertext: Vec<u8>,
     pub payloads: Vec<ObjectPayloadDescriptor>,
     pub created_at: String,
-    pub source_device_id: String,
+    pub source_device_id: DeviceId,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -265,7 +392,7 @@ pub struct BootstrapResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeviceInfo {
-    pub id: String,
+    pub id: DeviceId,
     pub name: String,
     pub platform: String,
 }
@@ -295,4 +422,65 @@ pub struct FileMeta {
     pub mime_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<i64>,
+}
+
+fn validate_sha256_matches<'a>(
+    ciphertext: &'a [u8],
+) -> impl FnOnce(&Vec<u8>, &()) -> garde::Result + 'a {
+    move |value, _| {
+        let computed: [u8; SHA256_BYTES] = Sha256::digest(ciphertext).into();
+        if computed.as_slice() != value.as_slice() {
+            return Err(garde::Error::new("must match ciphertext SHA-256"));
+        }
+        Ok(())
+    }
+}
+
+fn validate_inline_ciphertext<'a>(
+    ciphertext_size: i64,
+    sha256_ciphertext: &'a [u8],
+) -> impl FnOnce(&Option<Vec<u8>>, &()) -> garde::Result + 'a {
+    move |value, _| {
+        let Some(value) = value else {
+            return Ok(());
+        };
+        if ciphertext_size < 0 {
+            return Ok(());
+        }
+        if value.len() as i64 != ciphertext_size {
+            return Err(garde::Error::new(
+                "length must match declared ciphertext_size",
+            ));
+        }
+
+        let computed: [u8; SHA256_BYTES] = Sha256::digest(value).into();
+        if computed.as_slice() != sha256_ciphertext {
+            return Err(garde::Error::new("must match sha256_ciphertext"));
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_unique_init_payload_ids(value: &Vec<ObjectPayloadInit>, _: &()) -> garde::Result {
+    let mut seen = HashSet::new();
+    for payload in value {
+        if !seen.insert(payload.id) {
+            return Err(garde::Error::new("must not contain duplicate payload ids"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_unique_complete_payload_ids(
+    value: &Vec<ObjectPayloadComplete>,
+    _: &(),
+) -> garde::Result {
+    let mut seen = HashSet::new();
+    for payload in value {
+        if !seen.insert(payload.id) {
+            return Err(garde::Error::new("must not contain duplicate payload ids"));
+        }
+    }
+    Ok(())
 }

@@ -61,9 +61,9 @@
               stableChannel.rust-src
               stableChannel.rust-analyzer
             ]
-            ++ map (
-              t: (fenixPkgs.targets.${t}.toolchainOf stableArgs).rust-std
-            ) (androidRustTargets ++ [ wasmRustTarget ])
+            ++ map (t: (fenixPkgs.targets.${t}.toolchainOf stableArgs).rust-std) (
+              androidRustTargets ++ [ wasmRustTarget ]
+            )
           );
           nightly = fenixPkgs.combine [
             nightlyChannel.cargo
@@ -271,9 +271,7 @@
           scripts = mkCommandScripts system;
           specs = mkCommandSpecs system;
         in
-        pkgs.lib.mapAttrs (
-          name: drv: mkApp drv specs.${name}.program specs.${name}.description
-        ) scripts
+        pkgs.lib.mapAttrs (name: drv: mkApp drv specs.${name}.program specs.${name}.description) scripts
         // {
           default = mkApp scripts.fmt specs.fmt.program specs.fmt.description;
         }
