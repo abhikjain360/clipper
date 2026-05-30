@@ -87,6 +87,7 @@
             baseRuntimeInputs
             ++ (with pkgs; [
               dart
+              deno
               nixfmt
             ])
             ++ [ toolchains.nightly ];
@@ -108,6 +109,7 @@
           webServeRuntimeInputs = baseRuntimeInputs ++ [ pkgs.deno ];
           macosBuildRuntimeInputs =
             baseRuntimeInputs
+            ++ [ pkgs.deno ]
             ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
               pkgs.cocoapods
               toolchains.stable
@@ -194,7 +196,13 @@
 
           web-serve = {
             program = "clipper-web-serve";
-            script = "web-serve.sh";
+            denoScript = "web-serve.ts";
+            denoPermissions = [
+              "--allow-env=CLIPPER_WEB_ROOT,CLIPPER_REPO_ROOT"
+              "--allow-read"
+              "--allow-net=127.0.0.1"
+              "--allow-run=git"
+            ];
             description = "Serve the Flutter web build with required cross-origin isolation headers";
             runtimeInputs = webServeRuntimeInputs;
           };
@@ -202,7 +210,12 @@
         // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
           macos-build = {
             program = "clipper-macos-build";
-            script = "macos-build.sh";
+            denoScript = "macos-build.ts";
+            denoPermissions = [
+              "--allow-env"
+              "--allow-read"
+              "--allow-run"
+            ];
             description = "Build the macOS Flutter app with host Flutter/Xcode and Nix Rust";
             runtimeInputs = macosBuildRuntimeInputs;
             env = cargokitStableEnv;
@@ -213,16 +226,28 @@
         let
           pkgs = mkPkgs system;
           specs = mkCommandSpecs system;
+          mkCommandText =
+            cfg:
+            let
+              denoPermissions = pkgs.lib.escapeShellArgs (cfg.denoPermissions or [ ]);
+            in
+            if cfg ? denoScript then
+              ''
+                ${cfg.env or ""}
+                deno run ${denoPermissions} ${scriptsDir}/${cfg.denoScript} "$@"
+              ''
+            else
+              ''
+                ${cfg.env or ""}
+                bash ${scriptsDir}/${cfg.script} "$@"
+              '';
         in
         pkgs.lib.mapAttrs (
           _name: cfg:
           pkgs.writeShellApplication {
             name = cfg.program;
             runtimeInputs = cfg.runtimeInputs;
-            text = ''
-              ${cfg.env or ""}
-              bash ${scriptsDir}/${cfg.script} "$@"
-            '';
+            text = mkCommandText cfg;
           }
         ) specs;
       mkApp = drv: program: description: {

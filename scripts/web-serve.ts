@@ -1,9 +1,21 @@
+import {
+  fileExists,
+  findRepoRoot,
+  joinPath,
+  moduleDir,
+  nonEmpty,
+  resolvePath,
+} from "./script-common.ts";
+import type { Env } from "./script-common.ts";
+
 type ServeArgs = {
-  root: string;
-  preferredPort: number;
+  readonly root: string;
+  readonly preferredPort: number;
 };
 
 const HOST = "127.0.0.1";
+const DEFAULT_ROOT = "app/build/web";
+const DEFAULT_PORT = 53880;
 const PORT_ATTEMPTS = 100;
 
 const crossOriginHeaders: Readonly<Record<string, string>> = {
@@ -35,22 +47,96 @@ const contentTypes: Readonly<Record<string, string>> = {
 };
 
 function usage(): never {
-  throw new Error("usage: web-serve.ts <root> <port>");
+  throw new Error(
+    [
+      "usage: web-serve.ts [port]",
+      "       web-serve.ts [--root <path>] [--port <port>]",
+      "       web-serve.ts <root> <port>",
+    ].join("\n"),
+  );
 }
 
-function parseArgs(args: readonly string[]): ServeArgs {
-  if (args.length !== 2) usage();
-
-  const [root, rawPort] = args;
-  const preferredPort = Number(rawPort);
-  if (
-    !Number.isInteger(preferredPort) || preferredPort < 1 ||
-    preferredPort > 65_535
-  ) {
+function parsePort(rawPort: string): number {
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error(`invalid port: ${rawPort}`);
+  }
+  return port;
+}
+
+function looksLikePort(value: string): boolean {
+  return /^[0-9]+$/.test(value);
+}
+
+function parseArgs(args: readonly string[], env: Env): ServeArgs {
+  let root = nonEmpty(env.CLIPPER_WEB_ROOT) ?? DEFAULT_ROOT;
+  let preferredPort = DEFAULT_PORT;
+  let rootSet = false;
+  let portSet = false;
+  const positional: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--root") {
+      const value = args[index + 1];
+      if (value === undefined) usage();
+      root = value;
+      rootSet = true;
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--root=")) {
+      root = arg.slice("--root=".length);
+      rootSet = true;
+      continue;
+    }
+
+    if (arg === "--port" || arg === "-p") {
+      const value = args[index + 1];
+      if (value === undefined) usage();
+      preferredPort = parsePort(value);
+      portSet = true;
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--port=")) {
+      preferredPort = parsePort(arg.slice("--port=".length));
+      portSet = true;
+      continue;
+    }
+
+    if (arg.startsWith("-")) usage();
+
+    positional.push(arg);
+  }
+
+  for (const value of positional) {
+    if (!rootSet && (portSet || !looksLikePort(value))) {
+      root = value;
+      rootSet = true;
+      continue;
+    }
+
+    if (!portSet) {
+      preferredPort = parsePort(value);
+      portSet = true;
+      continue;
+    }
+
+    usage();
   }
 
   return { root, preferredPort };
+}
+
+function readEnv(): Env {
+  return {
+    CLIPPER_REPO_ROOT: Deno.env.get("CLIPPER_REPO_ROOT") ?? "",
+    CLIPPER_WEB_ROOT: Deno.env.get("CLIPPER_WEB_ROOT") ?? "",
+  };
 }
 
 function responseHeaders(contentType?: string): Headers {
@@ -92,7 +178,7 @@ function requestedFilePath(root: string, url: URL): string | undefined {
   }
 
   if (pathname.endsWith("/")) segments.push("index.html");
-  return [root, ...segments].join("/");
+  return joinPath(root, ...segments);
 }
 
 async function serveStaticFile(
@@ -168,5 +254,30 @@ async function serve(root: string, preferredPort: number): Promise<void> {
     : new Error("could not bind local web server");
 }
 
-const args = parseArgs(Deno.args);
-await serve(await Deno.realPath(args.root), args.preferredPort);
+async function resolveRoot(rawRoot: string): Promise<string> {
+  const scriptDir = moduleDir(import.meta.url);
+  const repoRoot = await findRepoRoot(readEnv(), [
+    joinPath(scriptDir, ".."),
+  ]);
+  const root = resolvePath(repoRoot, rawRoot);
+
+  if (!(await fileExists(joinPath(root, "index.html")))) {
+    throw new Error(
+      `missing ${root}/index.html; run nix run .#web-build first`,
+    );
+  }
+
+  return await Deno.realPath(root);
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs(Deno.args, readEnv());
+  await serve(await resolveRoot(args.root), args.preferredPort);
+}
+
+try {
+  await main();
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  Deno.exit(1);
+}

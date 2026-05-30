@@ -9,4 +9,5 @@ clipper_use_nightly
 
 nixfmt flake.nix
 cargo fmt --all
+deno fmt scripts/*.ts test-server.ts
 dart format app/lib app/test app/integration_test app/test_driver
