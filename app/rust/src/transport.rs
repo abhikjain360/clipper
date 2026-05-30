@@ -390,6 +390,9 @@ async fn route_daemon_line(
                     warn!("State change event did not include state");
                 }
             }
+            dt::DaemonEventKind::AuthChallenge => {
+                warn!("Ignoring auth challenge event after daemon handshake");
+            }
         },
         Err(e) => {
             warn!("Failed to parse daemon message: {}", e);
