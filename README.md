@@ -2,13 +2,20 @@
 
 Encrypted clipboard and file sync.
 
+> **Status: early and experimental.** Clipper is pre-1.0, has not been security
+> audited, and has known unfixed issues tracked in
+> [`docs/rust-code-review.md`](docs/rust-code-review.md). Don't trust it with
+> secrets you can't afford to lose yet. See [SECURITY.md](SECURITY.md).
+
 The server stores ciphertext and sync metadata. Clients do the crypto locally.
 The raw passphrase is not sent to the server.
 
 Auth uses OPAQUE, an augmented PAKE. The server stores OPAQUE verifier material,
 not a password hash usable as a login secret. Clipboard text, file metadata, and
-file bytes are encrypted client-side with XChaCha20-Poly1305. The encryption key
-is derived from the passphrase with Argon2id and a per-user salt.
+file bytes are encrypted client-side with XChaCha20-Poly1305. The 256-bit
+data-encryption key is derived from the OPAQUE login's `export_key` with
+HKDF-SHA256; it is computed on the client and never sent to the server. OPAQUE
+itself uses Argon2id to stretch the passphrase.
 
 Strong passphrases still matter. TLS still matters too; OPAQUE does not protect
 bearer tokens or sync metadata from plain HTTP.
@@ -236,3 +243,13 @@ CLIPPER_TRUSTED_PROXIES=127.0.0.1,::1 \
 
 The equivalent CLI form is `--trusted-proxy 127.0.0.1 --trusted-proxy ::1`.
 Do not trust forwarded headers from arbitrary peers; clients can spoof them.
+
+## License
+
+Clipper is licensed under the GNU Affero General Public License, Version 3
+(AGPL-3.0), **with an additional linking/combination permission**: using,
+linking against, or embedding Clipper in another project does not place that
+other project under the AGPL. Only modifications to Clipper's own source code
+carry the AGPL's copyleft — including its network-use (SaaS) disclosure
+requirement — and must be released in source form. See [LICENSE](LICENSE) for
+the exact terms.
