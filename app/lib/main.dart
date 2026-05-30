@@ -7,6 +7,7 @@ import 'src/rust/api/clipper.dart';
 import 'src/rust/frb_generated.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
+import 'utils/errors.dart';
 import 'widgets/app_status.dart';
 
 Future<void> main() async {
@@ -109,7 +110,7 @@ class _AppRootState extends State<AppRoot> {
         if (!mounted) return;
         setState(() {
           _state = null;
-          _connectError = e.toString();
+          _connectError = displayError(e);
         });
         // Wait before retrying
         await Future.delayed(const Duration(seconds: 2));

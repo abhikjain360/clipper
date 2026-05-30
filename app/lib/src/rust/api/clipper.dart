@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `bridge_result`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `from`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `as_ref`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `from_str`, `from`, `from`, `from`, `from`, `from`, `try_from`
 
 Future<void> connectToDaemon() =>
     RustLib.instance.api.crateApiClipperConnectToDaemon();
@@ -219,6 +219,27 @@ enum BridgeConnectionStatus {
 
   static Future<BridgeConnectionStatus> default_() =>
       RustLib.instance.api.crateApiClipperBridgeConnectionStatusDefault();
+}
+
+class BridgeError {
+  final String code;
+  final String message;
+
+  const BridgeError({required this.code, required this.message});
+
+  static Future<BridgeError> default_() =>
+      RustLib.instance.api.crateApiClipperBridgeErrorDefault();
+
+  @override
+  int get hashCode => code.hashCode ^ message.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BridgeError &&
+          runtimeType == other.runtimeType &&
+          code == other.code &&
+          message == other.message;
 }
 
 class BridgeFileItem {

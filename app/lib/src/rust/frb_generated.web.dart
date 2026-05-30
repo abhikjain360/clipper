@@ -39,6 +39,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BridgeConnectionStatus dco_decode_bridge_connection_status(dynamic raw);
 
   @protected
+  BridgeError dco_decode_bridge_error(dynamic raw);
+
+  @protected
   BridgeFileItem dco_decode_bridge_file_item(dynamic raw);
 
   @protected
@@ -91,6 +94,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BridgeConnectionStatus sse_decode_bridge_connection_status(
     SseDeserializer deserializer,
   );
+
+  @protected
+  BridgeError sse_decode_bridge_error(SseDeserializer deserializer);
 
   @protected
   BridgeFileItem sse_decode_bridge_file_item(SseDeserializer deserializer);
@@ -155,6 +161,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     BridgeConnectionStatus self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_bridge_error(BridgeError self, SseSerializer serializer);
 
   @protected
   void sse_encode_bridge_file_item(

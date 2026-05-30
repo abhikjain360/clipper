@@ -3,7 +3,7 @@ use axum::{
     extract::{Extension, State},
     http::StatusCode,
 };
-use clipper_core::models::{BootstrapResponse, DeviceInfo, ServerInfo};
+use clipper_core::models::{ApiErrorCode, BootstrapResponse, DeviceInfo, ServerInfo};
 use sea_orm::{
     ColumnTrait, DerivePartialModel, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect,
 };
@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::{
     auth::AuthInfo,
     entity::{devices, event_log},
+    routes::ApiError,
     state::AppState,
 };
 
@@ -27,7 +28,7 @@ struct BootstrapDeviceRow {
 pub async fn bootstrap(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
-) -> Result<Json<BootstrapResponse>, StatusCode> {
+) -> Result<Json<BootstrapResponse>, ApiError> {
     let dev = devices::Entity::find_by_id(auth.device_id)
         .into_partial_model::<BootstrapDeviceRow>()
         .one(state.db())
@@ -38,14 +39,22 @@ pub async fn bootstrap(
                 error = %e,
                 "Failed to look up device in bootstrap",
             );
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiErrorCode::Database,
+                "Database error",
+            )
         })?
         .ok_or_else(|| {
             error!(
                 device_id = %auth.device_id,
                 "Authenticated device row missing in bootstrap (data inconsistency)",
             );
-            StatusCode::NOT_FOUND
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                ApiErrorCode::NotFound,
+                "Device not found",
+            )
         })?;
 
     let latest_seq = event_log::Entity::find()
@@ -62,7 +71,11 @@ pub async fn bootstrap(
                 error = %e,
                 "Failed to load latest event_log seq in bootstrap",
             );
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiErrorCode::Database,
+                "Database error",
+            )
         })?
         .unwrap_or(0);
 

@@ -28,6 +28,36 @@ pub(crate) enum RuntimeError {
     UnsupportedPlatform,
 }
 
+impl RuntimeError {
+    pub(crate) fn error_response(&self) -> clipper_daemon_types::ErrorResponse {
+        match self {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            Self::Transport(error) => error.error_response(),
+            #[cfg(any(target_os = "android", target_family = "wasm"))]
+            Self::Client(error) => error.error_response(),
+            #[cfg(any(target_os = "android", target_family = "wasm"))]
+            Self::ResultEncode(_) => clipper_daemon_types::ErrorResponse::new(
+                clipper_daemon_types::ApiErrorCode::Unknown,
+                self.to_string(),
+            ),
+            Self::UnsupportedOperation(_) => clipper_daemon_types::ErrorResponse::new(
+                clipper_daemon_types::ApiErrorCode::Unknown,
+                self.to_string(),
+            ),
+            #[cfg(not(any(
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "android",
+                target_family = "wasm"
+            )))]
+            Self::UnsupportedPlatform => clipper_daemon_types::ErrorResponse::new(
+                clipper_daemon_types::ApiErrorCode::Unknown,
+                self.to_string(),
+            ),
+        }
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod imp {
     use clipper_daemon_types::AppState;

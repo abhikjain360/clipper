@@ -62,12 +62,7 @@ impl ApiClient {
 
     async fn checked_response(resp: reqwest::Response) -> Result<reqwest::Response, ClientError> {
         if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::Api {
-                status,
-                message: body,
-            });
+            return Err(api_error_from_response(resp).await);
         }
 
         Ok(resp)
@@ -377,16 +372,7 @@ impl ApiClient {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::Api {
-                status,
-                message: body,
-            });
-        }
-
-        Ok(resp.json().await?)
+        Ok(Self::checked_response(resp).await?.json().await?)
     }
 
     // ── Health ──
@@ -458,6 +444,37 @@ fn body_preview(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+async fn api_error_from_response(resp: reqwest::Response) -> ClientError {
+    let status = resp.status().as_u16();
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let bytes = resp.bytes().await.unwrap_or_default();
+    let error = if is_json_content_type(content_type.as_deref()) {
+        serde_json::from_slice::<ErrorResponse>(&bytes).unwrap_or_else(|_| {
+            ErrorResponse::new(
+                ApiErrorCode::from_http_status(status),
+                format!(
+                    "HTTP {status} with invalid error body: {}",
+                    body_preview(&bytes)
+                ),
+            )
+        })
+    } else {
+        ErrorResponse::new(ApiErrorCode::from_http_status(status), body_preview(&bytes))
+    };
+
+    ClientError::Api { status, error }
+}
+
+fn is_json_content_type(value: Option<&str>) -> bool {
+    value
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
 }
 
 // ── Encryption helpers ──
@@ -615,8 +632,8 @@ pub fn decrypt_file_blob_bytes(
 pub enum ClientError {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("API error {status}: {message}")]
-    Api { status: u16, message: String },
+    #[error("API error {status} ({code}): {message}", code = error.code, message = error.message)]
+    Api { status: u16, error: ErrorResponse },
     #[error("Crypto error: {0}")]
     Crypto(#[from] crypto::CryptoError),
     #[error("WebSocket error: {0}")]
@@ -625,6 +642,19 @@ pub enum ClientError {
     LocalStore(String),
     #[error("{0}")]
     Other(String),
+}
+
+impl ClientError {
+    pub fn error_response(&self) -> ErrorResponse {
+        match self {
+            Self::Api { error, .. } => error.clone(),
+            Self::Http(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.to_string()),
+            Self::Crypto(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.to_string()),
+            Self::WebSocket(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.clone()),
+            Self::LocalStore(error) => ErrorResponse::new(ApiErrorCode::Storage, error.clone()),
+            Self::Other(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.clone()),
+        }
+    }
 }
 
 impl From<crate::local_store::LocalStoreError> for ClientError {

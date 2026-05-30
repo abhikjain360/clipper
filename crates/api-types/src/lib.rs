@@ -359,9 +359,134 @@ pub struct HealthResponse {
     pub ok: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, Display, EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ApiErrorCode {
+    BadRequest,
+    UnsupportedMediaType,
+    ValidationFailed,
+    InvalidId,
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Conflict,
+    RateLimited,
+    PayloadTooLarge,
+    ServerNotInitialized,
+    Database,
+    ServerSecret,
+    Storage,
+    PayloadRead,
+    PayloadWrite,
+    Stream,
+    Unknown,
+    InvalidObjectKind,
+    ObjectNotFound,
+    ObjectAlreadyExists,
+    ObjectForbidden,
+    ObjectDeleteUnsupported,
+    ObjectNotReadyToComplete,
+    DuplicateObjectPayloadId,
+    ObjectPayloadNotFound,
+    ObjectPayloadAlreadyUploaded,
+    ObjectPayloadUploadInProgress,
+    ObjectPayloadNotUploaded,
+    MissingObjectPayloads,
+    MissingPayloadCompletion,
+    IncompletePayloadCompletion,
+    ObjectPayloadMetadataMismatch,
+    ObjectPayloadIntegrityMismatch,
+    InvalidPayloadSize,
+}
+
+impl ApiErrorCode {
+    pub fn default_message(self) -> &'static str {
+        match self {
+            Self::BadRequest => "Bad request",
+            Self::UnsupportedMediaType => "Unsupported media type",
+            Self::ValidationFailed => "Validation failed",
+            Self::InvalidId => "Invalid id",
+            Self::Unauthorized => "Unauthorized",
+            Self::Forbidden => "Forbidden",
+            Self::NotFound => "Not found",
+            Self::Conflict => "Conflict",
+            Self::RateLimited => "Too many requests",
+            Self::PayloadTooLarge => "Payload too large",
+            Self::ServerNotInitialized => "Server not initialized",
+            Self::Database => "Database error",
+            Self::ServerSecret => "Server secret error",
+            Self::Storage => "Storage error",
+            Self::PayloadRead => "Payload read error",
+            Self::PayloadWrite => "Payload write error",
+            Self::Stream => "Stream error",
+            Self::Unknown => "Unknown error",
+            Self::InvalidObjectKind => "Invalid object kind",
+            Self::ObjectNotFound => "Object not found",
+            Self::ObjectAlreadyExists => "Object already exists",
+            Self::ObjectForbidden => "Forbidden",
+            Self::ObjectDeleteUnsupported => "Object cannot be deleted this way",
+            Self::ObjectNotReadyToComplete => "Object is not ready to complete",
+            Self::DuplicateObjectPayloadId => "Duplicate object payload id",
+            Self::ObjectPayloadNotFound => "Object payload not found",
+            Self::ObjectPayloadAlreadyUploaded => "Object payload already uploaded",
+            Self::ObjectPayloadUploadInProgress => "Object payload upload in progress",
+            Self::ObjectPayloadNotUploaded => "Object payload has not been uploaded",
+            Self::MissingObjectPayloads => "Missing object payloads",
+            Self::MissingPayloadCompletion => "Missing payload completion",
+            Self::IncompletePayloadCompletion => {
+                "Complete request does not cover all object payloads"
+            }
+            Self::ObjectPayloadMetadataMismatch => {
+                "Payload metadata does not match initialized values"
+            }
+            Self::ObjectPayloadIntegrityMismatch => "Payload size or SHA-256 mismatch",
+            Self::InvalidPayloadSize => "Invalid payload size",
+        }
+    }
+
+    pub fn from_http_status(status: u16) -> Self {
+        match status {
+            400 => Self::BadRequest,
+            401 => Self::Unauthorized,
+            403 => Self::Forbidden,
+            404 => Self::NotFound,
+            409 => Self::Conflict,
+            413 => Self::PayloadTooLarge,
+            415 => Self::UnsupportedMediaType,
+            429 => Self::RateLimited,
+            500 => Self::Unknown,
+            503 => Self::ServerNotInitialized,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
-    pub error: String,
+    pub code: ApiErrorCode,
+    pub message: String,
+}
+
+impl ErrorResponse {
+    pub fn new(code: ApiErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn from_code(code: ApiErrorCode) -> Self {
+        Self::new(code, code.default_message())
+    }
+}
+
+impl std::fmt::Display for ErrorResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
 }
 
 // -- File metadata (encrypted) --

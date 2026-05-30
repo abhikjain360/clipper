@@ -8,9 +8,9 @@ use chrono::{Duration, Utc};
 use clipper_core::{
     crypto,
     models::{
-        ErrorResponse, LoginChallengeRequest, LoginChallengeResponse, LoginRequest, LoginResponse,
-        OkResponse, RegisterFinishRequest, RegisterFinishResponse, RegisterStartRequest,
-        RegisterStartResponse, ServerInfo,
+        LoginChallengeRequest, LoginChallengeResponse, LoginRequest, LoginResponse, OkResponse,
+        RegisterFinishRequest, RegisterFinishResponse, RegisterStartRequest, RegisterStartResponse,
+        ServerInfo,
     },
 };
 use sea_orm::{
@@ -24,7 +24,7 @@ use crate::{
     auth::{self as server_auth, AuthInfo},
     entity::{access_keys, devices, server_config, sessions, users},
     rate_limit::ClientIp,
-    routes::{Postcard, error_response},
+    routes::{ApiError, Postcard, error_response},
     secret_storage,
     state::AppState,
 };
@@ -49,7 +49,7 @@ struct LoginUserRow {
 pub async fn challenge(
     State(state): State<AppState>,
     Postcard(req): Postcard<LoginChallengeRequest>,
-) -> Result<Postcard<LoginChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Postcard<LoginChallengeResponse>, ApiError> {
     let db_config = load_server_config(&state).await?;
     let opaque_server_setup = unwrap_global_opaque_server_setup(&state, &db_config)?;
 
@@ -112,7 +112,7 @@ pub async fn challenge(
 pub async fn register_start(
     State(state): State<AppState>,
     Postcard(req): Postcard<RegisterStartRequest>,
-) -> Result<Postcard<RegisterStartResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Postcard<RegisterStartResponse>, ApiError> {
     let now = Utc::now().to_rfc3339();
     let db_config = load_server_config(&state).await?;
 
@@ -224,7 +224,7 @@ pub async fn register_finish(
     ClientIp(ip): ClientIp,
     headers: HeaderMap,
     Postcard(req): Postcard<RegisterFinishRequest>,
-) -> Result<Postcard<RegisterFinishResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Postcard<RegisterFinishResponse>, ApiError> {
     let pending = state
         .take_pending_registration(&req.registration_id)
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid registration"))?;
@@ -376,7 +376,7 @@ pub async fn login(
     ClientIp(ip): ClientIp,
     headers: HeaderMap,
     Postcard(req): Postcard<LoginRequest>,
-) -> Result<Postcard<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Postcard<LoginResponse>, ApiError> {
     // Pop state_S (single-use) stashed by `challenge`.
     let auth_challenge = state
         .take_auth_challenge(&req.challenge_id)
@@ -443,7 +443,7 @@ pub async fn login(
 pub async fn logout(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
-) -> Result<Json<OkResponse>, StatusCode> {
+) -> Result<Json<OkResponse>, ApiError> {
     sessions::Entity::delete_by_id(auth.session_id)
         .exec(state.db())
         .await
@@ -454,7 +454,7 @@ pub async fn logout(
                 error = %e,
                 "Failed to delete session on logout",
             );
-            StatusCode::INTERNAL_SERVER_ERROR
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
         })?;
 
     info!(device_id = %auth.device_id, "Logout");
@@ -471,9 +471,7 @@ fn access_key_hash(
     server_auth::hash_access_key(access_key, salt, secret, access_key_hash_params)
 }
 
-async fn load_server_config(
-    state: &AppState,
-) -> Result<server_config::Model, (StatusCode, Json<ErrorResponse>)> {
+async fn load_server_config(state: &AppState) -> Result<server_config::Model, ApiError> {
     server_config::Entity::find_by_id(1)
         .one(state.db())
         .await
@@ -491,7 +489,7 @@ fn opaque_credential_identifier(username: &str) -> Vec<u8> {
 fn unwrap_global_opaque_server_setup(
     state: &AppState,
     db_config: &server_config::Model,
-) -> Result<Vec<u8>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Vec<u8>, ApiError> {
     secret_storage::unwrap_opaque_server_setup(state.secrets(), &db_config.opaque_server_setup)
         .map_err(|e| {
             error!(error = %e, "Failed to unwrap global opaque_server_setup");
@@ -508,7 +506,7 @@ async fn issue_session<C>(
     db: &C,
     user_id: Uuid,
     options: SessionOptions,
-) -> Result<IssuedSession, (StatusCode, Json<ErrorResponse>)>
+) -> Result<IssuedSession, ApiError>
 where
     C: ConnectionTrait,
 {
@@ -1090,7 +1088,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(result.unwrap_err().0, StatusCode::UNAUTHORIZED);
+        assert_eq!(result.unwrap_err().status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -1156,7 +1154,7 @@ mod tests {
         };
         let result = login(State(state), client_ip(), HeaderMap::new(), validated(req)).await;
 
-        assert_eq!(result.unwrap_err().0, StatusCode::UNAUTHORIZED);
+        assert_eq!(result.unwrap_err().status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

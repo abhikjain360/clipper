@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../src/rust/api/clipper.dart';
 import '../utils/app_platform.dart';
+import '../utils/errors.dart';
 import '../widgets/clipper_brand.dart';
 import '../widgets/loading_filled_button.dart';
 import '../widgets/responsive_card_scaffold.dart';
@@ -91,7 +92,7 @@ class _LoginScreenState extends State<LoginScreen> {
       );
       // State change will be picked up by AppRoot's watcher
     } catch (e) {
-      setState(() => _error = e.toString());
+      setState(() => _error = displayError(e));
     } finally {
       if (mounted) {
         setState(() => _loading = false);
@@ -138,7 +139,7 @@ class _LoginScreenState extends State<LoginScreen> {
       _usernameController.text = registered;
       // State change will be picked up by AppRoot's watcher
     } catch (e) {
-      setState(() => _error = e.toString());
+      setState(() => _error = displayError(e));
     } finally {
       if (mounted) {
         setState(() => _loading = false);

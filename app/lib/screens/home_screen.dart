@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import '../services/secure_clipboard.dart';
 import '../src/rust/api/clipper.dart';
 import '../utils/browser_download.dart' as browser_download;
+import '../utils/errors.dart';
 import '../utils/file_helpers.dart';
 import '../utils/formatters.dart';
 import '../widgets/app_status.dart';
@@ -37,7 +38,7 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       await refresh();
     } catch (e) {
-      _showError(e.toString());
+      _showError(displayError(e));
     } finally {
       if (mounted) setState(() => _refreshing = false);
     }
@@ -82,7 +83,7 @@ class _HomeScreenState extends State<HomeScreen> {
         );
       }
     } catch (e) {
-      _showError(e.toString());
+      _showError(displayError(e));
     }
   }
 
@@ -101,7 +102,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ).showSnackBar(const SnackBar(content: Text('Clipboard added')));
       }
     } catch (e) {
-      _showError(e.toString());
+      _showError(displayError(e));
     } finally {
       if (mounted) setState(() => _addingClipboard = false);
     }
@@ -132,7 +133,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ).showSnackBar(const SnackBar(content: Text('File uploaded')));
       }
     } catch (e) {
-      _showError(e.toString());
+      _showError(displayError(e));
     }
   }
 
@@ -149,7 +150,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ).showSnackBar(const SnackBar(content: Text('Download started')));
         }
       } catch (e) {
-        _showError(e.toString());
+        _showError(displayError(e));
       }
       return;
     }
@@ -166,7 +167,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ).showSnackBar(SnackBar(content: Text('Downloaded to $targetPath')));
       }
     } catch (e) {
-      _showError(e.toString());
+      _showError(displayError(e));
     }
   }
 
@@ -196,7 +197,7 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       await deleteFile(fileId: fileId);
     } catch (e) {
-      _showError(e.toString());
+      _showError(displayError(e));
     }
   }
 

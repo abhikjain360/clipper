@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use clipper_client::engine::SyncEngine;
+use clipper_client::{api_client::ClientError, engine::SyncEngine};
 use hmac::{Hmac, Mac};
 use rand::RngExt;
 use sha2::Sha256;
@@ -74,7 +74,7 @@ pub async fn handle_connection(
                         }
                         let response = match serde_json::from_str::<DaemonRequest>(&trimmed) {
                             Ok(req) => dispatch_command(req, &engine).await,
-                            Err(e) => DaemonResponse::error(
+                            Err(e) => DaemonResponse::error_message(
                                 String::new(),
                                 format!("Invalid request: {}", e),
                             ),
@@ -89,9 +89,9 @@ pub async fn handle_connection(
                     }
                     Err(RequestLineError::TooLong) => {
                         warn!(client_id, max_bytes = MAX_IPC_REQUEST_LINE_BYTES, "IPC request line too large");
-                        let response = DaemonResponse::error(
+                        let response = DaemonResponse::error_message(
                             String::new(),
-                            "Request line too large".into(),
+                            "Request line too large",
                         );
                         if let Ok(json) = serde_json::to_string(&response) {
                             let mut w = writer.lock().await;
@@ -101,9 +101,9 @@ pub async fn handle_connection(
                         break;
                     }
                     Err(RequestLineError::Utf8) => {
-                        let response = DaemonResponse::error(
+                        let response = DaemonResponse::error_message(
                             String::new(),
-                            "Invalid request: request line is not UTF-8".into(),
+                            "Invalid request: request line is not UTF-8",
                         );
                         if let Ok(json) = serde_json::to_string(&response) {
                             let mut w = writer.lock().await;
@@ -170,14 +170,14 @@ async fn authenticate_connection(
             Ok(None) => return false,
             Err(RequestLineError::TooLong) => {
                 let response =
-                    DaemonResponse::error(String::new(), "Request line too large".into());
+                    DaemonResponse::error_message(String::new(), "Request line too large");
                 let _ = write_response(writer, response).await;
                 return false;
             }
             Err(RequestLineError::Utf8) => {
-                let response = DaemonResponse::error(
+                let response = DaemonResponse::error_message(
                     String::new(),
-                    "Invalid request: request line is not UTF-8".into(),
+                    "Invalid request: request line is not UTF-8",
                 );
                 let _ = write_response(writer, response).await;
                 return false;
@@ -197,7 +197,7 @@ async fn authenticate_connection(
                 return write_response(writer, response).await;
             }
             Err(AuthRequestError { id, message }) => {
-                let response = DaemonResponse::error(id.unwrap_or_default(), message);
+                let response = DaemonResponse::error_message(id.unwrap_or_default(), message);
                 let _ = write_response(writer, response).await;
                 return false;
             }
@@ -320,7 +320,9 @@ where
 async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> DaemonResponse {
     let id = req.id.clone();
     match req.command {
-        DaemonCommand::Authenticate(_) => DaemonResponse::error(id, "Already authenticated".into()),
+        DaemonCommand::Authenticate(_) => {
+            DaemonResponse::error_message(id, "Already authenticated")
+        }
         DaemonCommand::Login(params) => cmd_login(id, params, engine).await,
         DaemonCommand::Register(params) => cmd_register(id, params, engine).await,
         DaemonCommand::Logout => cmd_logout(id, engine).await,
@@ -340,6 +342,14 @@ async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> Daemo
         DaemonCommand::DeleteFile(params) => cmd_delete_file(id, params.file_id, engine).await,
         DaemonCommand::Refresh => cmd_refresh(id, engine).await,
     }
+}
+
+fn client_error(id: String, error: ClientError) -> DaemonResponse {
+    DaemonResponse::error(id, error.error_response())
+}
+
+fn message_error(id: String, error: impl ToString) -> DaemonResponse {
+    DaemonResponse::error_message(id, error.to_string())
 }
 
 fn random_bytes<const N: usize>() -> [u8; N] {
@@ -382,7 +392,7 @@ async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) ->
             }
             DaemonResponse::success(id, None)
         }
-        Err(e) => DaemonResponse::error(id, e.to_string()),
+        Err(e) => client_error(id, e),
     }
 }
 
@@ -422,7 +432,7 @@ async fn cmd_register(
             }
             json_success(id, RegisterResult { username })
         }
-        Err(e) => DaemonResponse::error(id, e.to_string()),
+        Err(e) => client_error(id, e),
     }
 }
 
@@ -434,7 +444,7 @@ async fn cmd_logout(id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
             }
             DaemonResponse::success(id, None)
         }
-        Err(e) => DaemonResponse::error(id, e.to_string()),
+        Err(e) => client_error(id, e),
     }
 }
 
@@ -446,7 +456,7 @@ async fn cmd_get_state(id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
 async fn cmd_send_clipboard(id: String, text: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
     match engine.send_clipboard(&text).await {
         Ok(()) => DaemonResponse::success(id, None),
-        Err(e) => DaemonResponse::error(id, e.to_string()),
+        Err(e) => client_error(id, e),
     }
 }
 
@@ -458,7 +468,7 @@ async fn cmd_send_clipboard_payload(
 ) -> DaemonResponse {
     match engine.send_clipboard_payload(&mime_type, &bytes).await {
         Ok(item_id) => json_success(id, serde_json::json!({ "id": item_id })),
-        Err(e) => DaemonResponse::error(id, e.to_string()),
+        Err(e) => client_error(id, e),
     }
 }
 
@@ -471,11 +481,11 @@ async fn cmd_copy_to_local(
         Ok(text) => {
             #[cfg(target_os = "linux")]
             if let Err(error) = crate::platform_clipboard::set_text(&text) {
-                return DaemonResponse::error(id, error.to_string());
+                return message_error(id, error);
             }
             json_success(id, CopyToLocalResult { text })
         }
-        Err(e) => DaemonResponse::error(id, e.to_string()),
+        Err(e) => client_error(id, e),
     }
 }
 
@@ -493,7 +503,7 @@ async fn cmd_clipboard_payload(
                 text: payload.text,
             },
         ),
-        Err(e) => DaemonResponse::error(id, e.to_string()),
+        Err(e) => client_error(id, e),
     }
 }
 
@@ -504,7 +514,7 @@ async fn cmd_upload_file(
 ) -> DaemonResponse {
     match engine.upload_file(&file_path).await {
         Ok(file_id) => json_success(id, UploadFileResult { file_id }),
-        Err(e) => DaemonResponse::error(id, e.to_string()),
+        Err(e) => client_error(id, e),
     }
 }
 
@@ -516,28 +526,28 @@ async fn cmd_download_file(
 ) -> DaemonResponse {
     match engine.download_file(&file_id, &target_path).await {
         Ok(()) => DaemonResponse::success(id, None),
-        Err(e) => DaemonResponse::error(id, e.to_string()),
+        Err(e) => client_error(id, e),
     }
 }
 
 async fn cmd_delete_file(id: String, file_id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
     match engine.delete_file(&file_id).await {
         Ok(()) => DaemonResponse::success(id, None),
-        Err(e) => DaemonResponse::error(id, e.to_string()),
+        Err(e) => client_error(id, e),
     }
 }
 
 async fn cmd_refresh(id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
     match engine.refresh().await {
         Ok(()) => DaemonResponse::success(id, None),
-        Err(e) => DaemonResponse::error(id, e.to_string()),
+        Err(e) => client_error(id, e),
     }
 }
 
 fn json_success<T: serde::Serialize>(id: String, value: T) -> DaemonResponse {
     match serde_json::to_value(value) {
         Ok(value) => DaemonResponse::success(id, Some(value)),
-        Err(e) => DaemonResponse::error(id, e.to_string()),
+        Err(e) => message_error(id, e),
     }
 }
 

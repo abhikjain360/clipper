@@ -5,20 +5,22 @@ use std::{
 };
 
 use axum::{
-    Json,
     extract::{ConnectInfo, FromRequestParts, Request, State},
     http::{HeaderMap, StatusCode, header, request::Parts},
     middleware::Next,
     response::Response,
 };
-use clipper_core::models::ErrorResponse;
+use clipper_core::models::ApiErrorCode;
 use governor::{DefaultDirectRateLimiter, DefaultKeyedRateLimiter, Quota, RateLimiter as Governor};
 use ipnet::IpNet;
 
 const X_FORWARDED_FOR: &str = "x-forwarded-for";
 const X_REAL_IP: &str = "x-real-ip";
 
-use crate::config::RateLimitConfig;
+use crate::{
+    config::RateLimitConfig,
+    routes::{ApiError, error_response},
+};
 
 pub struct RateLimiter {
     auth_by_ip: DefaultKeyedRateLimiter<IpAddr>,
@@ -50,13 +52,12 @@ pub async fn auth_rate_limit_middleware(
     ClientIp(ip): ClientIp,
     mut req: Request,
     next: Next,
-) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Response, ApiError> {
     if !limiter.check(ip) {
-        return Err((
+        return Err(ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
-            Json(ErrorResponse {
-                error: "Too many requests".into(),
-            }),
+            ApiErrorCode::RateLimited,
+            "Too many requests",
         ));
     }
 
@@ -96,7 +97,7 @@ impl<S> FromRequestParts<S> for ClientIp
 where
     S: Send + Sync,
 {
-    type Rejection = StatusCode;
+    type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         if let Some(ip) = parts.extensions.get::<ClientIp>() {
@@ -106,7 +107,7 @@ where
         let peer_addr = parts
             .extensions
             .get::<ConnectInfo<SocketAddr>>()
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server error"))?
             .0;
         let trusted_proxies = parts
             .extensions

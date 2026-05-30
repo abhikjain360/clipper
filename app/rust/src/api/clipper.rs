@@ -66,6 +66,12 @@ pub struct BridgeClipboardPayload {
     pub text: Option<String>,
 }
 
+#[derive(Clone, Default)]
+pub struct BridgeError {
+    pub code: String,
+    pub message: String,
+}
+
 // ── From conversions (app-types → bridge types) ──
 
 impl From<app_types::AppState> for BridgeAppState {
@@ -146,6 +152,16 @@ impl From<app_types::DecryptedFileItem> for BridgeFileItem {
     }
 }
 
+impl From<AppError> for BridgeError {
+    fn from(error: AppError) -> Self {
+        let error = error.into_error_response();
+        Self {
+            code: error.code.to_string(),
+            message: error.message,
+        }
+    }
+}
+
 // ── FRB entry points ──
 
 #[flutter_rust_bridge::frb(init)]
@@ -153,11 +169,13 @@ pub fn init_app() {
     flutter_rust_bridge::setup_default_user_utils();
 }
 
-async fn bridge_result<T>(future: impl Future<Output = Result<T, AppError>>) -> Result<T, String> {
-    future.await.map_err(|e| e.to_string())
+async fn bridge_result<T>(
+    future: impl Future<Output = Result<T, AppError>>,
+) -> Result<T, BridgeError> {
+    future.await.map_err(Into::into)
 }
 
-pub async fn connect_to_daemon() -> Result<(), String> {
+pub async fn connect_to_daemon() -> Result<(), BridgeError> {
     bridge_result(async { Ok(runtime::connect().await?) }).await
 }
 
@@ -166,7 +184,7 @@ pub async fn login(
     username: String,
     device_name: String,
     server_url: String,
-) -> Result<(), String> {
+) -> Result<(), BridgeError> {
     bridge_result(async move {
         runtime::send_command(daemon::DaemonCommand::Login(daemon::LoginParams {
             passphrase,
@@ -186,7 +204,7 @@ pub async fn register(
     passphrase: String,
     device_name: String,
     server_url: String,
-) -> Result<String, String> {
+) -> Result<String, BridgeError> {
     bridge_result(async move {
         let result =
             runtime::send_command(daemon::DaemonCommand::Register(daemon::RegisterParams {
@@ -205,7 +223,7 @@ pub async fn register(
     .await
 }
 
-pub async fn logout() -> Result<(), String> {
+pub async fn logout() -> Result<(), BridgeError> {
     bridge_result(async {
         runtime::send_command(daemon::DaemonCommand::Logout).await?;
         Ok(())
@@ -217,7 +235,7 @@ pub async fn get_state() -> BridgeAppState {
     runtime::current_state().await.into()
 }
 
-pub async fn send_clipboard(text: String) -> Result<(), String> {
+pub async fn send_clipboard(text: String) -> Result<(), BridgeError> {
     bridge_result(async move {
         runtime::send_command(daemon::DaemonCommand::SendClipboard(
             daemon::SendClipboardParams { text },
@@ -228,7 +246,10 @@ pub async fn send_clipboard(text: String) -> Result<(), String> {
     .await
 }
 
-pub async fn send_clipboard_payload(mime_type: String, bytes: Vec<u8>) -> Result<String, String> {
+pub async fn send_clipboard_payload(
+    mime_type: String,
+    bytes: Vec<u8>,
+) -> Result<String, BridgeError> {
     bridge_result(async move {
         let result = runtime::send_command(daemon::DaemonCommand::SendClipboardPayload(
             daemon::SendClipboardPayloadParams { mime_type, bytes },
@@ -246,7 +267,7 @@ pub async fn send_clipboard_payload(mime_type: String, bytes: Vec<u8>) -> Result
     .await
 }
 
-pub async fn copy_to_local(id: String) -> Result<String, String> {
+pub async fn copy_to_local(id: String) -> Result<String, BridgeError> {
     bridge_result(async move {
         let result = runtime::send_command(daemon::DaemonCommand::CopyToLocal(
             daemon::CopyToLocalParams { item_id: id },
@@ -260,7 +281,7 @@ pub async fn copy_to_local(id: String) -> Result<String, String> {
     .await
 }
 
-pub async fn clipboard_payload(id: String) -> Result<BridgeClipboardPayload, String> {
+pub async fn clipboard_payload(id: String) -> Result<BridgeClipboardPayload, BridgeError> {
     bridge_result(async move {
         let result = runtime::send_command(daemon::DaemonCommand::ClipboardPayload(
             daemon::ClipboardPayloadParams { item_id: id },
@@ -278,7 +299,7 @@ pub async fn clipboard_payload(id: String) -> Result<BridgeClipboardPayload, Str
     .await
 }
 
-pub async fn upload_file(file_path: String) -> Result<String, String> {
+pub async fn upload_file(file_path: String) -> Result<String, BridgeError> {
     bridge_result(async move {
         let result = runtime::send_command(daemon::DaemonCommand::UploadFile(
             daemon::UploadFileParams { file_path },
@@ -296,14 +317,14 @@ pub async fn upload_file_bytes(
     filename: String,
     mime_type: String,
     bytes: Vec<u8>,
-) -> Result<String, String> {
+) -> Result<String, BridgeError> {
     bridge_result(
         async move { Ok(runtime::upload_file_bytes(&filename, &mime_type, bytes).await?) },
     )
     .await
 }
 
-pub async fn download_file(file_id: String, target_path: String) -> Result<(), String> {
+pub async fn download_file(file_id: String, target_path: String) -> Result<(), BridgeError> {
     bridge_result(async move {
         runtime::send_command(daemon::DaemonCommand::DownloadFile(
             daemon::DownloadFileParams {
@@ -317,11 +338,11 @@ pub async fn download_file(file_id: String, target_path: String) -> Result<(), S
     .await
 }
 
-pub async fn download_file_bytes(file_id: String) -> Result<Vec<u8>, String> {
+pub async fn download_file_bytes(file_id: String) -> Result<Vec<u8>, BridgeError> {
     bridge_result(async move { Ok(runtime::download_file_bytes(&file_id).await?) }).await
 }
 
-pub async fn delete_file(file_id: String) -> Result<(), String> {
+pub async fn delete_file(file_id: String) -> Result<(), BridgeError> {
     bridge_result(async move {
         runtime::send_command(daemon::DaemonCommand::DeleteFile(
             daemon::DeleteFileParams { file_id },
@@ -332,7 +353,7 @@ pub async fn delete_file(file_id: String) -> Result<(), String> {
     .await
 }
 
-pub async fn refresh() -> Result<(), String> {
+pub async fn refresh() -> Result<(), BridgeError> {
     bridge_result(async {
         runtime::send_command(daemon::DaemonCommand::Refresh).await?;
         Ok(())

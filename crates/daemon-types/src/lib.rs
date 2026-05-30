@@ -10,3 +10,5 @@ mod state;
 
 pub use protocol::*;
 pub use state::*;
+
+pub use clipper_api_types::{ApiErrorCode, ErrorResponse};

@@ -7,6 +7,7 @@
 //! the same command enum in-process so it cannot drift from the daemon command
 //! surface.
 
+use clipper_api_types::{ApiErrorCode, ErrorResponse};
 use clipper_app_types::AppState;
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display, EnumString};
@@ -156,7 +157,7 @@ pub struct DaemonResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub error: Option<ErrorResponse>,
 }
 
 impl DaemonResponse {
@@ -169,13 +170,17 @@ impl DaemonResponse {
         }
     }
 
-    pub fn error(id: String, error: String) -> Self {
+    pub fn error(id: String, error: ErrorResponse) -> Self {
         Self {
             id,
             ok: false,
             result: None,
             error: Some(error),
         }
+    }
+
+    pub fn error_message(id: String, message: impl Into<String>) -> Self {
+        Self::error(id, ErrorResponse::new(ApiErrorCode::Unknown, message))
     }
 }
 
@@ -300,14 +305,16 @@ mod tests {
 
     #[test]
     fn response_error_omits_result() {
-        let resp = DaemonResponse::error("id2".into(), "bad stuff".into());
+        let resp = DaemonResponse::error_message("id2".into(), "bad stuff");
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("result"));
         assert!(json.contains(r#""ok":false"#));
 
         let parsed: DaemonResponse = serde_json::from_str(&json).unwrap();
         assert!(!parsed.ok);
-        assert_eq!(parsed.error.unwrap(), "bad stuff");
+        let error = parsed.error.unwrap();
+        assert_eq!(error.code, ApiErrorCode::Unknown);
+        assert_eq!(error.message, "bad stuff");
         assert!(parsed.result.is_none());
     }
 

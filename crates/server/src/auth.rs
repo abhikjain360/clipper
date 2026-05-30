@@ -8,9 +8,14 @@ use base64::Engine;
 use chrono::Utc;
 use clipper_core::crypto::{self, sha256};
 use sea_orm::{ColumnTrait, DerivePartialModel, EntityTrait, QueryFilter};
+use tracing::{debug, error};
 use uuid::Uuid;
 
-use crate::{entity::sessions, state::AppState};
+use crate::{
+    entity::sessions,
+    routes::{ApiError, error_response},
+    state::AppState,
+};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -49,10 +54,16 @@ pub async fn auth_middleware(
     State(state): State<AppState>,
     mut req: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
-    let token = extract_bearer(&req).ok_or(StatusCode::UNAUTHORIZED)?;
+) -> Result<Response, ApiError> {
+    let token = extract_bearer(&req).ok_or_else(|| {
+        debug!("Rejected authenticated request without bearer token");
+        error_response(StatusCode::UNAUTHORIZED, "Unauthorized")
+    })?;
     let token_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &token)
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+        .map_err(|_| {
+            debug!("Rejected authenticated request with invalid bearer token encoding");
+            error_response(StatusCode::UNAUTHORIZED, "Unauthorized")
+        })?;
 
     let token_hash = sha256(&token_bytes);
     let now = Utc::now().to_rfc3339();
@@ -62,12 +73,15 @@ pub async fn auth_middleware(
         .into_partial_model::<SessionAuthRow>()
         .one(state.db())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .map_err(|e| {
+            error!(error = %e, "Failed to look up session in auth middleware");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unauthorized"))?;
 
     // Check expiry
     if sess.expires_at < now {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(error_response(StatusCode::UNAUTHORIZED, "Unauthorized"));
     }
 
     // Update last_seen_at

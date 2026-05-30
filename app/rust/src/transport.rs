@@ -50,7 +50,7 @@ pub(crate) enum TransportError {
     #[error("daemon connection lost")]
     ConnectionLost,
     #[error("daemon returned error: {0}")]
-    Daemon(String),
+    Daemon(dt::ErrorResponse),
     #[error("daemon request encode failed: {0}")]
     RequestEncode(#[from] serde_json::Error),
     #[error("daemon write failed: {0}")]
@@ -65,6 +65,29 @@ pub(crate) enum TransportError {
     Auth(String),
     #[error("IPC secret unavailable: {0}")]
     IpcSecret(#[from] crate::ipc_auth::IpcSecretError),
+}
+
+impl TransportError {
+    pub(crate) fn error_response(&self) -> dt::ErrorResponse {
+        match self {
+            Self::Daemon(error) => error.clone(),
+            Self::Connect { source, .. } => {
+                dt::ErrorResponse::new(dt::ApiErrorCode::Unknown, source.to_string())
+            }
+            Self::DaemonProcess(_)
+            | Self::NotConnected
+            | Self::ConnectionLost
+            | Self::RequestEncode(_)
+            | Self::Write(_)
+            | Self::Read(_)
+            | Self::DaemonLineTooLarge
+            | Self::DaemonLineUtf8
+            | Self::Auth(_)
+            | Self::IpcSecret(_) => {
+                dt::ErrorResponse::new(dt::ApiErrorCode::Unknown, self.to_string())
+            }
+        }
+    }
 }
 
 // ── Connection types ──
@@ -204,9 +227,9 @@ pub(crate) async fn send_command(
     if resp.ok {
         Ok(resp.result)
     } else {
-        Err(TransportError::Daemon(
-            resp.error.unwrap_or_else(|| "Unknown error".into()),
-        ))
+        Err(TransportError::Daemon(resp.error.unwrap_or_else(|| {
+            dt::ErrorResponse::new(dt::ApiErrorCode::Unknown, "Unknown error")
+        })))
     }
 }
 
@@ -233,7 +256,7 @@ async fn drain_pending(
             id: String::new(),
             ok: false,
             result: None,
-            error: Some(reason.into()),
+            error: Some(dt::ErrorResponse::new(dt::ApiErrorCode::Unknown, reason)),
         });
     }
 }
@@ -297,6 +320,7 @@ async fn authenticate_connection(
         return Err(TransportError::Auth(
             response
                 .error
+                .map(|error| error.message)
                 .unwrap_or_else(|| "daemon rejected IPC auth".into()),
         ));
     }
@@ -453,11 +477,11 @@ mod tests {
 
         let r1 = rx1.await.unwrap();
         assert!(!r1.ok);
-        assert_eq!(r1.error.unwrap(), "gone");
+        assert_eq!(r1.error.unwrap().message, "gone");
 
         let r2 = rx2.await.unwrap();
         assert!(!r2.ok);
-        assert_eq!(r2.error.unwrap(), "gone");
+        assert_eq!(r2.error.unwrap().message, "gone");
 
         assert!(pending.lock().await.is_empty());
     }

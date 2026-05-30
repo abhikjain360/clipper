@@ -724,6 +724,7 @@ dependencies = [
 name = "clipper-daemon-types"
 version = "0.1.0"
 dependencies = [
+ "clipper-api-types",
  "clipper-app-types",
  "dirs",
  "libc",
