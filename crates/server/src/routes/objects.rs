@@ -65,17 +65,17 @@ pub async fn init_object(
         ));
     }
 
-    let all_inline = req.payloads.iter().all(|p| p.inline_ciphertext.is_some());
+    let mut all_inline = true;
     let mut written_paths = Vec::new();
-    for payload in req
-        .payloads
-        .iter()
-        .filter(|p| p.inline_ciphertext.is_some())
-    {
+    for payload in &req.payloads {
+        let Some(inline_ciphertext) = &payload.inline_ciphertext else {
+            all_inline = false;
+            continue;
+        };
+
         let payload_id = payload.id.to_string();
         let path = object_payload_path(&state, &object_id_text, &payload_id);
-        let inline = payload.inline_ciphertext.as_ref().expect("inline exists");
-        write_payload_bytes_create_new(&path, inline)
+        write_payload_bytes_create_new(&path, inline_ciphertext)
             .await
             .map_err(|e| {
                 error!(
@@ -92,6 +92,7 @@ pub async fn init_object(
             })?;
         written_paths.push(path);
     }
+    let all_inline = all_inline;
 
     let now = Utc::now().to_rfc3339();
     let expires_at = object_expires_at(&state, req.kind, &now);
@@ -114,13 +115,14 @@ pub async fn init_object(
     };
 
     if let Err(e) = object.insert(&txn).await {
-        let _ = txn.rollback().await;
+        _ = txn.rollback().await;
         remove_paths(written_paths).await;
         return Err(match e.sql_err() {
-            Some(SqlErr::UniqueConstraintViolation(_)) => {
+            Some(SqlErr::UniqueConstraintViolation(constraint)) => {
                 warn!(
                     object_id = %object_id,
                     user_id = %auth.user_id,
+                    constraint = %constraint,
                     "Concurrent init_object lost a race on object id uniqueness",
                 );
                 error_response(StatusCode::CONFLICT, "Object already exists")
