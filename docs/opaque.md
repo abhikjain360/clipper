@@ -216,3 +216,39 @@ output session_key
   separately via Argon2id over `pw` and a stored `encryption_salt`; that
   salt rides in the same response payload but has no relation to OPAQUE.
 - Access keys are an invite-gate that lives entirely outside OPAQUE.
+
+## At-rest wrapping (server pepper)
+
+OPAQUE protects against the server ever seeing `pw`, but a DB dump
+still leaks `opaque_server_setup` and `opaque_password_file`, and that
+is enough for offline brute force (compute `k_U`, compute `Y`, derive
+`rwd`, check `auth_tag`). Clipper closes that gap by AEAD-wrapping the
+at-rest blobs with subkeys derived from a server-managed root pepper.
+See `docs/server-secret.md` for ops; the math here is unchanged.
+
+What is wrapped on disk:
+
+- `users.opaque_server_setup`
+- `users.opaque_password_file`
+- `users.encryption_salt`
+- `server_config.access_key_hash_salt`
+
+What changes for access keys:
+
+- Argon2id for `access_keys.key_hash` is called with the server pepper
+  passed as Argon2's `secret` ("pepper") parameter, so DB-only attackers
+  cannot verify candidate access keys offline either.
+
+What does **not** change:
+
+- The OPAQUE protocol, message bytes, and session-key derivation.
+- The client's view of `encryption_salt` (it still receives the
+  plaintext salt in `ServerInfo` after a successful round-trip).
+- `sessions.token_hash` (32-byte random tokens; not brute-forceable).
+- `objects.meta_ciphertext` and `object_payloads/*.bin` (already
+  client-encrypted with a key bound to the wrapped `encryption_salt`).
+
+Wrap format and key derivation live in `clipper_core::crypto`
+(`wrap_with_key`, `derive_subkey`, `HKDF_LABEL_*`, `AAD_WRAP_*`); the
+column-to-subkey/AAD bindings live in
+`crates/server/src/secret_storage.rs`.

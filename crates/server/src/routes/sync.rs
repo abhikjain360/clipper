@@ -10,6 +10,7 @@ use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
 use crate::{
     auth::AuthInfo,
     entity::{devices, event_log, users},
+    secret_storage,
     state::AppState,
 };
 
@@ -40,6 +41,12 @@ pub async fn bootstrap(
         .map(|e| i64::from(e.seq))
         .unwrap_or(0);
 
+    let encryption_salt = secret_storage::unwrap_encryption_salt(
+        state.secrets(),
+        &user.encryption_salt,
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     Ok(Json(BootstrapResponse {
         device: DeviceInfo {
             id: dev.id.into(),
@@ -48,7 +55,7 @@ pub async fn bootstrap(
         },
         latest_seq,
         server: ServerInfo {
-            encryption_salt_b64: b64.encode(&user.encryption_salt),
+            encryption_salt_b64: b64.encode(&encryption_salt),
             encryption_params: state.config().crypto.encryption_params,
         },
     }))

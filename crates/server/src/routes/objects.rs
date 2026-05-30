@@ -874,9 +874,13 @@ mod tests {
         let mut config = crate::config::ServerConfig::default();
         config.server.data_dir = data_dir.path().to_path_buf();
         config.clipboard.max_items = max_items;
-        let state = AppState::open_with_db_and_config(db, config)
-            .await
-            .expect("state");
+        let state = AppState::open_with_db_and_config(
+            db,
+            config,
+            crate::secret::ServerSecrets::test_fixture(),
+        )
+        .await
+        .expect("state");
         (state, data_dir)
     }
 

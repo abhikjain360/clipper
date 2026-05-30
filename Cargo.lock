@@ -713,6 +713,7 @@ dependencies = [
  "chrono",
  "clipper-api-types",
  "getrandom 0.4.2",
+ "hkdf",
  "opaque-ke",
  "rand 0.10.1",
  "serde",
@@ -787,6 +788,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

@@ -4,6 +4,7 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, generic_array::typenum::Unsigned},
 };
 pub use clipper_api_types::Argon2Params;
+use hkdf::Hkdf;
 use rand::Rng;
 use sha2::{Digest, Sha256, digest::OutputSizeUser};
 use zeroize::Zeroizing;
@@ -14,6 +15,7 @@ pub const XCHACHA20_NONCE_BYTES: usize =
 pub const SHA256_BYTES: usize = <<Sha256 as OutputSizeUser>::OutputSize as Unsigned>::USIZE;
 pub const ACCESS_KEY_HASH_SALT_BYTES: usize = 16;
 pub const ACCESS_KEY_HASH_BYTES: usize = 32;
+pub const SERVER_SECRET_BYTES: usize = 32;
 
 const ACCESS_KEY_HASH_PARAMS_DEFAULT: Argon2Params = Argon2Params {
     m_cost: 19 * 1024,
@@ -75,21 +77,25 @@ pub fn sha256(data: &[u8]) -> [u8; SHA256_BYTES] {
 }
 
 /// Derive the stored verifier for a registration access key using Argon2id.
+/// `secret` is the server-side pepper mixed into Argon2 — pass `None` only
+/// for tests that don't care about pepper isolation.
 pub fn access_key_hash(
     access_key: &[u8],
     salt: &[u8],
+    secret: Option<&[u8]>,
 ) -> Result<[u8; ACCESS_KEY_HASH_BYTES], CryptoError> {
-    access_key_hash_with_params(access_key, salt, &ACCESS_KEY_HASH_PARAMS_DEFAULT)
+    access_key_hash_with_params(access_key, salt, secret, &ACCESS_KEY_HASH_PARAMS_DEFAULT)
 }
 
 /// Derive the stored verifier for a registration access key using configurable
-/// Argon2id parameters.
+/// Argon2id parameters and an optional server-side pepper.
 pub fn access_key_hash_with_params(
     access_key: &[u8],
     salt: &[u8],
+    secret: Option<&[u8]>,
     params: &Argon2Params,
 ) -> Result<[u8; ACCESS_KEY_HASH_BYTES], CryptoError> {
-    let argon2 = build_argon2(params)?;
+    let argon2 = build_argon2(secret, params)?;
     let mut hash = [0u8; ACCESS_KEY_HASH_BYTES];
     argon2
         .hash_password_into(access_key, salt, &mut hash)
@@ -102,10 +108,17 @@ pub fn default_access_key_hash_params() -> Argon2Params {
     ACCESS_KEY_HASH_PARAMS_DEFAULT
 }
 
-fn build_argon2(params: &Argon2Params) -> Result<Argon2<'static>, CryptoError> {
+fn build_argon2<'a>(
+    secret: Option<&'a [u8]>,
+    params: &Argon2Params,
+) -> Result<Argon2<'a>, CryptoError> {
     let p = Params::new(params.m_cost, params.t_cost, params.p_cost, Some(32))
         .map_err(|e| CryptoError::Kdf(e.to_string()))?;
-    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, p))
+    match secret {
+        Some(secret) => Argon2::new_with_secret(secret, Algorithm::Argon2id, Version::V0x13, p)
+            .map_err(|e| CryptoError::Kdf(e.to_string())),
+        None => Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, p)),
+    }
 }
 
 /// Derive a 32-byte key from passphrase + salt using Argon2id.
@@ -114,12 +127,43 @@ pub fn derive_key(
     salt: &[u8],
     params: &Argon2Params,
 ) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
-    let argon2 = build_argon2(params)?;
+    let argon2 = build_argon2(None, params)?;
     let mut key = Zeroizing::new([0u8; 32]);
     argon2
         .hash_password_into(passphrase, salt, key.as_mut())
         .map_err(|e| CryptoError::Kdf(e.to_string()))?;
     Ok(key)
+}
+
+/// HKDF-SHA256-derive a 32-byte subkey from the root server pepper.
+/// `label` provides domain separation between purposes; collisions
+/// between labels are a bug.
+pub fn derive_subkey(root: &[u8; SERVER_SECRET_BYTES], label: &[u8]) -> Zeroizing<[u8; 32]> {
+    let hkdf = Hkdf::<Sha256>::new(None, root);
+    let mut okm = Zeroizing::new([0u8; 32]);
+    hkdf.expand(label, okm.as_mut())
+        .expect("HKDF-SHA256 output of 32 bytes is within limits");
+    okm
+}
+
+/// Encrypt a small at-rest secret with a server-managed subkey and return
+/// `nonce_24 || ciphertext_with_tag`. `aad` provides cross-field domain
+/// separation so a ciphertext cannot be moved between columns.
+pub fn wrap_with_key(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let (nonce, ciphertext) = encrypt(key, plaintext, aad)?;
+    let mut blob = Vec::with_capacity(nonce.len() + ciphertext.len());
+    blob.extend_from_slice(&nonce);
+    blob.extend_from_slice(&ciphertext);
+    Ok(blob)
+}
+
+/// Inverse of `wrap_with_key`.
+pub fn unwrap_with_key(key: &[u8; 32], blob: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    if blob.len() < XCHACHA20_NONCE_BYTES {
+        return Err(CryptoError::Decrypt("wrapped blob too short".into()));
+    }
+    let (nonce, ciphertext) = blob.split_at(XCHACHA20_NONCE_BYTES);
+    decrypt(key, nonce, ciphertext, aad)
 }
 
 /// Run all four registration steps (client + server) in-process for a single
@@ -475,6 +519,23 @@ pub const AAD_CLIPBOARD_PAYLOAD_V1: &[u8] = b"clipper:clipboard-payload:v1";
 pub const AAD_FILE_META_V1: &[u8] = b"clipper:file-meta:v1";
 pub const AAD_FILE_BLOB_V1: &[u8] = b"clipper:file-blob:v1";
 
+// ── Server-pepper at-rest wrapping ──
+//
+// AAD strings bind a wrapped ciphertext to the column it lives in.
+// Subkey labels feed HKDF for per-purpose key separation. The two
+// MUST stay in sync: changing one without the other invalidates only
+// some fields and creates silent migration bugs.
+pub const AAD_WRAP_OPAQUE_SERVER_SETUP_V1: &[u8] = b"clipper:wrap:opaque-server-setup:v1";
+pub const AAD_WRAP_OPAQUE_PASSWORD_FILE_V1: &[u8] = b"clipper:wrap:opaque-password-file:v1";
+pub const AAD_WRAP_ENCRYPTION_SALT_V1: &[u8] = b"clipper:wrap:encryption-salt:v1";
+pub const AAD_WRAP_ACCESS_KEY_HASH_SALT_V1: &[u8] = b"clipper:wrap:access-key-hash-salt:v1";
+
+pub const HKDF_LABEL_OPAQUE_SERVER_SETUP_V1: &[u8] = b"clipper:hkdf:opaque-server-setup:v1";
+pub const HKDF_LABEL_OPAQUE_PASSWORD_FILE_V1: &[u8] = b"clipper:hkdf:opaque-password-file:v1";
+pub const HKDF_LABEL_ENCRYPTION_SALT_V1: &[u8] = b"clipper:hkdf:encryption-salt:v1";
+pub const HKDF_LABEL_ACCESS_KEY_HASH_SALT_V1: &[u8] = b"clipper:hkdf:access-key-hash-salt:v1";
+pub const HKDF_LABEL_ACCESS_KEY_PEPPER_V1: &[u8] = b"clipper:hkdf:access-key-pepper:v1";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,13 +595,86 @@ mod tests {
     fn test_access_key_hash_uses_salt() {
         let salt1 = [1_u8; ACCESS_KEY_HASH_SALT_BYTES];
         let salt2 = [2_u8; ACCESS_KEY_HASH_SALT_BYTES];
-        let hash1 = access_key_hash(b"invite", &salt1).unwrap();
-        let hash1_again = access_key_hash(b"invite", &salt1).unwrap();
-        let hash2 = access_key_hash(b"invite", &salt2).unwrap();
+        let hash1 = access_key_hash(b"invite", &salt1, None).unwrap();
+        let hash1_again = access_key_hash(b"invite", &salt1, None).unwrap();
+        let hash2 = access_key_hash(b"invite", &salt2, None).unwrap();
 
         assert_eq!(hash1.len(), ACCESS_KEY_HASH_BYTES);
         assert_eq!(hash1, hash1_again);
         assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_access_key_hash_secret_changes_output() {
+        let salt = [1_u8; ACCESS_KEY_HASH_SALT_BYTES];
+        let no_secret = access_key_hash(b"invite", &salt, None).unwrap();
+        let pepper_a = access_key_hash(b"invite", &salt, Some(&[7_u8; 32])).unwrap();
+        let pepper_a_again = access_key_hash(b"invite", &salt, Some(&[7_u8; 32])).unwrap();
+        let pepper_b = access_key_hash(b"invite", &salt, Some(&[8_u8; 32])).unwrap();
+
+        assert_ne!(no_secret, pepper_a);
+        assert_ne!(pepper_a, pepper_b);
+        assert_eq!(pepper_a, pepper_a_again);
+    }
+
+    #[test]
+    fn test_derive_subkey_is_deterministic_and_label_separated() {
+        let root = [0x11_u8; SERVER_SECRET_BYTES];
+        let a1 = derive_subkey(&root, b"label-a");
+        let a2 = derive_subkey(&root, b"label-a");
+        let b = derive_subkey(&root, b"label-b");
+
+        assert_eq!(*a1, *a2);
+        assert_ne!(*a1, *b);
+    }
+
+    #[test]
+    fn test_derive_subkey_changes_with_root() {
+        let root_a = [0x11_u8; SERVER_SECRET_BYTES];
+        let root_b = [0x22_u8; SERVER_SECRET_BYTES];
+        assert_ne!(*derive_subkey(&root_a, b"x"), *derive_subkey(&root_b, b"x"));
+    }
+
+    #[test]
+    fn test_wrap_unwrap_roundtrip() {
+        let key = [0x42_u8; 32];
+        let aad = AAD_WRAP_OPAQUE_SERVER_SETUP_V1;
+        let plaintext = b"opaque server setup bytes";
+        let blob = wrap_with_key(&key, plaintext, aad).expect("wrap");
+        assert!(blob.len() >= XCHACHA20_NONCE_BYTES + plaintext.len());
+
+        let recovered = unwrap_with_key(&key, &blob, aad).expect("unwrap");
+        assert_eq!(recovered, plaintext);
+    }
+
+    #[test]
+    fn test_unwrap_rejects_wrong_key() {
+        let aad = AAD_WRAP_ENCRYPTION_SALT_V1;
+        let blob = wrap_with_key(&[0x01_u8; 32], b"salt", aad).expect("wrap");
+        assert!(unwrap_with_key(&[0x02_u8; 32], &blob, aad).is_err());
+    }
+
+    #[test]
+    fn test_unwrap_rejects_wrong_aad() {
+        let key = [0x33_u8; 32];
+        let blob = wrap_with_key(&key, b"salt", AAD_WRAP_ENCRYPTION_SALT_V1).expect("wrap");
+        assert!(unwrap_with_key(&key, &blob, AAD_WRAP_OPAQUE_SERVER_SETUP_V1).is_err());
+    }
+
+    #[test]
+    fn test_unwrap_rejects_tampered_ciphertext() {
+        let key = [0x55_u8; 32];
+        let aad = AAD_WRAP_OPAQUE_PASSWORD_FILE_V1;
+        let mut blob = wrap_with_key(&key, b"envelope", aad).expect("wrap");
+        let last = blob.len() - 1;
+        blob[last] ^= 0x01;
+        assert!(unwrap_with_key(&key, &blob, aad).is_err());
+    }
+
+    #[test]
+    fn test_unwrap_rejects_truncated_blob() {
+        let key = [0x77_u8; 32];
+        assert!(unwrap_with_key(&key, &[0_u8; 4], AAD_WRAP_ENCRYPTION_SALT_V1).is_err());
     }
 
     #[test]

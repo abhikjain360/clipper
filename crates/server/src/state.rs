@@ -10,7 +10,9 @@ use sea_orm_migration::MigratorTrait;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::{config::ServerConfig, error::ServerResult, migration, ws::WsBroadcast};
+use crate::{
+    config::ServerConfig, error::ServerResult, migration, secret::ServerSecrets, ws::WsBroadcast,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -21,6 +23,7 @@ pub struct AppStateInner {
     pub db: DatabaseConnection,
     pub data_dir: PathBuf,
     pub config: ServerConfig,
+    pub secrets: Arc<ServerSecrets>,
     pub ws_tx: broadcast::Sender<WsBroadcast>,
     auth_challenges: std::sync::Mutex<HashMap<String, AuthChallenge>>,
     pending_registrations: std::sync::Mutex<HashMap<String, PendingRegistration>>,
@@ -41,11 +44,11 @@ pub struct PendingRegistration {
 }
 
 impl AppState {
-    pub(crate) async fn open(config: ServerConfig) -> ServerResult<Self> {
+    pub(crate) async fn open(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<Self> {
         let data_dir = config.server.data_dir.clone();
         tokio::fs::create_dir_all(&data_dir).await?;
         let db = Self::connect_db(&data_dir).await?;
-        Self::open_with_db_and_config(db, config).await
+        Self::open_with_db_and_config(db, config, secrets).await
     }
 
     #[cfg(test)]
@@ -55,14 +58,15 @@ impl AppState {
     ) -> ServerResult<Self> {
         let mut config = ServerConfig::default();
         config.server.data_dir = data_dir;
-        Self::open_with_db_and_config(db, config).await
+        Self::open_with_db_and_config(db, config, ServerSecrets::test_fixture()).await
     }
 
     pub(crate) async fn open_with_db_and_config(
         db: DatabaseConnection,
         config: ServerConfig,
+        secrets: ServerSecrets,
     ) -> ServerResult<Self> {
-        let state = Self::new(db, config);
+        let state = Self::new(db, config, secrets);
         state.run_migrations().await?;
         state.ensure_storage_dirs().await?;
         Ok(state)
@@ -85,7 +89,7 @@ impl AppState {
         Ok(())
     }
 
-    fn new(db: DatabaseConnection, config: ServerConfig) -> Self {
+    fn new(db: DatabaseConnection, config: ServerConfig, secrets: ServerSecrets) -> Self {
         let (ws_tx, _) = broadcast::channel(256);
         let data_dir = config.server.data_dir.clone();
         Self {
@@ -93,6 +97,7 @@ impl AppState {
                 db,
                 data_dir,
                 config,
+                secrets: Arc::new(secrets),
                 ws_tx,
                 auth_challenges: std::sync::Mutex::new(HashMap::new()),
                 pending_registrations: std::sync::Mutex::new(HashMap::new()),
@@ -110,6 +115,10 @@ impl AppState {
 
     pub fn config(&self) -> &ServerConfig {
         &self.inner.config
+    }
+
+    pub fn secrets(&self) -> &ServerSecrets {
+        &self.inner.secrets
     }
 
     pub fn objects_dir(&self) -> PathBuf {

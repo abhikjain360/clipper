@@ -25,6 +25,7 @@ use crate::{
     entity::{access_keys, devices, server_config, sessions, users},
     rate_limit::{ClientIp, RateLimiter},
     routes::{ValidatedJson, error_response},
+    secret_storage,
     state::AppState,
 };
 
@@ -41,6 +42,17 @@ pub async fn challenge(
 
     let user = resolve_login_user(&state, req.user_id).await?;
 
+    let opaque_server_setup =
+        secret_storage::unwrap_opaque_server_setup(state.secrets(), &user.opaque_server_setup)
+            .map_err(|_| {
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
+            })?;
+    let opaque_password_file =
+        secret_storage::unwrap_opaque_password_file(state.secrets(), &user.opaque_password_file)
+            .map_err(|_| {
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
+            })?;
+
     // id_U for this user (legacy single-user rows get the legacy identifier).
     let credential_identifier = opaque_credential_identifier_for_user(&user);
     // req.credential_request = M ‖ ke1 from the client.
@@ -56,8 +68,8 @@ pub async fn challenge(
     // server_login_state = state_S = (client_mac_key, session_key, transcript_pre ‖ server_mac).
     let (credential_response, server_login_state) =
         crypto::opaque_server_login_start_with_identifier(
-            &user.opaque_server_setup,
-            &user.opaque_password_file,
+            &opaque_server_setup,
+            &opaque_password_file,
             &req.credential_request,
             &credential_identifier,
         )
@@ -69,7 +81,7 @@ pub async fn challenge(
     Ok(Json(LoginChallengeResponse {
         challenge_id,
         credential_response_b64: B64.encode(credential_response),
-        server: server_info(&user, &state.config().crypto),
+        server: server_info(&state, &user)?,
     }))
 }
 
@@ -84,9 +96,15 @@ pub async fn register_start(
 
     let now = Utc::now().to_rfc3339();
     let db_config = load_server_config(&state).await?;
+    let access_key_hash_salt = secret_storage::unwrap_access_key_hash_salt(
+        state.secrets(),
+        &db_config.access_key_hash_salt,
+    )
+    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error"))?;
     let access_key_hash = access_key_hash(
         &req.access_key,
-        &db_config.access_key_hash_salt,
+        &access_key_hash_salt,
+        &state.secrets().access_key_pepper,
         &state.config().crypto.access_key_hash_params,
     )
     .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error"))?;
@@ -191,11 +209,25 @@ pub async fn register_finish(
         ));
     }
 
+    let wrapped_opaque_server_setup =
+        secret_storage::wrap_opaque_server_setup(state.secrets(), &pending.opaque_server_setup)
+            .map_err(|_| {
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
+            })?;
+    let wrapped_opaque_password_file =
+        secret_storage::wrap_opaque_password_file(state.secrets(), &opaque_password_file).map_err(
+            |_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error"),
+        )?;
+    let wrapped_encryption_salt =
+        secret_storage::wrap_encryption_salt(state.secrets(), &pending.encryption_salt).map_err(
+            |_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error"),
+        )?;
+
     users::ActiveModel {
         id: Set(pending.user_id),
-        opaque_server_setup: Set(pending.opaque_server_setup),
-        opaque_password_file: Set(opaque_password_file),
-        encryption_salt: Set(pending.encryption_salt.clone()),
+        opaque_server_setup: Set(wrapped_opaque_server_setup),
+        opaque_password_file: Set(wrapped_opaque_password_file),
+        encryption_salt: Set(wrapped_encryption_salt),
         access_key_hash: Set(pending.access_key_hash.clone()),
         created_at: Set(now.clone()),
         updated_at: Set(now.clone()),
@@ -309,11 +341,12 @@ pub async fn login(
 
     info!(user_id = %user.id, device_id = %session.device_id, "Login successful");
 
+    let server = server_info(&state, &user)?;
     Ok(Json(LoginResponse {
         token: session.token,
         user_id: user.id.to_string(),
         device_id: session.device_id.to_string(),
-        server: server_info(&user, &state.config().crypto),
+        server,
     }))
 }
 
@@ -334,9 +367,10 @@ pub async fn logout(
 fn access_key_hash(
     access_key: &str,
     salt: &[u8],
+    secret: &[u8],
     access_key_hash_params: &crypto::Argon2Params,
 ) -> Result<String, clipper_core::crypto::CryptoError> {
-    server_auth::hash_access_key(access_key, salt, access_key_hash_params)
+    server_auth::hash_access_key(access_key, salt, secret, access_key_hash_params)
 }
 
 async fn load_server_config(
@@ -375,11 +409,18 @@ fn opaque_credential_identifier_for_user(user: &users::Model) -> Vec<u8> {
     }
 }
 
-fn server_info(user: &users::Model, crypto: &crate::config::CryptoConfig) -> ServerInfo {
-    ServerInfo {
-        encryption_salt_b64: B64.encode(&user.encryption_salt),
-        encryption_params: crypto.encryption_params,
-    }
+fn server_info(
+    state: &AppState,
+    user: &users::Model,
+) -> Result<ServerInfo, (StatusCode, Json<ErrorResponse>)> {
+    let encryption_salt =
+        secret_storage::unwrap_encryption_salt(state.secrets(), &user.encryption_salt).map_err(
+            |_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error"),
+        )?;
+    Ok(ServerInfo {
+        encryption_salt_b64: B64.encode(&encryption_salt),
+        encryption_params: state.config().crypto.encryption_params,
+    })
 }
 
 async fn resolve_login_user(
@@ -526,11 +567,16 @@ mod tests {
             .await
             .expect("state");
         let now = Utc::now().to_rfc3339();
+        let wrapped_salt = secret_storage::wrap_access_key_hash_salt(
+            state.secrets(),
+            &crypto::generate_access_key_hash_salt(),
+        )
+        .expect("wrap salt");
         server_config::ActiveModel {
             id: Set(1),
             created_at: Set(now.clone()),
             updated_at: Set(now),
-            access_key_hash_salt: Set(crypto::generate_access_key_hash_salt().to_vec()),
+            access_key_hash_salt: Set(wrapped_salt),
         }
         .insert(state.db())
         .await
@@ -573,11 +619,21 @@ mod tests {
         .await
         .expect("insert access key");
 
+        let wrapped_opaque_server_setup =
+            secret_storage::wrap_opaque_server_setup(state.secrets(), &opaque_server_setup)
+                .expect("wrap opaque_server_setup");
+        let wrapped_opaque_password_file =
+            secret_storage::wrap_opaque_password_file(state.secrets(), &opaque_password_file)
+                .expect("wrap opaque_password_file");
+        let wrapped_encryption_salt =
+            secret_storage::wrap_encryption_salt(state.secrets(), &encryption_salt)
+                .expect("wrap encryption_salt");
+
         users::ActiveModel {
             id: Set(user_id),
-            opaque_server_setup: Set(opaque_server_setup),
-            opaque_password_file: Set(opaque_password_file),
-            encryption_salt: Set(encryption_salt.to_vec()),
+            opaque_server_setup: Set(wrapped_opaque_server_setup),
+            opaque_password_file: Set(wrapped_opaque_password_file),
+            encryption_salt: Set(wrapped_encryption_salt),
             access_key_hash: Set(access_key_hash),
             created_at: Set(now.clone()),
             updated_at: Set(now),
@@ -675,9 +731,15 @@ mod tests {
             .await
             .expect("query server config")
             .expect("server config");
+        let salt = secret_storage::unwrap_access_key_hash_salt(
+            state.secrets(),
+            &config.access_key_hash_salt,
+        )
+        .expect("unwrap access_key_hash_salt");
         access_key_hash(
             access_key,
-            &config.access_key_hash_salt,
+            &salt,
+            &state.secrets().access_key_pepper,
             &state.config().crypto.access_key_hash_params,
         )
         .expect("access key hash")
@@ -958,5 +1020,135 @@ mod tests {
         .await;
 
         assert_eq!(result.unwrap_err().0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    // We test that registration persists wrapped — not plaintext — OPAQUE
+    // state and encryption_salt, because the whole point of the pepper is
+    // that a DB dump leaks ciphertext, not the underlying secrets.
+    #[tokio::test]
+    async fn register_persists_auth_blobs_wrapped() {
+        let (state, _data_dir) = empty_state().await;
+        let access_key = "invite-key-with-entropy";
+        let passphrase = b"user private passphrase";
+        insert_access_key(&state, access_key).await;
+
+        let (start_req, client_state) = registration_start_request(access_key, passphrase);
+        let Json(start_resp) = register_start(
+            State(state.clone()),
+            Extension(limiter()),
+            client_ip(),
+            validated(start_req),
+        )
+        .await
+        .expect("register start");
+        let user_id = Uuid::parse_str(&start_resp.user_id).expect("user id");
+        let plaintext_salt = B64
+            .decode(&start_resp.server.encryption_salt_b64)
+            .expect("decode salt");
+        let finish_req = registration_finish_request(start_resp, &client_state, passphrase);
+
+        let _ = register_finish(
+            State(state.clone()),
+            Extension(limiter()),
+            client_ip(),
+            HeaderMap::new(),
+            validated(finish_req),
+        )
+        .await
+        .expect("register finish");
+
+        let stored = users::Entity::find_by_id(user_id)
+            .one(state.db())
+            .await
+            .expect("query user")
+            .expect("user");
+
+        // The stored salt is wrapped: it must not match the plaintext
+        // salt the client received over the wire, and it must unwrap
+        // back to that same plaintext via the server's pepper subkeys.
+        assert_ne!(stored.encryption_salt, plaintext_salt);
+        let recovered =
+            secret_storage::unwrap_encryption_salt(state.secrets(), &stored.encryption_salt)
+                .expect("unwrap encryption_salt");
+        assert_eq!(recovered, plaintext_salt);
+
+        // OPAQUE blobs must not survive in cleartext, and must unwrap
+        // with the same pepper.
+        assert!(
+            secret_storage::unwrap_opaque_server_setup(
+                state.secrets(),
+                &stored.opaque_server_setup,
+            )
+            .is_ok()
+        );
+        assert!(
+            secret_storage::unwrap_opaque_password_file(
+                state.secrets(),
+                &stored.opaque_password_file,
+            )
+            .is_ok()
+        );
+    }
+
+    // We test that a different pepper cannot recover the stored secrets,
+    // because that is the property a DB-only attacker would try to defeat.
+    #[tokio::test]
+    async fn wrong_pepper_cannot_unwrap_stored_blobs() {
+        let passphrase = b"correct horse battery staple";
+        let (state, _data_dir) = test_state(passphrase).await;
+        let user = users::Entity::find()
+            .one(state.db())
+            .await
+            .expect("query")
+            .expect("user");
+
+        let attacker = crate::secret::ServerSecrets::from_root(&[0x99_u8; 32]);
+        assert!(
+            secret_storage::unwrap_opaque_server_setup(&attacker, &user.opaque_server_setup)
+                .is_err()
+        );
+        assert!(
+            secret_storage::unwrap_opaque_password_file(&attacker, &user.opaque_password_file)
+                .is_err()
+        );
+        assert!(secret_storage::unwrap_encryption_salt(&attacker, &user.encryption_salt).is_err());
+
+        let server_config = server_config::Entity::find_by_id(1)
+            .one(state.db())
+            .await
+            .expect("query")
+            .expect("server_config");
+        assert!(
+            secret_storage::unwrap_access_key_hash_salt(
+                &attacker,
+                &server_config.access_key_hash_salt,
+            )
+            .is_err()
+        );
+    }
+
+    // We test that `init_server` wraps the access-key-hash salt on
+    // disk, since access-key offline brute force is the other half of
+    // the threat model.
+    #[tokio::test]
+    async fn init_server_wraps_access_key_hash_salt() {
+        let (state, _data_dir) = empty_state().await;
+        let stored = server_config::Entity::find_by_id(1)
+            .one(state.db())
+            .await
+            .expect("query")
+            .expect("server_config");
+
+        // 16 bytes is the configured salt length; a wrapped blob carries
+        // an additional 24-byte nonce + 16-byte AEAD tag, so it must be
+        // strictly longer.
+        assert!(stored.access_key_hash_salt.len() > 16);
+        assert!(
+            secret_storage::unwrap_access_key_hash_salt(
+                state.secrets(),
+                &stored.access_key_hash_salt,
+            )
+            .is_ok()
+        );
     }
 }

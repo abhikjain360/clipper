@@ -6,6 +6,8 @@ mod error;
 mod migration;
 mod rate_limit;
 mod routes;
+mod secret;
+mod secret_storage;
 mod state;
 mod ws;
 
@@ -35,6 +37,7 @@ use crate::{
     entity::access_keys,
     error::{ServerError, ServerResult},
     rate_limit::{RateLimiter, TrustedProxies},
+    secret::{ServerSecrets, generate_root_base64},
     state::AppState,
 };
 
@@ -64,6 +67,10 @@ enum Command {
         #[arg(long, value_name = "RFC3339")]
         expires_at: Option<String>,
     },
+    /// Mint a fresh server pepper (base64, 32 bytes). Store it in
+    /// CLIPPER_SERVER_SECRET or a file referenced by
+    /// CLIPPER_SERVER_SECRET_FILE before running init/serve.
+    GenerateSecret,
     /// Run the server
     Serve {
         #[command(flatten)]
@@ -93,7 +100,8 @@ async fn run() -> ServerResult<()> {
             let mut overrides = ConfigOverrides::default();
             overrides.server.data_dir = data_dir;
             let config = load_config(cli.config.as_deref(), overrides)?;
-            init_server(config).await?;
+            let secrets = ServerSecrets::load_from_env()?;
+            init_server(config, secrets).await?;
         }
         Command::AddAccessKey {
             data_dir,
@@ -103,12 +111,19 @@ async fn run() -> ServerResult<()> {
             let mut overrides = ConfigOverrides::default();
             overrides.server.data_dir = data_dir;
             let config = load_config(cli.config.as_deref(), overrides)?;
+            let secrets = ServerSecrets::load_from_env()?;
             let access_key = read_access_key(access_key)?;
-            add_access_key(config, &access_key, expires_at).await?;
+            add_access_key(config, secrets, &access_key, expires_at).await?;
+        }
+        Command::GenerateSecret => {
+            // Plain stdout, single line — easy to pipe into an env file
+            // or `systemd-creds encrypt`.
+            println!("{}", generate_root_base64());
         }
         Command::Serve { overrides } => {
             let config = load_config(cli.config.as_deref(), *overrides)?;
-            serve(config).await?;
+            let secrets = ServerSecrets::load_from_env()?;
+            serve(config, secrets).await?;
         }
     }
 
@@ -136,9 +151,9 @@ fn load_config(path: Option<&Path>, cli_overrides: ConfigOverrides) -> ServerRes
     Ok(config)
 }
 
-async fn init_server(config: ServerConfig) -> ServerResult<()> {
+async fn init_server(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()> {
     let access_key_hash_salt_bytes = config.crypto.access_key_hash_salt_bytes;
-    let state = AppState::open(config).await?;
+    let state = AppState::open(config, secrets).await?;
 
     // Check if already initialized
     use sea_orm::EntityTrait;
@@ -154,13 +169,14 @@ async fn init_server(config: ServerConfig) -> ServerResult<()> {
     use sea_orm::{ActiveModelTrait, Set};
     let now = chrono::Utc::now().to_rfc3339();
 
+    let plaintext_salt = clipper_core::crypto::generate_random_bytes(access_key_hash_salt_bytes);
+    let wrapped_salt = secret_storage::wrap_access_key_hash_salt(state.secrets(), &plaintext_salt)?;
+
     let config = entity::server_config::ActiveModel {
         id: Set(1),
         created_at: Set(now.clone()),
         updated_at: Set(now),
-        access_key_hash_salt: Set(clipper_core::crypto::generate_random_bytes(
-            access_key_hash_salt_bytes,
-        )),
+        access_key_hash_salt: Set(wrapped_salt),
     };
     config.insert(state.db()).await?;
 
@@ -182,6 +198,7 @@ fn read_access_key(access_key: Option<String>) -> ServerResult<String> {
 
 async fn add_access_key(
     config: ServerConfig,
+    secrets: ServerSecrets,
     access_key: &str,
     expires_at: Option<String>,
 ) -> ServerResult<()> {
@@ -195,14 +212,19 @@ async fn add_access_key(
 
     use sea_orm::{ActiveModelTrait, EntityTrait, Set};
     let access_key_hash_params = config.crypto.access_key_hash_params;
-    let state = AppState::open(config).await?;
+    let state = AppState::open(config, secrets).await?;
     let server_config = entity::server_config::Entity::find_by_id(1)
         .one(state.db())
         .await?
         .ok_or(ServerError::NotInitialized)?;
+    let salt = secret_storage::unwrap_access_key_hash_salt(
+        state.secrets(),
+        &server_config.access_key_hash_salt,
+    )?;
     let key_hash = hash_access_key(
         access_key,
-        &server_config.access_key_hash_salt,
+        &salt,
+        &state.secrets().access_key_pepper,
         &access_key_hash_params,
     )?;
     let now = chrono::Utc::now().to_rfc3339();
@@ -222,8 +244,8 @@ async fn add_access_key(
     Ok(())
 }
 
-async fn serve(config: ServerConfig) -> ServerResult<()> {
-    let state = AppState::open(config).await?;
+async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()> {
+    let state = AppState::open(config, secrets).await?;
     let addr = state.config().server.addr.clone();
     let trusted_proxies = TrustedProxies::new(state.config().server.trusted_proxies.clone());
     let rate_limit_prune_interval_secs = state.config().rate_limit.prune_interval_secs;

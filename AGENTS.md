@@ -93,6 +93,15 @@
 - Auth is multi-user: access keys are one-time registration invites stored as
   hashes, while user passphrases must only flow through OPAQUE registration and
   login. Server handlers must scope private data by authenticated `user_id`.
+- Server auth blobs (`users.opaque_server_setup`,
+  `users.opaque_password_file`, `users.encryption_salt`,
+  `server_config.access_key_hash_salt`) are AEAD-wrapped at rest with a
+  pepper sourced from `CLIPPER_SERVER_SECRET` / `CLIPPER_SERVER_SECRET_FILE`.
+  Use `crates/server/src/secret_storage.rs` helpers at the storage
+  boundary — never insert plaintext into those columns. Access-key
+  hashes use the same pepper as Argon2's `secret`. See
+  `docs/server-secret.md` for ops, `docs/opaque.md` for the wrap layer
+  in relation to OPAQUE.
 - When auth state or auth commands cross the Flutter Rust Bridge, update the
   bridge adapter and regenerate FRB output so Dart, daemon IPC, and Rust stay
   aligned.
