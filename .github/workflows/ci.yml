@@ -1,26 +1,5 @@
 name: CI
 
-# When this runs (intentionally narrow):
-#
-#   1. workflow_dispatch — a maintainer runs CI manually from the Actions tab,
-#      selecting the branch under test (e.g. a PR's head branch). Dispatch
-#      requires write access, so this is maintainer-only by design.
-#
-#   2. A maintainer adds the "run-ci" label to a pull request targeting main.
-#      Only users with triage/write access can label a PR, so this is the
-#      "maintainer manually triggers CI on a pull request" path. Re-add the
-#      label to re-run after new commits are pushed to the PR.
-#
-#   3. A pull request targeting main is merged (closed with merged == true).
-#      This validates main after a PR merge. A direct `git push` to main does
-#      NOT fire pull_request, so CI never runs on direct pushes. To make that
-#      guarantee meaningful, enable branch protection on main so it can only
-#      advance via merged PRs.
-#
-# Note on third-party actions: versions below are pinned to major tags for
-# readability. Before relying on this, confirm the tags exist and pin them to
-# full commit SHAs. CI uses no secrets, so fork PRs cannot exfiltrate anything;
-# the workflow definition itself always comes from the base branch.
 on:
   workflow_dispatch:
   pull_request:
@@ -35,8 +14,6 @@ permissions:
   contents: read
 
 jobs:
-  # Single source of truth for "should this event run CI?" so every job below
-  # can share one condition instead of repeating it.
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -67,13 +44,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      # Zero-config Nix store caching. If unavailable in your org, swap for
-      # nix-community/cache-nix-action or FlakeHub Cache.
-      - uses: DeterminateSystems/magic-nix-cache-action@v8
-      # `nix run .#fmt` formats Rust, Dart, Deno, and Nix in place; if anything
-      # was not already formatted, the working tree changes and the diff fails.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d
+      - uses: DeterminateSystems/magic-nix-cache-action@87b14cf437d03d37989d87f0fa5ce4f5dc1a330b
       - name: Format
         run: nix run .#fmt
       - name: Fail if formatting changed files
@@ -85,11 +58,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d
+      - uses: DeterminateSystems/magic-nix-cache-action@87b14cf437d03d37989d87f0fa5ce4f5dc1a330b
       - name: Cache cargo + target
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry/index
@@ -109,11 +82,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d
+      - uses: DeterminateSystems/magic-nix-cache-action@87b14cf437d03d37989d87f0fa5ce4f5dc1a330b
       - name: Cache cargo + target
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry/index
@@ -130,11 +103,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d
+      - uses: DeterminateSystems/magic-nix-cache-action@87b14cf437d03d37989d87f0fa5ce4f5dc1a330b
       - name: Cache cargo + target
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry/index
@@ -151,9 +124,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d
+      - uses: DeterminateSystems/magic-nix-cache-action@87b14cf437d03d37989d87f0fa5ce4f5dc1a330b
       - run: nix run .#audit
 
   flutter:
@@ -162,11 +135,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d
+      - uses: DeterminateSystems/magic-nix-cache-action@87b14cf437d03d37989d87f0fa5ce4f5dc1a330b
       - name: Cache pub cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.pub-cache
