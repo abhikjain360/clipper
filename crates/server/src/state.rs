@@ -8,16 +8,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::Utc;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::{DateTime, Utc};
+use clipper_core::crypto;
 use sea_orm::{Database, DatabaseConnection, EntityTrait, QueryOrder, QuerySelect};
 use sea_orm_migration::MigratorTrait;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
-    config::ServerConfig, entity::event_log, error::ServerResult, migration, secret::ServerSecrets,
-    ws::WsBroadcast,
+    auth::AuthInfo, config::ServerConfig, entity::event_log, error::ServerResult, migration,
+    secret::ServerSecrets, ws::WsBroadcast,
 };
+
+const WS_TICKET_BYTES: usize = 32;
+const WS_TICKET_TTL_SECS: i64 = 60;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -32,6 +37,7 @@ pub struct AppStateInner {
     pub ws_tx: broadcast::Sender<WsBroadcast>,
     auth_challenges: std::sync::Mutex<HashMap<String, AuthChallenge>>,
     pending_registrations: std::sync::Mutex<HashMap<String, PendingRegistration>>,
+    ws_tickets: std::sync::Mutex<HashMap<Vec<u8>, WsTicket>>,
     /// High-water mark for the application-assigned `event_log.seq` clock.
     event_seq: AtomicI64,
 }
@@ -50,6 +56,16 @@ pub struct PendingRegistration {
     pub username: String,
     pub access_key_hash: String,
     expires_at: Instant,
+}
+
+pub struct WsTicket {
+    pub auth: AuthInfo,
+    expires_at: Instant,
+}
+
+pub struct IssuedWsTicket {
+    pub ticket: String,
+    pub expires_at: DateTime<Utc>,
 }
 
 impl AppState {
@@ -127,6 +143,7 @@ impl AppState {
                 ws_tx,
                 auth_challenges: std::sync::Mutex::new(HashMap::new()),
                 pending_registrations: std::sync::Mutex::new(HashMap::new()),
+                ws_tickets: std::sync::Mutex::new(HashMap::new()),
                 event_seq: AtomicI64::new(0),
             }),
         }
@@ -261,6 +278,46 @@ impl AppState {
         registrations.retain(|_, registration| registration.expires_at > now);
         registrations.remove(registration_id)
     }
+
+    pub fn create_ws_ticket(&self, auth: AuthInfo) -> IssuedWsTicket {
+        let now = Instant::now();
+        let expires_at = Utc::now() + chrono::Duration::seconds(WS_TICKET_TTL_SECS);
+        let mut tickets = self.inner.ws_tickets.lock().expect("lock poisoned");
+        tickets.retain(|_, ticket| ticket.expires_at > now);
+
+        // All tickets share a fixed TTL, so the smallest `expires_at` is the
+        // oldest ticket. Evict oldest-first so a burst of new tickets does not
+        // displace ones that are about to be consumed.
+        while tickets.len() >= self.config().auth.max_pending_ws_tickets {
+            let Some(oldest) = tickets
+                .iter()
+                .min_by_key(|(_, ticket)| ticket.expires_at)
+                .map(|(hash, _)| hash.clone())
+            else {
+                break;
+            };
+            tickets.remove(&oldest);
+        }
+
+        let ticket = URL_SAFE_NO_PAD.encode(crypto::generate_random_bytes(WS_TICKET_BYTES));
+        tickets.insert(
+            crypto::sha256(ticket.as_bytes()).to_vec(),
+            WsTicket {
+                auth,
+                expires_at: now + Duration::from_secs(WS_TICKET_TTL_SECS as u64),
+            },
+        );
+        IssuedWsTicket { ticket, expires_at }
+    }
+
+    pub fn consume_ws_ticket(&self, ticket: &str) -> Option<AuthInfo> {
+        let now = Instant::now();
+        let mut tickets = self.inner.ws_tickets.lock().expect("lock poisoned");
+        tickets.retain(|_, ticket| ticket.expires_at > now);
+        tickets
+            .remove(&crypto::sha256(ticket.as_bytes()).to_vec())
+            .map(|ticket| ticket.auth)
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +334,17 @@ mod tests {
             .expect("state")
     }
 
+    async fn test_state_with_ws_ticket_cap(cap: usize) -> AppState {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::connect("sqlite::memory:").await.expect("db");
+        let mut config = ServerConfig::default();
+        config.server.data_dir = dir.path().to_path_buf();
+        config.auth.max_pending_ws_tickets = cap;
+        AppState::open_with_db_and_config(db, config, ServerSecrets::test_fixture())
+            .await
+            .expect("state")
+    }
+
     // A tight loop forces many allocations into the same microsecond, exercising
     // the monotonic `prev + 1` path that keeps the sync cursor unique.
     #[tokio::test]
@@ -288,5 +356,46 @@ mod tests {
             assert!(next > prev, "seq must strictly increase: {next} !> {prev}");
             prev = next;
         }
+    }
+
+    #[tokio::test]
+    async fn ws_tickets_are_single_use() {
+        let state = test_state().await;
+        let auth = AuthInfo {
+            session_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            device_id: Uuid::now_v7(),
+        };
+        let issued = state.create_ws_ticket(auth.clone());
+
+        let consumed = state
+            .consume_ws_ticket(&issued.ticket)
+            .expect("ticket should be valid once");
+        assert_eq!(consumed.session_id, auth.session_id);
+        assert!(state.consume_ws_ticket(&issued.ticket).is_none());
+    }
+
+    #[tokio::test]
+    async fn ws_tickets_evict_oldest_first_at_capacity() {
+        let state = test_state_with_ws_ticket_cap(2).await;
+        let auth = || AuthInfo {
+            session_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            device_id: Uuid::now_v7(),
+        };
+
+        // Sleep between mints so each ticket gets a distinct `expires_at`,
+        // making oldest-first eviction unambiguous.
+        let first = state.create_ws_ticket(auth());
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let second = state.create_ws_ticket(auth());
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let third = state.create_ws_ticket(auth());
+
+        // Cap is 2: minting the third evicts the oldest ticket, not a fresh one
+        // that is about to connect.
+        assert!(state.consume_ws_ticket(&first.ticket).is_none());
+        assert!(state.consume_ws_ticket(&second.ticket).is_some());
+        assert!(state.consume_ws_ticket(&third.ticket).is_some());
     }
 }

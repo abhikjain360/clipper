@@ -277,6 +277,7 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
     // private routes
     let authed = Router::new()
         .route("/api/auth/logout", post(routes::auth::logout))
+        .route("/api/ws-ticket", post(ws::mint_ws_ticket))
         .route("/api/objects/init", post(routes::objects::init_object))
         .route(
             "/api/objects/{id}/payloads/{payload_id}",
@@ -317,6 +318,7 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
     // public routes
     let app = Router::new()
         .route("/api/health", get(routes::health::health))
+        .route("/api/ws-ticket/connect", get(ws::ws_ticket_handler))
         .merge(public_auth)
         .merge(authed)
         .layer(axum::Extension(trusted_proxies))

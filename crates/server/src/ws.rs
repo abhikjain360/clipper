@@ -3,18 +3,27 @@ use axum::{
         State, WebSocketUpgrade,
         ws::{CloseFrame, Message, WebSocket, close_code},
     },
+    http::StatusCode,
     response::Response,
 };
 use chrono::Utc;
 use clipper_core::models::{
     ObjectEventType, ObjectId, ObjectKind, WsClientMessage, WsError, WsServerMessage,
+    WsTicketResponse,
 };
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::{auth::AuthInfo, entity::event_log, state::AppState};
+use crate::{
+    auth::AuthInfo,
+    entity::event_log,
+    routes::{Postcard, RouteResult, error_response},
+    state::AppState,
+};
+
+const WS_TICKET_PROTOCOL: &str = "clipper-ticket";
 
 /// A broadcast message sent to all connected WebSocket clients.
 #[derive(Clone, Debug)]
@@ -34,6 +43,49 @@ pub async fn ws_handler(
     axum::Extension(auth): axum::Extension<AuthInfo>,
 ) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state, auth))
+}
+
+pub async fn mint_ws_ticket(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Postcard<WsTicketResponse> {
+    let issued = state.create_ws_ticket(auth);
+    Postcard(WsTicketResponse {
+        ticket: issued.ticket,
+        expires_at: issued.expires_at.to_rfc3339(),
+    })
+}
+
+pub async fn ws_ticket_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> RouteResult<Response> {
+    let mut saw_ticket_protocol = false;
+    let mut ticket = None;
+    for protocol in ws
+        .requested_protocols()
+        .filter_map(|protocol| protocol.to_str().ok())
+        .map(str::trim)
+    {
+        if protocol == WS_TICKET_PROTOCOL {
+            saw_ticket_protocol = true;
+        } else if !protocol.is_empty() && ticket.is_none() {
+            ticket = Some(protocol.to_owned());
+        }
+    }
+    let ticket = saw_ticket_protocol
+        .then_some(ticket)
+        .flatten()
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Missing WebSocket ticket"))?;
+    let auth = state.consume_ws_ticket(&ticket).ok_or_else(|| {
+        error_response(
+            StatusCode::UNAUTHORIZED,
+            "Invalid or expired WebSocket ticket",
+        )
+    })?;
+    Ok(ws
+        .protocols([WS_TICKET_PROTOCOL])
+        .on_upgrade(move |socket| handle_socket(socket, state, auth)))
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {

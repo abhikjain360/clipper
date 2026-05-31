@@ -75,6 +75,22 @@ impl ApiClient {
         Ok(url)
     }
 
+    pub fn websocket_ticket_url(&self) -> Result<Url, ClientError> {
+        let mut url = self.api_url(&["ws-ticket", "connect"])?;
+        let scheme = match url.scheme() {
+            "https" => "wss",
+            "http" => "ws",
+            _ => {
+                return Err(ClientError::InvalidServerUrl(
+                    "Server URL must use http or https".into(),
+                ));
+            }
+        };
+        url.set_scheme(scheme)
+            .map_err(|_| ClientError::InvalidServerUrl("Invalid WebSocket URL scheme".into()))?;
+        Ok(url)
+    }
+
     fn api_url(&self, segments: &[&str]) -> Result<Url, ClientError> {
         let mut url = self.base_url.clone();
         {
@@ -216,6 +232,20 @@ impl ApiClient {
             response: login_resp,
             encryption_key,
         })
+    }
+
+    pub async fn websocket_ticket(&self) -> Result<WsTicketResponse, ClientError> {
+        let resp = self
+            .http
+            .post(self.api_url(&["ws-ticket"])?)
+            .header(
+                header::AUTHORIZATION,
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .send()
+            .await?;
+
+        Self::postcard_response(resp).await
     }
 
     pub async fn register(
@@ -426,7 +456,6 @@ impl ApiClient {
 
         Self::postcard_response(resp).await
     }
-
 }
 
 fn parse_server_url(base_url: &str) -> Result<Url, ClientError> {
@@ -890,6 +919,19 @@ mod tests {
         assert_eq!(
             client.websocket_url().expect("websocket URL").as_str(),
             "wss://example.com/clipper/api/ws"
+        );
+    }
+
+    #[test]
+    fn websocket_ticket_url_uses_ws_scheme_and_api_path() {
+        let client = ApiClient::new("https://example.com/clipper");
+
+        assert_eq!(
+            client
+                .websocket_ticket_url()
+                .expect("ticket websocket URL")
+                .as_str(),
+            "wss://example.com/clipper/api/ws-ticket/connect"
         );
     }
 

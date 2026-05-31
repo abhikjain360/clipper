@@ -121,6 +121,11 @@ worker. `nix run .#web-serve` serves `app/build/web` with those headers; a
 generic static file server such as `python -m http.server` will show a blank
 page or startup error.
 
+The browser client receives live sync events over a ticketed WebSocket path:
+it mints a short-lived ticket over authenticated HTTP and then connects to the
+public WebSocket upgrade route with that ticket as a WebSocket subprotocol.
+Native clients continue to use the bearer-authenticated `/api/ws` route.
+
 ## Local Server
 
 ```sh
@@ -203,6 +208,7 @@ prune_interval_secs = 60
 [auth]
 challenge_ttl_secs = 300
 max_pending_challenges = 4096
+max_pending_ws_tickets = 4096
 
 [limits]
 max_file_blob_bytes = 536870912

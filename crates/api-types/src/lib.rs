@@ -481,6 +481,12 @@ pub enum WsClientMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct WsTicketResponse {
+    pub ticket: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WsServerMessage {
     #[serde(rename = "hello_ack")]

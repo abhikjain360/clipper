@@ -191,11 +191,26 @@ user request. Future LAN P2P must follow the same on-demand payload rule.
 
 Sync flow:
 
-1. Client calls `GET /api/sync/bootstrap` after login. The response includes device info and the latest `event_log.seq`. The client rebuilds clipboard/file state from `GET /api/objects` (see `SyncEngine::fetch_object_state`).
-2. Client opens `GET /api/ws` with bearer auth.
-3. Client sends `hello { last_seq }`.
-4. Server replies with `hello_ack { server_time, latest_seq }`, then replays that user's `event_log` rows after `last_seq`. If the replay query errors, the server sends `Invalidate { target: "all" }` so the client refreshes from list endpoints.
-5. Server then continues broadcasting only that user's new events.
+1. After login, clients open a WebSocket and send `hello`.
+2. Native clients connect to `GET /api/ws` through the normal authenticated
+   router, so `auth_middleware` extracts `Authorization: Bearer ...` and injects
+   `AuthInfo`.
+3. Browser clients cannot set arbitrary WebSocket upgrade headers. They first
+   call authenticated `POST /api/ws-ticket` over HTTP, then connect to public
+   `GET /api/ws-ticket/connect` with WebSocket subprotocols
+   `clipper-ticket` and the short-lived ticket. The server consumes that ticket
+   before upgrading and then calls the same socket handler with the recovered
+   `AuthInfo`.
+4. Server replies with `hello_ack { server_time, stream_start_seq }`, where
+   `stream_start_seq` is the current per-user event-log high-water mark.
+5. The client snapshots files and clipboard objects from `GET /api/objects`
+   using `created_seq_lte = stream_start_seq`, then applies live WebSocket
+   events with `seq > stream_start_seq`.
+6. If a client lags behind the broadcast buffer, the server sends
+   `Invalidate { target: "all" }` and closes the socket so the client reconnects
+   and snapshots again.
+7. Live broadcasts are scoped to the authenticated user and skip events
+   originated by the same authenticated device.
 
 Cleanup flow:
 
@@ -225,6 +240,7 @@ Review `routes/auth.rs`, `auth.rs`, `state.rs`, and `rate_limit.rs` first.
 - Usernames are enumerable: `challenge` returns `401 "Unknown user"` for a missing username without doing OPAQUE work, and `register_start` returns `409 "Username already taken"`. Because `opaque_server_setup` is per-user, the OPAQUE `fake_sk` enumeration mitigation is not exercised. Treat this as an accepted tradeoff of the username-based design, not as something `fake_sk` defends (see `docs/opaque.md` and `docs/rust-code-review.md` P3).
 - Challenge IDs must be random, short-lived, and single-use. Pending registration IDs must be random, short-lived, and single-use. Both maps in `AppState` cap themselves at `auth.max_pending_challenges`; the eviction order under that cap is HashMap iteration order (effectively arbitrary), so high pressure can drop fresh entries.
 - Session tokens must be random, stored server-side only as hashes (`sha256(token)`), and required on all private routes.
+- WebSocket tickets are browser compatibility credentials only. `POST /api/ws-ticket` must require a normal bearer session, issue a high-entropy ticket, store only `sha256(ticket)` in memory with the associated `AuthInfo`, cap tickets at `auth.max_pending_ws_tickets` (separate from the OPAQUE challenge cap so the two DoS surfaces tune independently), and make tickets short-lived and single-use. Because all tickets share a fixed TTL, eviction under the cap drops the oldest (smallest `expires_at`) first, so a burst of new tickets cannot displace one that is about to connect. Do not persist tickets or accept them for non-WebSocket APIs.
 - Expired sessions must fail closed; `auth_middleware` rejects when `sess.expires_at < now_rfc3339`.
 - Logout should delete only the authenticated session.
 - Auth rate limiting must apply to registration starts/finishes, OPAQUE challenge starts, and login finalizations. It is `governor`-backed, keyed by resolved client IP, configurable from TOML/CLI, and also has a global auth cap.

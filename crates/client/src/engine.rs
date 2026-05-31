@@ -26,6 +26,8 @@ const RECENT_CLIPBOARD_LIMIT: usize = 100;
 pub const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
 const CLIPBOARD_HYDRATION_CONCURRENCY: usize = 8;
 const OBJECT_ENVELOPE_VERSION_V1: u64 = 1;
+#[cfg(target_family = "wasm")]
+const WS_TICKET_PROTOCOL: &str = "clipper-ticket";
 
 #[derive(Debug, Clone)]
 pub struct ClipboardPayload {
@@ -238,10 +240,9 @@ impl SyncEngine {
         }
         self.bump_version();
 
-        #[cfg(not(target_family = "wasm"))]
         {
             let engine = Arc::clone(self);
-            tokio::spawn(async move {
+            spawn_background(async move {
                 engine.ws_loop().await;
             });
         }
@@ -852,6 +853,56 @@ impl SyncEngine {
         });
     }
 
+    async fn handle_ws_text(
+        self: &Arc<Self>,
+        text: &str,
+        generation: u64,
+    ) -> Result<bool, ClientError> {
+        match serde_json::from_str::<WsServerMessage>(text) {
+            Ok(WsServerMessage::HelloAck { .. }) => {
+                debug!("Ignoring duplicate WS hello_ack");
+            }
+            Ok(WsServerMessage::Event {
+                seq,
+                event_type,
+                object_kind,
+                object_id,
+                ..
+            }) => {
+                debug!("WS event seq={} type={}", seq, event_type);
+                match event_type {
+                    ObjectEventType::Created => {
+                        self.handle_created_event(generation, object_kind, object_id, seq)
+                            .await?;
+                    }
+                    ObjectEventType::Deleted if object_kind == ObjectKind::File => {
+                        self.handle_deleted_event(generation, ObjectKind::File, object_id, seq)
+                            .await?;
+                    }
+                    ObjectEventType::Deleted => {
+                        warn!(
+                            seq,
+                            object_kind = %object_kind,
+                            "Ignoring unsupported WS delete event for object kind",
+                        );
+                    }
+                }
+            }
+            Ok(WsServerMessage::Invalidate { .. }) => {
+                info!("WS invalidate requested reconnect");
+                return Ok(false);
+            }
+            Ok(WsServerMessage::Error { error }) => {
+                warn!("Server rejected WS connection: {error}");
+                return Ok(false);
+            }
+            Err(e) => {
+                warn!("Failed to parse WS message: {}", e);
+            }
+        }
+        Ok(true)
+    }
+
     async fn snapshot_files(
         self: &Arc<Self>,
         generation: u64,
@@ -1346,52 +1397,8 @@ impl SyncEngine {
 
                     match msg {
                         tungstenite::Message::Text(text) => {
-                            match serde_json::from_str::<WsServerMessage>(&text) {
-                                Ok(WsServerMessage::HelloAck { .. }) => {
-                                    debug!("Ignoring duplicate WS hello_ack");
-                                }
-                                Ok(WsServerMessage::Event {
-                                    seq,
-                                    event_type,
-                                    object_kind,
-                                    object_id,
-                                    ..
-                                }) => {
-                                    debug!("WS event seq={} type={}", seq, event_type);
-                                    match event_type {
-                                        ObjectEventType::Created => {
-                                            self.handle_created_event(generation, object_kind, object_id, seq)
-                                                .await?;
-                                        }
-                                        ObjectEventType::Deleted if object_kind == ObjectKind::File => {
-                                            self.handle_deleted_event(
-                                                generation,
-                                                ObjectKind::File,
-                                                object_id,
-                                                seq,
-                                            )
-                                            .await?;
-                                        }
-                                        ObjectEventType::Deleted => {
-                                            warn!(
-                                                seq,
-                                                object_kind = %object_kind,
-                                                "Ignoring unsupported WS delete event for object kind",
-                                            );
-                                        }
-                                    }
-                                }
-                                Ok(WsServerMessage::Invalidate { .. }) => {
-                                    info!("WS invalidate requested reconnect");
-                                    break;
-                                }
-                                Ok(WsServerMessage::Error { error }) => {
-                                    warn!("Server rejected WS connection: {error}");
-                                    break;
-                                }
-                                Err(e) => {
-                                    warn!("Failed to parse WS message: {}", e);
-                                }
+                            if !self.handle_ws_text(&text, generation).await? {
+                                break;
                             }
                         }
                         tungstenite::Message::Ping(data) => {
@@ -1409,6 +1416,250 @@ impl SyncEngine {
 
         Ok(())
     }
+
+    #[cfg(target_family = "wasm")]
+    async fn ws_loop(self: &Arc<Self>) {
+        let mut backoff = Duration::from_secs(1);
+        let max_backoff = Duration::from_secs(60);
+
+        loop {
+            {
+                let state = self.state.read().await;
+                if !state.logged_in {
+                    return;
+                }
+            }
+
+            {
+                let mut state = self.state.write().await;
+                state.connection_status = ConnectionStatus::Connecting;
+            }
+            self.bump_version();
+
+            match self.ws_connect().await {
+                Ok(()) => {
+                    backoff = Duration::from_secs(1);
+                }
+                Err(e) => {
+                    warn!("WebSocket error: {}", e);
+                    {
+                        let mut state = self.state.write().await;
+                        state.connection_status = ConnectionStatus::Disconnected;
+                    }
+                    self.bump_version();
+                }
+            }
+
+            {
+                let state = self.state.read().await;
+                if !state.logged_in {
+                    return;
+                }
+            }
+
+            gloo_timers::future::sleep(backoff).await;
+            backoff = (backoff * 2).min(max_backoff);
+        }
+    }
+
+    #[cfg(target_family = "wasm")]
+    async fn ws_connect(self: &Arc<Self>) -> Result<(), ClientError> {
+        let ws_url = {
+            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
+            let ticket = api.websocket_ticket().await?;
+            (api.websocket_ticket_url()?, ticket.ticket)
+        };
+
+        let mut ws = BrowserWs::connect(ws_url.0.as_str(), &ws_url.1).await?;
+
+        let hello = WsClientMessage::Hello;
+        let hello_json =
+            serde_json::to_string(&hello).map_err(|e| ClientError::WebSocket(e.to_string()))?;
+        ws.send_text(&hello_json)?;
+
+        let stream_start_seq = loop {
+            let text = ws
+                .next_text()
+                .await?
+                .ok_or_else(|| ClientError::WebSocket("closed before hello_ack".into()))?;
+            match serde_json::from_str::<WsServerMessage>(&text) {
+                Ok(WsServerMessage::HelloAck {
+                    stream_start_seq, ..
+                }) => break stream_start_seq,
+                Ok(WsServerMessage::Error { error }) => {
+                    return Err(ClientError::WebSocket(error.to_string()));
+                }
+                Ok(other) => {
+                    debug!("Ignoring WS message before hello_ack: {:?}", other);
+                }
+                Err(e) => {
+                    return Err(ClientError::WebSocket(format!(
+                        "failed to parse hello_ack: {e}"
+                    )));
+                }
+            }
+        };
+
+        let generation = self.local_store.start_generation().await;
+        self.start_reconciliation(generation, stream_start_seq)
+            .await;
+
+        {
+            let mut state = self.state.write().await;
+            state.connection_status = ConnectionStatus::Connected;
+        }
+        self.bump_version();
+        info!(
+            stream_start_seq,
+            generation, "WebSocket connected and reconciliation started"
+        );
+
+        let mut restart_rx = self.ws_restart_rx.clone();
+        loop {
+            tokio::select! {
+                changed = restart_rx.changed() => {
+                    if changed.is_ok() {
+                        info!("WebSocket reconnect requested");
+                    }
+                    break;
+                }
+                msg = ws.next_text() => {
+                    let Some(text) = msg? else {
+                        info!("WebSocket closed by server");
+                        break;
+                    };
+                    if !self.handle_ws_text(&text, generation).await? {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(target_family = "wasm")]
+enum BrowserWsMessage {
+    Open,
+    Text(String),
+    Error(String),
+    Close(String),
+}
+
+#[cfg(target_family = "wasm")]
+struct BrowserWs {
+    socket: web_sys::WebSocket,
+    rx: tokio::sync::mpsc::UnboundedReceiver<BrowserWsMessage>,
+    _onopen: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+    _onmessage: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::MessageEvent)>,
+    _onerror: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+    _onclose: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::CloseEvent)>,
+}
+
+#[cfg(target_family = "wasm")]
+impl BrowserWs {
+    async fn connect(url: &str, ticket: &str) -> Result<Self, ClientError> {
+        use wasm_bindgen::JsCast;
+
+        let protocols = js_sys::Array::new();
+        protocols.push(&wasm_bindgen::JsValue::from_str(WS_TICKET_PROTOCOL));
+        protocols.push(&wasm_bindgen::JsValue::from_str(ticket));
+        let socket = web_sys::WebSocket::new_with_str_sequence(url, protocols.as_ref())
+            .map_err(|error| ClientError::WebSocket(js_error_message(error)))?;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let onopen = {
+            let tx = tx.clone();
+            wasm_bindgen::closure::Closure::wrap(Box::new(move |_event: web_sys::Event| {
+                _ = tx.send(BrowserWsMessage::Open);
+            }) as Box<dyn FnMut(web_sys::Event)>)
+        };
+        socket.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+
+        let onmessage = {
+            let tx = tx.clone();
+            wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
+                if let Some(text) = event.data().as_string() {
+                    _ = tx.send(BrowserWsMessage::Text(text));
+                }
+            })
+                as Box<dyn FnMut(web_sys::MessageEvent)>)
+        };
+        socket.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+
+        let onerror = {
+            let tx = tx.clone();
+            wasm_bindgen::closure::Closure::wrap(Box::new(move |_event: web_sys::Event| {
+                _ = tx.send(BrowserWsMessage::Error("browser WebSocket error".into()));
+            }) as Box<dyn FnMut(web_sys::Event)>)
+        };
+        socket.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+
+        let onclose = {
+            let tx = tx.clone();
+            wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::CloseEvent| {
+                let reason = if event.reason().is_empty() {
+                    format!("closed with code {}", event.code())
+                } else {
+                    format!("closed with code {}: {}", event.code(), event.reason())
+                };
+                _ = tx.send(BrowserWsMessage::Close(reason));
+            })
+                as Box<dyn FnMut(web_sys::CloseEvent)>)
+        };
+        socket.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+
+        let mut ws = Self {
+            socket,
+            rx,
+            _onopen: onopen,
+            _onmessage: onmessage,
+            _onerror: onerror,
+            _onclose: onclose,
+        };
+
+        loop {
+            match ws.rx.recv().await {
+                Some(BrowserWsMessage::Open) => return Ok(ws),
+                Some(BrowserWsMessage::Text(_)) => {}
+                Some(BrowserWsMessage::Error(error)) => {
+                    return Err(ClientError::WebSocket(error));
+                }
+                Some(BrowserWsMessage::Close(reason)) => {
+                    return Err(ClientError::WebSocket(reason));
+                }
+                None => return Err(ClientError::WebSocket("WebSocket closed".into())),
+            }
+        }
+    }
+
+    fn send_text(&self, text: &str) -> Result<(), ClientError> {
+        self.socket
+            .send_with_str(text)
+            .map_err(|error| ClientError::WebSocket(js_error_message(error)))
+    }
+
+    async fn next_text(&mut self) -> Result<Option<String>, ClientError> {
+        loop {
+            match self.rx.recv().await {
+                Some(BrowserWsMessage::Open) => {}
+                Some(BrowserWsMessage::Text(text)) => return Ok(Some(text)),
+                Some(BrowserWsMessage::Error(error)) => {
+                    return Err(ClientError::WebSocket(error));
+                }
+                Some(BrowserWsMessage::Close(_reason)) => return Ok(None),
+                None => return Ok(None),
+            }
+        }
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn js_error_message(error: wasm_bindgen::JsValue) -> String {
+    error
+        .as_string()
+        .unwrap_or_else(|| "browser WebSocket operation failed".into())
 }
 
 fn mime_guess_from_filename(filename: &str) -> String {

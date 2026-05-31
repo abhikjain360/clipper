@@ -27,6 +27,7 @@ const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
     auth: AuthConfig {
         challenge_ttl_secs: 5 * 60,
         max_pending_challenges: 4096,
+        max_pending_ws_tickets: 4096,
     },
     limits: LimitsConfig {
         max_file_blob_bytes: 512 * 1024 * 1024,
@@ -199,8 +200,12 @@ impl RateLimitConfig {
 pub struct AuthConfig {
     #[garde(range(min = 1))]
     pub challenge_ttl_secs: u64,
+    /// Maximum in-memory OPAQUE challenges and pending registrations.
     #[garde(range(min = 1))]
     pub max_pending_challenges: usize,
+    /// Maximum in-memory WebSocket tickets awaiting connection.
+    #[garde(range(min = 1))]
+    pub max_pending_ws_tickets: usize,
 }
 
 impl AuthConfig {
@@ -208,7 +213,11 @@ impl AuthConfig {
         apply_option_overrides!(
             self,
             overrides,
-            [challenge_ttl_secs, max_pending_challenges]
+            [
+                challenge_ttl_secs,
+                max_pending_challenges,
+                max_pending_ws_tickets
+            ]
         );
     }
 }
@@ -403,6 +412,9 @@ pub struct AuthConfigOverrides {
     /// Maximum in-memory OPAQUE challenges and pending registrations.
     #[arg(long = "auth-max-pending-challenges")]
     pub max_pending_challenges: Option<usize>,
+    /// Maximum in-memory WebSocket tickets awaiting connection.
+    #[arg(long = "auth-max-pending-ws-tickets")]
+    pub max_pending_ws_tickets: Option<usize>,
 }
 
 #[derive(Args, Debug, Clone, Default, Deserialize)]
@@ -582,6 +594,7 @@ mod tests {
                 [auth]
                 challenge_ttl_secs = 120
                 max_pending_challenges = 128
+                max_pending_ws_tickets = 256
 
                 [limits]
                 max_file_blob_bytes = 1024
@@ -622,6 +635,7 @@ mod tests {
         assert_eq!(config.rate_limit.prune_interval_secs, 30);
         assert_eq!(config.auth.challenge_ttl_secs, 120);
         assert_eq!(config.auth.max_pending_challenges, 128);
+        assert_eq!(config.auth.max_pending_ws_tickets, 256);
         assert_eq!(config.limits.max_file_blob_bytes, 1024);
         assert_eq!(config.limits.max_file_meta_ciphertext_bytes, 2048);
         assert_eq!(config.limits.max_object_meta_ciphertext_bytes, 4096);
