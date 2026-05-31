@@ -400,6 +400,7 @@ pub struct ObjectPayloadUpload {
 pub struct ObjectInitResponse {
     pub upload_urls: Vec<ObjectPayloadUpload>,
     pub complete: bool,
+    pub created_seq: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -416,6 +417,16 @@ pub struct ObjectPayloadComplete {
 pub struct ObjectCompleteRequest {
     #[garde(dive, length(min = 1), custom(validate_unique_complete_payload_ids))]
     pub payloads: Vec<ObjectPayloadComplete>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectCompleteResponse {
+    pub created_seq: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectDeleteResponse {
+    pub deleted_seq: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

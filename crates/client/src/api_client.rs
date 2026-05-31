@@ -347,7 +347,7 @@ impl ApiClient {
         &self,
         object_id: &str,
         req: &ObjectCompleteRequest,
-    ) -> Result<OkResponse, ClientError> {
+    ) -> Result<ObjectCompleteResponse, ClientError> {
         let url = self.api_url(&["objects", object_id, "complete"])?;
         let resp = self
             .http
@@ -405,7 +405,10 @@ impl ApiClient {
         Ok(Self::checked_response(resp).await?.bytes().await?.to_vec())
     }
 
-    pub async fn delete_object(&self, object_id: &str) -> Result<OkResponse, ClientError> {
+    pub async fn delete_object(
+        &self,
+        object_id: &str,
+    ) -> Result<ObjectDeleteResponse, ClientError> {
         let url = self.api_url(&["objects", object_id])?;
         let resp = self
             .http

@@ -20,6 +20,7 @@ use crate::{auth::AuthInfo, entity::event_log, state::AppState};
 #[derive(Clone, Debug)]
 pub struct WsBroadcast {
     pub user_id: Uuid,
+    pub source_device_id: Uuid,
     pub seq: i64,
     pub event_type: String,
     pub object_kind: String,
@@ -119,7 +120,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
             broadcast = rx.recv() => {
                 match broadcast {
                     Ok(evt) => {
-                        if evt.user_id != auth.user_id {
+                        if !should_forward_live_broadcast(&evt, auth.user_id, auth.device_id) {
                             continue;
                         }
                         let msg = WsServerMessage::Event {
@@ -213,4 +214,64 @@ async fn get_events_since(
         .into_partial_model::<WsEventRow>()
         .all(state.db())
         .await
+}
+
+fn should_forward_live_broadcast(evt: &WsBroadcast, user_id: Uuid, device_id: Uuid) -> bool {
+    evt.user_id == user_id && evt.source_device_id != device_id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn broadcast(user_id: Uuid, source_device_id: Uuid) -> WsBroadcast {
+        WsBroadcast {
+            user_id,
+            source_device_id,
+            seq: 1,
+            event_type: "file.created".into(),
+            object_kind: "file".into(),
+            object_id: Uuid::now_v7().to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn live_broadcast_filter_skips_self_originated_events() {
+        let user_id = Uuid::now_v7();
+        let device_id = Uuid::now_v7();
+
+        assert!(!should_forward_live_broadcast(
+            &broadcast(user_id, device_id),
+            user_id,
+            device_id,
+        ));
+    }
+
+    #[test]
+    fn live_broadcast_filter_keeps_other_devices_for_same_user() {
+        let user_id = Uuid::now_v7();
+        let device_id = Uuid::now_v7();
+        let other_device_id = Uuid::now_v7();
+
+        assert!(should_forward_live_broadcast(
+            &broadcast(user_id, other_device_id),
+            user_id,
+            device_id,
+        ));
+    }
+
+    #[test]
+    fn live_broadcast_filter_skips_other_users() {
+        let user_id = Uuid::now_v7();
+        let other_user_id = Uuid::now_v7();
+        let device_id = Uuid::now_v7();
+        let other_device_id = Uuid::now_v7();
+
+        assert!(!should_forward_live_broadcast(
+            &broadcast(other_user_id, other_device_id),
+            user_id,
+            device_id,
+        ));
+    }
 }

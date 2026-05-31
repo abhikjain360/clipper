@@ -115,6 +115,11 @@ impl SyncEngine {
         _ = self.state_tx.send(v);
     }
 
+    async fn observe_committed_seq(&self, seq: i64) {
+        let mut last_seq = self.last_seq.write().await;
+        *last_seq = (*last_seq).max(seq);
+    }
+
     // ── Auth ──
 
     pub async fn login(
@@ -455,15 +460,16 @@ impl SyncEngine {
             envelope,
         };
 
-        self.submit_single_payload_object(
-            &object_id,
-            &payload_id,
-            &init_req,
-            encrypted_payload,
-            payload_size,
-            payload_hash,
-        )
-        .await?;
+        let created_seq = self
+            .submit_single_payload_object(
+                &object_id,
+                &payload_id,
+                &init_req,
+                encrypted_payload,
+                payload_size,
+                payload_hash,
+            )
+            .await?;
 
         let item = DecryptedClipboardItem {
             id: object_id.clone(),
@@ -485,6 +491,7 @@ impl SyncEngine {
             let mut state = self.state.write().await;
             state.clipboard_items = clipboard_items;
         }
+        self.observe_committed_seq(created_seq).await;
         self.bump_version();
         info!(
             clipboard_id = %object_id,
@@ -585,14 +592,16 @@ impl SyncEngine {
         encrypted_payload: Vec<u8>,
         payload_size: i64,
         payload_hash: Vec<u8>,
-    ) -> Result<(), ClientError> {
+    ) -> Result<i64, ClientError> {
         let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
         let init_resp = api.object_init(init_req).await?;
         let payload_id_typed = payload_id
             .parse()
             .map_err(|e| ClientError::Other(format!("Invalid payload id: {e}")))?;
         if init_resp.complete {
-            return Ok(());
+            return init_resp.created_seq.ok_or_else(|| {
+                ClientError::Other("Complete object response missing created_seq".into())
+            });
         }
 
         if !init_resp
@@ -607,18 +616,19 @@ impl SyncEngine {
 
         api.object_upload_payload(object_id, payload_id, encrypted_payload)
             .await?;
-        api.object_complete(
-            object_id,
-            &ObjectCompleteRequest {
-                payloads: vec![ObjectPayloadComplete {
-                    id: payload_id_typed,
-                    ciphertext_size: payload_size,
-                    sha256_ciphertext: payload_hash,
-                }],
-            },
-        )
-        .await?;
-        Ok(())
+        let complete_resp = api
+            .object_complete(
+                object_id,
+                &ObjectCompleteRequest {
+                    payloads: vec![ObjectPayloadComplete {
+                        id: payload_id_typed,
+                        ciphertext_size: payload_size,
+                        sha256_ciphertext: payload_hash,
+                    }],
+                },
+            )
+            .await?;
+        Ok(complete_resp.created_seq)
     }
 
     // ── Files ──
@@ -725,15 +735,16 @@ impl SyncEngine {
             envelope,
         };
 
-        self.submit_single_payload_object(
-            &file_id,
-            &payload_id,
-            &init_req,
-            encrypted_blob,
-            blob_size,
-            blob_hash,
-        )
-        .await?;
+        let created_seq = self
+            .submit_single_payload_object(
+                &file_id,
+                &payload_id,
+                &init_req,
+                encrypted_blob,
+                blob_size,
+                blob_hash,
+            )
+            .await?;
 
         {
             let mut state = self.state.write().await;
@@ -749,6 +760,7 @@ impl SyncEngine {
                 },
             );
         }
+        self.observe_committed_seq(created_seq).await;
         self.bump_version();
         info!(file_id = %file_id, filename = %filename, "File uploaded");
         Ok(file_id)
@@ -814,15 +826,15 @@ impl SyncEngine {
     }
 
     pub async fn delete_file(&self, file_id: &str) -> Result<(), ClientError> {
-        {
+        let delete_resp = {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.delete_object(file_id).await?;
-        }
-
+            api.delete_object(file_id).await?
+        };
         {
             let mut state = self.state.write().await;
             state.files.retain(|f| f.id != file_id);
         }
+        self.observe_committed_seq(delete_resp.deleted_seq).await;
         self.bump_version();
         info!(file_id = %file_id, "File deleted");
         Ok(())

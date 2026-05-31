@@ -10,9 +10,10 @@ use chrono::{Duration, Utc};
 use clipper_core::{
     crypto::{self, SHA256_BYTES},
     models::{
-        ApiErrorCode, ObjectCompleteRequest, ObjectEnvelopeOperation, ObjectInitRequest,
-        ObjectInitResponse, ObjectKind, ObjectListItem, ObjectListResponse,
-        ObjectPayloadDescriptor, ObjectPayloadInit, ObjectPayloadUpload, OkResponse,
+        ApiErrorCode, ObjectCompleteRequest, ObjectCompleteResponse, ObjectDeleteResponse,
+        ObjectEnvelopeOperation, ObjectInitRequest, ObjectInitResponse, ObjectKind, ObjectListItem,
+        ObjectListResponse, ObjectPayloadDescriptor, ObjectPayloadInit, ObjectPayloadUpload,
+        OkResponse,
     },
 };
 use clipper_fs_txn::FsTransaction;
@@ -273,10 +274,12 @@ pub async fn init_object(
     // The transaction committed; keep the inline payload files on disk.
     staged.commit();
 
+    let created_seq = inserted_event.as_ref().map(|inserted| inserted.seq);
     if let Some(inserted) = inserted_event {
         broadcast_created(
             &state,
             user_id,
+            device_id,
             inserted.seq,
             kind,
             &object_id_text,
@@ -292,6 +295,7 @@ pub async fn init_object(
     Ok(Postcard(ObjectInitResponse {
         upload_urls,
         complete: all_inline,
+        created_seq,
     }))
 }
 
@@ -467,19 +471,22 @@ pub async fn complete_object(
     Extension(auth): Extension<AuthInfo>,
     Path(object_id): Path<String>,
     Postcard(req): Postcard<ObjectCompleteRequest>,
-) -> Result<Postcard<OkResponse>, ApiError> {
+) -> Result<Postcard<ObjectCompleteResponse>, ApiError> {
     let object_uuid =
         Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
     let object = object_for_upload(&state, auth.user_id, auth.device_id, object_uuid).await?;
+    let kind = parse_object_kind(object_uuid, &object.kind)?;
 
     if object.status == "complete" {
+        let created_seq =
+            object_event_seq(&state, auth.user_id, kind, object_uuid, "created").await?;
         debug!(
             object_id = %object_uuid,
             user_id = %auth.user_id,
             device_id = %auth.device_id,
             "Accepted idempotent complete_object for already complete object",
         );
-        return Ok(Postcard(OkResponse { ok: true }));
+        return Ok(Postcard(ObjectCompleteResponse { created_seq }));
     }
 
     let payloads = object_payloads::Entity::find()
@@ -607,14 +614,6 @@ pub async fn complete_object(
         }
     }
 
-    let kind = object.kind.parse().map_err(|_| {
-        error!(
-            object_id = %object_uuid,
-            kind = %object.kind,
-            "Object row has unknown kind value in database",
-        );
-        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-    })?;
     let now = Utc::now().to_rfc3339();
     let txn = state.db().begin().await.map_err(|e| {
         error!(error = %e, "Failed to begin complete_object transaction");
@@ -699,13 +698,23 @@ pub async fn complete_object(
         ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
-    broadcast_created(&state, auth.user_id, inserted.seq, kind, &object_id, &now);
+    broadcast_created(
+        &state,
+        auth.user_id,
+        auth.device_id,
+        inserted.seq,
+        kind,
+        &object_id,
+        &now,
+    );
     if kind == ObjectKind::Clipboard {
         spawn_clipboard_trim(state.clone(), auth.user_id);
     }
 
     info!(device_id = %auth.device_id, object_id = %object_id, kind = kind.as_ref(), "Object completed");
-    Ok(Postcard(OkResponse { ok: true }))
+    Ok(Postcard(ObjectCompleteResponse {
+        created_seq: inserted.seq,
+    }))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1029,7 +1038,7 @@ pub async fn delete_object(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
     Path(object_id): Path<String>,
-) -> Result<Postcard<OkResponse>, ApiError> {
+) -> Result<Postcard<ObjectDeleteResponse>, ApiError> {
     let object_uuid =
         Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
     let kind = objects::Entity::find_by_id(object_uuid)
@@ -1151,6 +1160,7 @@ pub async fn delete_object(
     remove_paths(paths).await;
     _ = state.ws_tx().send(WsBroadcast {
         user_id: auth.user_id,
+        source_device_id: auth.device_id,
         seq: inserted.seq,
         event_type: "file.deleted".into(),
         object_kind: "file".into(),
@@ -1158,7 +1168,9 @@ pub async fn delete_object(
         created_at: now,
     });
 
-    Ok(Postcard(OkResponse { ok: true }))
+    Ok(Postcard(ObjectDeleteResponse {
+        deleted_seq: inserted.seq,
+    }))
 }
 
 async fn validate_object_init_envelope(
@@ -1381,6 +1393,56 @@ where
     })
 }
 
+fn parse_object_kind(object_id: Uuid, kind: &str) -> Result<ObjectKind, ApiError> {
+    kind.parse().map_err(|_| {
+        error!(
+            object_id = %object_id,
+            kind = %kind,
+            "Object row has unknown kind value in database",
+        );
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+    })
+}
+
+async fn object_event_seq(
+    state: &AppState,
+    user_id: Uuid,
+    kind: ObjectKind,
+    object_id: Uuid,
+    event_suffix: &str,
+) -> Result<i64, ApiError> {
+    let event_type = format!("{}.{event_suffix}", kind.as_ref());
+    event_log::Entity::find()
+        .filter(event_log::Column::UserId.eq(user_id))
+        .filter(event_log::Column::ObjectId.eq(object_id))
+        .filter(event_log::Column::EventType.eq(event_type.clone()))
+        .order_by_desc(event_log::Column::Seq)
+        .select_only()
+        .column(event_log::Column::Seq)
+        .into_tuple::<i64>()
+        .one(state.db())
+        .await
+        .map_err(|e| {
+            error!(
+                object_id = %object_id,
+                user_id = %user_id,
+                event_type = %event_type,
+                error = %e,
+                "Failed to look up committed object event seq",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?
+        .ok_or_else(|| {
+            error!(
+                object_id = %object_id,
+                user_id = %user_id,
+                event_type = %event_type,
+                "Object is missing its committed event seq",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })
+}
+
 fn map_payload_batch_insert_error(error: DbErr, object_id: Uuid) -> ApiError {
     match error.sql_err() {
         Some(SqlErr::UniqueConstraintViolation(constraint)) => {
@@ -1438,6 +1500,7 @@ fn is_payload_path_conflict(constraint: &str) -> bool {
 fn broadcast_created(
     state: &AppState,
     user_id: Uuid,
+    source_device_id: Uuid,
     seq: i64,
     kind: ObjectKind,
     object_id: &str,
@@ -1445,6 +1508,7 @@ fn broadcast_created(
 ) {
     _ = state.ws_tx().send(WsBroadcast {
         user_id,
+        source_device_id,
         seq,
         event_type: format!("{}.created", kind.as_ref()),
         object_kind: kind.to_string(),
@@ -1853,6 +1917,7 @@ mod tests {
         let object_id = Uuid::now_v7().to_string();
         let payload_id = Uuid::now_v7().to_string();
         let ciphertext = b"encrypted clipboard payload";
+        let mut rx = state.ws_tx().subscribe();
 
         let Postcard(resp) = init_object(
             State(state.clone()),
@@ -1872,6 +1937,26 @@ mod tests {
 
         assert!(resp.complete);
         assert!(resp.upload_urls.is_empty());
+        let created_seq = resp.created_seq.expect("inline init returns created_seq");
+        assert!(created_seq > 0);
+        let broadcast = rx.try_recv().expect("created broadcast");
+        assert_eq!(broadcast.user_id, user_id);
+        assert_eq!(broadcast.source_device_id, device_id);
+        assert_eq!(broadcast.seq, created_seq);
+        assert_eq!(broadcast.event_type, "clipboard.created");
+        assert_eq!(broadcast.object_id, object_id);
+        assert_eq!(
+            object_event_seq(
+                &state,
+                user_id,
+                ObjectKind::Clipboard,
+                object_id.parse().expect("object id"),
+                "created",
+            )
+            .await
+            .expect("event seq"),
+            created_seq,
+        );
 
         let Postcard(list) = list_objects(
             State(state.clone()),
@@ -2100,6 +2185,7 @@ mod tests {
 
         assert!(!resp.complete);
         assert_eq!(resp.upload_urls.len(), 1);
+        assert!(resp.created_seq.is_none());
 
         upload_payload(
             State(state.clone()),
@@ -2110,7 +2196,8 @@ mod tests {
         .await
         .expect("upload");
 
-        complete_object(
+        let mut rx = state.ws_tx().subscribe();
+        let Postcard(complete_resp) = complete_object(
             State(state.clone()),
             Extension(auth(user_id, device_id)),
             Path(object_id.clone()),
@@ -2124,6 +2211,29 @@ mod tests {
         )
         .await
         .expect("complete");
+        assert!(complete_resp.created_seq > 0);
+        let broadcast = rx.try_recv().expect("created broadcast");
+        assert_eq!(broadcast.user_id, user_id);
+        assert_eq!(broadcast.source_device_id, device_id);
+        assert_eq!(broadcast.seq, complete_resp.created_seq);
+        assert_eq!(broadcast.event_type, "file.created");
+        assert_eq!(broadcast.object_id, object_id);
+
+        let Postcard(idempotent_resp) = complete_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path(object_id.clone()),
+            postcard(ObjectCompleteRequest {
+                payloads: vec![ObjectPayloadComplete {
+                    id: payload_id.parse().expect("payload id"),
+                    ciphertext_size: ciphertext.len() as i64,
+                    sha256_ciphertext: sha256(ciphertext).to_vec(),
+                }],
+            }),
+        )
+        .await
+        .expect("idempotent complete");
+        assert_eq!(idempotent_resp.created_seq, complete_resp.created_seq);
 
         let Postcard(list) = list_objects(
             State(state),
@@ -2138,6 +2248,71 @@ mod tests {
         .expect("list");
         assert_eq!(list.items.len(), 1);
         assert_eq!(list.items[0].id.to_string(), object_id);
+    }
+
+    #[tokio::test]
+    async fn delete_file_returns_deleted_seq_and_broadcast_actor() {
+        let (state, data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
+        let object_id = Uuid::now_v7().to_string();
+        let object_uuid = object_id.parse::<Uuid>().expect("object id");
+        let payload_id = Uuid::now_v7().to_string();
+        let ciphertext = b"encrypted file payload";
+
+        init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                object_id.clone(),
+                payload_id.clone(),
+                ObjectKind::File,
+                ciphertext,
+                true,
+                device_id,
+                &signing_secret_key,
+            )),
+        )
+        .await
+        .expect("init");
+
+        let mut rx = state.ws_tx().subscribe();
+        let Postcard(delete_resp) = delete_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path(object_id.clone()),
+        )
+        .await
+        .expect("delete");
+
+        assert!(delete_resp.deleted_seq > 0);
+        let broadcast = rx.try_recv().expect("deleted broadcast");
+        assert_eq!(broadcast.user_id, user_id);
+        assert_eq!(broadcast.source_device_id, device_id);
+        assert_eq!(broadcast.seq, delete_resp.deleted_seq);
+        assert_eq!(broadcast.event_type, "file.deleted");
+        assert_eq!(broadcast.object_id, object_id);
+        assert_eq!(
+            object_event_seq(&state, user_id, ObjectKind::File, object_uuid, "deleted")
+                .await
+                .expect("event seq"),
+            delete_resp.deleted_seq,
+        );
+
+        let object = objects::Entity::find_by_id(object_uuid)
+            .one(state.db())
+            .await
+            .expect("object lookup");
+        assert!(object.is_none());
+        assert!(
+            !data_dir
+                .path()
+                .join("objects")
+                .join(object_payload_filename(&object_id, &payload_id))
+                .exists(),
+            "deleted payload file was removed",
+        );
     }
 
     #[tokio::test]
