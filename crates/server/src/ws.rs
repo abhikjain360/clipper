@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         State, WebSocketUpgrade,
-        ws::{Message, WebSocket},
+        ws::{CloseFrame, Message, WebSocket, close_code},
     },
     response::Response,
 };
@@ -10,6 +10,7 @@ use clipper_core::models::{WsClientMessage, WsError, WsServerMessage};
 use sea_orm::{
     ColumnTrait, DerivePartialModel, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect,
 };
+use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -136,7 +137,36 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
                             break;
                         }
                     }
-                    Err(_) => break,
+                    // This client fell behind the broadcast buffer and missed
+                    // events. Tell it to drop cached state and re-sync, then
+                    // close cleanly so it reconnects without flagging an error.
+                    Err(RecvError::Lagged(skipped)) => {
+                        debug!(device_id = %device_id, skipped, "WebSocket lagged; invalidating");
+                        let inv = WsServerMessage::Invalidate {
+                            target: "all".to_string(),
+                        };
+                        _ = socket
+                            .send(Message::Text(serde_json::to_string(&inv).unwrap().into()))
+                            .await;
+                        _ = socket
+                            .send(Message::Close(Some(CloseFrame {
+                                code: close_code::AWAY,
+                                reason: "lagged".into(),
+                            })))
+                            .await;
+                        break;
+                    }
+                    // Broadcast channel closed: the server is going away. Close
+                    // cleanly so the client treats it as a normal disconnect.
+                    Err(RecvError::Closed) => {
+                        _ = socket
+                            .send(Message::Close(Some(CloseFrame {
+                                code: close_code::AWAY,
+                                reason: "server shutting down".into(),
+                            })))
+                            .await;
+                        break;
+                    }
                 }
             }
         }
