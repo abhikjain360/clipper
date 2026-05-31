@@ -993,6 +993,9 @@ impl SyncEngine {
                                 warn!("Failed to refresh after invalidate: {}", e);
                             }
                         }
+                        Ok(WsServerMessage::Error { error }) => {
+                            warn!("Server rejected WS connection: {error}");
+                        }
                         Err(e) => {
                             warn!("Failed to parse WS message: {}", e);
                         }

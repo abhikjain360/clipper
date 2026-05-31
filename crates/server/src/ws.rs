@@ -6,11 +6,11 @@ use axum::{
     response::Response,
 };
 use chrono::Utc;
-use clipper_core::models::{WsClientMessage, WsServerMessage};
+use clipper_core::models::{WsClientMessage, WsError, WsServerMessage};
 use sea_orm::{
     ColumnTrait, DerivePartialModel, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect,
 };
-use tracing::{info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::{auth::AuthInfo, entity::event_log, state::AppState};
@@ -39,17 +39,12 @@ struct WsEventRow {
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-    auth: Option<axum::Extension<AuthInfo>>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
 ) -> Response {
-    let auth_info = auth.map(|a| a.0);
-    ws.on_upgrade(move |socket| handle_socket(socket, state, auth_info))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, auth))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState, auth: Option<AuthInfo>) {
-    let Some(auth) = auth else {
-        warn!("WebSocket connected without auth");
-        return;
-    };
+async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
     let device_id = auth.device_id.to_string();
     info!(device_id = %device_id, "WebSocket connected");
 
@@ -57,15 +52,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: Option<Auth
     let last_seq = match socket.recv().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<WsClientMessage>(&text) {
             Ok(WsClientMessage::Hello { last_seq }) => last_seq,
-            Err(_) => {
-                warn!("Invalid hello message");
-                return;
-            }
+            Err(_) => return close_with_error(socket, WsError::InvalidHello).await,
         },
-        _ => {
-            warn!("Expected hello message");
-            return;
-        }
+        _ => return close_with_error(socket, WsError::ExpectedHello).await,
     };
 
     // Send hello_ack
@@ -154,6 +143,20 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: Option<Auth
     }
 
     info!(device_id = %device_id, "WebSocket disconnected");
+}
+
+/// Report a typed protocol error to the client, then close the socket cleanly.
+///
+/// Dropping the socket alone would close the connection abruptly (no Close
+/// frame), so we send the error message followed by a Close frame before the
+/// socket is dropped at the end of this function.
+async fn close_with_error(mut socket: WebSocket, error: WsError) {
+    debug!(%error, "Closing WebSocket after client protocol error");
+    let msg = WsServerMessage::Error { error };
+    if let Ok(text) = serde_json::to_string(&msg) {
+        _ = socket.send(Message::Text(text.into())).await;
+    }
+    _ = socket.send(Message::Close(None)).await;
 }
 
 async fn get_latest_seq(state: &AppState, user_id: Uuid) -> Result<i64, sea_orm::DbErr> {

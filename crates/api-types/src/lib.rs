@@ -380,6 +380,23 @@ pub enum WsServerMessage {
     },
     #[serde(rename = "invalidate")]
     Invalidate { target: String },
+    #[serde(rename = "error")]
+    Error { error: WsError },
+}
+
+/// A protocol error the server reports to the client immediately before
+/// closing the WebSocket. Carries a stable machine-readable `code` on the
+/// wire; the human-readable message comes from `Display`, so clients map the
+/// code rather than parsing free text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum WsError {
+    /// A frame arrived before the required `hello` handshake.
+    #[error("expected a hello message as the first frame")]
+    ExpectedHello,
+    /// The `hello` frame could not be parsed.
+    #[error("hello message was malformed")]
+    InvalidHello,
 }
 
 // -- Sync --
