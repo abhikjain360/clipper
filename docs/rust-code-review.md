@@ -18,10 +18,9 @@ metadata when they affect whether the project is safe to publish.
 Highest-priority open risks: AEAD AAD does not bind object identity, so a
 hostile server can swap ciphertext between objects; three distinct paths can
 silently lose a user's own sync events (WebSocket subscribe/replay race, pruned
-events, and the client advancing its cursor before refresh); decrypted plaintext
-escapes the local trust boundary (world-readable file downloads and a local
-cache that logout never wipes); and crypto config validation floors permit a
-trivially insecure deployment.
+events, and the client advancing its cursor before refresh); and decrypted
+plaintext escapes the local trust boundary (world-readable file downloads and a
+local cache that logout never wipes).
 
 ## P1: Encrypted Payload Authentication Does Not Bind Object Metadata
 
@@ -114,33 +113,6 @@ window with no further events before reconnect.
 
 Recommended fix: advance client `last_seq` only after the refresh/bootstrap
 that consumes it succeeds, or persist an explicit "needs bootstrap" state.
-
-## P2: Crypto Config Floors Permit A Trivially Insecure Deployment
-
-`CryptoConfig` validation only requires `range(min = 1)` for
-`session_token_bytes` and `access_key_hash_salt_bytes`
-(`crates/server/src/config.rs:289-292`), and `Argon2Params` only requires
-`range(min = 1)` for `m_cost`, `t_cost`, `p_cost`
-(`crates/api-types/src/lib.rs:78-83`, reached via `#[garde(dive)]`). A TOML/CLI
-deployment can therefore start with 1-byte session tokens — `generate_token_with_length(1)`
-yields ≈8-bit tokens consumed at `crates/server/src/routes/auth.rs:584`,
-remotely guessable → account takeover — and 1-byte access-key salts. Validation
-accepts all of it.
-
-Scope and nuance of the Argon2 floor:
-
-- `argon2`'s `Params::new` enforces `m_cost >= 8`, so the realistic weak floor
-  is ≈8 KiB / 1 pass, not 1 KiB / 1 pass.
-- The configurable Argon2 parameters govern only the *access-key verifier*. The
-  OPAQUE KSF uses opaque-ke's own default, so the client's E2EE data key is not
-  affected by this config.
-- There is no `m_cost` *upper* bound, so a misconfiguration can OOM
-  `register_start`'s `spawn_blocking` hash — a self-inflicted DoS as well as a
-  too-weak floor.
-
-Recommended fix: enforce hard security floors (session tokens ≥ 32 bytes, salts
-≥ 16 bytes, documented Argon2 minimums) and a sane Argon2 `m_cost` ceiling,
-unless an explicit, clearly named dev/unsafe mode is selected.
 
 ## P2: Local Plaintext Clipboard Cache Is World-Readable
 
@@ -660,24 +632,21 @@ release or advertising the app as secure:
 3. Decrypted-plaintext egress and retention: write file downloads at `0600` with
    `O_NOFOLLOW`, apply `0600`-in-`0700` to the local cache, and make logout
    destructive and local-first regardless of server reachability (P2).
-4. Crypto config floors and ceilings — session tokens ≥ 32 bytes, salts ≥ 16
-   bytes, Argon2 minimums plus an `m_cost` ceiling, behind an explicit dev/unsafe
-   mode (P2).
-5. Cleanup/delete durability and races: delete orphan rows by captured ID in one
+4. Cleanup/delete durability and races: delete orphan rows by captured ID in one
    transaction with a status re-check, fence `upload_payload`'s rename, make
    `delete_object` reconcile via tombstone, add a directory-vs-DB GC, and cap
    payloads per object (P2).
-6. Background task cancellation on re-auth/logout; object-by-ID metadata lookup
+5. Background task cancellation on re-auth/logout; object-by-ID metadata lookup
    for download; client download size/hash checks against the descriptor (P2).
-7. Release readiness: align app versioning; commit `app/pubspec.lock` with
+6. Release readiness: align app versioning; commit `app/pubspec.lock` with
    `--enforce-lockfile` and fix osv-scanner Dart coverage; restrict Android
    cleartext traffic.
-8. Rate-limit hardening: drop the leftmost-XFF fallback and add per-source
+7. Rate-limit hardening: drop the leftmost-XFF fallback and add per-source
    fairness / a sane global ceiling; add IPC listener handshake/idle timeouts and
    a connection cap; add config upper bounds (`max_limit`, ttl/retention days,
    `device_name`/`platform`) and an explicit `DefaultBodyLimit`; resolve the dead
    `max_file_meta_ciphertext_bytes` knob.
-9. Hygiene/cleanup: validated `before` cursor and integer timestamps; redact
+8. Hygiene/cleanup: validated `before` cursor and integer timestamps; redact
    `Debug`, add `Zeroizing`, and stop copying the data key out of its wrapper;
    validate in `set_base_url`; ordered challenge eviction; restrict CORS;
    uniform challenge/register responses (or accept username enumeration

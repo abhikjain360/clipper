@@ -3,7 +3,10 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, AeadCore, KeyInit, generic_array::typenum::Unsigned},
 };
-pub use clipper_api_types::Argon2Params;
+pub use clipper_api_types::{
+    ARGON2_MAX_M_COST_KIB, ARGON2_MAX_P_COST, ARGON2_MAX_T_COST, ARGON2_MIN_M_COST_KIB,
+    ARGON2_MIN_P_COST, ARGON2_MIN_T_COST, Argon2Params,
+};
 use hkdf::Hkdf;
 use rand::Rng;
 use sha2::{Digest, Sha256, digest::OutputSizeUser};

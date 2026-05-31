@@ -632,6 +632,7 @@ dependencies = [
  "serde",
  "sha2",
  "strum",
+ "thiserror",
  "uuid",
 ]
 

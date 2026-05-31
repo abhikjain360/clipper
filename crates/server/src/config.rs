@@ -6,6 +6,13 @@ use garde::Validate;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use serde::Deserialize;
 
+// 32-byte bearer tokens are already at the practical security ceiling; the
+// upper bounds prevent accidental huge allocations without exposing unsafe lows.
+const MIN_ACCESS_KEY_HASH_SALT_BYTES: usize = 16;
+const MAX_ACCESS_KEY_HASH_SALT_BYTES: usize = 64;
+const MIN_SESSION_TOKEN_BYTES: usize = 32;
+const MAX_SESSION_TOKEN_BYTES: usize = 64;
+
 const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
     server: ServerDefaults {
         data_dir: ".clipper-server",
@@ -45,8 +52,8 @@ const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
             t_cost: 2,
             p_cost: 1,
         },
-        access_key_hash_salt_bytes: 16,
-        session_token_bytes: 32,
+        access_key_hash_salt_bytes: MIN_ACCESS_KEY_HASH_SALT_BYTES,
+        session_token_bytes: MIN_SESSION_TOKEN_BYTES,
     },
 };
 
@@ -286,9 +293,9 @@ impl CleanupConfig {
 pub struct CryptoConfig {
     #[garde(dive)]
     pub access_key_hash_params: Argon2Params,
-    #[garde(range(min = 1))]
+    #[garde(custom(validate_access_key_hash_salt_bytes))]
     pub access_key_hash_salt_bytes: usize,
-    #[garde(range(min = 1))]
+    #[garde(custom(validate_session_token_bytes))]
     pub session_token_bytes: usize,
 }
 
@@ -526,6 +533,34 @@ fn validate_list_max_limit(default_limit: u64) -> impl FnOnce(&u64, &()) -> gard
     }
 }
 
+fn validate_access_key_hash_salt_bytes(value: &usize, _: &()) -> garde::Result {
+    if *value < MIN_ACCESS_KEY_HASH_SALT_BYTES {
+        return Err(garde::Error::new(format!(
+            "must be at least {MIN_ACCESS_KEY_HASH_SALT_BYTES} bytes",
+        )));
+    }
+    if *value > MAX_ACCESS_KEY_HASH_SALT_BYTES {
+        return Err(garde::Error::new(format!(
+            "must be at most {MAX_ACCESS_KEY_HASH_SALT_BYTES} bytes",
+        )));
+    }
+    Ok(())
+}
+
+fn validate_session_token_bytes(value: &usize, _: &()) -> garde::Result {
+    if *value < MIN_SESSION_TOKEN_BYTES {
+        return Err(garde::Error::new(format!(
+            "must be at least {MIN_SESSION_TOKEN_BYTES} bytes",
+        )));
+    }
+    if *value > MAX_SESSION_TOKEN_BYTES {
+        return Err(garde::Error::new(format!(
+            "must be at most {MAX_SESSION_TOKEN_BYTES} bytes",
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,8 +602,8 @@ mod tests {
                 orphan_upload_ttl_secs = 20
 
                 [crypto]
-                access_key_hash_m_cost = 4096
-                access_key_hash_t_cost = 1
+                access_key_hash_m_cost = 32768
+                access_key_hash_t_cost = 3
                 access_key_hash_p_cost = 2
                 access_key_hash_salt_bytes = 32
                 session_token_bytes = 48
@@ -597,8 +632,8 @@ mod tests {
         assert_eq!(config.cleanup.interval_secs, 15);
         assert_eq!(config.cleanup.event_log_retention_days, 4);
         assert_eq!(config.cleanup.orphan_upload_ttl_secs, 20);
-        assert_eq!(config.crypto.access_key_hash_params.m_cost, 4096);
-        assert_eq!(config.crypto.access_key_hash_params.t_cost, 1);
+        assert_eq!(config.crypto.access_key_hash_params.m_cost, 32768);
+        assert_eq!(config.crypto.access_key_hash_params.t_cost, 3);
         assert_eq!(config.crypto.access_key_hash_params.p_cost, 2);
         assert_eq!(config.crypto.access_key_hash_salt_bytes, 32);
         assert_eq!(config.crypto.session_token_bytes, 48);
@@ -628,5 +663,48 @@ mod tests {
         assert_eq!(config.server.data_dir, PathBuf::from("/tmp/clipper"));
         assert_eq!(config.server.addr, DEFAULT_CONFIG.server.addr);
         assert!(config.server.trusted_proxies.is_empty());
+    }
+
+    #[test]
+    fn validation_rejects_weak_crypto_config() {
+        let mut config = ServerConfig::default();
+        config.crypto.access_key_hash_params.m_cost = 4096;
+        assert!(config.validate_config().is_err());
+
+        let mut config = ServerConfig::default();
+        config.crypto.access_key_hash_params.t_cost = 1;
+        assert!(config.validate_config().is_err());
+
+        let mut config = ServerConfig::default();
+        config.crypto.access_key_hash_salt_bytes = MIN_ACCESS_KEY_HASH_SALT_BYTES - 1;
+        assert!(config.validate_config().is_err());
+
+        let mut config = ServerConfig::default();
+        config.crypto.session_token_bytes = MIN_SESSION_TOKEN_BYTES - 1;
+        assert!(config.validate_config().is_err());
+    }
+
+    #[test]
+    fn validation_rejects_absurd_crypto_config() {
+        let mut config = ServerConfig::default();
+        config.crypto.access_key_hash_params.m_cost =
+            clipper_core::crypto::ARGON2_MAX_M_COST_KIB + 1;
+        assert!(config.validate_config().is_err());
+
+        let mut config = ServerConfig::default();
+        config.crypto.access_key_hash_params.t_cost = clipper_core::crypto::ARGON2_MAX_T_COST + 1;
+        assert!(config.validate_config().is_err());
+
+        let mut config = ServerConfig::default();
+        config.crypto.access_key_hash_params.p_cost = clipper_core::crypto::ARGON2_MAX_P_COST + 1;
+        assert!(config.validate_config().is_err());
+
+        let mut config = ServerConfig::default();
+        config.crypto.access_key_hash_salt_bytes = MAX_ACCESS_KEY_HASH_SALT_BYTES + 1;
+        assert!(config.validate_config().is_err());
+
+        let mut config = ServerConfig::default();
+        config.crypto.session_token_bytes = MAX_SESSION_TOKEN_BYTES + 1;
+        assert!(config.validate_config().is_err());
     }
 }

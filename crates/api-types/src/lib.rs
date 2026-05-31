@@ -15,6 +15,15 @@ use uuid::Uuid;
 const SHA256_BYTES: usize = 32;
 const XCHACHA20_NONCE_BYTES: usize = 24;
 
+// OWASP's practical Argon2id floor is 19 MiB, 2 iterations, 1 lane. The
+// ceilings keep server-side configurable hashing from becoming an OOM footgun.
+pub const ARGON2_MIN_M_COST_KIB: u32 = 19 * 1024;
+pub const ARGON2_MAX_M_COST_KIB: u32 = 1024 * 1024;
+pub const ARGON2_MIN_T_COST: u32 = 2;
+pub const ARGON2_MAX_T_COST: u32 = 10;
+pub const ARGON2_MIN_P_COST: u32 = 1;
+pub const ARGON2_MAX_P_COST: u32 = 16;
+
 macro_rules! uuid_id {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -75,11 +84,11 @@ pub const POSTCARD_CONTENT_TYPE: &str = "application/vnd.clipper.postcard";
 /// Argon2id parameters used for server-side verifier derivation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Validate)]
 pub struct Argon2Params {
-    #[garde(range(min = 1))]
+    #[garde(custom(validate_argon2_m_cost))]
     pub m_cost: u32,
-    #[garde(range(min = 1))]
+    #[garde(custom(validate_argon2_t_cost))]
     pub t_cost: u32,
-    #[garde(range(min = 1))]
+    #[garde(custom(validate_argon2_p_cost))]
     pub p_cost: u32,
 }
 
@@ -113,6 +122,48 @@ pub fn validate_username(value: &str, _: &()) -> garde::Result {
         return Err(garde::Error::new(
             "must contain only lowercase ascii letters, digits, '_' or '-'",
         ));
+    }
+    Ok(())
+}
+
+fn validate_argon2_m_cost(value: &u32, _: &()) -> garde::Result {
+    if *value < ARGON2_MIN_M_COST_KIB {
+        return Err(garde::Error::new(format!(
+            "must be at least {ARGON2_MIN_M_COST_KIB} KiB",
+        )));
+    }
+    if *value > ARGON2_MAX_M_COST_KIB {
+        return Err(garde::Error::new(format!(
+            "must be at most {ARGON2_MAX_M_COST_KIB} KiB",
+        )));
+    }
+    Ok(())
+}
+
+fn validate_argon2_t_cost(value: &u32, _: &()) -> garde::Result {
+    if *value < ARGON2_MIN_T_COST {
+        return Err(garde::Error::new(format!(
+            "must be at least {ARGON2_MIN_T_COST}",
+        )));
+    }
+    if *value > ARGON2_MAX_T_COST {
+        return Err(garde::Error::new(format!(
+            "must be at most {ARGON2_MAX_T_COST}",
+        )));
+    }
+    Ok(())
+}
+
+fn validate_argon2_p_cost(value: &u32, _: &()) -> garde::Result {
+    if *value < ARGON2_MIN_P_COST {
+        return Err(garde::Error::new(format!(
+            "must be at least {ARGON2_MIN_P_COST}",
+        )));
+    }
+    if *value > ARGON2_MAX_P_COST {
+        return Err(garde::Error::new(format!(
+            "must be at most {ARGON2_MAX_P_COST}",
+        )));
     }
     Ok(())
 }
@@ -583,4 +634,72 @@ fn validate_unique_complete_payload_ids(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use garde::Validate;
+
+    use super::*;
+
+    #[test]
+    fn argon2_params_validate_pragmatic_security_floor() {
+        Argon2Params {
+            m_cost: ARGON2_MIN_M_COST_KIB,
+            t_cost: ARGON2_MIN_T_COST,
+            p_cost: ARGON2_MIN_P_COST,
+        }
+        .validate()
+        .expect("minimum accepted Argon2 params should validate");
+
+        assert!(
+            Argon2Params {
+                m_cost: ARGON2_MIN_M_COST_KIB - 1,
+                t_cost: ARGON2_MIN_T_COST,
+                p_cost: ARGON2_MIN_P_COST,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            Argon2Params {
+                m_cost: ARGON2_MIN_M_COST_KIB,
+                t_cost: ARGON2_MIN_T_COST - 1,
+                p_cost: ARGON2_MIN_P_COST,
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn argon2_params_validate_resource_ceiling() {
+        assert!(
+            Argon2Params {
+                m_cost: ARGON2_MAX_M_COST_KIB + 1,
+                t_cost: ARGON2_MIN_T_COST,
+                p_cost: ARGON2_MIN_P_COST,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            Argon2Params {
+                m_cost: ARGON2_MIN_M_COST_KIB,
+                t_cost: ARGON2_MAX_T_COST + 1,
+                p_cost: ARGON2_MIN_P_COST,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            Argon2Params {
+                m_cost: ARGON2_MIN_M_COST_KIB,
+                t_cost: ARGON2_MIN_T_COST,
+                p_cost: ARGON2_MAX_P_COST + 1,
+            }
+            .validate()
+            .is_err()
+        );
+    }
 }
