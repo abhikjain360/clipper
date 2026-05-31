@@ -11,15 +11,15 @@ use clipper_core::{
     crypto::{self, SHA256_BYTES},
     models::{
         ApiErrorCode, ObjectCompleteRequest, ObjectCompleteResponse, ObjectDeleteResponse,
-        ObjectEnvelopeOperation, ObjectInitRequest, ObjectInitResponse, ObjectKind, ObjectListItem,
-        ObjectListResponse, ObjectPayloadDescriptor, ObjectPayloadInit, ObjectPayloadUpload,
-        OkResponse,
+        ObjectEnvelopeOperation, ObjectEventType, ObjectId, ObjectInitRequest, ObjectInitResponse,
+        ObjectKind, ObjectListCursor, ObjectListItem, ObjectListResponse, ObjectPayloadDescriptor,
+        ObjectPayloadInit, ObjectPayloadUpload, OkResponse,
     },
 };
 use clipper_fs_txn::FsTransaction;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DbErr, DerivePartialModel, EntityTrait, Order, QueryFilter,
-    QueryOrder, QuerySelect, Set, SqlErr, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, DbErr, DerivePartialModel, EntityTrait, Order,
+    QueryFilter, QueryOrder, QuerySelect, Set, SqlErr, TransactionTrait,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -80,27 +80,24 @@ pub async fn init_object(
         )
     })?;
 
-    if objects::Entity::find_by_id(object_id)
-        .select_only()
-        .column(objects::Column::Id)
-        .into_tuple::<Uuid>()
+    if let Some(existing) = objects::Entity::find_by_id(object_id)
         .one(state.db())
         .await
         .map_err(|e| {
             error!(object_id = %object_id, error = %e, "Failed to look up object in init_object");
             ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?
-        .is_some()
     {
-        debug!(
-            object_id = %object_id,
-            user_id = %auth.user_id,
-            "Rejected object init for existing object id",
-        );
-        return Err(ApiError::from_code_with_message(
-            ApiErrorCode::ObjectAlreadyExists,
-            "Object already exists",
-        ));
+        let resp = idempotent_init_response(
+            &state,
+            auth.user_id,
+            auth.device_id,
+            &req,
+            &envelope_bytes,
+            existing,
+        )
+        .await?;
+        return Ok(Postcard(resp));
     }
 
     let mut all_inline = true;
@@ -214,7 +211,8 @@ pub async fn init_object(
             expires_at: Set(expires_at),
             source_device_id: Set(device_id),
             envelope: Set(envelope_bytes),
-            status: Set(if all_inline { "complete" } else { "pending" }.into()),
+            status: Set("pending".into()),
+            created_seq: Set(None),
         };
         object.insert(txn).await.map_err(|e| match e.sql_err() {
             Some(SqlErr::UniqueConstraintViolation(constraint)) => {
@@ -255,15 +253,10 @@ pub async fn init_object(
         // Allocated here, after the object/payload inserts above have taken the
         // write lock, so seq order matches commit order.
         if all_inline {
-            let inserted = insert_created_event(
-                txn,
-                user_id,
-                kind,
-                object_id,
-                created_at_str,
-                state_ref.next_event_seq(),
-            )
-            .await?;
+            let seq = state_ref.next_event_seq();
+            let inserted =
+                insert_created_event(txn, user_id, kind, object_id, created_at_str, seq).await?;
+            set_object_created_seq(txn, user_id, object_id, seq).await?;
             Ok(Some(inserted))
         } else {
             Ok(None)
@@ -335,6 +328,16 @@ pub async fn upload_payload(
                 "Object payload not found",
             )
         })?;
+
+    if payload.status == "uploaded" || payload.status == "complete" {
+        debug!(
+            object_id = %object_uuid,
+            payload_id = %payload_uuid,
+            status = %payload.status,
+            "Accepted idempotent upload for already uploaded payload",
+        );
+        return Ok(Postcard(OkResponse { ok: true }));
+    }
 
     if payload.status != "pending" {
         debug!(
@@ -478,8 +481,14 @@ pub async fn complete_object(
     let kind = parse_object_kind(object_uuid, &object.kind)?;
 
     if object.status == "complete" {
-        let created_seq =
-            object_event_seq(&state, auth.user_id, kind, object_uuid, "created").await?;
+        let created_seq = object.created_seq.ok_or_else(|| {
+            error!(
+                object_id = %object_uuid,
+                user_id = %auth.user_id,
+                "Complete object is missing created_seq",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
         debug!(
             object_id = %object_uuid,
             user_id = %auth.user_id,
@@ -619,6 +628,7 @@ pub async fn complete_object(
         error!(error = %e, "Failed to begin complete_object transaction");
         ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
+    let created_seq = state.next_event_seq();
 
     object_payloads::Entity::update_many()
         .col_expr(
@@ -650,6 +660,10 @@ pub async fn complete_object(
             objects::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now.clone()),
         )
+        .col_expr(
+            objects::Column::CreatedSeq,
+            sea_orm::sea_query::Expr::value(created_seq),
+        )
         .filter(objects::Column::Id.eq(object_uuid))
         .filter(objects::Column::UserId.eq(auth.user_id))
         .filter(objects::Column::Status.eq("pending"))
@@ -679,15 +693,8 @@ pub async fn complete_object(
         ));
     }
 
-    let inserted = insert_created_event(
-        &txn,
-        auth.user_id,
-        kind,
-        object_uuid,
-        &now,
-        state.next_event_seq(),
-    )
-    .await?;
+    let inserted =
+        insert_created_event(&txn, auth.user_id, kind, object_uuid, &now, created_seq).await?;
 
     txn.commit().await.map_err(|e| {
         error!(
@@ -712,16 +719,48 @@ pub async fn complete_object(
     }
 
     info!(device_id = %auth.device_id, object_id = %object_id, kind = kind.as_ref(), "Object completed");
-    Ok(Postcard(ObjectCompleteResponse {
-        created_seq: inserted.seq,
-    }))
+    Ok(Postcard(ObjectCompleteResponse { created_seq }))
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug)]
 pub struct ObjectListQuery {
     pub kind: Option<String>,
     pub limit: Option<u64>,
-    pub before: Option<String>,
+    pub created_seq_lte: Option<i64>,
+    pub after: Option<ObjectListCursor>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ObjectListQueryWire {
+    kind: Option<String>,
+    limit: Option<u64>,
+    created_seq_lte: Option<i64>,
+    after_created_seq: Option<i64>,
+    after_id: Option<ObjectId>,
+}
+
+impl<'de> serde::Deserialize<'de> for ObjectListQuery {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ObjectListQueryWire::deserialize(deserializer)?;
+        let after = match (wire.after_created_seq, wire.after_id) {
+            (Some(created_seq), Some(id)) => Some(ObjectListCursor { created_seq, id }),
+            (None, None) => None,
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "after_created_seq and after_id must be provided together",
+                ));
+            }
+        };
+        Ok(Self {
+            kind: wire.kind,
+            limit: wire.limit,
+            created_seq_lte: wire.created_seq_lte,
+            after,
+        })
+    }
 }
 
 #[derive(Debug, DerivePartialModel)]
@@ -729,6 +768,7 @@ pub struct ObjectListQuery {
 struct ListedObjectRow {
     id: Uuid,
     kind: String,
+    created_seq: Option<i64>,
     meta_ciphertext: Vec<u8>,
     meta_nonce: Vec<u8>,
     created_at: String,
@@ -753,6 +793,7 @@ struct ObjectUploadRow {
     kind: String,
     source_device_id: Uuid,
     status: String,
+    created_seq: Option<i64>,
 }
 
 #[derive(Debug, DerivePartialModel)]
@@ -782,22 +823,61 @@ pub async fn list_objects(
         .limit
         .unwrap_or(state.config().list.default_limit)
         .min(state.config().list.max_limit);
+    let kind = query
+        .kind
+        .as_deref()
+        .map(|kind| {
+            kind.parse::<ObjectKind>().map_err(|_| {
+                debug!(kind, "Rejected unknown object kind in list query");
+                ApiError::from_code(ApiErrorCode::InvalidObjectKind)
+            })
+        })
+        .transpose()?;
+    let after = query.after;
+
     let mut q = objects::Entity::find()
         .filter(objects::Column::UserId.eq(auth.user_id))
         .filter(objects::Column::Status.eq("complete"))
-        .order_by(objects::Column::CreatedAt, Order::Desc);
+        .filter(objects::Column::CreatedSeq.is_not_null());
 
-    if let Some(kind) = &query.kind {
-        let kind: ObjectKind = kind.parse().map_err(|_| {
-            debug!(kind = %kind, "Rejected unknown object kind in list query");
-            ApiError::from_code_with_message(ApiErrorCode::InvalidObjectKind, "Invalid object kind")
-        })?;
+    if let Some(kind) = kind {
         q = q.filter(objects::Column::Kind.eq(kind.as_ref()));
+        if kind == ObjectKind::Clipboard {
+            let retained_ids = retained_clipboard_object_ids(&state, auth.user_id).await?;
+            if retained_ids.is_empty() {
+                return Ok(Postcard(ObjectListResponse {
+                    items: Vec::new(),
+                    next_after: None,
+                }));
+            }
+            q = q.filter(objects::Column::Id.is_in(retained_ids));
+        }
     }
 
-    if let Some(before) = &query.before {
-        q = q.filter(objects::Column::CreatedAt.lt(before.clone()));
+    if let Some(created_seq_lte) = query.created_seq_lte {
+        q = q.filter(objects::Column::CreatedSeq.lte(created_seq_lte));
     }
+
+    if let Some(after) = after {
+        q = q.filter(
+            Condition::any()
+                .add(objects::Column::CreatedSeq.gt(after.created_seq))
+                .add(
+                    Condition::all()
+                        .add(objects::Column::CreatedSeq.eq(after.created_seq))
+                        .add(objects::Column::Id.gt(after.id.into_uuid())),
+                ),
+        );
+    }
+
+    let uses_forward_cursor = query.created_seq_lte.is_some() || query.after.is_some();
+    q = if uses_forward_cursor {
+        q.order_by(objects::Column::CreatedSeq, Order::Asc)
+            .order_by(objects::Column::Id, Order::Asc)
+    } else {
+        q.order_by(objects::Column::CreatedSeq, Order::Desc)
+            .order_by(objects::Column::Id, Order::Desc)
+    };
 
     let objects = q
         .limit(limit + 1)
@@ -815,8 +895,149 @@ pub async fn list_objects(
 
     let has_more = objects.len() as u64 > limit;
     let objects: Vec<ListedObjectRow> = objects.into_iter().take(limit as usize).collect();
-    let object_ids: Vec<Uuid> = objects.iter().map(|object| object.id).collect();
+    let items = object_list_items(&state, auth.user_id, &objects).await?;
+    let next_after = if has_more && uses_forward_cursor {
+        let last = objects.last().ok_or_else(|| {
+            error!(
+                user_id = %auth.user_id,
+                "Object list had more rows than requested but no cursor row",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+        Some(ObjectListCursor {
+            created_seq: last.created_seq.ok_or_else(|| {
+                error!(
+                    object_id = %last.id,
+                    user_id = %auth.user_id,
+                    "Listed object is missing created_seq",
+                );
+                ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+            })?,
+            id: ObjectId::from(last.id),
+        })
+    } else {
+        None
+    };
 
+    debug!(
+        user_id = %auth.user_id,
+        device_id = %auth.device_id,
+        kind = query.kind.as_deref().unwrap_or("<all>"),
+        limit,
+        items = items.len(),
+        has_more,
+        "Listed objects",
+    );
+
+    Ok(Postcard(ObjectListResponse { items, next_after }))
+}
+
+pub async fn get_object(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
+    Path(object_id): Path<String>,
+) -> Result<Postcard<ObjectListItem>, ApiError> {
+    let object_uuid =
+        Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
+    let object = objects::Entity::find_by_id(object_uuid)
+        .filter(objects::Column::UserId.eq(auth.user_id))
+        .filter(objects::Column::Status.eq("complete"))
+        .filter(objects::Column::CreatedSeq.is_not_null())
+        .into_partial_model::<ListedObjectRow>()
+        .one(state.db())
+        .await
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                user_id = %auth.user_id,
+                error = %e,
+                "Failed to load object by id",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?
+        .ok_or_else(|| {
+            debug!(
+                object_id = %object_uuid,
+                user_id = %auth.user_id,
+                "Object by id not found",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::ObjectNotFound, "Object not found")
+        })?;
+    ensure_object_read_retained(&state, auth.user_id, object_uuid, &object.kind).await?;
+    let mut items = object_list_items(&state, auth.user_id, &[object]).await?;
+    let item = items.pop().ok_or_else(|| {
+        error!(
+            object_id = %object_uuid,
+            user_id = %auth.user_id,
+            "Object list item helper returned no rows for targeted get",
+        );
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+    })?;
+    Ok(Postcard(item))
+}
+
+async fn retained_clipboard_object_ids(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<Vec<Uuid>, ApiError> {
+    let now = Utc::now().to_rfc3339();
+    objects::Entity::find()
+        .filter(objects::Column::UserId.eq(user_id))
+        .filter(objects::Column::Kind.eq(ObjectKind::Clipboard.as_ref()))
+        .filter(objects::Column::Status.eq("complete"))
+        .filter(objects::Column::CreatedSeq.is_not_null())
+        .filter(
+            Condition::any()
+                .add(objects::Column::ExpiresAt.is_null())
+                .add(objects::Column::ExpiresAt.gt(now)),
+        )
+        .order_by(objects::Column::CreatedSeq, Order::Desc)
+        .order_by(objects::Column::Id, Order::Desc)
+        .limit(state.config().clipboard.max_items)
+        .select_only()
+        .column(objects::Column::Id)
+        .into_tuple()
+        .all(state.db())
+        .await
+        .map_err(|e| {
+            error!(
+                user_id = %user_id,
+                error = %e,
+                "Failed to load retained clipboard object ids",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })
+}
+
+async fn ensure_object_read_retained(
+    state: &AppState,
+    user_id: Uuid,
+    object_id: Uuid,
+    kind: &str,
+) -> Result<(), ApiError> {
+    if kind != ObjectKind::Clipboard.as_ref() {
+        return Ok(());
+    }
+
+    if retained_clipboard_object_ids(state, user_id)
+        .await?
+        .contains(&object_id)
+    {
+        Ok(())
+    } else {
+        Err(ApiError::from_code_with_message(
+            ApiErrorCode::ObjectNotFound,
+            "Object not found",
+        ))
+    }
+}
+
+async fn object_list_items(
+    state: &AppState,
+    user_id: Uuid,
+    objects: &[ListedObjectRow],
+) -> Result<Vec<ObjectListItem>, ApiError> {
+    let object_ids: Vec<Uuid> = objects.iter().map(|object| object.id).collect();
     let payloads = if object_ids.is_empty() {
         Vec::new()
     } else {
@@ -830,7 +1051,7 @@ pub async fn list_objects(
             .await
             .map_err(|e| {
                 error!(
-                    user_id = %auth.user_id,
+                    user_id = %user_id,
                     error = %e,
                     "Failed to load payloads while listing objects",
                 );
@@ -855,7 +1076,7 @@ pub async fn list_objects(
     } else {
         devices::Entity::find()
             .filter(devices::Column::Id.is_in(source_device_ids))
-            .filter(devices::Column::UserId.eq(auth.user_id))
+            .filter(devices::Column::UserId.eq(user_id))
             .select_only()
             .column(devices::Column::Id)
             .column(devices::Column::SigningPublicKey)
@@ -864,7 +1085,7 @@ pub async fn list_objects(
             .await
             .map_err(|e| {
                 error!(
-                    user_id = %auth.user_id,
+                    user_id = %user_id,
                     error = %e,
                     "Failed to load source device signing keys while listing objects",
                 );
@@ -875,7 +1096,15 @@ pub async fn list_objects(
     };
 
     let mut items = Vec::with_capacity(objects.len());
-    for object in &objects {
+    for object in objects {
+        let created_seq = object.created_seq.ok_or_else(|| {
+            error!(
+                object_id = %object.id,
+                user_id = %user_id,
+                "Complete object row is missing created_seq",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
         let envelope = postcard::from_bytes(&object.envelope).map_err(|e| {
             error!(
                 object_id = %object.id,
@@ -905,6 +1134,7 @@ pub async fn list_objects(
                 );
                 ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
             })?,
+            created_seq,
             meta_nonce: object.meta_nonce.clone(),
             meta_ciphertext: object.meta_ciphertext.clone(),
             payloads: payloads_by_object
@@ -924,23 +1154,7 @@ pub async fn list_objects(
             envelope,
         });
     }
-
-    let next_before = if has_more {
-        objects.last().map(|i| i.created_at.clone())
-    } else {
-        None
-    };
-    debug!(
-        user_id = %auth.user_id,
-        device_id = %auth.device_id,
-        kind = query.kind.as_deref().unwrap_or("<all>"),
-        limit,
-        items = items.len(),
-        has_more,
-        "Listed objects",
-    );
-
-    Ok(Postcard(ObjectListResponse { items, next_before }))
+    Ok(items)
 }
 
 pub async fn download_payload(
@@ -953,12 +1167,14 @@ pub async fn download_payload(
     let payload_uuid =
         Uuid::parse_str(&payload_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
 
-    let object_exists = objects::Entity::find_by_id(object_uuid)
+    let object = objects::Entity::find_by_id(object_uuid)
         .filter(objects::Column::UserId.eq(auth.user_id))
         .filter(objects::Column::Status.eq("complete"))
+        .filter(objects::Column::CreatedSeq.is_not_null())
         .select_only()
         .column(objects::Column::Id)
-        .into_tuple::<Uuid>()
+        .column(objects::Column::Kind)
+        .into_tuple::<(Uuid, String)>()
         .one(state.db())
         .await
         .map_err(|e| {
@@ -969,7 +1185,7 @@ pub async fn download_payload(
             );
             ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
-    if object_exists.is_none() {
+    let Some((_, kind)) = object else {
         debug!(
             object_id = %object_uuid,
             user_id = %auth.user_id,
@@ -979,7 +1195,8 @@ pub async fn download_payload(
             ApiErrorCode::ObjectNotFound,
             "Object not found",
         ));
-    }
+    };
+    ensure_object_read_retained(&state, auth.user_id, object_uuid, &kind).await?;
 
     let payload = object_payloads::Entity::find_by_id((object_uuid, payload_uuid))
         .filter(object_payloads::Column::Status.eq("complete"))
@@ -1127,7 +1344,7 @@ pub async fn delete_object(
         // Allocated after the object delete above has taken the write lock.
         seq: Set(state.next_event_seq()),
         user_id: Set(auth.user_id),
-        event_type: Set("file.deleted".into()),
+        event_type: Set(ObjectEventType::Deleted.to_string()),
         object_kind: Set("file".into()),
         object_id: Set(object_uuid),
         created_at: Set(now.clone()),
@@ -1138,7 +1355,7 @@ pub async fn delete_object(
             error!(
                 object_id = %object_uuid,
                 error = %e,
-                "Failed to insert file.deleted event",
+                "Failed to insert deleted event",
             );
             _ = txn.rollback().await;
             return Err(ApiError::from_code_with_message(
@@ -1162,9 +1379,9 @@ pub async fn delete_object(
         user_id: auth.user_id,
         source_device_id: auth.device_id,
         seq: inserted.seq,
-        event_type: "file.deleted".into(),
-        object_kind: "file".into(),
-        object_id,
+        event_type: ObjectEventType::Deleted,
+        object_kind: ObjectKind::File,
+        object_id: object_uuid.into(),
         created_at: now,
     });
 
@@ -1360,6 +1577,199 @@ async fn object_for_upload(
     Ok(object)
 }
 
+async fn idempotent_init_response(
+    state: &AppState,
+    user_id: Uuid,
+    device_id: Uuid,
+    req: &ObjectInitRequest,
+    envelope_bytes: &[u8],
+    existing: objects::Model,
+) -> Result<ObjectInitResponse, ApiError> {
+    let object_id = req.id.into_uuid();
+    if existing.user_id != user_id
+        || existing.source_device_id != device_id
+        || existing.kind != req.kind.to_string()
+        || existing.meta_nonce != req.meta_nonce
+        || existing.meta_ciphertext != req.meta_ciphertext
+        || existing.envelope.as_slice() != envelope_bytes
+    {
+        warn!(
+            object_id = %object_id,
+            user_id = %user_id,
+            device_id = %device_id,
+            "Rejected object init for conflicting existing object id",
+        );
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::ObjectAlreadyExists,
+            "Object already exists with different data",
+        ));
+    }
+
+    let payloads = object_payloads::Entity::find()
+        .filter(object_payloads::Column::ObjectId.eq(object_id))
+        .select_only()
+        .column(object_payloads::Column::PayloadId)
+        .column(object_payloads::Column::Nonce)
+        .column(object_payloads::Column::CiphertextSize)
+        .column(object_payloads::Column::Sha256Ciphertext)
+        .column(object_payloads::Column::Status)
+        .into_tuple::<(Uuid, Vec<u8>, i64, Vec<u8>, String)>()
+        .all(state.db())
+        .await
+        .map_err(|e| {
+            error!(
+                object_id = %object_id,
+                error = %e,
+                "Failed to load existing object payloads for idempotent init",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+    if payloads.len() != req.payloads.len() {
+        warn!(
+            object_id = %object_id,
+            expected = req.payloads.len(),
+            actual = payloads.len(),
+            "Rejected object init for existing object with different payload count",
+        );
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::ObjectAlreadyExists,
+            "Object already exists with different payloads",
+        ));
+    }
+
+    let mut payloads_by_id = payloads
+        .into_iter()
+        .map(|(id, nonce, ciphertext_size, sha256_ciphertext, status)| {
+            (id, (nonce, ciphertext_size, sha256_ciphertext, status))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut upload_urls = Vec::new();
+    for payload in &req.payloads {
+        let payload_id = payload.id.into_uuid();
+        let Some((nonce, ciphertext_size, sha256_ciphertext, status)) =
+            payloads_by_id.remove(&payload_id)
+        else {
+            warn!(
+                object_id = %object_id,
+                payload_id = %payload.id,
+                "Rejected object init for existing object missing requested payload",
+            );
+            return Err(ApiError::from_code_with_message(
+                ApiErrorCode::ObjectAlreadyExists,
+                "Object already exists with different payloads",
+            ));
+        };
+        if nonce != payload.nonce
+            || ciphertext_size != payload.ciphertext_size
+            || sha256_ciphertext != payload.sha256_ciphertext
+        {
+            warn!(
+                object_id = %object_id,
+                payload_id = %payload.id,
+                "Rejected object init for existing object with different payload metadata",
+            );
+            return Err(ApiError::from_code_with_message(
+                ApiErrorCode::ObjectAlreadyExists,
+                "Object already exists with different payload metadata",
+            ));
+        }
+        if status == "pending" || status == "uploading" {
+            upload_urls.push(ObjectPayloadUpload {
+                id: payload.id,
+                upload_url: format!("/api/objects/{}/payloads/{}", req.id, payload.id),
+            });
+        }
+    }
+
+    if !payloads_by_id.is_empty() {
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::ObjectAlreadyExists,
+            "Object already exists with different payloads",
+        ));
+    }
+
+    if existing.status == "complete" {
+        let created_seq = existing.created_seq.ok_or_else(|| {
+            error!(
+                object_id = %object_id,
+                user_id = %user_id,
+                "Complete object is missing created_seq during idempotent init",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+        debug!(
+            object_id = %object_id,
+            user_id = %user_id,
+            device_id = %device_id,
+            "Accepted idempotent init for already complete object",
+        );
+        return Ok(ObjectInitResponse {
+            upload_urls: Vec::new(),
+            complete: true,
+            created_seq: Some(created_seq),
+        });
+    }
+
+    debug!(
+        object_id = %object_id,
+        user_id = %user_id,
+        device_id = %device_id,
+        upload_urls = upload_urls.len(),
+        "Accepted idempotent init for pending object",
+    );
+    Ok(ObjectInitResponse {
+        upload_urls,
+        complete: false,
+        created_seq: None,
+    })
+}
+
+async fn set_object_created_seq<C>(
+    db: &C,
+    user_id: Uuid,
+    object_id: Uuid,
+    created_seq: i64,
+) -> Result<(), ApiError>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let updated = objects::Entity::update_many()
+        .col_expr(
+            objects::Column::CreatedSeq,
+            sea_orm::sea_query::Expr::value(created_seq),
+        )
+        .col_expr(
+            objects::Column::Status,
+            sea_orm::sea_query::Expr::value("complete"),
+        )
+        .filter(objects::Column::Id.eq(object_id))
+        .filter(objects::Column::UserId.eq(user_id))
+        .exec(db)
+        .await
+        .map_err(|e| {
+            error!(
+                object_id = %object_id,
+                user_id = %user_id,
+                error = %e,
+                "Failed to set object created_seq",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+    if updated.rows_affected != 1 {
+        error!(
+            object_id = %object_id,
+            user_id = %user_id,
+            rows_affected = updated.rows_affected,
+            "Setting object created_seq affected an unexpected row count",
+        );
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::Database,
+            "Database error",
+        ));
+    }
+    Ok(())
+}
+
 async fn insert_created_event<C>(
     db: &C,
     user_id: Uuid,
@@ -1374,7 +1784,7 @@ where
     event_log::ActiveModel {
         seq: Set(seq),
         user_id: Set(user_id),
-        event_type: Set(format!("{}.created", kind.as_ref())),
+        event_type: Set(ObjectEventType::Created.to_string()),
         object_kind: Set(kind.to_string()),
         object_id: Set(object_id),
         created_at: Set(now.into()),
@@ -1404,18 +1814,19 @@ fn parse_object_kind(object_id: Uuid, kind: &str) -> Result<ObjectKind, ApiError
     })
 }
 
+#[cfg(test)]
 async fn object_event_seq(
     state: &AppState,
     user_id: Uuid,
     kind: ObjectKind,
     object_id: Uuid,
-    event_suffix: &str,
+    event_type: ObjectEventType,
 ) -> Result<i64, ApiError> {
-    let event_type = format!("{}.{event_suffix}", kind.as_ref());
     event_log::Entity::find()
         .filter(event_log::Column::UserId.eq(user_id))
         .filter(event_log::Column::ObjectId.eq(object_id))
-        .filter(event_log::Column::EventType.eq(event_type.clone()))
+        .filter(event_log::Column::ObjectKind.eq(kind.to_string()))
+        .filter(event_log::Column::EventType.eq(event_type.to_string()))
         .order_by_desc(event_log::Column::Seq)
         .select_only()
         .column(event_log::Column::Seq)
@@ -1510,9 +1921,11 @@ fn broadcast_created(
         user_id,
         source_device_id,
         seq,
-        event_type: format!("{}.created", kind.as_ref()),
-        object_kind: kind.to_string(),
-        object_id: object_id.into(),
+        event_type: ObjectEventType::Created,
+        object_kind: kind,
+        object_id: object_id
+            .parse()
+            .expect("broadcast object_id was already validated"),
         created_at: now.into(),
     });
 }
@@ -1943,15 +2356,16 @@ mod tests {
         assert_eq!(broadcast.user_id, user_id);
         assert_eq!(broadcast.source_device_id, device_id);
         assert_eq!(broadcast.seq, created_seq);
-        assert_eq!(broadcast.event_type, "clipboard.created");
-        assert_eq!(broadcast.object_id, object_id);
+        assert_eq!(broadcast.event_type, ObjectEventType::Created);
+        assert_eq!(broadcast.object_kind, ObjectKind::Clipboard);
+        assert_eq!(broadcast.object_id.to_string(), object_id);
         assert_eq!(
             object_event_seq(
                 &state,
                 user_id,
                 ObjectKind::Clipboard,
                 object_id.parse().expect("object id"),
-                "created",
+                ObjectEventType::Created,
             )
             .await
             .expect("event seq"),
@@ -1964,13 +2378,25 @@ mod tests {
             Query(ObjectListQuery {
                 kind: Some("clipboard".into()),
                 limit: None,
-                before: None,
+                created_seq_lte: None,
+                after: None,
             }),
         )
         .await
         .expect("list");
         assert_eq!(list.items.len(), 1);
         assert_eq!(list.items[0].id.to_string(), object_id);
+        assert_eq!(list.items[0].created_seq, created_seq);
+
+        let Postcard(target) = get_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path(object_id.clone()),
+        )
+        .await
+        .expect("targeted get");
+        assert_eq!(target.id.to_string(), object_id);
+        assert_eq!(target.created_seq, created_seq);
 
         let body = download_payload(
             State(state),
@@ -2061,7 +2487,8 @@ mod tests {
             Query(ObjectListQuery {
                 kind: Some("clipboard".into()),
                 limit: None,
-                before: None,
+                created_seq_lte: None,
+                after: None,
             }),
         )
         .await
@@ -2166,19 +2593,20 @@ mod tests {
         let object_id = Uuid::now_v7().to_string();
         let payload_id = Uuid::now_v7().to_string();
         let ciphertext = b"encrypted file payload";
+        let req = init_request(
+            object_id.clone(),
+            payload_id.clone(),
+            ObjectKind::File,
+            ciphertext,
+            false,
+            device_id,
+            &signing_secret_key,
+        );
 
         let Postcard(resp) = init_object(
             State(state.clone()),
             Extension(auth(user_id, device_id)),
-            postcard(init_request(
-                object_id.clone(),
-                payload_id.clone(),
-                ObjectKind::File,
-                ciphertext,
-                false,
-                device_id,
-                &signing_secret_key,
-            )),
+            postcard(req.clone()),
         )
         .await
         .expect("init");
@@ -2195,6 +2623,17 @@ mod tests {
         )
         .await
         .expect("upload");
+
+        let Postcard(idempotent_uploaded_init) = init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(req.clone()),
+        )
+        .await
+        .expect("idempotent init after upload");
+        assert!(!idempotent_uploaded_init.complete);
+        assert!(idempotent_uploaded_init.upload_urls.is_empty());
+        assert!(idempotent_uploaded_init.created_seq.is_none());
 
         let mut rx = state.ws_tx().subscribe();
         let Postcard(complete_resp) = complete_object(
@@ -2216,8 +2655,9 @@ mod tests {
         assert_eq!(broadcast.user_id, user_id);
         assert_eq!(broadcast.source_device_id, device_id);
         assert_eq!(broadcast.seq, complete_resp.created_seq);
-        assert_eq!(broadcast.event_type, "file.created");
-        assert_eq!(broadcast.object_id, object_id);
+        assert_eq!(broadcast.event_type, ObjectEventType::Created);
+        assert_eq!(broadcast.object_kind, ObjectKind::File);
+        assert_eq!(broadcast.object_id.to_string(), object_id);
 
         let Postcard(idempotent_resp) = complete_object(
             State(state.clone()),
@@ -2235,19 +2675,35 @@ mod tests {
         .expect("idempotent complete");
         assert_eq!(idempotent_resp.created_seq, complete_resp.created_seq);
 
+        let Postcard(idempotent_complete_init) = init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(req),
+        )
+        .await
+        .expect("idempotent init after complete");
+        assert!(idempotent_complete_init.complete);
+        assert!(idempotent_complete_init.upload_urls.is_empty());
+        assert_eq!(
+            idempotent_complete_init.created_seq,
+            Some(complete_resp.created_seq)
+        );
+
         let Postcard(list) = list_objects(
             State(state),
             Extension(auth(user_id, device_id)),
             Query(ObjectListQuery {
                 kind: Some("file".into()),
                 limit: None,
-                before: None,
+                created_seq_lte: None,
+                after: None,
             }),
         )
         .await
         .expect("list");
         assert_eq!(list.items.len(), 1);
         assert_eq!(list.items[0].id.to_string(), object_id);
+        assert_eq!(list.items[0].created_seq, complete_resp.created_seq);
     }
 
     #[tokio::test]
@@ -2291,12 +2747,19 @@ mod tests {
         assert_eq!(broadcast.user_id, user_id);
         assert_eq!(broadcast.source_device_id, device_id);
         assert_eq!(broadcast.seq, delete_resp.deleted_seq);
-        assert_eq!(broadcast.event_type, "file.deleted");
-        assert_eq!(broadcast.object_id, object_id);
+        assert_eq!(broadcast.event_type, ObjectEventType::Deleted);
+        assert_eq!(broadcast.object_kind, ObjectKind::File);
+        assert_eq!(broadcast.object_id.to_string(), object_id);
         assert_eq!(
-            object_event_seq(&state, user_id, ObjectKind::File, object_uuid, "deleted")
-                .await
-                .expect("event seq"),
+            object_event_seq(
+                &state,
+                user_id,
+                ObjectKind::File,
+                object_uuid,
+                ObjectEventType::Deleted,
+            )
+            .await
+            .expect("event seq"),
             delete_resp.deleted_seq,
         );
 
@@ -2471,6 +2934,23 @@ mod tests {
             "clipboard expires_at = created_at + ttl_days",
         );
         assert!(file.expires_at.is_none(), "file objects have no TTL");
+
+        objects::Entity::update_many()
+            .col_expr(
+                objects::Column::ExpiresAt,
+                sea_orm::sea_query::Expr::value("2000-01-01T00:00:00+00:00"),
+            )
+            .filter(objects::Column::Id.eq(clip.id))
+            .exec(state.db())
+            .await
+            .expect("expire clipboard");
+        let result = get_object(
+            State(state),
+            Extension(auth(user_id, device_id)),
+            Path(clip_object_id),
+        )
+        .await;
+        assert_eq!(result.unwrap_err().status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

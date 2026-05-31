@@ -301,6 +301,7 @@ pub struct ClipboardMeta {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, Display, EnumString,
 )]
+#[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ObjectKind {
     Clipboard,
@@ -310,6 +311,17 @@ pub enum ObjectKind {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, Display, EnumString,
 )]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ObjectEventType {
+    Created,
+    Deleted,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, Display, EnumString,
+)]
+#[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ObjectEnvelopeOperation {
     Create,
@@ -441,6 +453,7 @@ pub struct ObjectPayloadDescriptor {
 pub struct ObjectListItem {
     pub id: ObjectId,
     pub kind: ObjectKind,
+    pub created_seq: i64,
     pub meta_nonce: Vec<u8>,
     pub meta_ciphertext: Vec<u8>,
     pub payloads: Vec<ObjectPayloadDescriptor>,
@@ -450,10 +463,16 @@ pub struct ObjectListItem {
     pub envelope: ObjectEnvelopeV1,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ObjectListCursor {
+    pub created_seq: i64,
+    pub id: ObjectId,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ObjectListResponse {
     pub items: Vec<ObjectListItem>,
-    pub next_before: Option<String>,
+    pub next_after: Option<ObjectListCursor>,
 }
 
 // -- WebSocket --
@@ -462,7 +481,7 @@ pub struct ObjectListResponse {
 #[serde(tag = "type")]
 pub enum WsClientMessage {
     #[serde(rename = "hello")]
-    Hello { last_seq: i64 },
+    Hello,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -471,14 +490,14 @@ pub enum WsServerMessage {
     #[serde(rename = "hello_ack")]
     HelloAck {
         server_time: String,
-        latest_seq: i64,
+        stream_start_seq: i64,
     },
     #[serde(rename = "event")]
     Event {
         seq: i64,
-        event_type: String,
-        object_kind: String,
-        object_id: String,
+        event_type: ObjectEventType,
+        object_kind: ObjectKind,
+        object_id: ObjectId,
         created_at: String,
     },
     #[serde(rename = "invalidate")]
@@ -500,22 +519,6 @@ pub enum WsError {
     /// The `hello` frame could not be parsed.
     #[error("hello message was malformed")]
     InvalidHello,
-}
-
-// -- Sync --
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BootstrapResponse {
-    pub device: DeviceInfo,
-    pub latest_seq: i64,
-    pub server: ServerInfo,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DeviceInfo {
-    pub id: DeviceId,
-    pub name: String,
-    pub platform: String,
 }
 
 // -- Generic --

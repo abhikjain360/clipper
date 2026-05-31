@@ -178,6 +178,13 @@ impl MigrationTrait for Migration {
                             .default("pending")
                             .check(Expr::col(Objects::Status).is_in(["pending", "complete"])),
                     )
+                    .col(ColumnDef::new(Objects::CreatedSeq).big_integer())
+                    .check(
+                        Cond::any()
+                            .add(Expr::col(Objects::Status).ne("complete"))
+                            .add(Expr::col(Objects::CreatedSeq).is_not_null())
+                            .into(),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_objects_source_device_id")
@@ -267,7 +274,12 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(EventLog::UserId).uuid().not_null())
-                    .col(ColumnDef::new(EventLog::EventType).text().not_null())
+                    .col(
+                        ColumnDef::new(EventLog::EventType)
+                            .text()
+                            .not_null()
+                            .check(Expr::col(EventLog::EventType).is_in(["created", "deleted"])),
+                    )
                     .col(
                         ColumnDef::new(EventLog::ObjectKind)
                             .text()
@@ -278,19 +290,10 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(EventLog::CreatedAt).text().not_null())
                     .check(
                         Cond::any()
+                            .add(Expr::col(EventLog::EventType).eq("created"))
                             .add(
                                 Cond::all()
-                                    .add(Expr::col(EventLog::EventType).eq("clipboard.created"))
-                                    .add(Expr::col(EventLog::ObjectKind).eq("clipboard")),
-                            )
-                            .add(
-                                Cond::all()
-                                    .add(Expr::col(EventLog::EventType).eq("file.created"))
-                                    .add(Expr::col(EventLog::ObjectKind).eq("file")),
-                            )
-                            .add(
-                                Cond::all()
-                                    .add(Expr::col(EventLog::EventType).eq("file.deleted"))
+                                    .add(Expr::col(EventLog::EventType).eq("deleted"))
                                     .add(Expr::col(EventLog::ObjectKind).eq("file")),
                             )
                             .into(),
@@ -325,6 +328,21 @@ impl MigrationTrait for Migration {
                     .name("idx_event_log_created_at")
                     .table(EventLog::Table)
                     .col(EventLog::CreatedAt)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_objects_user_kind_status_created_seq_id")
+                    .table(Objects::Table)
+                    .col(Objects::UserId)
+                    .col(Objects::Kind)
+                    .col(Objects::Status)
+                    .col(Objects::CreatedSeq)
+                    .col(Objects::Id)
                     .if_not_exists()
                     .to_owned(),
             )
@@ -476,6 +494,7 @@ enum Objects {
     SourceDeviceId,
     Envelope,
     Status,
+    CreatedSeq,
 }
 
 #[derive(DeriveIden)]

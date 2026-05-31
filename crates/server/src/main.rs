@@ -21,7 +21,7 @@ use axum::{
     Router,
     http::{Method, header},
     middleware,
-    routing::{delete, get, post},
+    routing::{get, post},
 };
 use clap::{Parser, Subcommand};
 use tower_http::{
@@ -286,9 +286,11 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
             "/api/objects/{id}/complete",
             post(routes::objects::complete_object),
         )
-        .route("/api/objects/{id}", delete(routes::objects::delete_object))
+        .route(
+            "/api/objects/{id}",
+            get(routes::objects::get_object).delete(routes::objects::delete_object),
+        )
         .route("/api/objects", get(routes::objects::list_objects))
-        .route("/api/sync/bootstrap", get(routes::sync::bootstrap))
         .route("/api/ws", get(ws::ws_handler))
         .layer(middleware::from_fn_with_state(
             state.clone(),

@@ -113,7 +113,9 @@ pub(crate) async fn trim_user_clipboard(
     let excess_ids: Vec<Uuid> = objects::Entity::find()
         .filter(objects::Column::Kind.eq("clipboard"))
         .filter(objects::Column::UserId.eq(user_id))
-        .order_by(objects::Column::CreatedAt, Order::Desc)
+        .filter(objects::Column::CreatedSeq.is_not_null())
+        .order_by(objects::Column::CreatedSeq, Order::Desc)
+        .order_by(objects::Column::Id, Order::Desc)
         .offset(max_items)
         // SQLite rejects OFFSET without LIMIT, so bound generously to "all remaining rows".
         .limit(i64::MAX as u64)

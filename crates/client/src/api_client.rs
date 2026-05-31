@@ -75,13 +75,13 @@ impl ApiClient {
             "https" => "wss",
             "http" => "ws",
             _ => {
-                return Err(ClientError::Other(
+                return Err(ClientError::InvalidServerUrl(
                     "Server URL must use http or https".into(),
                 ));
             }
         };
         url.set_scheme(scheme)
-            .map_err(|_| ClientError::Other("Invalid WebSocket URL scheme".into()))?;
+            .map_err(|_| ClientError::InvalidServerUrl("Invalid WebSocket URL scheme".into()))?;
         Ok(url)
     }
 
@@ -89,7 +89,7 @@ impl ApiClient {
         let mut url = self.base_url.clone();
         {
             let mut path = url.path_segments_mut().map_err(|_| {
-                ClientError::Other("Server URL cannot be used as a base URL".into())
+                ClientError::InvalidServerUrl("Server URL cannot be used as a base URL".into())
             })?;
             path.push("api");
             for segment in segments {
@@ -112,7 +112,7 @@ impl ApiClient {
     }
 
     fn postcard_body<T: Serialize>(value: &T) -> Result<Vec<u8>, ClientError> {
-        postcard::to_allocvec(value).map_err(|e| ClientError::Other(format!("postcard: {}", e)))
+        Ok(postcard::to_allocvec(value)?)
     }
 
     async fn postcard_response<T: DeserializeOwned>(
@@ -129,7 +129,7 @@ impl ApiClient {
         let bytes = resp.bytes().await?;
 
         if !is_postcard_content_type(content_type.as_deref()) {
-            return Err(ClientError::Other(format!(
+            return Err(ClientError::UnexpectedResponse(format!(
                 "expected postcard response from {}, got content-type {}; status={}; body-bytes={}; body-prefix={}",
                 url,
                 content_type.as_deref().unwrap_or("<missing>"),
@@ -141,7 +141,7 @@ impl ApiClient {
 
         postcard::from_bytes(&bytes)
             .map_err(|e| {
-                ClientError::Other(format!(
+                ClientError::UnexpectedResponse(format!(
                     "postcard decode from {} failed: {}; status={}; content-type={}; body-bytes={}; body-prefix={}",
                     url,
                     e,
@@ -365,7 +365,8 @@ impl ApiClient {
         &self,
         kind: Option<ObjectKind>,
         limit: Option<u64>,
-        before: Option<&str>,
+        created_seq_lte: Option<i64>,
+        after: Option<ObjectListCursor>,
     ) -> Result<ObjectListResponse, ClientError> {
         let mut url = self.api_url(&["objects"])?;
         {
@@ -374,11 +375,27 @@ impl ApiClient {
             if let Some(kind) = kind {
                 query.append_pair("kind", kind.as_ref());
             }
-            if let Some(before) = before {
-                query.append_pair("before", before);
+            if let Some(created_seq_lte) = created_seq_lte {
+                query.append_pair("created_seq_lte", &created_seq_lte.to_string());
+            }
+            if let Some(after) = after {
+                query.append_pair("after_created_seq", &after.created_seq.to_string());
+                query.append_pair("after_id", &after.id.to_string());
             }
         }
 
+        let resp = self
+            .http
+            .get(url)
+            .header("Authorization", self.auth_header().unwrap_or_default())
+            .send()
+            .await?;
+
+        Self::postcard_response(resp).await
+    }
+
+    pub async fn get_object(&self, object_id: &str) -> Result<ObjectListItem, ClientError> {
+        let url = self.api_url(&["objects", object_id])?;
         let resp = self
             .http
             .get(url)
@@ -420,19 +437,6 @@ impl ApiClient {
         Self::postcard_response(resp).await
     }
 
-    // ── Sync ──
-
-    pub async fn bootstrap(&self) -> Result<BootstrapResponse, ClientError> {
-        let resp = self
-            .http
-            .get(self.api_url(&["sync", "bootstrap"])?)
-            .header("Authorization", self.auth_header().unwrap_or_default())
-            .send()
-            .await?;
-
-        Ok(Self::checked_response(resp).await?.json().await?)
-    }
-
     // ── Health ──
 
     pub async fn health(&self) -> Result<HealthResponse, ClientError> {
@@ -442,11 +446,11 @@ impl ApiClient {
 }
 
 fn parse_server_url(base_url: &str) -> Result<Url, ClientError> {
-    let mut url = Url::parse(base_url.trim())
-        .map_err(|e| ClientError::Other(format!("Invalid server URL: {}", e)))?;
+    let mut url =
+        Url::parse(base_url.trim()).map_err(|e| ClientError::InvalidServerUrl(e.to_string()))?;
     validate_server_url(&url)?;
     if url.query().is_some() || url.fragment().is_some() {
-        return Err(ClientError::Other(
+        return Err(ClientError::InvalidServerUrl(
             "Server URL must not include a query or fragment".into(),
         ));
     }
@@ -461,7 +465,7 @@ fn display_server_url(url: &Url) -> String {
 
 fn validate_server_url(url: &Url) -> Result<(), ClientError> {
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(ClientError::Other(
+        return Err(ClientError::InvalidServerUrl(
             "Server URL must not include credentials".into(),
         ));
     }
@@ -469,10 +473,10 @@ fn validate_server_url(url: &Url) -> Result<(), ClientError> {
     match url.scheme() {
         "https" => Ok(()),
         "http" if is_loopback_host(url) || is_android_emulator_host(url) => Ok(()),
-        "http" => Err(ClientError::Other(
+        "http" => Err(ClientError::InvalidServerUrl(
             "Plain HTTP is only allowed for localhost servers".into(),
         )),
-        _ => Err(ClientError::Other(
+        _ => Err(ClientError::InvalidServerUrl(
             "Server URL must use http or https".into(),
         )),
     }
@@ -730,6 +734,51 @@ pub enum ClientError {
     WebSocket(String),
     #[error("Local store error: {0}")]
     LocalStore(String),
+    /// No active session: a token, device identity, signing key, or encryption
+    /// key required for this action is missing. The client must log in first.
+    #[error("Not authenticated; sign in first")]
+    NotAuthenticated,
+    /// A clipboard or object MIME type the client does not know how to handle.
+    #[error("Unsupported MIME type: {mime_type}")]
+    UnsupportedMimeType { mime_type: String },
+    /// A clipboard or file item is not present in the local state.
+    #[error("Item not found: {id}")]
+    ItemNotFound { id: String },
+    /// The item exists but its stored payload bytes are unavailable locally.
+    #[error("Payload not found for item: {id}")]
+    PayloadNotFound { id: String },
+    /// A UUID-typed identifier (device, object, or payload id) failed to parse.
+    #[error("Invalid {kind}: {source}")]
+    InvalidId {
+        kind: &'static str,
+        source: uuid::Error,
+    },
+    /// The configured server URL is not a usable base URL or violates client
+    /// transport policy (scheme, credentials, query/fragment).
+    #[error("Invalid server URL: {0}")]
+    InvalidServerUrl(String),
+    /// An object was a different kind than the operation requires.
+    #[error("Expected a {expected} object but found a {actual} object")]
+    UnexpectedObjectKind {
+        expected: ObjectKind,
+        actual: ObjectKind,
+    },
+    /// The server's response did not meet a protocol expectation the client
+    /// relies on (missing fields, mismatched identity, unexpected encoding).
+    #[error("Unexpected server response: {0}")]
+    UnexpectedResponse(String),
+    /// Encoding a request body to the postcard wire format failed.
+    #[error("Serialization error: {0}")]
+    Serialization(#[from] postcard::Error),
+    /// A local filesystem operation failed.
+    #[error("{context}: {source}")]
+    Io {
+        context: &'static str,
+        source: std::io::Error,
+    },
+    /// The action is not available in this build or on this platform.
+    #[error("{0}")]
+    Unsupported(String),
     #[error("{0}")]
     Other(String),
 }
@@ -804,6 +853,27 @@ impl ClientError {
             Self::Crypto(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.to_string()),
             Self::WebSocket(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.clone()),
             Self::LocalStore(error) => ErrorResponse::new(ApiErrorCode::Storage, error.clone()),
+            Self::NotAuthenticated => {
+                ErrorResponse::new(ApiErrorCode::Unauthorized, self.to_string())
+            }
+            Self::UnsupportedMimeType { .. } => {
+                ErrorResponse::new(ApiErrorCode::UnsupportedMediaType, self.to_string())
+            }
+            Self::ItemNotFound { .. } | Self::PayloadNotFound { .. } => {
+                ErrorResponse::new(ApiErrorCode::NotFound, self.to_string())
+            }
+            Self::InvalidId { .. } => ErrorResponse::new(ApiErrorCode::InvalidId, self.to_string()),
+            Self::InvalidServerUrl(_) => {
+                ErrorResponse::new(ApiErrorCode::BadRequest, self.to_string())
+            }
+            Self::UnexpectedObjectKind { .. } => {
+                ErrorResponse::new(ApiErrorCode::InvalidObjectKind, self.to_string())
+            }
+            Self::UnexpectedResponse(_) | Self::Serialization(_) => {
+                ErrorResponse::new(ApiErrorCode::Unknown, self.to_string())
+            }
+            Self::Io { .. } => ErrorResponse::new(ApiErrorCode::Storage, self.to_string()),
+            Self::Unsupported(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.clone()),
             Self::Other(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.clone()),
         }
     }
@@ -832,21 +902,31 @@ mod tests {
         assert!(parse_server_url("http://10.0.3.2:8787").is_ok());
     }
 
+    fn assert_invalid_server_url(input: &str) {
+        assert!(
+            matches!(
+                parse_server_url(input),
+                Err(ClientError::InvalidServerUrl(_))
+            ),
+            "expected InvalidServerUrl for {input:?}",
+        );
+    }
+
     #[test]
     fn server_url_rejects_non_loopback_http() {
-        assert!(parse_server_url("http://example.com").is_err());
-        assert!(parse_server_url("http://192.168.1.5:8787").is_err());
+        assert_invalid_server_url("http://example.com");
+        assert_invalid_server_url("http://192.168.1.5:8787");
     }
 
     #[test]
     fn server_url_rejects_embedded_credentials() {
-        assert!(parse_server_url("https://user:pass@example.com").is_err());
+        assert_invalid_server_url("https://user:pass@example.com");
     }
 
     #[test]
     fn server_url_rejects_query_and_fragment() {
-        assert!(parse_server_url("https://example.com?debug=true").is_err());
-        assert!(parse_server_url("https://example.com#clipper").is_err());
+        assert_invalid_server_url("https://example.com?debug=true");
+        assert_invalid_server_url("https://example.com#clipper");
     }
 
     #[test]

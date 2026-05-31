@@ -90,7 +90,7 @@ SQLite stores durable metadata. The filesystem stores larger encrypted blobs:
 - `object_payloads`
   - per-payload row keyed by `(object_id, payload_id)`: ciphertext path, nonce, ciphertext size, SHA-256, status (`pending` | `uploading` | `uploaded` | `complete`). Each row points at a file under `state.objects_dir()`.
 - `event_log`
-  - stores user-scoped ordered object events used by bootstrap/WebSocket replay. A check constraint pins the event-type / object-kind pairs to `clipboard.created`, `file.created`, and `file.deleted`.
+  - stores user-scoped ordered object events used by bootstrap/WebSocket replay. A check constraint pins event types to `created` or `deleted`, and allows `deleted` only for file objects.
 
 Database schema source of truth lives in `crates/server/src/migration/*.rs`;
 SeaORM entity files under `crates/server/src/entity/` are generated from that
@@ -181,9 +181,9 @@ Object upload/download flow (used for both clipboard items and files):
 6. For each non-inline payload, the client calls `PUT /api/objects/{object_id}/payloads/{payload_id}` with raw ciphertext bytes. Only the authenticated source device may upload. The server claims the payload (`pending` → `uploading`), streams bytes into a `*.tmp` file, refuses any byte count above the initialized size, renames into the final path, and marks the payload `uploaded`.
 7. After uploading every non-inline payload, the client calls `POST /api/objects/{object_id}/complete` with a postcard `ObjectCompleteRequest` covering every payload. The server requires the source device to match, re-hashes each on-disk payload, verifies size and SHA-256 against both the init metadata and the completion request, marks every payload `complete`, transitions the object from `pending` to `complete`, inserts a `*.created` event row, and broadcasts it to that user's WebSocket subscribers.
 8. List, download, and delete are user-scoped:
-   - `GET /api/objects?kind=...&limit=...&before=...` returns `complete` objects ordered by `created_at desc`, including each object's payload descriptors. The query enforces `limit + 1` at SQL level and exposes `next_before` cursoring.
+   - `GET /api/objects?kind=...&limit=...&created_seq_lte=...&after_created_seq=...&after_id=...` returns `complete` objects ordered by server create sequence, including each object's payload descriptors. The query enforces `limit + 1` at SQL level and exposes a typed `next_after` cursor.
    - `GET /api/objects/{id}/payloads/{payload_id}` streams a `complete` payload's ciphertext from disk.
-   - `DELETE /api/objects/{id}` is restricted to `kind = "file"`. It deletes the row, all payload files, logs `file.deleted`, and broadcasts that event. Clipboard objects cannot currently be deleted through this route.
+   - `DELETE /api/objects/{id}` is restricted to `kind = "file"`. It deletes the row, all payload files, logs a `deleted` file event, and broadcasts that event. Clipboard objects cannot currently be deleted through this route.
 
 Planned client-side local-store behavior keeps this same abstraction: object
 metadata may be cached locally, but payload bytes are still downloaded only on

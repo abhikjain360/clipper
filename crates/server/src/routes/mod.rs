@@ -14,7 +14,6 @@ use tracing::{debug, error, trace, warn};
 pub mod auth;
 pub mod health;
 pub mod objects;
-pub mod sync;
 
 #[derive(Debug)]
 pub struct Postcard<T>(pub T);

@@ -5,7 +5,10 @@ use std::{
     sync::Arc,
 };
 
-use clipper_client::{api_client::ClientError, engine::SyncEngine};
+use clipper_client::{
+    api_client::ClientError,
+    engine::{SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
+};
 use hmac::{Hmac, Mac};
 use rand::RngExt;
 use sha2::Sha256;
@@ -458,8 +461,11 @@ async fn cmd_get_state(id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
 }
 
 async fn cmd_send_clipboard(id: String, text: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
-    match engine.send_clipboard(&text).await {
-        Ok(()) => DaemonResponse::success(id, None),
+    match engine
+        .send_clipboard_payload(TEXT_CLIPBOARD_MIME_TYPE, text.as_bytes())
+        .await
+    {
+        Ok(_) => DaemonResponse::success(id, None),
         Err(e) => client_error(id, e),
     }
 }

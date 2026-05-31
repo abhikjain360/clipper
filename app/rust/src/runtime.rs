@@ -107,7 +107,7 @@ mod imp {
         sync::{Arc, LazyLock},
     };
 
-    use clipper_client::engine::SyncEngine;
+    use clipper_client::engine::{SyncEngine, TEXT_CLIPBOARD_MIME_TYPE};
     #[cfg(not(target_family = "wasm"))]
     use clipper_daemon_types::UploadFileResult;
     use clipper_daemon_types::{
@@ -223,7 +223,9 @@ mod imp {
                 Ok(None)
             }
             DaemonCommand::SendClipboard(params) => {
-                engine.send_clipboard(&params.text).await?;
+                engine
+                    .send_clipboard_payload(TEXT_CLIPBOARD_MIME_TYPE, params.text.as_bytes())
+                    .await?;
                 Ok(None)
             }
             DaemonCommand::SendClipboardPayload(params) => {

@@ -6,10 +6,10 @@ use axum::{
     response::Response,
 };
 use chrono::Utc;
-use clipper_core::models::{WsClientMessage, WsError, WsServerMessage};
-use sea_orm::{
-    ColumnTrait, DerivePartialModel, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect,
+use clipper_core::models::{
+    ObjectEventType, ObjectId, ObjectKind, WsClientMessage, WsError, WsServerMessage,
 };
+use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, info};
 use uuid::Uuid;
@@ -22,20 +22,10 @@ pub struct WsBroadcast {
     pub user_id: Uuid,
     pub source_device_id: Uuid,
     pub seq: i64,
-    pub event_type: String,
-    pub object_kind: String,
-    pub object_id: String,
+    pub event_type: ObjectEventType,
+    pub object_kind: ObjectKind,
+    pub object_id: ObjectId,
     pub created_at: String,
-}
-
-#[derive(Debug, DerivePartialModel)]
-#[sea_orm(entity = "event_log::Entity", from_query_result)]
-struct WsEventRow {
-    seq: i64,
-    event_type: String,
-    object_kind: String,
-    object_id: Uuid,
-    created_at: String,
 }
 
 pub async fn ws_handler(
@@ -50,20 +40,23 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
     let device_id = auth.device_id.to_string();
     info!(device_id = %device_id, "WebSocket connected");
 
-    // Wait for hello message
-    let last_seq = match socket.recv().await {
+    // Wait for hello message.
+    match socket.recv().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<WsClientMessage>(&text) {
-            Ok(WsClientMessage::Hello { last_seq }) => last_seq,
+            Ok(WsClientMessage::Hello) => {}
             Err(_) => return close_with_error(socket, WsError::InvalidHello).await,
         },
         _ => return close_with_error(socket, WsError::ExpectedHello).await,
-    };
+    }
 
-    // Send hello_ack
-    let latest_seq = get_latest_seq(&state, auth.user_id).await.unwrap_or(0);
+    // Subscribe before reading the high-water seq. HTTP snapshots own state
+    // through stream_start_seq; this live stream owns events after it.
+    let mut rx = state.ws_tx().subscribe();
+
+    let stream_start_seq = get_latest_seq(&state, auth.user_id).await.unwrap_or(0);
     let ack = WsServerMessage::HelloAck {
         server_time: Utc::now().to_rfc3339(),
-        latest_seq,
+        stream_start_seq,
     };
     if socket
         .send(Message::Text(serde_json::to_string(&ack).unwrap().into()))
@@ -72,39 +65,6 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
     {
         return;
     }
-
-    // Replay missed events
-    if last_seq < latest_seq {
-        if let Ok(events) = get_events_since(&state, auth.user_id, last_seq).await {
-            for evt in events {
-                let msg = WsServerMessage::Event {
-                    seq: evt.seq,
-                    event_type: evt.event_type,
-                    object_kind: evt.object_kind,
-                    object_id: evt.object_id.to_string(),
-                    created_at: evt.created_at,
-                };
-                if socket
-                    .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        } else {
-            // Gap too large or events pruned — send invalidate
-            let inv = WsServerMessage::Invalidate {
-                target: "all".to_string(),
-            };
-            _ = socket
-                .send(Message::Text(serde_json::to_string(&inv).unwrap().into()))
-                .await;
-        }
-    }
-
-    // Subscribe to broadcast
-    let mut rx = state.ws_tx().subscribe();
 
     loop {
         tokio::select! {
@@ -120,6 +80,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
             broadcast = rx.recv() => {
                 match broadcast {
                     Ok(evt) => {
+                        if evt.seq <= stream_start_seq {
+                            continue;
+                        }
                         if !should_forward_live_broadcast(&evt, auth.user_id, auth.device_id) {
                             continue;
                         }
@@ -202,20 +165,6 @@ async fn get_latest_seq(state: &AppState, user_id: Uuid) -> Result<i64, sea_orm:
     Ok(row.unwrap_or(0))
 }
 
-async fn get_events_since(
-    state: &AppState,
-    user_id: Uuid,
-    last_seq: i64,
-) -> Result<Vec<WsEventRow>, sea_orm::DbErr> {
-    event_log::Entity::find()
-        .filter(event_log::Column::UserId.eq(user_id))
-        .filter(event_log::Column::Seq.gt(last_seq))
-        .order_by_asc(event_log::Column::Seq)
-        .into_partial_model::<WsEventRow>()
-        .all(state.db())
-        .await
-}
-
 fn should_forward_live_broadcast(evt: &WsBroadcast, user_id: Uuid, device_id: Uuid) -> bool {
     evt.user_id == user_id && evt.source_device_id != device_id
 }
@@ -229,9 +178,9 @@ mod tests {
             user_id,
             source_device_id,
             seq: 1,
-            event_type: "file.created".into(),
-            object_kind: "file".into(),
-            object_id: Uuid::now_v7().to_string(),
+            event_type: ObjectEventType::Created,
+            object_kind: ObjectKind::File,
+            object_id: Uuid::now_v7().into(),
             created_at: Utc::now().to_rfc3339(),
         }
     }

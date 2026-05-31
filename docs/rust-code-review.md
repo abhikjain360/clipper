@@ -15,71 +15,10 @@ Scope: `crates/core`, `crates/server`, `crates/client` (including
 Release-readiness notes at the bottom also mention Flutter, Android, and CI
 metadata when they affect whether the project is safe to publish.
 
-Highest-priority open risks: three distinct paths can silently lose a user's own
-sync events (WebSocket subscribe/replay race, pruned events, and the client
-advancing its cursor before refresh), and decrypted plaintext escapes the local
-trust boundary (world-readable file downloads and a local cache that logout
-never wipes).
-
-## P1: WebSocket Subscribe-After-Replay Race Drops Concurrently-Committed Events
-
-`handle_socket` reads `latest_seq` (`crates/server/src/ws.rs:72`), replays
-events via `get_events_since(last_seq)` over a committed DB snapshot in an
-await-per-event loop (`:86-103`), and only _after_ replay finishes calls
-`state.ws_tx().subscribe()` (`:116`). Any event another device commits and
-broadcasts during that window is in neither the replay (committed after the
-snapshot read) nor the live stream (`broadcast::Sender` drops messages for
-not-yet-subscribed receivers). The server write paths broadcast after commit
-outside the write lock (`crates/server/src/routes/objects.rs:250/253`,
-`:662/671`, `:1061/1071`), so the window is real under concurrent multi-device
-writes.
-
-The client cannot recover the gap on its own: it never re-derives `last_seq`
-from `HelloAck.latest_seq` (`crates/client/src/engine.rs:970-972` only logs it)
-and advances the cursor only from received `Event` messages (`:980`), so the
-cursor sits at the last replayed seq and the dropped event is never re-requested.
-Recovery happens only if a later event triggers a `refresh()` whose top-100-per-
-kind window still contains the missed object, or a full `Invalidate` occurs —
-otherwise it is permanent cross-device divergence.
-
-Recommended fix: subscribe to the broadcast channel _before_ issuing the replay
-query, buffer live messages during replay, then flush buffered live events while
-de-duplicating by seq (drop any seq ≤ the last replayed seq). This closes the
-window so no committed event can fall between the snapshot and the live stream.
-
-## P1: WebSocket Replay Can Silently Miss Pruned Events And Is Uncapped
-
-`handle_socket` (`crates/server/src/ws.rs:86-113`) sends
-`Invalidate { target: "all" }` only when the `get_events_since` query _errors_
-(`:104-112`). It does not track the oldest retained `event_log.seq` per user, so
-once `cleanup_old_events` prunes rows (`crates/server/src/cleanup.rs:152-159`,
-default `event_log_retention_days = 3`), a client reconnecting with a `last_seq`
-older than the surviving range gets a successful query that returns only the
-suffix and silently advances past the pruned creates/deletes — pruning is not a
-DB error. `get_events_since` also has no `LIMIT` or lower bound, so a very old or
-negative `last_seq` forces the server to materialize and stream every retained
-event (`ws.rs:171-183`) — a memory/CPU amplification vector.
-
-Recommended fix:
-
-- Track the oldest available `event_log.seq` per user; send `Invalidate` when
-  `last_seq` precedes it.
-- Cap replay count; `Invalidate` instead of streaming an unbounded backlog.
-
-## P1: Client Advances `last_seq` Before Refresh Succeeds
-
-`SyncEngine::ws_connect` (`crates/client/src/engine.rs:980`) writes
-`*self.last_seq.write().await = seq` _before_ calling `self.refresh()` at
-`:983`. If refresh/download/decrypt then fails (transient error or hostile
-server response) it only warns (`:984`) and continues, and the next reconnect
-sends the advanced `Hello { last_seq }` (`:947-948`), so the server never
-replays the failed event. `refresh()` is a full top-100-per-kind re-fetch, so a
-later successful event self-corrects an existing create and any delete;
-permanent loss is narrowed to a missed create that falls outside the latest-100
-window with no further events before reconnect.
-
-Recommended fix: advance client `last_seq` only after the refresh/bootstrap
-that consumes it succeeds, or persist an explicit "needs bootstrap" state.
+Highest-priority open risks: decrypted plaintext escapes the local trust
+boundary (world-readable file downloads and a local cache that logout never
+wipes), and authenticated clients can still drive resource pressure through
+uncapped object payload counts and unbounded payload downloads.
 
 ## P2: File Download Writes Decrypted Plaintext World-Readable And Follows Symlinks
 
@@ -143,7 +82,7 @@ revocation failed. Combine with the `0600`/`0700` permission fix.
 ## P2: Object Delete Unlinks Payload Files After Commit With No Reconciliation
 
 `delete_object` commits the transaction that removes the `objects` row (cascading
-payload rows) and inserts the `file.deleted` event
+payload rows) and inserts the file `deleted` event
 (`crates/server/src/routes/objects.rs:1061`), _then_ calls `remove_paths(paths)`
 to unlink the ciphertext `.bin` files (`:1070`). `remove_paths` is best-effort
 and logs-and-continues on non-`NotFound` errors (`:1376-1388`). If the process is
@@ -207,20 +146,6 @@ object today, so a tight cap is free.
 
 Recommended fix: add an explicit maximum payload count.
 
-## P2: File Download Only Finds Metadata In The First Page
-
-`SyncEngine::download_file_bytes` (`crates/client/src/engine.rs:626`) calls
-`list_objects(Some(File), Some(500), None)` and searches that single page for
-the requested ID before downloading. Files older than the most recent 500
-become undownloadable from the client even though the server retains them. The
-server exposes `GET /api/objects/{id}/payloads/{payload_id}` but no object
-metadata lookup by ID, and `local_store` caches clipboard items but not file
-metadata, so the download path cannot recover the nonce locally either.
-
-Recommended fix: add an object-by-ID metadata endpoint (kind, metadata
-nonce/ciphertext, payload descriptors), or extend `local_store` to cache file
-metadata and look the nonce up there.
-
 ## P2: Repeated Login/Register Can Spawn Duplicate Background Work
 
 `SyncEngine::finish_auth` (`crates/client/src/engine.rs:210-224`)
@@ -257,19 +182,15 @@ manifest hash.
 ## P2: Timestamps Are Stored And Compared As Text
 
 The schema stores timestamps as text and code compares them lexicographically
-for sessions, access keys, cleanup, and pagination. `ObjectListQuery.before` is a
-free-form `Option<String>` (`crates/server/src/routes/objects.rs:684`) injected
-into `CreatedAt.lt(before)` (`:757-759`) with no RFC3339/UTC validation against a
-text column. All server-generated timestamps come from
+for sessions, access keys, and cleanup. All server-generated timestamps come from
 `chrono::Utc::now().to_rfc3339()` (fixed `+00:00` form), so intra-server compares
 are stable and SeaORM parameterizes the value (not SQL injection). The risk is
-cross-source mixing: the client-supplied `before` is unvalidated, and any future
+cross-source mixing: any future
 backfill in a different format (`Z`, fractional seconds, non-UTC offsets)
 silently changes ordering for everyone.
 
 Recommended fix: store integer Unix milliseconds, or normalize one fixed-width
-UTC string everywhere and validate `before`, or parse to `DateTime<Utc>` before
-comparing.
+UTC string everywhere and parse to `DateTime<Utc>` before comparing.
 
 ## P3: Username Enumeration Via Register-Start And Challenge Timing
 
@@ -577,23 +498,19 @@ release or advertising the app as secure:
 1. Crypto AAD binding: bind object ID, payload ID, kind, and source device into
    AEAD AAD and cross-check the returned blob client-side, or move to signed
    object envelopes (P1).
-2. WS/sync correctness cluster: subscribe to the broadcast channel before the
-   replay query and flush/dedup-by-seq the buffered live events; track the oldest
-   retained seq per user and `Invalidate` on gap; cap replay; and advance the
-   client `last_seq` only after refresh succeeds (P1).
-3. Decrypted-plaintext egress and retention: write file downloads at `0600` with
+2. Decrypted-plaintext egress and retention: write file downloads at `0600` with
    `O_NOFOLLOW`, apply `0600`-in-`0700` to the local cache, and make logout
    destructive and local-first regardless of server reachability (P2).
-4. Cleanup/delete durability and races: delete orphan rows by captured ID in one
+3. Cleanup/delete durability and races: delete orphan rows by captured ID in one
    transaction with a status re-check, fence `upload_payload`'s rename, make
    `delete_object` reconcile via tombstone, add a directory-vs-DB GC, and cap
    payloads per object (P2).
-5. Background task cancellation on re-auth/logout; object-by-ID metadata lookup
-   for download; client download size/hash checks against the descriptor (P2).
-6. Release readiness: align app versioning; commit `app/pubspec.lock` with
+4. Background task cancellation on re-auth/logout; client download size/hash
+   checks against the descriptor (P2).
+5. Release readiness: align app versioning; commit `app/pubspec.lock` with
    `--enforce-lockfile` and fix osv-scanner Dart coverage; restrict Android
    cleartext traffic.
-7. Rate-limit hardening: drop the leftmost-XFF fallback and add per-source
+6. Rate-limit hardening: drop the leftmost-XFF fallback and add per-source
    fairness / a sane global ceiling; add IPC listener handshake/idle timeouts and
    a connection cap; add config upper bounds (`max_limit`, ttl/retention days,
    `device_name`/`platform`) and an explicit `DefaultBodyLimit`; resolve the dead

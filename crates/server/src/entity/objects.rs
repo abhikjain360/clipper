@@ -25,6 +25,7 @@ pub struct Model {
     pub envelope: Vec<u8>,
     #[sea_orm(column_type = "Text")]
     pub status: String,
+    pub created_seq: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

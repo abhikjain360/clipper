@@ -6,7 +6,7 @@ pub use clipper_app_types::{
     AppState, ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem,
 };
 use clipper_core::{crypto, models::*};
-use futures_util::{StreamExt, TryStreamExt, stream};
+use futures_util::{StreamExt, stream};
 use tokio::sync::{Mutex, RwLock, watch};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
@@ -17,14 +17,14 @@ use crate::{
         decrypt_file_blob_bytes, decrypt_file_meta_bytes, encrypt_clipboard_meta,
         encrypt_clipboard_payload, encrypt_file_blob_bytes, encrypt_file_meta_bytes,
     },
-    local_store::{DeviceSigningIdentity, LocalStore},
+    local_store::{DeviceSigningIdentity, LocalStore, LocalVisibleState},
 };
 
 const INLINE_OBJECT_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 const RECENT_CLIPBOARD_LIMIT: usize = 100;
-const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
+/// MIME type used for plain-text clipboard entries.
+pub const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
 const CLIPBOARD_HYDRATION_CONCURRENCY: usize = 8;
-const LOCAL_PERSIST_CONCURRENCY: usize = 8;
 const OBJECT_ENVELOPE_VERSION_V1: u64 = 1;
 
 #[derive(Debug, Clone)]
@@ -49,15 +49,12 @@ pub struct SyncEngine {
     state_tx: watch::Sender<u64>,
     state_rx: watch::Receiver<u64>,
     state_version: std::sync::atomic::AtomicU64,
-    last_seq: RwLock<i64>,
+    ws_restart_tx: watch::Sender<u64>,
+    ws_restart_rx: watch::Receiver<u64>,
     suppressed_payload: RwLock<Option<([u8; 32], std::time::Instant)>>,
 }
 
 impl SyncEngine {
-    pub fn new(base_url: &str) -> Arc<Self> {
-        Self::new_with_data_dir(base_url, default_data_dir())
-    }
-
     pub fn new_with_data_dir(base_url: &str, data_dir: impl Into<PathBuf>) -> Arc<Self> {
         Self::try_new_with_data_dir(base_url, data_dir).expect("invalid Clipper server URL")
     }
@@ -67,6 +64,7 @@ impl SyncEngine {
         data_dir: impl Into<PathBuf>,
     ) -> Result<Arc<Self>, ClientError> {
         let (tx, rx) = watch::channel(0u64);
+        let (ws_restart_tx, ws_restart_rx) = watch::channel(0u64);
         Ok(Arc::new(Self {
             api: Mutex::new(ApiClient::try_new(base_url)?),
             local_store: LocalStore::new(data_dir),
@@ -76,7 +74,8 @@ impl SyncEngine {
             state_tx: tx,
             state_rx: rx,
             state_version: std::sync::atomic::AtomicU64::new(0),
-            last_seq: RwLock::new(0),
+            ws_restart_tx,
+            ws_restart_rx,
             suppressed_payload: RwLock::new(None),
         }))
     }
@@ -115,22 +114,7 @@ impl SyncEngine {
         _ = self.state_tx.send(v);
     }
 
-    async fn observe_committed_seq(&self, seq: i64) {
-        let mut last_seq = self.last_seq.write().await;
-        *last_seq = (*last_seq).max(seq);
-    }
-
     // ── Auth ──
-
-    pub async fn login(
-        self: &Arc<Self>,
-        passphrase: &str,
-        username: &str,
-        device_name: &str,
-    ) -> Result<(), ClientError> {
-        self.login_with_platform(passphrase, username, device_name, "macos")
-            .await
-    }
 
     pub async fn login_with_platform(
         self: &Arc<Self>,
@@ -175,17 +159,6 @@ impl SyncEngine {
 
         info!("Login complete, device_id={}", login_resp.device_id);
         Ok(())
-    }
-
-    pub async fn register(
-        self: &Arc<Self>,
-        access_key: &str,
-        username: &str,
-        passphrase: &str,
-        device_name: &str,
-    ) -> Result<String, ClientError> {
-        self.register_with_platform(access_key, username, passphrase, device_name, "macos")
-            .await
     }
 
     pub async fn register_with_platform(
@@ -260,11 +233,10 @@ impl SyncEngine {
             state.username = Some(username);
             state.device_id = Some(device_id);
             state.device_name = Some(device_name.to_string());
+            state.connection_status = ConnectionStatus::Connecting;
             state.error = None;
         }
         self.bump_version();
-
-        self.sync_bootstrap().await?;
 
         #[cfg(not(target_family = "wasm"))]
         {
@@ -299,16 +271,15 @@ impl SyncEngine {
             state
                 .device_id
                 .clone()
-                .ok_or_else(|| ClientError::Other("No device_id".into()))?
+                .ok_or(ClientError::NotAuthenticated)?
         };
-        let device_id_typed = device_id
-            .parse()
-            .map_err(|e| ClientError::Other(format!("Invalid device_id: {e}")))?;
+        let device_id_typed = device_id.parse().map_err(|source| ClientError::InvalidId {
+            kind: "device id",
+            source,
+        })?;
         let signing_key = {
             let signing_key = self.device_signing_key.read().await;
-            let signing_key = signing_key
-                .as_ref()
-                .ok_or_else(|| ClientError::Other("No device signing key".into()))?;
+            let signing_key = signing_key.as_ref().ok_or(ClientError::NotAuthenticated)?;
             Zeroizing::new(**signing_key)
         };
         Ok((device_id, device_id_typed, signing_key))
@@ -332,22 +303,15 @@ impl SyncEngine {
 
     // ── Clipboard ──
 
-    pub async fn send_clipboard(&self, text: &str) -> Result<(), ClientError> {
-        self.send_clipboard_payload(TEXT_CLIPBOARD_MIME_TYPE, text.as_bytes())
-            .await?;
-        debug!("Clipboard text uploaded");
-        Ok(())
-    }
-
     pub async fn send_clipboard_payload(
         &self,
         mime_type: &str,
         data: &[u8],
     ) -> Result<String, ClientError> {
         if !is_supported_clipboard_mime_type(mime_type) {
-            return Err(ClientError::Other(format!(
-                "Unsupported clipboard MIME type: {mime_type}"
-            )));
+            return Err(ClientError::UnsupportedMimeType {
+                mime_type: mime_type.to_string(),
+            });
         }
 
         let payload_digest = clipboard_payload_digest(mime_type, data);
@@ -408,7 +372,7 @@ impl SyncEngine {
             let encryption_key = self.encryption_key.read().await;
             let encryption_key = encryption_key
                 .as_ref()
-                .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
+                .ok_or(ClientError::NotAuthenticated)?;
             let meta = ClipboardMeta {
                 mime_type: mime_type.to_string(),
                 size: Some(plaintext_size),
@@ -479,20 +443,17 @@ impl SyncEngine {
             created_at,
             source_device_id: device_id,
         };
-        self.local_store
-            .persist_clipboard_payload_item(&item, data)
-            .await?;
-        let clipboard_items = self
+        let visible = self
             .local_store
-            .recent_clipboard_items(RECENT_CLIPBOARD_LIMIT)
+            .persist_local_clipboard_present(
+                &item,
+                data,
+                created_seq,
+                created_seq,
+                RECENT_CLIPBOARD_LIMIT,
+            )
             .await?;
-
-        {
-            let mut state = self.state.write().await;
-            state.clipboard_items = clipboard_items;
-        }
-        self.observe_committed_seq(created_seq).await;
-        self.bump_version();
+        self.publish_visible_state(visible).await;
         info!(
             clipboard_id = %object_id,
             mime_type,
@@ -523,13 +484,13 @@ impl SyncEngine {
             let state = self.state.read().await;
             state.clipboard_items.iter().find(|i| i.id == id).cloned()
         }
-        .ok_or_else(|| ClientError::Other("Item not found".into()))?;
+        .ok_or_else(|| ClientError::ItemNotFound { id: id.to_string() })?;
 
         let bytes = self
             .local_store
             .clipboard_payload(id)
             .await?
-            .ok_or_else(|| ClientError::Other("Item payload not found".into()))?;
+            .ok_or_else(|| ClientError::PayloadNotFound { id: id.to_string() })?;
         let text = if is_text_mime_type(&item.mime_type) {
             Some(
                 String::from_utf8(bytes.clone())
@@ -564,7 +525,7 @@ impl SyncEngine {
         let text = match state_item {
             Some((text, mime_type)) => {
                 if !is_text_mime_type(&mime_type) {
-                    return Err(ClientError::Other(format!(
+                    return Err(ClientError::Unsupported(format!(
                         "Clipboard item is {mime_type}; copying non-text clipboard payloads is not wired to the OS clipboard yet"
                     )));
                 }
@@ -574,7 +535,7 @@ impl SyncEngine {
                 .local_store
                 .clipboard_text(id)
                 .await?
-                .ok_or_else(|| ClientError::Other("Item not found".into()))?,
+                .ok_or_else(|| ClientError::ItemNotFound { id: id.to_string() })?,
         };
 
         *self.suppressed_payload.write().await = Some((
@@ -597,25 +558,32 @@ impl SyncEngine {
         let init_resp = api.object_init(init_req).await?;
         let payload_id_typed = payload_id
             .parse()
-            .map_err(|e| ClientError::Other(format!("Invalid payload id: {e}")))?;
+            .map_err(|source| ClientError::InvalidId {
+                kind: "payload id",
+                source,
+            })?;
         if init_resp.complete {
             return init_resp.created_seq.ok_or_else(|| {
-                ClientError::Other("Complete object response missing created_seq".into())
+                ClientError::UnexpectedResponse(
+                    "complete object response missing created_seq".into(),
+                )
             });
         }
 
-        if !init_resp
+        let upload_needed = init_resp
             .upload_urls
             .iter()
-            .any(|upload| upload.id == payload_id_typed)
-        {
-            return Err(ClientError::Other(
-                "Object payload upload URL missing".into(),
+            .any(|upload| upload.id == payload_id_typed);
+        if !upload_needed && !init_resp.upload_urls.is_empty() {
+            return Err(ClientError::UnexpectedResponse(
+                "object payload upload URL missing".into(),
             ));
         }
 
-        api.object_upload_payload(object_id, payload_id, encrypted_payload)
-            .await?;
+        if upload_needed {
+            api.object_upload_payload(object_id, payload_id, encrypted_payload)
+                .await?;
+        }
         let complete_resp = api
             .object_complete(
                 object_id,
@@ -643,13 +611,16 @@ impl SyncEngine {
             .to_string();
         let data = tokio::fs::read(path)
             .await
-            .map_err(|e| ClientError::Other(format!("read file: {}", e)))?;
+            .map_err(|source| ClientError::Io {
+                context: "read file",
+                source,
+            })?;
         self.upload_file_bytes(&filename, None, &data).await
     }
 
     #[cfg(target_family = "wasm")]
     pub async fn upload_file(&self, _file_path: &str) -> Result<String, ClientError> {
-        Err(ClientError::Other(
+        Err(ClientError::Unsupported(
             "Path-based file upload is not available on web".into(),
         ))
     }
@@ -691,7 +662,7 @@ impl SyncEngine {
             let encryption_key = self.encryption_key.read().await;
             let encryption_key = encryption_key
                 .as_ref()
-                .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
+                .ok_or(ClientError::NotAuthenticated)?;
             let (meta_nonce, meta_ciphertext) =
                 encrypt_file_meta_bytes(&meta, encryption_key, &aad_body)?;
             let (blob_nonce, encrypted_blob) =
@@ -746,22 +717,19 @@ impl SyncEngine {
             )
             .await?;
 
-        {
-            let mut state = self.state.write().await;
-            state.files.insert(
-                0,
-                DecryptedFileItem {
-                    id: file_id.clone(),
-                    filename: filename.clone(),
-                    mime_type: mime_type.clone(),
-                    blob_size: data.len() as i64,
-                    created_at,
-                    source_device_id: device_id,
-                },
-            );
-        }
-        self.observe_committed_seq(created_seq).await;
-        self.bump_version();
+        let item = DecryptedFileItem {
+            id: file_id.clone(),
+            filename: filename.clone(),
+            mime_type: mime_type.clone(),
+            blob_size: data.len() as i64,
+            created_at,
+            source_device_id: device_id,
+        };
+        let visible = self
+            .local_store
+            .persist_local_file_present(&item, created_seq, created_seq, RECENT_CLIPBOARD_LIMIT)
+            .await?;
+        self.publish_visible_state(visible).await;
         info!(file_id = %file_id, filename = %filename, "File uploaded");
         Ok(file_id)
     }
@@ -769,15 +737,14 @@ impl SyncEngine {
     pub async fn download_file_bytes(&self, file_id: &str) -> Result<Vec<u8>, ClientError> {
         let (file_item, payload, encrypted_blob) = {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            let files_resp = api
-                .list_objects(Some(ObjectKind::File), Some(500), None)
-                .await?;
-            let file_item = files_resp
-                .items
-                .into_iter()
-                .find(|f| f.id.to_string() == file_id)
-                .ok_or_else(|| ClientError::Other("File not found on server".into()))?;
+            let file_item = api.get_object(file_id).await?;
             verify_object_list_item_envelope(&file_item)?;
+            if file_item.kind != ObjectKind::File {
+                return Err(ClientError::UnexpectedObjectKind {
+                    expected: ObjectKind::File,
+                    actual: file_item.kind,
+                });
+            }
             let payload = single_payload(&file_item)?.clone();
             let blob = api
                 .download_object_payload(file_id, &payload.id.to_string())
@@ -790,7 +757,7 @@ impl SyncEngine {
             let encryption_key = self.encryption_key.read().await;
             let encryption_key = encryption_key
                 .as_ref()
-                .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
+                .ok_or(ClientError::NotAuthenticated)?;
             decrypt_file_blob_bytes(
                 &payload.nonce,
                 &encrypted_blob,
@@ -808,7 +775,10 @@ impl SyncEngine {
         let plaintext = self.download_file_bytes(file_id).await?;
         tokio::fs::write(std::path::Path::new(target_path), &plaintext)
             .await
-            .map_err(|e| ClientError::Other(format!("write file: {}", e)))?;
+            .map_err(|source| ClientError::Io {
+                context: "write file",
+                source,
+            })?;
 
         info!(file_id = %file_id, path = %target_path, "File downloaded");
         Ok(())
@@ -820,7 +790,7 @@ impl SyncEngine {
         _file_id: &str,
         _target_path: &str,
     ) -> Result<(), ClientError> {
-        Err(ClientError::Other(
+        Err(ClientError::Unsupported(
             "Path-based file download is not available on web".into(),
         ))
     }
@@ -830,141 +800,220 @@ impl SyncEngine {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
             api.delete_object(file_id).await?
         };
-        {
-            let mut state = self.state.write().await;
-            state.files.retain(|f| f.id != file_id);
-        }
-        self.observe_committed_seq(delete_resp.deleted_seq).await;
-        self.bump_version();
+        let visible = self
+            .local_store
+            .apply_local_delete(
+                ObjectKind::File,
+                file_id,
+                delete_resp.deleted_seq,
+                RECENT_CLIPBOARD_LIMIT,
+            )
+            .await?;
+        self.publish_visible_state(visible).await;
         info!(file_id = %file_id, "File deleted");
         Ok(())
     }
 
     // ── Sync ──
 
-    async fn sync_bootstrap(&self) -> Result<(), ClientError> {
-        let bootstrap = {
-            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.bootstrap().await?
-        };
-
-        let (clipboard_objects, files) = self.fetch_object_state(100).await?;
-
-        self.persist_clipboard_objects(&clipboard_objects).await?;
-        let clipboard_items = self
-            .local_store
-            .recent_clipboard_items(RECENT_CLIPBOARD_LIMIT)
-            .await?;
-        let clipboard_count = clipboard_items.len();
-        let file_count = files.len();
-
-        *self.last_seq.write().await = bootstrap.latest_seq;
-
-        {
-            let mut state = self.state.write().await;
-            state.clipboard_items = clipboard_items;
-            state.files = files;
-            state.connection_status = ConnectionStatus::Connected;
-        }
-        self.bump_version();
-
-        debug!(
-            "Bootstrap complete: {} clipboard, {} files, seq={}",
-            clipboard_count, file_count, bootstrap.latest_seq,
-        );
-        Ok(())
-    }
-
     pub async fn refresh(&self) -> Result<(), ClientError> {
-        let (clipboard_objects, files) = self.fetch_object_state(100).await?;
+        _ = self.ws_restart_tx.send(*self.ws_restart_tx.borrow() + 1);
+        Ok(())
+    }
 
-        self.persist_clipboard_objects(&clipboard_objects).await?;
-        let clipboard_items = self
-            .local_store
-            .recent_clipboard_items(RECENT_CLIPBOARD_LIMIT)
-            .await?;
-
+    async fn publish_visible_state(&self, visible: LocalVisibleState) {
         {
             let mut state = self.state.write().await;
-            state.clipboard_items = clipboard_items;
-            state.files = files;
+            state.clipboard_items = visible.clipboard_items;
+            state.files = visible.files;
         }
         self.bump_version();
-        Ok(())
     }
 
-    async fn persist_clipboard_objects(
-        &self,
-        objects: &[DecryptedClipboardObject],
+    async fn start_reconciliation(self: &Arc<Self>, generation: u64, stream_start_seq: i64) {
+        let file_engine = Arc::clone(self);
+        spawn_background(async move {
+            if let Err(error) = file_engine
+                .snapshot_files(generation, stream_start_seq)
+                .await
+            {
+                warn!("File snapshot failed: {}", error);
+            }
+        });
+
+        let clipboard_engine = Arc::clone(self);
+        spawn_background(async move {
+            if let Err(error) = clipboard_engine
+                .snapshot_clipboard(generation, stream_start_seq)
+                .await
+            {
+                warn!("Clipboard snapshot failed: {}", error);
+            }
+        });
+    }
+
+    async fn snapshot_files(
+        self: &Arc<Self>,
+        generation: u64,
+        stream_start_seq: i64,
     ) -> Result<(), ClientError> {
-        let objects = objects
-            .iter()
-            .map(|object| (object.item.clone(), object.payload.clone()))
-            .collect::<Vec<_>>();
-        stream::iter(objects)
-            .map(|(item, payload)| async move {
-                self.local_store
-                    .persist_clipboard_payload_item(&item, &payload)
-                    .await
-            })
-            .buffer_unordered(LOCAL_PERSIST_CONCURRENCY)
-            .try_collect::<Vec<_>>()
-            .await?;
-        Ok(())
-    }
-
-    async fn fetch_object_state(
-        &self,
-        limit: u64,
-    ) -> Result<(Vec<DecryptedClipboardObject>, Vec<DecryptedFileItem>), ClientError> {
         let api = {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
             api.clone()
         };
-        let (clipboard_resp, files_resp) = tokio::try_join!(
-            api.list_objects(Some(ObjectKind::Clipboard), Some(limit), None),
-            api.list_objects(Some(ObjectKind::File), Some(limit), None),
-        )?;
-
-        let encryption_key = {
-            let encryption_key = self.encryption_key.read().await;
-            **encryption_key
-                .as_ref()
-                .ok_or_else(|| ClientError::Other("Not logged in".into()))?
-        };
-
-        let clipboard_items = stream::iter(clipboard_resp.items)
-            .map(|item| {
-                let api = &api;
-                async move {
-                    match self
-                        .decrypt_clipboard_object_item_with_api(api, &item, &encryption_key)
-                        .await
-                    {
-                        Ok(item) => Some(item),
-                        Err(e) => {
-                            warn!(id = %item.id, "Failed to load clipboard object: {}", e);
-                            None
-                        }
+        let encryption_key = self.current_encryption_key().await?;
+        let mut after = None;
+        loop {
+            let page = api
+                .list_objects(
+                    Some(ObjectKind::File),
+                    Some(100),
+                    Some(stream_start_seq),
+                    after,
+                )
+                .await?;
+            for item in page.items {
+                match decrypt_file_object_item(&item, &encryption_key) {
+                    Ok(file) => {
+                        self.persist_file_snapshot_item(&file, item.created_seq, generation)
+                            .await?;
                     }
+                    Err(e) => warn!(id = %item.id, "Failed to decrypt file object: {}", e),
                 }
-            })
-            .buffer_unordered(CLIPBOARD_HYDRATION_CONCURRENCY)
-            .filter_map(std::future::ready)
-            .collect::<Vec<_>>()
-            .await;
-
-        let mut files = Vec::new();
-        for item in &files_resp.items {
-            match decrypt_file_object_item(item, &encryption_key) {
-                Ok(item) => files.push(item),
-                Err(e) => {
-                    warn!(id = %item.id, "Failed to decrypt file object: {}", e);
-                }
+            }
+            match page.next_after {
+                Some(cursor) => after = Some(cursor),
+                None => break,
             }
         }
 
-        Ok((clipboard_items, files))
+        if let Some(visible) = self
+            .local_store
+            .sweep_kind(
+                ObjectKind::File,
+                generation,
+                stream_start_seq,
+                RECENT_CLIPBOARD_LIMIT,
+            )
+            .await?
+        {
+            self.publish_visible_state(visible).await;
+        }
+        Ok(())
+    }
+
+    async fn snapshot_clipboard(
+        self: &Arc<Self>,
+        generation: u64,
+        stream_start_seq: i64,
+    ) -> Result<(), ClientError> {
+        let api = {
+            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
+            api.clone()
+        };
+        let encryption_key = self.current_encryption_key().await?;
+        let mut after = None;
+        loop {
+            let page = api
+                .list_objects(
+                    Some(ObjectKind::Clipboard),
+                    Some(100),
+                    Some(stream_start_seq),
+                    after,
+                )
+                .await?;
+            let objects = stream::iter(page.items)
+                .map(|item| {
+                    let api = &api;
+                    let encryption_key = encryption_key;
+                    async move {
+                        let created_seq = item.created_seq;
+                        match self
+                            .decrypt_clipboard_object_item_with_api(api, &item, &encryption_key)
+                            .await
+                        {
+                            Ok(object) => Some((object, created_seq)),
+                            Err(e) => {
+                                warn!(id = %item.id, "Failed to load clipboard object: {}", e);
+                                None
+                            }
+                        }
+                    }
+                })
+                .buffer_unordered(CLIPBOARD_HYDRATION_CONCURRENCY)
+                .filter_map(std::future::ready)
+                .collect::<Vec<_>>()
+                .await;
+
+            for (object, created_seq) in objects {
+                self.persist_clipboard_snapshot_item(&object, created_seq, generation)
+                    .await?;
+            }
+
+            match page.next_after {
+                Some(cursor) => after = Some(cursor),
+                None => break,
+            }
+        }
+
+        if let Some(visible) = self
+            .local_store
+            .sweep_kind(
+                ObjectKind::Clipboard,
+                generation,
+                stream_start_seq,
+                RECENT_CLIPBOARD_LIMIT,
+            )
+            .await?
+        {
+            self.publish_visible_state(visible).await;
+        }
+        Ok(())
+    }
+
+    async fn persist_file_snapshot_item(
+        &self,
+        file: &DecryptedFileItem,
+        created_seq: i64,
+        generation: u64,
+    ) -> Result<(), ClientError> {
+        if let Some(visible) = self
+            .local_store
+            .persist_snapshot_file_present(file, created_seq, generation, RECENT_CLIPBOARD_LIMIT)
+            .await?
+        {
+            self.publish_visible_state(visible).await;
+        }
+        Ok(())
+    }
+
+    async fn persist_clipboard_snapshot_item(
+        &self,
+        object: &DecryptedClipboardObject,
+        created_seq: i64,
+        generation: u64,
+    ) -> Result<(), ClientError> {
+        if let Some(visible) = self
+            .local_store
+            .persist_snapshot_clipboard_present(
+                &object.item,
+                &object.payload,
+                created_seq,
+                generation,
+                RECENT_CLIPBOARD_LIMIT,
+            )
+            .await?
+        {
+            self.publish_visible_state(visible).await;
+        }
+        Ok(())
+    }
+
+    async fn current_encryption_key(&self) -> Result<[u8; 32], ClientError> {
+        let encryption_key = self.encryption_key.read().await;
+        Ok(**encryption_key
+            .as_ref()
+            .ok_or(ClientError::NotAuthenticated)?)
     }
 
     async fn decrypt_clipboard_object_item_with_api(
@@ -981,10 +1030,9 @@ impl SyncEngine {
             &item.envelope.body,
         )?;
         if !is_supported_clipboard_mime_type(&meta.mime_type) {
-            return Err(ClientError::Other(format!(
-                "Unsupported clipboard MIME type: {}",
-                meta.mime_type
-            )));
+            return Err(ClientError::UnsupportedMimeType {
+                mime_type: meta.mime_type,
+            });
         }
         let payload = single_payload(item)?;
         let payload_size = meta.size.unwrap_or(payload.ciphertext_size);
@@ -1012,6 +1060,131 @@ impl SyncEngine {
             },
             payload: plaintext,
         })
+    }
+
+    async fn handle_created_event(
+        self: &Arc<Self>,
+        generation: u64,
+        kind: ObjectKind,
+        object_id: ObjectId,
+        event_seq: i64,
+    ) -> Result<(), ClientError> {
+        let object_id_text = object_id.to_string();
+        let should_materialize = self
+            .local_store
+            .mark_pending_create(kind, &object_id_text, event_seq, generation)
+            .await?;
+
+        if should_materialize {
+            let engine = Arc::clone(self);
+            spawn_background(async move {
+                if let Err(error) = engine
+                    .materialize_object(generation, kind, object_id, event_seq)
+                    .await
+                {
+                    warn!(
+                        object_id = %object_id,
+                        event_seq,
+                        "Failed to materialize live object: {}",
+                        error,
+                    );
+                }
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn handle_deleted_event(
+        &self,
+        generation: u64,
+        kind: ObjectKind,
+        object_id: ObjectId,
+        event_seq: i64,
+    ) -> Result<(), ClientError> {
+        if let Some(visible) = self
+            .local_store
+            .apply_live_delete(
+                kind,
+                &object_id.to_string(),
+                event_seq,
+                generation,
+                RECENT_CLIPBOARD_LIMIT,
+            )
+            .await?
+        {
+            self.publish_visible_state(visible).await;
+        }
+        Ok(())
+    }
+
+    async fn materialize_object(
+        self: &Arc<Self>,
+        generation: u64,
+        kind: ObjectKind,
+        object_id: ObjectId,
+        event_seq: i64,
+    ) -> Result<(), ClientError> {
+        let api = {
+            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
+            api.clone()
+        };
+        let object_id_text = object_id.to_string();
+        let item = match api.get_object(&object_id_text).await {
+            Ok(item) => item,
+            Err(error) if is_not_found_error(&error) => {
+                self.remove_absent_object(generation, &object_id_text)
+                    .await?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+
+        if item.id != object_id || item.kind != kind {
+            return Err(ClientError::UnexpectedResponse(format!(
+                "materialized object {object_id} returned mismatched identity"
+            )));
+        }
+        if item.created_seq != event_seq {
+            debug!(
+                object_id = %object_id,
+                event_seq,
+                created_seq = item.created_seq,
+                "Live create event seq differed from object created_seq",
+            );
+        }
+
+        let encryption_key = self.current_encryption_key().await?;
+        match kind {
+            ObjectKind::Clipboard => {
+                let object = self
+                    .decrypt_clipboard_object_item_with_api(&api, &item, &encryption_key)
+                    .await?;
+                self.persist_clipboard_snapshot_item(&object, item.created_seq, generation)
+                    .await?;
+            }
+            ObjectKind::File => {
+                let file = decrypt_file_object_item(&item, &encryption_key)?;
+                self.persist_file_snapshot_item(&file, item.created_seq, generation)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn remove_absent_object(
+        &self,
+        generation: u64,
+        object_id: &str,
+    ) -> Result<(), ClientError> {
+        if let Some(visible) = self
+            .local_store
+            .remove_absent_object(object_id, generation, RECENT_CLIPBOARD_LIMIT)
+            .await?
+        {
+            self.publish_visible_state(visible).await;
+        }
+        Ok(())
     }
 
     // ── WebSocket ──
@@ -1063,7 +1236,7 @@ impl SyncEngine {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    async fn ws_connect(&self) -> Result<(), ClientError> {
+    async fn ws_connect(self: &Arc<Self>) -> Result<(), ClientError> {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite;
 
@@ -1071,7 +1244,7 @@ impl SyncEngine {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
             let t = api
                 .token()
-                .ok_or_else(|| ClientError::Other("No token".into()))?
+                .ok_or(ClientError::NotAuthenticated)?
                 .to_string();
             let ws_url = api.websocket_url()?;
             let host = api.base_url().host_str().unwrap_or("localhost").to_string();
@@ -1098,8 +1271,7 @@ impl SyncEngine {
 
         let (mut write, mut read) = ws_stream.split();
 
-        let last_seq = *self.last_seq.read().await;
-        let hello = WsClientMessage::Hello { last_seq };
+        let hello = WsClientMessage::Hello;
         let hello_json =
             serde_json::to_string(&hello).map_err(|e| ClientError::WebSocket(e.to_string()))?;
         write
@@ -1107,51 +1279,28 @@ impl SyncEngine {
             .await
             .map_err(|e: tungstenite::Error| ClientError::WebSocket(e.to_string()))?;
 
-        {
-            let mut state = self.state.write().await;
-            state.connection_status = ConnectionStatus::Connected;
-        }
-        self.bump_version();
-        info!("WebSocket connected, last_seq={}", last_seq);
-
-        while let Some(msg_result) = read.next().await {
-            let msg: tungstenite::Message = msg_result
+        let stream_start_seq = loop {
+            let msg = read
+                .next()
+                .await
+                .ok_or_else(|| ClientError::WebSocket("closed before hello_ack".into()))?
                 .map_err(|e: tungstenite::Error| ClientError::WebSocket(e.to_string()))?;
-
             match msg {
                 tungstenite::Message::Text(text) => {
                     match serde_json::from_str::<WsServerMessage>(&text) {
-                        Ok(WsServerMessage::HelloAck { latest_seq, .. }) => {
-                            debug!("WS hello_ack, latest_seq={}", latest_seq);
-                        }
-                        Ok(WsServerMessage::Event {
-                            seq,
-                            event_type,
-                            object_kind,
-                            ..
-                        }) => {
-                            debug!("WS event seq={} type={}", seq, event_type);
-                            *self.last_seq.write().await = seq;
-                            match object_kind.as_ref() {
-                                "clipboard" | "file" => {
-                                    if let Err(e) = self.refresh().await {
-                                        warn!("Failed to refresh after event: {}", e);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        Ok(WsServerMessage::Invalidate { .. }) => {
-                            info!("WS invalidate, full refresh");
-                            if let Err(e) = self.refresh().await {
-                                warn!("Failed to refresh after invalidate: {}", e);
-                            }
-                        }
+                        Ok(WsServerMessage::HelloAck {
+                            stream_start_seq, ..
+                        }) => break stream_start_seq,
                         Ok(WsServerMessage::Error { error }) => {
-                            warn!("Server rejected WS connection: {error}");
+                            return Err(ClientError::WebSocket(error.to_string()));
+                        }
+                        Ok(other) => {
+                            debug!("Ignoring WS message before hello_ack: {:?}", other);
                         }
                         Err(e) => {
-                            warn!("Failed to parse WS message: {}", e);
+                            return Err(ClientError::WebSocket(format!(
+                                "failed to parse hello_ack: {e}"
+                            )));
                         }
                     }
                 }
@@ -1159,10 +1308,102 @@ impl SyncEngine {
                     _ = write.send(tungstenite::Message::Pong(data)).await;
                 }
                 tungstenite::Message::Close(_) => {
-                    info!("WebSocket closed by server");
-                    break;
+                    return Err(ClientError::WebSocket("closed before hello_ack".into()));
                 }
                 _ => {}
+            }
+        };
+
+        let generation = self.local_store.start_generation().await;
+        self.start_reconciliation(generation, stream_start_seq)
+            .await;
+
+        {
+            let mut state = self.state.write().await;
+            state.connection_status = ConnectionStatus::Connected;
+        }
+        self.bump_version();
+        info!(
+            stream_start_seq,
+            generation, "WebSocket connected and reconciliation started"
+        );
+
+        let mut restart_rx = self.ws_restart_rx.clone();
+        loop {
+            tokio::select! {
+                changed = restart_rx.changed() => {
+                    if changed.is_ok() {
+                        info!("WebSocket reconnect requested");
+                    }
+                    break;
+                }
+                msg_result = read.next() => {
+                    let Some(msg_result) = msg_result else {
+                        break;
+                    };
+                    let msg: tungstenite::Message = msg_result
+                        .map_err(|e: tungstenite::Error| ClientError::WebSocket(e.to_string()))?;
+
+                    match msg {
+                        tungstenite::Message::Text(text) => {
+                            match serde_json::from_str::<WsServerMessage>(&text) {
+                                Ok(WsServerMessage::HelloAck { .. }) => {
+                                    debug!("Ignoring duplicate WS hello_ack");
+                                }
+                                Ok(WsServerMessage::Event {
+                                    seq,
+                                    event_type,
+                                    object_kind,
+                                    object_id,
+                                    ..
+                                }) => {
+                                    debug!("WS event seq={} type={}", seq, event_type);
+                                    match event_type {
+                                        ObjectEventType::Created => {
+                                            self.handle_created_event(generation, object_kind, object_id, seq)
+                                                .await?;
+                                        }
+                                        ObjectEventType::Deleted if object_kind == ObjectKind::File => {
+                                            self.handle_deleted_event(
+                                                generation,
+                                                ObjectKind::File,
+                                                object_id,
+                                                seq,
+                                            )
+                                            .await?;
+                                        }
+                                        ObjectEventType::Deleted => {
+                                            warn!(
+                                                seq,
+                                                object_kind = %object_kind,
+                                                "Ignoring unsupported WS delete event for object kind",
+                                            );
+                                        }
+                                    }
+                                }
+                                Ok(WsServerMessage::Invalidate { .. }) => {
+                                    info!("WS invalidate requested reconnect");
+                                    break;
+                                }
+                                Ok(WsServerMessage::Error { error }) => {
+                                    warn!("Server rejected WS connection: {error}");
+                                    break;
+                                }
+                                Err(e) => {
+                                    warn!("Failed to parse WS message: {}", e);
+                                }
+                            }
+                        }
+                        tungstenite::Message::Ping(data) => {
+                            _ = write.send(tungstenite::Message::Pong(data)).await;
+                        }
+                        tungstenite::Message::Close(_) => {
+                            info!("WebSocket closed by server");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -1218,8 +1459,8 @@ fn inline_ciphertext(ciphertext: &[u8]) -> Option<Vec<u8>> {
 
 fn single_payload(item: &ObjectListItem) -> Result<&ObjectPayloadDescriptor, ClientError> {
     if item.payloads.len() != 1 {
-        return Err(ClientError::Other(format!(
-            "Object {} has {} payloads; exactly one is supported by this client",
+        return Err(ClientError::UnexpectedResponse(format!(
+            "object {} has {} payloads; exactly one is supported by this client",
             item.id,
             item.payloads.len()
         )));
@@ -1231,9 +1472,10 @@ fn single_payload(item: &ObjectListItem) -> Result<&ObjectPayloadDescriptor, Cli
 fn optional_device_id(device_id: Option<&str>) -> Result<Option<DeviceId>, ClientError> {
     device_id
         .map(|device_id| {
-            device_id
-                .parse()
-                .map_err(|e| ClientError::Other(format!("Invalid saved device id: {e}")))
+            device_id.parse().map_err(|source| ClientError::InvalidId {
+                kind: "saved device id",
+                source,
+            })
         })
         .transpose()
 }
@@ -1420,16 +1662,24 @@ fn top_level_mime_type(mime_type: &str) -> String {
         .to_string()
 }
 
+fn is_not_found_error(error: &ClientError) -> bool {
+    matches!(error, ClientError::Api { status, .. } if *status == 404)
+}
+
 #[cfg(not(target_family = "wasm"))]
-fn default_data_dir() -> PathBuf {
-    std::env::var_os("CLIPPER_CLIENT_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("clipper-client"))
+fn spawn_background<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(future);
 }
 
 #[cfg(target_family = "wasm")]
-fn default_data_dir() -> PathBuf {
-    PathBuf::from("web")
+fn spawn_background<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(future);
 }
 
 fn profile_id_from_encryption_key(encryption_key: &[u8; 32]) -> String {
