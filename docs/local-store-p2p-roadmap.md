@@ -3,7 +3,7 @@
 This document records the target client storage and LAN P2P direction for
 Clipper. The goal is to keep the current simple product model:
 
-- clipboard history is small, fast, and locally available;
+- clipboard history is small, fast, locally available, and retention-bounded;
 - files appear as a shared repository of metadata;
 - file bytes are downloaded only when the user asks for them;
 - every network transport moves encrypted objects, not plaintext;
@@ -23,11 +23,13 @@ Today the client keeps decrypted display state in memory:
 
 Implementation status: **step 1 below has landed**, and the server-sync create
 path now uses the signed object envelope shape from step 4. The client has a
-durable, per-profile clipboard repository in `crates/client/src/local_store.rs`
+per-profile clipboard repository in `crates/client/src/local_store.rs`
 (plaintext clipboard payloads + metadata on disk), and `AppState.clipboard_items`
-is rebuilt from it. File metadata is **not** yet cached locally (step 2) — file
-lists are still rebuilt from `GET /api/objects`, so the download path still
-depends on the server.
+is rebuilt from it. This repository is durable storage for the current retained
+clipboard working set, not an all-time local-first clipboard archive; server sync
+may sweep clipboard rows that fall outside the server retention contract. File
+metadata is **not** yet cached locally (step 2) — file lists are still rebuilt
+from `GET /api/objects`, so the download path still depends on the server.
 
 The server stores the durable canonical repo today:
 
@@ -36,9 +38,11 @@ The server stores the durable canonical repo today:
 - encrypted file blobs on disk;
 - event log rows for sync notification and replay.
 
-This is acceptable for small clipboard history, but it is the wrong boundary for
-local-first behavior and future P2P. The client should have its own local cache
-of the repo.
+This is acceptable for small retained clipboard history, but it is the wrong
+boundary for file metadata availability and future P2P. The client should have
+its own local cache of the repo. See `docs/ws-sync-roadmap.md` for the future
+WebSocket sync plan that separates retention-bounded clipboard history from
+durable file snapshots.
 
 ## Target Model
 
@@ -77,19 +81,22 @@ store, with pagination or lazy reads for clipboard history.
 ## Clipboard
 
 Clipboard history should move from "recent decrypted strings in memory" to
-"records on disk plus lightweight state for the UI."
+"retention-bounded records on disk plus lightweight state for the UI."
 
 Behavior:
 
-- store clipboard text locally as plaintext text files or equivalent local DB
-  rows;
+- store retained clipboard text locally as plaintext text files or equivalent
+  local DB rows;
 - encrypt clipboard text when sending it to a server, relay, or peer;
 - do not keep a second ciphertext copy by default;
 - optionally cache ciphertext only for short-lived transfer or performance
   cases where the storage tradeoff is explicit;
 - expose recent metadata and the currently selected/visible text to the UI;
 - avoid keeping the full clipboard history decrypted in `AppState`;
-- keep server retention and local retention independently configurable later.
+- treat server-synced clipboard history as retention-bounded. Local retention may
+  become independently configurable later, but until that product requirement
+  exists, sync may sweep local clipboard rows that are absent from the retained
+  server snapshot.
 
 The OS clipboard remains the source for the current paste buffer. Clipper should
 not treat "latest item in memory" as the durable paste source.
@@ -168,9 +175,11 @@ conflicting provenance, and unauthenticated deletes without decrypting content.
 
 1. Add local clipboard-on-disk. **(Done — `crates/client/src/local_store.rs`.)**
 
-   Persist clipboard items locally and stop using `AppState.clipboard_items` as
-   the durable clipboard history. Keep the current UI behavior by rebuilding a
-   lightweight recent view from local storage.
+   Persist retained clipboard items locally and stop using
+   `AppState.clipboard_items` as the durable clipboard working set. Keep the
+   current UI behavior by rebuilding a lightweight recent view from local
+   storage. This is not an all-time clipboard archive; retained server sync may
+   prune local clipboard rows.
 
 2. Add local file metadata cache.
 
