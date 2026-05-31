@@ -112,12 +112,12 @@ impl LocalStore {
         payload: &[u8],
     ) -> Result<(), LocalStoreError> {
         let dir = self.clipboard_dir();
-        tokio::fs::create_dir_all(&dir).await?;
+        ensure_private_dir(&dir).await?;
 
         let payload_path = dir.join(format!("{item_id}.payload"));
         let meta_path = dir.join(format!("{item_id}.json"));
 
-        write_file_atomic(&payload_path, payload).await?;
+        write_private_file_atomic(&payload_path, payload).await?;
 
         let metadata = ClipboardMetadata {
             id: item.id.clone(),
@@ -127,7 +127,7 @@ impl LocalStore {
             source_device_id: item.source_device_id.clone(),
         };
         let metadata_json = serde_json::to_vec_pretty(&metadata)?;
-        write_file_atomic(&meta_path, &metadata_json).await?;
+        write_private_file_atomic(&meta_path, &metadata_json).await?;
 
         Ok(())
     }
@@ -528,19 +528,6 @@ fn is_text_mime_type(mime_type: &str) -> bool {
         .starts_with("text/")
 }
 
-#[cfg(not(target_family = "wasm"))]
-async fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), LocalStoreError> {
-    let tmp_path = path.with_extension(format!(
-        "{}.tmp",
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("file")
-    ));
-    tokio::fs::write(&tmp_path, bytes).await?;
-    tokio::fs::rename(&tmp_path, path).await?;
-    Ok(())
-}
-
 fn validate_item_id(id: &str) -> Result<String, LocalStoreError> {
     let uuid = uuid::Uuid::parse_str(id).map_err(|_| LocalStoreError::InvalidId(id.to_string()))?;
     Ok(uuid.to_string())
@@ -743,6 +730,46 @@ mod tests {
             .expect("payload")
             .expect("payload bytes");
         assert_eq!(payload, vec![0, 1, 2, 3]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restricts_clipboard_cache_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+
+        let secret = item(
+            "44444444-4444-4444-8444-444444444444",
+            "super-secret",
+            "2026-01-04T00:00:00+00:00",
+        );
+        store
+            .persist_clipboard_payload_item(&secret, secret.text.as_bytes())
+            .await
+            .expect("persist");
+
+        let dir = store.clipboard_dir();
+        let dir_mode = tokio::fs::metadata(&dir)
+            .await
+            .expect("dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "clipboard dir should be 0700");
+
+        for ext in ["payload", "json"] {
+            let path = dir.join(format!("44444444-4444-4444-8444-444444444444.{ext}"));
+            let mode = tokio::fs::metadata(&path)
+                .await
+                .expect("file metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{ext} file should be 0600");
+        }
     }
 
     #[tokio::test]

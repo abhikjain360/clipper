@@ -1,7 +1,7 @@
 # Rust Code Review Findings
 
 Open security and correctness issues in the Rust backend. This document tracks
-only what is wrong *now*; fixed items are removed rather than archived.
+only what is wrong _now_; fixed items are removed rather than archived.
 
 Threat model: every client (frontend, daemon, desktop, Android, web, and any
 future client) is untrusted; the server is honest-but-curious storage and
@@ -25,7 +25,7 @@ never wipes).
 
 `handle_socket` reads `latest_seq` (`crates/server/src/ws.rs:72`), replays
 events via `get_events_since(last_seq)` over a committed DB snapshot in an
-await-per-event loop (`:86-103`), and only *after* replay finishes calls
+await-per-event loop (`:86-103`), and only _after_ replay finishes calls
 `state.ws_tx().subscribe()` (`:116`). Any event another device commits and
 broadcasts during that window is in neither the replay (committed after the
 snapshot read) nor the live stream (`broadcast::Sender` drops messages for
@@ -42,7 +42,7 @@ Recovery happens only if a later event triggers a `refresh()` whose top-100-per-
 kind window still contains the missed object, or a full `Invalidate` occurs —
 otherwise it is permanent cross-device divergence.
 
-Recommended fix: subscribe to the broadcast channel *before* issuing the replay
+Recommended fix: subscribe to the broadcast channel _before_ issuing the replay
 query, buffer live messages during replay, then flush buffered live events while
 de-duplicating by seq (drop any seq ≤ the last replayed seq). This closes the
 window so no committed event can fall between the snapshot and the live stream.
@@ -50,7 +50,7 @@ window so no committed event can fall between the snapshot and the live stream.
 ## P1: WebSocket Replay Can Silently Miss Pruned Events And Is Uncapped
 
 `handle_socket` (`crates/server/src/ws.rs:86-113`) sends
-`Invalidate { target: "all" }` only when the `get_events_since` query *errors*
+`Invalidate { target: "all" }` only when the `get_events_since` query _errors_
 (`:104-112`). It does not track the oldest retained `event_log.seq` per user, so
 once `cleanup_old_events` prunes rows (`crates/server/src/cleanup.rs:152-159`,
 default `event_log_retention_days = 3`), a client reconnecting with a `last_seq`
@@ -69,7 +69,7 @@ Recommended fix:
 ## P1: Client Advances `last_seq` Before Refresh Succeeds
 
 `SyncEngine::ws_connect` (`crates/client/src/engine.rs:980`) writes
-`*self.last_seq.write().await = seq` *before* calling `self.refresh()` at
+`*self.last_seq.write().await = seq` _before_ calling `self.refresh()` at
 `:983`. If refresh/download/decrypt then fails (transient error or hostile
 server response) it only warns (`:984`) and continues, and the next reconnect
 sends the advanced `Hello { last_seq }` (`:947-948`), so the server never
@@ -80,21 +80,6 @@ window with no further events before reconnect.
 
 Recommended fix: advance client `last_seq` only after the refresh/bootstrap
 that consumes it succeeds, or persist an explicit "needs bootstrap" state.
-
-## P2: Local Plaintext Clipboard Cache Is World-Readable
-
-The client clipboard cache is plaintext on disk by design, but the writes do not
-restrict permissions: `persist_clipboard_payload_item_inner` calls
-`create_dir_all` with no mode (`crates/client/src/local_store.rs:88`) and
-`write_file_atomic` uses `tokio::fs::write` for both the temp and final files
-with no `set_permissions` (`:391-401`), yielding `0755` dirs / `0644` files
-under the usual `022` umask, and `clipboard_dir` is not restricted to `0700`.
-Any local user can then read cached clipboard contents (passwords, tokens). This
-is the same exposure the daemon IPC secret is carefully protected against, but
-the cache is not.
-
-Recommended fix: write payload/meta files `0600` inside a `0700` profile
-directory on non-wasm targets (mirror `crates/daemon/src/keychain.rs`).
 
 ## P2: File Download Writes Decrypted Plaintext World-Readable And Follows Symlinks
 
@@ -159,7 +144,7 @@ revocation failed. Combine with the `0600`/`0700` permission fix.
 
 `delete_object` commits the transaction that removes the `objects` row (cascading
 payload rows) and inserts the `file.deleted` event
-(`crates/server/src/routes/objects.rs:1061`), *then* calls `remove_paths(paths)`
+(`crates/server/src/routes/objects.rs:1061`), _then_ calls `remove_paths(paths)`
 to unlink the ciphertext `.bin` files (`:1070`). `remove_paths` is best-effort
 and logs-and-continues on non-`NotFound` errors (`:1376-1388`). If the process is
 killed, the disk fills, or an unlink fails in that gap, the rows are gone but the
@@ -185,21 +170,21 @@ that deletes files with no backing row.
 
 `cleanup_orphan_object_uploads` (`crates/server/src/cleanup.rs:171-207`) captures
 orphan object IDs by filter (`Status.ne("complete")` + `CreatedAt.lt(cutoff)`,
-`:176-183`), removes their payload *files* (`:187-194`), then re-runs the
+`:176-183`), removes their payload _files_ (`:187-194`), then re-runs the
 deletion **by filter** (`:197-202`) rather than by the captured ID set, across
 three un-transacted awaits. Two interleavings both corrupt state:
 
-- An upload that *completes* in the window leaves a now-`complete` object whose
+- An upload that _completes_ in the window leaves a now-`complete` object whose
   blob file was already unlinked — download 404 / data inconsistency
   (`crates/server/src/routes/objects.rs:929`).
 - A concurrent `upload_payload` that recreates the `.bin` after cleanup unlinked
   it (`remove existing final, then rename tmp → final`,
-  `crates/server/src/routes/objects.rs:374-375`) leaves a file on disk *after*
+  `crates/server/src/routes/objects.rs:374-375`) leaves a file on disk _after_
   the filtered delete cascades the row away — a stranded file with no backing
   row, never reclaimed (no directory sweep exists).
 
 Deleting by the captured ID set alone closes only the first direction; file
-*creation* in `upload_payload` must also be fenced against the concurrent orphan
+_creation_ in `upload_payload` must also be fenced against the concurrent orphan
 delete.
 
 Recommended fix: delete by the captured ID set in a single transaction with a
@@ -289,7 +274,7 @@ comparing.
 ## P3: Username Enumeration Via Register-Start And Challenge Timing
 
 The `challenge` endpoint uses opaque-ke's fake-record path for unknown users, so
-its *response content* no longer reveals account existence. Two gaps remain:
+its _response content_ no longer reveals account existence. Two gaps remain:
 
 - `register_start` returns `409 "Username already taken"`
   (`crates/server/src/routes/auth.rs:186-191`), a direct content oracle for any
@@ -448,7 +433,7 @@ The code does the opposite: it reads a single **global** setup from
 `crates/server/src/routes/auth.rs:489`; "server-wide setup" comment at `:193`),
 computes `id_U = clipper:user:{username}:passphrase:v1` from the
 client-submitted username (`:485-498`, the only `id_U` derivation in the repo),
-and the `challenge` handler *does* use opaque-ke's fake-record path (`:56-84`).
+and the `challenge` handler _does_ use opaque-ke's fake-record path (`:56-84`).
 `docs/backend-review-flow.md` repeats the inversion (per-user setup at `:82`/`:152`,
 `id_U` bound to the immutable UUID at `:161`, `fake_sk` not exercised at `:225`).
 
@@ -456,7 +441,7 @@ There is no live exploit today (no username-rename path exists; the username
 lookup and `id_U` are byte-exact, so no auth desync), but the threat-model
 documentation a reviewer or operator relies on is wrong about global-vs-per-user
 setup, the OPRF identity binding, and whether the enumeration defense applies. It
-also masks a latent fragility: because `id_U` binds to the *mutable* username
+also masks a latent fragility: because `id_U` binds to the _mutable_ username
 rather than the immutable `user_id`, any future rename feature would silently
 invalidate every existing login (the OPRF key changes).
 
@@ -561,17 +546,17 @@ release or advertising the app as secure:
 ## Accepted / Intentional Tradeoffs (Residual Risks By Design)
 
 - **Same-user local IPC trust (P0, out of scope).** The daemon hardens the
-  socket against *cross-user* access (private `0700` runtime dir, `0600`
+  socket against _cross-user_ access (private `0700` runtime dir, `0600`
   socket, HMAC-SHA256 challenge/response, 32 MiB line cap). The residual gap is
-  *same-user*: the IPC secret is keychain-backed on macOS but a `0600` file on
+  _same-user_: the IPC secret is keychain-backed on macOS but a `0600` file on
   Linux (`crates/daemon/src/keychain.rs`), so any same-user process can complete
   the handshake and issue commands (including `UploadFile`/`DownloadFile` with
   arbitrary paths). If same-user malware enters scope, move to OS-mediated app
   identity / user consent and add separate authorization for the file-path
-  commands. (This covers path *arbitrariness* only; the download egress file
+  commands. (This covers path _arbitrariness_ only; the download egress file
   permissions and symlink-following are a real defect — see the P2 above.)
 - The client `local_store` keeps clipboard plaintext on disk by design; only
-  the network boundary is encrypted. (The *permissions* on that cache and on file
+  the network boundary is encrypted. (The _permissions_ on that cache and on file
   downloads, and the fact that logout does not wipe it, are real P2 bugs above,
   not part of this tradeoff.)
 - Plain HTTP is allowed only for loopback (`127.0.0.1`, `::1`, `localhost`) and
