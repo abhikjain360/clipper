@@ -37,10 +37,6 @@ macro_rules! uuid_id {
         pub struct $name(Uuid);
 
         impl $name {
-            pub fn as_uuid(&self) -> &Uuid {
-                &self.0
-            }
-
             pub fn into_uuid(self) -> Uuid {
                 self.0
             }

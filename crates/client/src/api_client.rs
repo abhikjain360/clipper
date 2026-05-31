@@ -1,6 +1,5 @@
 //! HTTP + WebSocket client for the Clipper server.
 
-use base64::Engine;
 use clipper_core::{crypto, models::*};
 use reqwest::{Client, header};
 use serde::{Serialize, de::DeserializeOwned};
@@ -8,7 +7,6 @@ use tracing::{debug, warn};
 use url::Url;
 use zeroize::Zeroizing;
 
-const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 const POSTCARD_ERROR_PREVIEW_BYTES: usize = 64;
 
 /// Clipper API client.
@@ -43,14 +41,6 @@ impl ApiClient {
             base_url: parse_server_url(base_url)?,
             token: None,
         })
-    }
-
-    pub fn set_token(&mut self, token: String) {
-        self.token = Some(token);
-    }
-
-    pub fn clear_token(&mut self) {
-        self.token = None;
     }
 
     pub fn token(&self) -> Option<&str> {
@@ -437,12 +427,6 @@ impl ApiClient {
         Self::postcard_response(resp).await
     }
 
-    // ── Health ──
-
-    pub async fn health(&self) -> Result<HealthResponse, ClientError> {
-        let resp = self.http.get(self.api_url(&["health"])?).send().await?;
-        Ok(resp.json().await?)
-    }
 }
 
 fn parse_server_url(base_url: &str) -> Result<Url, ClientError> {
@@ -606,16 +590,6 @@ pub fn decrypt_clipboard_payload(
     crypto::decrypt(encryption_key, nonce, ciphertext, &aad)
 }
 
-/// Encrypt file metadata for upload.
-pub fn encrypt_file_meta(
-    meta: &FileMeta,
-    encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV1,
-) -> Result<(String, String), crypto::CryptoError> {
-    let (nonce, ciphertext) = encrypt_file_meta_bytes(meta, encryption_key, envelope_body)?;
-    Ok((B64.encode(nonce), B64.encode(ciphertext)))
-}
-
 /// Encrypt file metadata for object upload.
 pub fn encrypt_file_meta_bytes(
     meta: &FileMeta,
@@ -627,24 +601,6 @@ pub fn encrypt_file_meta_bytes(
     let aad = crypto::object_meta_aad_v1(envelope_body)?;
     let (nonce, ciphertext) = crypto::encrypt(encryption_key, &json, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
-}
-
-/// Decrypt file metadata.
-pub fn decrypt_file_meta(
-    nonce_b64: &str,
-    ciphertext_b64: &str,
-    encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV1,
-) -> Result<FileMeta, crypto::CryptoError> {
-    let nonce = B64
-        .decode(nonce_b64)
-        .map_err(|e| crypto::CryptoError::Decrypt(format!("nonce decode: {}", e)))?;
-    let ciphertext = B64
-        .decode(ciphertext_b64)
-        .map_err(|e| crypto::CryptoError::Decrypt(format!("ciphertext decode: {}", e)))?;
-    let aad = crypto::object_meta_aad_v1(envelope_body)?;
-    let plaintext = crypto::decrypt(encryption_key, &nonce, &ciphertext, &aad)?;
-    decode_file_meta_plaintext(&plaintext)
 }
 
 /// Decrypt file metadata from object bytes.
@@ -664,18 +620,6 @@ fn decode_file_meta_plaintext(plaintext: &[u8]) -> Result<FileMeta, crypto::Cryp
         .map_err(|e| crypto::CryptoError::Decrypt(format!("json: {}", e)))
 }
 
-/// Encrypt file blob data.
-pub fn encrypt_file_blob(
-    data: &[u8],
-    encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV1,
-    payload_id: ObjectPayloadId,
-) -> Result<(String, Vec<u8>), crypto::CryptoError> {
-    let (nonce, ciphertext) =
-        encrypt_file_blob_bytes(data, encryption_key, envelope_body, payload_id)?;
-    Ok((B64.encode(nonce), ciphertext))
-}
-
 /// Encrypt file blob data for object upload.
 pub fn encrypt_file_blob_bytes(
     data: &[u8],
@@ -686,26 +630,6 @@ pub fn encrypt_file_blob_bytes(
     let aad = crypto::object_payload_aad_v1(envelope_body, payload_id)?;
     let (nonce, ciphertext) = crypto::encrypt(encryption_key, data, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
-}
-
-/// Decrypt file blob data.
-pub fn decrypt_file_blob(
-    nonce_b64: &str,
-    ciphertext: &[u8],
-    encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV1,
-    payload_id: ObjectPayloadId,
-) -> Result<Vec<u8>, crypto::CryptoError> {
-    let nonce = B64
-        .decode(nonce_b64)
-        .map_err(|e| crypto::CryptoError::Decrypt(format!("nonce decode: {}", e)))?;
-    decrypt_file_blob_bytes(
-        &nonce,
-        ciphertext,
-        encryption_key,
-        envelope_body,
-        payload_id,
-    )
 }
 
 /// Decrypt file blob data from object bytes.

@@ -78,11 +78,6 @@ pub fn generate_nonce() -> [u8; XCHACHA20_NONCE_BYTES] {
     generate_bytes::<XCHACHA20_NONCE_BYTES>()
 }
 
-/// Generate a random 32-byte session token.
-pub fn generate_token() -> [u8; 32] {
-    generate_bytes::<32>()
-}
-
 /// Generate a random session token with the requested size.
 pub fn generate_token_with_length(length: usize) -> Vec<u8> {
     generate_random_bytes(length)
@@ -252,11 +247,6 @@ pub fn access_key_hash_with_params(
         .hash_password_into(access_key, salt, &mut hash)
         .map_err(|e| CryptoError::Kdf(e.to_string()))?;
     Ok(hash)
-}
-
-/// Default access key hash params for backwards-compatible startup.
-pub fn default_access_key_hash_params() -> Argon2Params {
-    ACCESS_KEY_HASH_PARAMS_DEFAULT
 }
 
 fn build_argon2<'a>(

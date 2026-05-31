@@ -61,12 +61,6 @@ impl FsTransaction {
         file.flush().await
     }
 
-    /// Track an externally created `path` for rollback, for callers that write
-    /// files themselves (e.g. streaming to a temp path and renaming).
-    pub fn track(&mut self, path: impl Into<PathBuf>) {
-        self.paths.push(path.into());
-    }
-
     /// Keep every tracked file. Consumes the guard so [`Drop`] removes nothing.
     pub fn commit(mut self) {
         self.paths.clear();
@@ -119,24 +113,6 @@ mod tests {
         }
 
         assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn rolls_back_written_and_tracked_paths() {
-        let dir = tempfile::tempdir().unwrap();
-        let written = dir.path().join("written.bin");
-        let external = dir.path().join("external.bin");
-        std::fs::write(&external, b"external").unwrap();
-
-        {
-            let mut txn = FsTransaction::new();
-            txn.write_new(&written, b"x").await.unwrap();
-            txn.track(&external);
-            assert!(written.exists() && external.exists());
-        }
-
-        assert!(!written.exists());
-        assert!(!external.exists());
     }
 
     #[tokio::test]
