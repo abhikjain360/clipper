@@ -12,8 +12,14 @@ use sha2::{Digest, Sha256};
 use strum::{AsRefStr, Display, EnumString};
 use uuid::Uuid;
 
-const SHA256_BYTES: usize = 32;
-const XCHACHA20_NONCE_BYTES: usize = 24;
+pub const SHA256_BYTES: usize = 32;
+pub const XCHACHA20_NONCE_BYTES: usize = 24;
+pub const DEVICE_SIGNING_PUBLIC_KEY_BYTES: usize = 32;
+pub const DEVICE_SIGNING_SECRET_KEY_BYTES: usize = 32;
+pub const DEVICE_LOGIN_PROOF_CHALLENGE_BYTES: usize = 32;
+pub const DEVICE_LOGIN_PROOF_SIGNATURE_BYTES: usize = 64;
+pub const DEVICE_LOGIN_PROOF_VERSION: u64 = 1;
+pub const OBJECT_ENVELOPE_SIGNATURE_BYTES: usize = 64;
 
 // OWASP's practical Argon2id floor is 19 MiB, 2 iterations, 1 lane. The
 // ceilings keep server-side configurable hashing from becoming an OOM footgun.
@@ -168,6 +174,21 @@ fn validate_argon2_p_cost(value: &u32, _: &()) -> garde::Result {
     Ok(())
 }
 
+fn validate_optional_device_login_proof_signature(
+    value: &Option<Vec<u8>>,
+    _: &(),
+) -> garde::Result {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.len() != DEVICE_LOGIN_PROOF_SIGNATURE_BYTES {
+        return Err(garde::Error::new(format!(
+            "length must be {DEVICE_LOGIN_PROOF_SIGNATURE_BYTES}"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct LoginChallengeRequest {
     #[garde(custom(validate_username))]
@@ -180,6 +201,7 @@ pub struct LoginChallengeRequest {
 pub struct LoginChallengeResponse {
     pub challenge_id: String,
     pub credential_response: Vec<u8>,
+    pub device_proof_challenge: Vec<u8>,
     pub server: ServerInfo,
 }
 
@@ -191,6 +213,10 @@ pub struct LoginRequest {
     pub credential_finalization: Vec<u8>,
     #[garde(skip)]
     pub device_id: Option<DeviceId>,
+    #[garde(length(equal = DEVICE_SIGNING_PUBLIC_KEY_BYTES))]
+    pub device_signing_public_key: Vec<u8>,
+    #[garde(custom(validate_optional_device_login_proof_signature))]
+    pub device_login_proof_signature: Option<Vec<u8>>,
     #[garde(length(min = 1))]
     pub device_name: Option<String>,
     #[garde(length(min = 1))]
@@ -235,6 +261,8 @@ pub struct RegisterFinishRequest {
     pub registration_upload: Vec<u8>,
     #[garde(skip)]
     pub device_id: Option<DeviceId>,
+    #[garde(length(equal = DEVICE_SIGNING_PUBLIC_KEY_BYTES))]
+    pub device_signing_public_key: Vec<u8>,
     #[garde(length(min = 1))]
     pub device_name: Option<String>,
     #[garde(length(min = 1))]
@@ -248,6 +276,16 @@ pub struct RegisterFinishResponse {
     pub username: String,
     pub device_id: String,
     pub server: ServerInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceLoginProofBodyV1 {
+    pub version: u64,
+    pub challenge_id: String,
+    pub challenge: Vec<u8>,
+    pub username: String,
+    pub device_id: DeviceId,
+    pub device_signing_public_key: Vec<u8>,
 }
 
 // -- Clipboard --
@@ -269,7 +307,57 @@ pub enum ObjectKind {
     File,
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, Display, EnumString,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum ObjectEnvelopeOperation {
+    Create,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct ObjectEnvelopePayloadV1 {
+    #[garde(skip)]
+    pub id: ObjectPayloadId,
+    #[garde(length(equal = XCHACHA20_NONCE_BYTES))]
+    pub nonce: Vec<u8>,
+    #[garde(range(min = 0))]
+    pub ciphertext_size: i64,
+    #[garde(length(equal = SHA256_BYTES))]
+    pub sha256_ciphertext: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct ObjectEnvelopeBodyV1 {
+    #[garde(skip)]
+    pub object_id: ObjectId,
+    #[garde(skip)]
+    pub object_type: ObjectKind,
+    #[garde(range(min = 1))]
+    pub object_version: u64,
+    #[garde(skip)]
+    pub source_device_id: DeviceId,
+    #[garde(length(min = 1))]
+    pub created_at: String,
+    #[garde(skip)]
+    pub operation: ObjectEnvelopeOperation,
+    #[garde(length(equal = XCHACHA20_NONCE_BYTES))]
+    pub meta_nonce: Vec<u8>,
+    #[garde(length(equal = SHA256_BYTES))]
+    pub sha256_meta_ciphertext: Vec<u8>,
+    #[garde(dive, length(min = 1), custom(validate_unique_envelope_payload_ids))]
+    pub payloads: Vec<ObjectEnvelopePayloadV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct ObjectEnvelopeV1 {
+    #[garde(dive)]
+    pub body: ObjectEnvelopeBodyV1,
+    #[garde(length(equal = OBJECT_ENVELOPE_SIGNATURE_BYTES))]
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct ObjectPayloadInit {
     #[garde(skip)]
     pub id: ObjectPayloadId,
@@ -286,7 +374,7 @@ pub struct ObjectPayloadInit {
     pub inline_ciphertext: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct ObjectInitRequest {
     #[garde(skip)]
     pub id: ObjectId,
@@ -298,6 +386,8 @@ pub struct ObjectInitRequest {
     pub meta_ciphertext: Vec<u8>,
     #[garde(dive, length(min = 1), custom(validate_unique_init_payload_ids))]
     pub payloads: Vec<ObjectPayloadInit>,
+    #[garde(dive)]
+    pub envelope: ObjectEnvelopeV1,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -312,7 +402,7 @@ pub struct ObjectInitResponse {
     pub complete: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct ObjectPayloadComplete {
     #[garde(skip)]
     pub id: ObjectPayloadId,
@@ -322,13 +412,13 @@ pub struct ObjectPayloadComplete {
     pub sha256_ciphertext: Vec<u8>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct ObjectCompleteRequest {
     #[garde(dive, length(min = 1), custom(validate_unique_complete_payload_ids))]
     pub payloads: Vec<ObjectPayloadComplete>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectPayloadDescriptor {
     pub id: ObjectPayloadId,
     pub nonce: Vec<u8>,
@@ -336,7 +426,7 @@ pub struct ObjectPayloadDescriptor {
     pub sha256_ciphertext: Vec<u8>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectListItem {
     pub id: ObjectId,
     pub kind: ObjectKind,
@@ -345,6 +435,8 @@ pub struct ObjectListItem {
     pub payloads: Vec<ObjectPayloadDescriptor>,
     pub created_at: String,
     pub source_device_id: DeviceId,
+    pub source_device_signing_public_key: Vec<u8>,
+    pub envelope: ObjectEnvelopeV1,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -468,6 +560,7 @@ pub enum ApiErrorCode {
     ObjectPayloadMetadataMismatch,
     ObjectPayloadIntegrityMismatch,
     InvalidPayloadSize,
+    InvalidObjectEnvelope,
 }
 
 impl ApiErrorCode {
@@ -512,6 +605,7 @@ impl ApiErrorCode {
             }
             Self::ObjectPayloadIntegrityMismatch => "Payload size or SHA-256 mismatch",
             Self::InvalidPayloadSize => "Invalid payload size",
+            Self::InvalidObjectEnvelope => "Invalid object envelope",
         }
     }
 
@@ -537,7 +631,8 @@ impl ApiErrorCode {
             | Self::ValidationFailed
             | Self::InvalidId
             | Self::InvalidObjectKind
-            | Self::InvalidPayloadSize => 400,
+            | Self::InvalidPayloadSize
+            | Self::InvalidObjectEnvelope => 400,
             Self::Unauthorized => 401,
             Self::Forbidden | Self::ObjectForbidden => 403,
             Self::NotFound | Self::ObjectNotFound => 404,
@@ -631,6 +726,19 @@ fn validate_inline_ciphertext<'a>(
 }
 
 fn validate_unique_init_payload_ids(value: &Vec<ObjectPayloadInit>, _: &()) -> garde::Result {
+    let mut seen = HashSet::new();
+    for payload in value {
+        if !seen.insert(payload.id) {
+            return Err(garde::Error::new("must not contain duplicate payload ids"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_unique_envelope_payload_ids(
+    value: &Vec<ObjectEnvelopePayloadV1>,
+    _: &(),
+) -> garde::Result {
     let mut seen = HashSet::new();
     for payload in value {
         if !seen.insert(payload.id) {

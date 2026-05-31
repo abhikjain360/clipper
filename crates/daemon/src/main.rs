@@ -176,7 +176,7 @@ async fn run() -> DaemonResult<()> {
         .map(|creds| creds.server_url.as_str())
         .unwrap_or(default_server_url.as_str());
 
-    let engine = SyncEngine::new_with_data_dir(server_url, data_dir.join("client"));
+    let engine = SyncEngine::try_new_with_data_dir(server_url, data_dir.join("client"))?;
     if let Some(creds) = loaded_creds {
         engine
             .set_saved_profile(creds.username, Some(creds.device_name))

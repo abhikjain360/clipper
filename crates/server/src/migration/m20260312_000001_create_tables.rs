@@ -96,6 +96,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Devices::UserId).uuid().not_null())
                     .col(ColumnDef::new(Devices::Name).text().not_null())
                     .col(ColumnDef::new(Devices::Platform).text().not_null())
+                    .col(ColumnDef::new(Devices::SigningPublicKey).blob().not_null())
                     .col(ColumnDef::new(Devices::CreatedAt).text().not_null())
                     .col(ColumnDef::new(Devices::UpdatedAt).text().not_null())
                     .col(ColumnDef::new(Devices::LastSeenAt).text().not_null())
@@ -169,6 +170,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Objects::UpdatedAt).text().not_null())
                     .col(ColumnDef::new(Objects::ExpiresAt).text())
                     .col(ColumnDef::new(Objects::SourceDeviceId).uuid().not_null())
+                    .col(ColumnDef::new(Objects::Envelope).blob().not_null())
                     .col(
                         ColumnDef::new(Objects::Status)
                             .text()
@@ -472,6 +474,7 @@ enum Objects {
     UpdatedAt,
     ExpiresAt,
     SourceDeviceId,
+    Envelope,
     Status,
 }
 
@@ -496,6 +499,7 @@ enum Devices {
     UserId,
     Name,
     Platform,
+    SigningPublicKey,
     CreatedAt,
     UpdatedAt,
     LastSeenAt,

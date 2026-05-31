@@ -8,9 +8,9 @@ use chrono::{Duration, Utc};
 use clipper_core::{
     crypto,
     models::{
-        LoginChallengeRequest, LoginChallengeResponse, LoginRequest, LoginResponse, OkResponse,
-        RegisterFinishRequest, RegisterFinishResponse, RegisterStartRequest, RegisterStartResponse,
-        ServerInfo,
+        DEVICE_LOGIN_PROOF_VERSION, DeviceLoginProofBodyV1, LoginChallengeRequest,
+        LoginChallengeResponse, LoginRequest, LoginResponse, OkResponse, RegisterFinishRequest,
+        RegisterFinishResponse, RegisterStartRequest, RegisterStartResponse, ServerInfo,
     },
 };
 use sea_orm::{
@@ -43,6 +43,13 @@ struct LoginChallengeUserRow {
 struct LoginUserRow {
     id: Uuid,
     username: String,
+}
+
+#[derive(Debug, DerivePartialModel)]
+#[sea_orm(entity = "devices::Entity", from_query_result)]
+struct ExistingDeviceRow {
+    user_id: Uuid,
+    signing_public_key: Vec<u8>,
 }
 
 /// OPAQUE login round 1, server side. Math in `docs/opaque.md`.
@@ -99,11 +106,18 @@ pub async fn challenge(
     // Stash state_S keyed by challenge_id until the client returns its
     // CredentialFinalization in `login`. `challenge_user_id` is None for a
     // fabricated challenge.
-    let challenge_id = state.create_auth_challenge(challenge_user_id, server_login_state);
+    let device_proof_challenge =
+        crypto::generate_random_bytes(crypto::DEVICE_LOGIN_PROOF_CHALLENGE_BYTES);
+    let challenge_id = state.create_auth_challenge(
+        challenge_user_id,
+        server_login_state,
+        device_proof_challenge.clone(),
+    );
 
     Ok(Postcard(LoginChallengeResponse {
         challenge_id,
         credential_response,
+        device_proof_challenge,
         server: ServerInfo {},
     }))
 }
@@ -342,6 +356,7 @@ pub async fn register_finish(
         pending.user_id,
         SessionOptions {
             requested_device_id: req.device_id,
+            device_signing_public_key: req.device_signing_public_key,
             device_name: req.device_name,
             platform: req.platform,
             ip: ip.to_string(),
@@ -350,6 +365,7 @@ pub async fn register_finish(
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string()),
             token_bytes: state.config().crypto.session_token_bytes,
+            session_proof: SessionProof::Registration,
         },
     )
     .await?;
@@ -417,6 +433,7 @@ pub async fn login(
         user.id,
         SessionOptions {
             requested_device_id: req.device_id,
+            device_signing_public_key: req.device_signing_public_key,
             device_name: req.device_name,
             platform: req.platform,
             ip: ip.to_string(),
@@ -425,6 +442,12 @@ pub async fn login(
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string()),
             token_bytes: state.config().crypto.session_token_bytes,
+            session_proof: SessionProof::Login(DeviceLoginProof {
+                challenge_id: req.challenge_id,
+                challenge: auth_challenge.device_proof_challenge,
+                username: user.username.clone(),
+                signature: req.device_login_proof_signature,
+            }),
         },
     )
     .await?;
@@ -520,10 +543,8 @@ where
         .unwrap_or_else(|| "Unknown Device".into());
     let platform = options.platform.unwrap_or_else(|| "unknown".into());
 
-    let existing_device_user_id = devices::Entity::find_by_id(device_id)
-        .select_only()
-        .column(devices::Column::UserId)
-        .into_tuple::<Uuid>()
+    let existing_device = devices::Entity::find_by_id(device_id)
+        .into_partial_model::<ExistingDeviceRow>()
         .one(db)
         .await
         .map_err(|e| {
@@ -531,12 +552,12 @@ where
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
         })?;
 
-    if let Some(existing_user_id) = existing_device_user_id {
-        if existing_user_id != user_id {
+    if let Some(existing_device) = existing_device {
+        if existing_device.user_id != user_id {
             warn!(
                 device_id = %device_id,
                 requested_user_id = %user_id,
-                existing_user_id = %existing_user_id,
+                existing_user_id = %existing_device.user_id,
                 "Device id already bound to a different user",
             );
             return Err(error_response(
@@ -544,6 +565,24 @@ where
                 "Device id already exists",
             ));
         }
+        if existing_device.signing_public_key != options.device_signing_public_key {
+            warn!(
+                device_id = %device_id,
+                user_id = %user_id,
+                "Device id was presented with a different signing public key",
+            );
+            return Err(error_response(
+                StatusCode::CONFLICT,
+                "Device signing key mismatch",
+            ));
+        }
+        verify_existing_device_login_proof(
+            user_id,
+            device_id,
+            &existing_device.signing_public_key,
+            &options.device_signing_public_key,
+            &options.session_proof,
+        )?;
         devices::Entity::update_many()
             .col_expr(
                 devices::Column::LastSeenAt,
@@ -572,6 +611,7 @@ where
             user_id: Set(user_id),
             name: Set(device_name),
             platform: Set(platform),
+            signing_public_key: Set(options.device_signing_public_key),
             created_at: Set(now.clone()),
             updated_at: Set(now.clone()),
             last_seen_at: Set(now.clone()),
@@ -640,11 +680,84 @@ fn map_device_insert_error(error: sea_orm::DbErr, device_id: Uuid, user_id: Uuid
 #[derive(Debug)]
 struct SessionOptions {
     requested_device_id: Option<clipper_core::models::DeviceId>,
+    device_signing_public_key: Vec<u8>,
     device_name: Option<String>,
     platform: Option<String>,
     ip: String,
     user_agent: Option<String>,
     token_bytes: usize,
+    session_proof: SessionProof,
+}
+
+#[derive(Debug)]
+enum SessionProof {
+    Registration,
+    Login(DeviceLoginProof),
+}
+
+#[derive(Debug)]
+struct DeviceLoginProof {
+    challenge_id: String,
+    challenge: Vec<u8>,
+    username: String,
+    signature: Option<Vec<u8>>,
+}
+
+fn verify_existing_device_login_proof(
+    user_id: Uuid,
+    device_id: Uuid,
+    signing_public_key: &[u8],
+    presented_signing_public_key: &[u8],
+    proof: &SessionProof,
+) -> Result<(), ApiError> {
+    let SessionProof::Login(proof) = proof else {
+        warn!(
+            device_id = %device_id,
+            user_id = %user_id,
+            "Registration session issue attempted to reuse an existing device id",
+        );
+        return Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "Device proof required",
+        ));
+    };
+    if proof.challenge.len() != crypto::DEVICE_LOGIN_PROOF_CHALLENGE_BYTES {
+        warn!(
+            device_id = %device_id,
+            user_id = %user_id,
+            challenge_len = proof.challenge.len(),
+            "Stored device proof challenge had an invalid length",
+        );
+        return Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "Invalid device proof",
+        ));
+    }
+    let signature = proof.signature.as_deref().ok_or_else(|| {
+        warn!(
+            device_id = %device_id,
+            user_id = %user_id,
+            "Existing device login did not include a proof signature",
+        );
+        error_response(StatusCode::UNAUTHORIZED, "Device proof required")
+    })?;
+    let body = DeviceLoginProofBodyV1 {
+        version: DEVICE_LOGIN_PROOF_VERSION,
+        challenge_id: proof.challenge_id.clone(),
+        challenge: proof.challenge.clone(),
+        username: proof.username.clone(),
+        device_id: device_id.into(),
+        device_signing_public_key: presented_signing_public_key.to_vec(),
+    };
+    crypto::verify_device_login_proof_signature(signing_public_key, &body, signature).map_err(|e| {
+        warn!(
+            device_id = %device_id,
+            user_id = %user_id,
+            error = %e,
+            "Existing device login presented an invalid proof signature",
+        );
+        error_response(StatusCode::UNAUTHORIZED, "Invalid device proof")
+    })
 }
 
 #[cfg(test)]
@@ -882,6 +995,7 @@ mod tests {
             registration_id: registration.registration_id,
             registration_upload: registration_finish.registration_upload,
             device_id: None,
+            device_signing_public_key: test_device_signing_public_key(),
             device_name: Some("test-device".into()),
             platform: Some("test".into()),
         }
@@ -1038,9 +1152,60 @@ mod tests {
             challenge_id: challenge.challenge_id,
             credential_finalization: finish.credential_finalization,
             device_id: None,
+            device_signing_public_key: test_device_signing_public_key(),
+            device_login_proof_signature: None,
             device_name: Some("test-device".into()),
             platform: Some("test".into()),
         }
+    }
+
+    fn login_request_for_device(
+        challenge: LoginChallengeResponse,
+        client_state: &[u8],
+        passphrase: &[u8],
+        device_id: Uuid,
+        signing_secret_key: [u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
+        include_proof: bool,
+    ) -> LoginRequest {
+        let finish = crypto::opaque_client_login_finish(
+            client_state,
+            passphrase,
+            &challenge.credential_response,
+        )
+        .expect("client login finish");
+        let device_id = clipper_core::models::DeviceId::from(device_id);
+        let device_signing_public_key =
+            crypto::device_signing_public_key(&signing_secret_key).to_vec();
+        let device_login_proof_signature = include_proof.then(|| {
+            let body = DeviceLoginProofBodyV1 {
+                version: DEVICE_LOGIN_PROOF_VERSION,
+                challenge_id: challenge.challenge_id.clone(),
+                challenge: challenge.device_proof_challenge.clone(),
+                username: "alice".into(),
+                device_id,
+                device_signing_public_key: device_signing_public_key.clone(),
+            };
+            crypto::sign_device_login_proof_body(&signing_secret_key, &body)
+                .expect("sign device login proof")
+        });
+
+        LoginRequest {
+            challenge_id: challenge.challenge_id,
+            credential_finalization: finish.credential_finalization,
+            device_id: Some(device_id),
+            device_signing_public_key,
+            device_login_proof_signature,
+            device_name: Some("test-device".into()),
+            platform: Some("test".into()),
+        }
+    }
+
+    fn test_device_signing_secret_key() -> [u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES] {
+        [42_u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]
+    }
+
+    fn test_device_signing_public_key() -> Vec<u8> {
+        crypto::device_signing_public_key(&test_device_signing_secret_key()).to_vec()
     }
 
     // This exercises the happy path for OPAQUE login. We test it because
@@ -1085,6 +1250,7 @@ mod tests {
             user_id: Set(user_id),
             name: Set("existing-device".into()),
             platform: Set("test".into()),
+            signing_public_key: Set(test_device_signing_public_key()),
             created_at: Set(now.clone()),
             updated_at: Set(now.clone()),
             last_seen_at: Set(now.clone()),
@@ -1098,6 +1264,7 @@ mod tests {
             user_id: Set(user_id),
             name: Set("raced-device".into()),
             platform: Set("test".into()),
+            signing_public_key: Set(test_device_signing_public_key()),
             created_at: Set(now.clone()),
             updated_at: Set(now.clone()),
             last_seen_at: Set(now),
@@ -1110,6 +1277,115 @@ mod tests {
             map_device_insert_error(err, device_id, user_id).status(),
             StatusCode::CONFLICT
         );
+    }
+
+    #[tokio::test]
+    async fn login_existing_device_requires_device_key_proof() {
+        let passphrase = b"correct horse battery staple";
+        let (state, _data_dir) = test_state(passphrase).await;
+        let user_id = users::Entity::find()
+            .select_only()
+            .column(users::Column::Id)
+            .into_tuple::<Uuid>()
+            .one(state.db())
+            .await
+            .expect("query user id")
+            .expect("user id");
+        let device_id = Uuid::now_v7();
+        let now = Utc::now().to_rfc3339();
+
+        devices::ActiveModel {
+            id: Set(device_id),
+            user_id: Set(user_id),
+            name: Set("existing-device".into()),
+            platform: Set("test".into()),
+            signing_public_key: Set(test_device_signing_public_key()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            last_seen_at: Set(now),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert existing device");
+
+        let (challenge_req, client_state) = challenge_request("alice", passphrase);
+        let Postcard(login_challenge) = challenge(State(state.clone()), validated(challenge_req))
+            .await
+            .expect("challenge");
+        let missing_proof_req = login_request_for_device(
+            login_challenge,
+            &client_state,
+            passphrase,
+            device_id,
+            test_device_signing_secret_key(),
+            false,
+        );
+        let missing_proof = login(
+            State(state.clone()),
+            client_ip(),
+            HeaderMap::new(),
+            validated(missing_proof_req),
+        )
+        .await;
+        assert_eq!(
+            missing_proof.unwrap_err().status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let (challenge_req, client_state) = challenge_request("alice", passphrase);
+        let Postcard(login_challenge) = challenge(State(state.clone()), validated(challenge_req))
+            .await
+            .expect("challenge");
+        let mut tampered_proof_req = login_request_for_device(
+            login_challenge,
+            &client_state,
+            passphrase,
+            device_id,
+            test_device_signing_secret_key(),
+            true,
+        );
+        if let Some(byte) = tampered_proof_req
+            .device_login_proof_signature
+            .as_mut()
+            .expect("proof")
+            .last_mut()
+        {
+            *byte ^= 0x01;
+        }
+        let tampered_proof = login(
+            State(state.clone()),
+            client_ip(),
+            HeaderMap::new(),
+            validated(tampered_proof_req),
+        )
+        .await;
+        assert_eq!(
+            tampered_proof.unwrap_err().status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let (challenge_req, client_state) = challenge_request("alice", passphrase);
+        let Postcard(login_challenge) = challenge(State(state.clone()), validated(challenge_req))
+            .await
+            .expect("challenge");
+        let valid_req = login_request_for_device(
+            login_challenge,
+            &client_state,
+            passphrase,
+            device_id,
+            test_device_signing_secret_key(),
+            true,
+        );
+        let Postcard(resp) = login(
+            State(state),
+            client_ip(),
+            HeaderMap::new(),
+            validated(valid_req),
+        )
+        .await
+        .expect("login");
+
+        assert_eq!(resp.device_id, device_id.to_string());
     }
 
     // This reuses a captured OPAQUE finalization against the same challenge.
@@ -1129,6 +1405,8 @@ mod tests {
             challenge_id: req.challenge_id.clone(),
             credential_finalization: req.credential_finalization.clone(),
             device_id: None,
+            device_signing_public_key: test_device_signing_public_key(),
+            device_login_proof_signature: None,
             device_name: Some("test-device".into()),
             platform: Some("test".into()),
         };
@@ -1211,6 +1489,8 @@ mod tests {
             challenge_id: resp.challenge_id,
             credential_finalization: vec![0_u8; 64],
             device_id: None,
+            device_signing_public_key: test_device_signing_public_key(),
+            device_login_proof_signature: None,
             device_name: Some("test-device".into()),
             platform: Some("test".into()),
         };
@@ -1237,6 +1517,8 @@ mod tests {
                         challenge_id: format!("missing-{i}"),
                         credential_finalization: b"not opaque".to_vec(),
                         device_id: None,
+                        device_signing_public_key: test_device_signing_public_key(),
+                        device_login_proof_signature: None,
                         device_name: None,
                         platform: None,
                     },
@@ -1254,6 +1536,8 @@ mod tests {
                     challenge_id: "missing-final".into(),
                     credential_finalization: b"not opaque".to_vec(),
                     device_id: None,
+                    device_signing_public_key: test_device_signing_public_key(),
+                    device_login_proof_signature: None,
                     device_name: None,
                     platform: None,
                 },

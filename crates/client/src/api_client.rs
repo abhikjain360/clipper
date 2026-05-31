@@ -15,7 +15,7 @@ const POSTCARD_ERROR_PREVIEW_BYTES: usize = 64;
 #[derive(Clone)]
 pub struct ApiClient {
     http: Client,
-    base_url: String,
+    base_url: Url,
     token: Option<String>,
 }
 
@@ -24,13 +24,25 @@ pub struct AuthResult<T> {
     pub encryption_key: Zeroizing<[u8; 32]>,
 }
 
+#[derive(Clone, Copy)]
+pub struct AuthDevice<'a> {
+    pub id: Option<DeviceId>,
+    pub name: &'a str,
+    pub platform: &'a str,
+    pub signing_secret_key: &'a [u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
+}
+
 impl ApiClient {
     pub fn new(base_url: &str) -> Self {
-        Self {
+        Self::try_new(base_url).expect("invalid Clipper server URL")
+    }
+
+    pub fn try_new(base_url: &str) -> Result<Self, ClientError> {
+        Ok(Self {
             http: Client::new(),
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: parse_server_url(base_url)?,
             token: None,
-        }
+        })
     }
 
     pub fn set_token(&mut self, token: String) {
@@ -45,16 +57,46 @@ impl ApiClient {
         self.token.as_deref()
     }
 
-    pub fn base_url(&self) -> &str {
+    pub fn base_url(&self) -> &Url {
         &self.base_url
     }
 
-    pub fn set_base_url(&mut self, url: &str) {
-        self.base_url = url.trim_end_matches('/').to_string();
+    pub fn base_url_display(&self) -> String {
+        display_server_url(&self.base_url)
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}{}", self.base_url, path)
+    pub fn set_base_url(&mut self, url: &str) -> Result<(), ClientError> {
+        parse_server_url(url).map(|url| self.base_url = url)
+    }
+
+    pub fn websocket_url(&self) -> Result<Url, ClientError> {
+        let mut url = self.api_url(&["ws"])?;
+        let scheme = match url.scheme() {
+            "https" => "wss",
+            "http" => "ws",
+            _ => {
+                return Err(ClientError::Other(
+                    "Server URL must use http or https".into(),
+                ));
+            }
+        };
+        url.set_scheme(scheme)
+            .map_err(|_| ClientError::Other("Invalid WebSocket URL scheme".into()))?;
+        Ok(url)
+    }
+
+    fn api_url(&self, segments: &[&str]) -> Result<Url, ClientError> {
+        let mut url = self.base_url.clone();
+        {
+            let mut path = url.path_segments_mut().map_err(|_| {
+                ClientError::Other("Server URL cannot be used as a base URL".into())
+            })?;
+            path.push("api");
+            for segment in segments {
+                path.push(segment);
+            }
+        }
+        Ok(url)
     }
 
     fn auth_header(&self) -> Option<String> {
@@ -117,8 +159,7 @@ impl ApiClient {
         &mut self,
         passphrase: &str,
         username: &str,
-        device_name: &str,
-        platform: &str,
+        device: AuthDevice<'_>,
     ) -> Result<AuthResult<LoginResponse>, ClientError> {
         validate_server_url(&self.base_url)?;
 
@@ -130,7 +171,7 @@ impl ApiClient {
         };
         let challenge_resp = self
             .http
-            .post(self.url("/api/auth/challenge"))
+            .post(self.api_url(&["auth", "challenge"])?)
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(&challenge_req)?)
             .send()
@@ -138,6 +179,22 @@ impl ApiClient {
 
         let challenge_resp: LoginChallengeResponse =
             Self::postcard_response(challenge_resp).await?;
+        let device_signing_public_key =
+            crypto::device_signing_public_key(device.signing_secret_key);
+        let device_login_proof_signature = device
+            .id
+            .map(|device_id| {
+                let proof_body = DeviceLoginProofBodyV1 {
+                    version: DEVICE_LOGIN_PROOF_VERSION,
+                    challenge_id: challenge_resp.challenge_id.clone(),
+                    challenge: challenge_resp.device_proof_challenge.clone(),
+                    username: username.to_string(),
+                    device_id,
+                    device_signing_public_key: device_signing_public_key.to_vec(),
+                };
+                crypto::sign_device_login_proof_body(device.signing_secret_key, &proof_body)
+            })
+            .transpose()?;
         let finish = crypto::opaque_client_login_finish(
             &client_login_state,
             passphrase.as_bytes(),
@@ -148,13 +205,15 @@ impl ApiClient {
         let req = LoginRequest {
             challenge_id: challenge_resp.challenge_id,
             credential_finalization: finish.credential_finalization,
-            device_id: None,
-            device_name: Some(device_name.to_string()),
-            platform: Some(platform.to_string()),
+            device_id: device.id,
+            device_signing_public_key: device_signing_public_key.to_vec(),
+            device_login_proof_signature,
+            device_name: Some(device.name.to_string()),
+            platform: Some(device.platform.to_string()),
         };
         let resp = self
             .http
-            .post(self.url("/api/auth/login"))
+            .post(self.api_url(&["auth", "login"])?)
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(&req)?)
             .send()
@@ -174,8 +233,7 @@ impl ApiClient {
         access_key: &str,
         username: &str,
         passphrase: &str,
-        device_name: &str,
-        platform: &str,
+        device: AuthDevice<'_>,
     ) -> Result<AuthResult<RegisterFinishResponse>, ClientError> {
         validate_server_url(&self.base_url)?;
 
@@ -188,7 +246,7 @@ impl ApiClient {
         };
         let resp = self
             .http
-            .post(self.url("/api/auth/register/start"))
+            .post(self.api_url(&["auth", "register", "start"])?)
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(&start_req)?)
             .send()
@@ -201,17 +259,20 @@ impl ApiClient {
             &start_resp.registration_response,
         )?;
         let encryption_key = crypto::derive_data_key_from_opaque_export_key(&finish.export_key);
+        let device_signing_public_key =
+            crypto::device_signing_public_key(device.signing_secret_key);
 
         let finish_req = RegisterFinishRequest {
             registration_id: start_resp.registration_id,
             registration_upload: finish.registration_upload,
-            device_id: None,
-            device_name: Some(device_name.to_string()),
-            platform: Some(platform.to_string()),
+            device_id: device.id,
+            device_signing_public_key: device_signing_public_key.to_vec(),
+            device_name: Some(device.name.to_string()),
+            platform: Some(device.platform.to_string()),
         };
         let resp = self
             .http
-            .post(self.url("/api/auth/register/finish"))
+            .post(self.api_url(&["auth", "register", "finish"])?)
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(&finish_req)?)
             .send()
@@ -233,7 +294,7 @@ impl ApiClient {
     pub async fn logout(&mut self) -> Result<(), ClientError> {
         let resp = self
             .http
-            .post(self.url("/api/auth/logout"))
+            .post(self.api_url(&["auth", "logout"])?)
             .header("Authorization", self.auth_header().unwrap_or_default())
             .send()
             .await?;
@@ -253,7 +314,7 @@ impl ApiClient {
     ) -> Result<ObjectInitResponse, ClientError> {
         let resp = self
             .http
-            .post(self.url("/api/objects/init"))
+            .post(self.api_url(&["objects", "init"])?)
             .header("Authorization", self.auth_header().unwrap_or_default())
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(req)?)
@@ -269,13 +330,10 @@ impl ApiClient {
         payload_id: &str,
         data: Vec<u8>,
     ) -> Result<OkResponse, ClientError> {
-        let url = format!(
-            "{}/api/objects/{}/payloads/{}",
-            self.base_url, object_id, payload_id
-        );
+        let url = self.api_url(&["objects", object_id, "payloads", payload_id])?;
         let resp = self
             .http
-            .put(&url)
+            .put(url)
             .header("Authorization", self.auth_header().unwrap_or_default())
             .header("Content-Type", "application/octet-stream")
             .body(data)
@@ -290,10 +348,10 @@ impl ApiClient {
         object_id: &str,
         req: &ObjectCompleteRequest,
     ) -> Result<OkResponse, ClientError> {
-        let url = format!("{}/api/objects/{}/complete", self.base_url, object_id);
+        let url = self.api_url(&["objects", object_id, "complete"])?;
         let resp = self
             .http
-            .post(&url)
+            .post(url)
             .header("Authorization", self.auth_header().unwrap_or_default())
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(req)?)
@@ -309,8 +367,7 @@ impl ApiClient {
         limit: Option<u64>,
         before: Option<&str>,
     ) -> Result<ObjectListResponse, ClientError> {
-        let mut url = Url::parse(&self.url("/api/objects"))
-            .map_err(|e| ClientError::Other(format!("Invalid server URL: {}", e)))?;
+        let mut url = self.api_url(&["objects"])?;
         {
             let mut query = url.query_pairs_mut();
             query.append_pair("limit", &limit.unwrap_or(100).to_string());
@@ -337,13 +394,10 @@ impl ApiClient {
         object_id: &str,
         payload_id: &str,
     ) -> Result<Vec<u8>, ClientError> {
-        let url = format!(
-            "{}/api/objects/{}/payloads/{}",
-            self.base_url, object_id, payload_id
-        );
+        let url = self.api_url(&["objects", object_id, "payloads", payload_id])?;
         let resp = self
             .http
-            .get(&url)
+            .get(url)
             .header("Authorization", self.auth_header().unwrap_or_default())
             .send()
             .await?;
@@ -352,10 +406,10 @@ impl ApiClient {
     }
 
     pub async fn delete_object(&self, object_id: &str) -> Result<OkResponse, ClientError> {
-        let url = format!("{}/api/objects/{}", self.base_url, object_id);
+        let url = self.api_url(&["objects", object_id])?;
         let resp = self
             .http
-            .delete(&url)
+            .delete(url)
             .header("Authorization", self.auth_header().unwrap_or_default())
             .send()
             .await?;
@@ -368,7 +422,7 @@ impl ApiClient {
     pub async fn bootstrap(&self) -> Result<BootstrapResponse, ClientError> {
         let resp = self
             .http
-            .get(self.url("/api/sync/bootstrap"))
+            .get(self.api_url(&["sync", "bootstrap"])?)
             .header("Authorization", self.auth_header().unwrap_or_default())
             .send()
             .await?;
@@ -379,15 +433,30 @@ impl ApiClient {
     // ── Health ──
 
     pub async fn health(&self) -> Result<HealthResponse, ClientError> {
-        let resp = self.http.get(self.url("/api/health")).send().await?;
+        let resp = self.http.get(self.api_url(&["health"])?).send().await?;
         Ok(resp.json().await?)
     }
 }
 
-fn validate_server_url(base_url: &str) -> Result<(), ClientError> {
-    let url = Url::parse(base_url)
+fn parse_server_url(base_url: &str) -> Result<Url, ClientError> {
+    let mut url = Url::parse(base_url.trim())
         .map_err(|e| ClientError::Other(format!("Invalid server URL: {}", e)))?;
+    validate_server_url(&url)?;
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(ClientError::Other(
+            "Server URL must not include a query or fragment".into(),
+        ));
+    }
+    let normalized_path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&normalized_path);
+    Ok(url)
+}
 
+fn display_server_url(url: &Url) -> String {
+    url.as_str().trim_end_matches('/').to_string()
+}
+
+fn validate_server_url(url: &Url) -> Result<(), ClientError> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(ClientError::Other(
             "Server URL must not include credentials".into(),
@@ -396,7 +465,7 @@ fn validate_server_url(base_url: &str) -> Result<(), ClientError> {
 
     match url.scheme() {
         "https" => Ok(()),
-        "http" if is_loopback_host(&url) || is_android_emulator_host(&url) => Ok(()),
+        "http" if is_loopback_host(url) || is_android_emulator_host(url) => Ok(()),
         "http" => Err(ClientError::Other(
             "Plain HTTP is only allowed for localhost servers".into(),
         )),
@@ -484,11 +553,12 @@ fn is_json_content_type(value: Option<&str>) -> bool {
 pub fn encrypt_clipboard_meta(
     meta: &ClipboardMeta,
     encryption_key: &[u8; 32],
+    envelope_body: &ObjectEnvelopeBodyV1,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
     let json = serde_json::to_vec(meta)
         .map_err(|e| crypto::CryptoError::Encrypt(format!("json: {}", e)))?;
-    let (nonce, ciphertext) =
-        crypto::encrypt(encryption_key, &json, crypto::AAD_CLIPBOARD_META_V1)?;
+    let aad = crypto::object_meta_aad_v1(envelope_body)?;
+    let (nonce, ciphertext) = crypto::encrypt(encryption_key, &json, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
 
@@ -497,13 +567,10 @@ pub fn decrypt_clipboard_meta(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
+    envelope_body: &ObjectEnvelopeBodyV1,
 ) -> Result<ClipboardMeta, crypto::CryptoError> {
-    let plaintext = crypto::decrypt(
-        encryption_key,
-        nonce,
-        ciphertext,
-        crypto::AAD_CLIPBOARD_META_V1,
-    )?;
+    let aad = crypto::object_meta_aad_v1(envelope_body)?;
+    let plaintext = crypto::decrypt(encryption_key, nonce, ciphertext, &aad)?;
     serde_json::from_slice(&plaintext)
         .map_err(|e| crypto::CryptoError::Decrypt(format!("json: {}", e)))
 }
@@ -512,9 +579,11 @@ pub fn decrypt_clipboard_meta(
 pub fn encrypt_clipboard_payload(
     data: &[u8],
     encryption_key: &[u8; 32],
+    envelope_body: &ObjectEnvelopeBodyV1,
+    payload_id: ObjectPayloadId,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
-    let (nonce, ciphertext) =
-        crypto::encrypt(encryption_key, data, crypto::AAD_CLIPBOARD_PAYLOAD_V1)?;
+    let aad = crypto::object_payload_aad_v1(envelope_body, payload_id)?;
+    let (nonce, ciphertext) = crypto::encrypt(encryption_key, data, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
 
@@ -523,21 +592,20 @@ pub fn decrypt_clipboard_payload(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
+    envelope_body: &ObjectEnvelopeBodyV1,
+    payload_id: ObjectPayloadId,
 ) -> Result<Vec<u8>, crypto::CryptoError> {
-    crypto::decrypt(
-        encryption_key,
-        nonce,
-        ciphertext,
-        crypto::AAD_CLIPBOARD_PAYLOAD_V1,
-    )
+    let aad = crypto::object_payload_aad_v1(envelope_body, payload_id)?;
+    crypto::decrypt(encryption_key, nonce, ciphertext, &aad)
 }
 
 /// Encrypt file metadata for upload.
 pub fn encrypt_file_meta(
     meta: &FileMeta,
     encryption_key: &[u8; 32],
+    envelope_body: &ObjectEnvelopeBodyV1,
 ) -> Result<(String, String), crypto::CryptoError> {
-    let (nonce, ciphertext) = encrypt_file_meta_bytes(meta, encryption_key)?;
+    let (nonce, ciphertext) = encrypt_file_meta_bytes(meta, encryption_key, envelope_body)?;
     Ok((B64.encode(nonce), B64.encode(ciphertext)))
 }
 
@@ -545,10 +613,12 @@ pub fn encrypt_file_meta(
 pub fn encrypt_file_meta_bytes(
     meta: &FileMeta,
     encryption_key: &[u8; 32],
+    envelope_body: &ObjectEnvelopeBodyV1,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
     let json = serde_json::to_vec(meta)
         .map_err(|e| crypto::CryptoError::Encrypt(format!("json: {}", e)))?;
-    let (nonce, ciphertext) = crypto::encrypt(encryption_key, &json, crypto::AAD_FILE_META_V1)?;
+    let aad = crypto::object_meta_aad_v1(envelope_body)?;
+    let (nonce, ciphertext) = crypto::encrypt(encryption_key, &json, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
 
@@ -557,6 +627,7 @@ pub fn decrypt_file_meta(
     nonce_b64: &str,
     ciphertext_b64: &str,
     encryption_key: &[u8; 32],
+    envelope_body: &ObjectEnvelopeBodyV1,
 ) -> Result<FileMeta, crypto::CryptoError> {
     let nonce = B64
         .decode(nonce_b64)
@@ -564,12 +635,8 @@ pub fn decrypt_file_meta(
     let ciphertext = B64
         .decode(ciphertext_b64)
         .map_err(|e| crypto::CryptoError::Decrypt(format!("ciphertext decode: {}", e)))?;
-    let plaintext = crypto::decrypt(
-        encryption_key,
-        &nonce,
-        &ciphertext,
-        crypto::AAD_FILE_META_V1,
-    )?;
+    let aad = crypto::object_meta_aad_v1(envelope_body)?;
+    let plaintext = crypto::decrypt(encryption_key, &nonce, &ciphertext, &aad)?;
     decode_file_meta_plaintext(&plaintext)
 }
 
@@ -578,8 +645,10 @@ pub fn decrypt_file_meta_bytes(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
+    envelope_body: &ObjectEnvelopeBodyV1,
 ) -> Result<FileMeta, crypto::CryptoError> {
-    let plaintext = crypto::decrypt(encryption_key, nonce, ciphertext, crypto::AAD_FILE_META_V1)?;
+    let aad = crypto::object_meta_aad_v1(envelope_body)?;
+    let plaintext = crypto::decrypt(encryption_key, nonce, ciphertext, &aad)?;
     decode_file_meta_plaintext(&plaintext)
 }
 
@@ -592,8 +661,11 @@ fn decode_file_meta_plaintext(plaintext: &[u8]) -> Result<FileMeta, crypto::Cryp
 pub fn encrypt_file_blob(
     data: &[u8],
     encryption_key: &[u8; 32],
+    envelope_body: &ObjectEnvelopeBodyV1,
+    payload_id: ObjectPayloadId,
 ) -> Result<(String, Vec<u8>), crypto::CryptoError> {
-    let (nonce, ciphertext) = encrypt_file_blob_bytes(data, encryption_key)?;
+    let (nonce, ciphertext) =
+        encrypt_file_blob_bytes(data, encryption_key, envelope_body, payload_id)?;
     Ok((B64.encode(nonce), ciphertext))
 }
 
@@ -601,8 +673,11 @@ pub fn encrypt_file_blob(
 pub fn encrypt_file_blob_bytes(
     data: &[u8],
     encryption_key: &[u8; 32],
+    envelope_body: &ObjectEnvelopeBodyV1,
+    payload_id: ObjectPayloadId,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
-    let (nonce, ciphertext) = crypto::encrypt(encryption_key, data, crypto::AAD_FILE_BLOB_V1)?;
+    let aad = crypto::object_payload_aad_v1(envelope_body, payload_id)?;
+    let (nonce, ciphertext) = crypto::encrypt(encryption_key, data, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
 
@@ -611,11 +686,19 @@ pub fn decrypt_file_blob(
     nonce_b64: &str,
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
+    envelope_body: &ObjectEnvelopeBodyV1,
+    payload_id: ObjectPayloadId,
 ) -> Result<Vec<u8>, crypto::CryptoError> {
     let nonce = B64
         .decode(nonce_b64)
         .map_err(|e| crypto::CryptoError::Decrypt(format!("nonce decode: {}", e)))?;
-    decrypt_file_blob_bytes(&nonce, ciphertext, encryption_key)
+    decrypt_file_blob_bytes(
+        &nonce,
+        ciphertext,
+        encryption_key,
+        envelope_body,
+        payload_id,
+    )
 }
 
 /// Decrypt file blob data from object bytes.
@@ -623,8 +706,11 @@ pub fn decrypt_file_blob_bytes(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
+    envelope_body: &ObjectEnvelopeBodyV1,
+    payload_id: ObjectPayloadId,
 ) -> Result<Vec<u8>, crypto::CryptoError> {
-    crypto::decrypt(encryption_key, nonce, ciphertext, crypto::AAD_FILE_BLOB_V1)
+    let aad = crypto::object_payload_aad_v1(envelope_body, payload_id)?;
+    crypto::decrypt(encryption_key, nonce, ciphertext, &aad)
 }
 
 // ── Errors ──
@@ -643,6 +729,68 @@ pub enum ClientError {
     LocalStore(String),
     #[error("{0}")]
     Other(String),
+}
+
+#[cfg(test)]
+mod crypto_tests {
+    use super::*;
+
+    fn envelope_body(object_id: uuid::Uuid, payload_id: uuid::Uuid) -> ObjectEnvelopeBodyV1 {
+        ObjectEnvelopeBodyV1 {
+            object_id: object_id.into(),
+            object_type: ObjectKind::File,
+            object_version: 1,
+            source_device_id: uuid::Uuid::now_v7().into(),
+            created_at: "2026-05-31T00:00:00Z".into(),
+            operation: ObjectEnvelopeOperation::Create,
+            meta_nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
+            sha256_meta_ciphertext: vec![0_u8; crypto::SHA256_BYTES],
+            payloads: vec![ObjectEnvelopePayloadV1 {
+                id: payload_id.into(),
+                nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
+                ciphertext_size: 0,
+                sha256_ciphertext: vec![0_u8; crypto::SHA256_BYTES],
+            }],
+        }
+    }
+
+    #[test]
+    fn file_blob_decrypt_rejects_swapped_object_context() {
+        let key = [7_u8; 32];
+        let payload_a = uuid::Uuid::now_v7();
+        let payload_b = uuid::Uuid::now_v7();
+        let body_a = envelope_body(uuid::Uuid::now_v7(), payload_a);
+        let body_b = envelope_body(uuid::Uuid::now_v7(), payload_b);
+
+        let (nonce, ciphertext) =
+            encrypt_file_blob_bytes(b"secret file", &key, &body_a, payload_a.into())
+                .expect("encrypt");
+
+        assert!(
+            decrypt_file_blob_bytes(&nonce, &ciphertext, &key, &body_b, payload_b.into()).is_err(),
+            "ciphertext from object A must not decrypt as object B"
+        );
+    }
+
+    #[test]
+    fn file_metadata_decrypt_rejects_different_payload_set() {
+        let key = [9_u8; 32];
+        let object_id = uuid::Uuid::now_v7();
+        let body_a = envelope_body(object_id, uuid::Uuid::now_v7());
+        let body_b = envelope_body(object_id, uuid::Uuid::now_v7());
+        let meta = FileMeta {
+            filename: "notes.txt".into(),
+            mime_type: "text/plain".into(),
+            size: Some(12),
+        };
+
+        let (nonce, ciphertext) = encrypt_file_meta_bytes(&meta, &key, &body_a).expect("encrypt");
+
+        assert!(
+            decrypt_file_meta_bytes(&nonce, &ciphertext, &key, &body_b).is_err(),
+            "metadata must be bound to the payload set it describes"
+        );
+    }
 }
 
 impl ClientError {
@@ -670,26 +818,72 @@ mod tests {
 
     #[test]
     fn server_url_allows_loopback_http() {
-        assert!(validate_server_url("http://127.0.0.1:8787").is_ok());
-        assert!(validate_server_url("http://[::1]:8787").is_ok());
-        assert!(validate_server_url("http://localhost:8787").is_ok());
+        assert!(parse_server_url("http://127.0.0.1:8787").is_ok());
+        assert!(parse_server_url("http://[::1]:8787").is_ok());
+        assert!(parse_server_url("http://localhost:8787").is_ok());
     }
 
     #[test]
     fn server_url_allows_android_emulator_host_http() {
-        assert!(validate_server_url("http://10.0.2.2:8787").is_ok());
-        assert!(validate_server_url("http://10.0.3.2:8787").is_ok());
+        assert!(parse_server_url("http://10.0.2.2:8787").is_ok());
+        assert!(parse_server_url("http://10.0.3.2:8787").is_ok());
     }
 
     #[test]
     fn server_url_rejects_non_loopback_http() {
-        assert!(validate_server_url("http://example.com").is_err());
-        assert!(validate_server_url("http://192.168.1.5:8787").is_err());
+        assert!(parse_server_url("http://example.com").is_err());
+        assert!(parse_server_url("http://192.168.1.5:8787").is_err());
     }
 
     #[test]
     fn server_url_rejects_embedded_credentials() {
-        assert!(validate_server_url("https://user:pass@example.com").is_err());
+        assert!(parse_server_url("https://user:pass@example.com").is_err());
+    }
+
+    #[test]
+    fn server_url_rejects_query_and_fragment() {
+        assert!(parse_server_url("https://example.com?debug=true").is_err());
+        assert!(parse_server_url("https://example.com#clipper").is_err());
+    }
+
+    #[test]
+    fn api_url_preserves_base_path_and_encodes_segments() {
+        let client = ApiClient::new("https://example.com/clipper/");
+        let url = client
+            .api_url(&["objects", "object/with/slashes", "payloads", "payload id"])
+            .expect("api URL");
+
+        assert_eq!(
+            url.as_str(),
+            "https://example.com/clipper/api/objects/object%2Fwith%2Fslashes/payloads/payload%20id"
+        );
+    }
+
+    #[test]
+    fn api_url_handles_root_base_without_double_slash() {
+        let client = ApiClient::new("https://example.com/");
+
+        assert_eq!(
+            client.api_url(&["health"]).expect("api URL").as_str(),
+            "https://example.com/api/health"
+        );
+    }
+
+    #[test]
+    fn base_url_display_omits_trailing_root_slash() {
+        let client = ApiClient::new("https://example.com/");
+
+        assert_eq!(client.base_url_display(), "https://example.com");
+    }
+
+    #[test]
+    fn websocket_url_uses_ws_scheme_and_api_path() {
+        let client = ApiClient::new("https://example.com/clipper");
+
+        assert_eq!(
+            client.websocket_url().expect("websocket URL").as_str(),
+            "wss://example.com/clipper/api/ws"
+        );
     }
 
     #[test]

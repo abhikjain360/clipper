@@ -8,11 +8,11 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 use clipper_core::{
-    crypto::SHA256_BYTES,
+    crypto::{self, SHA256_BYTES},
     models::{
-        ApiErrorCode, ObjectCompleteRequest, ObjectInitRequest, ObjectInitResponse, ObjectKind,
-        ObjectListItem, ObjectListResponse, ObjectPayloadDescriptor, ObjectPayloadUpload,
-        OkResponse,
+        ApiErrorCode, ObjectCompleteRequest, ObjectEnvelopeOperation, ObjectInitRequest,
+        ObjectInitResponse, ObjectKind, ObjectListItem, ObjectListResponse,
+        ObjectPayloadDescriptor, ObjectPayloadInit, ObjectPayloadUpload, OkResponse,
     },
 };
 use clipper_fs_txn::FsTransaction;
@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::AuthInfo,
-    entity::{event_log, object_payloads, objects},
+    entity::{devices, event_log, object_payloads, objects},
     routes::{ApiError, Postcard, with_txn},
     state::AppState,
     ws::WsBroadcast,
@@ -69,6 +69,15 @@ pub async fn init_object(
             ));
         }
     }
+
+    validate_object_init_envelope(&state, auth.user_id, auth.device_id, &req).await?;
+    let envelope_bytes = postcard::to_allocvec(&req.envelope).map_err(|e| {
+        error!(object_id = %object_id, error = %e, "Failed to encode object envelope");
+        ApiError::from_code_with_message(
+            ApiErrorCode::InvalidObjectEnvelope,
+            "Invalid object envelope",
+        )
+    })?;
 
     if objects::Entity::find_by_id(object_id)
         .select_only()
@@ -127,10 +136,23 @@ pub async fn init_object(
     }
     let all_inline = all_inline;
 
-    let now = Utc::now().to_rfc3339();
+    let created_at = req.envelope.body.created_at.clone();
+    chrono::DateTime::parse_from_rfc3339(&created_at).map_err(|e| {
+        debug!(
+            object_id = %object_id,
+            created_at = %created_at,
+            error = %e,
+            "Rejected object envelope with invalid created_at",
+        );
+        ApiError::from_code_with_message(
+            ApiErrorCode::InvalidObjectEnvelope,
+            "Invalid object envelope created_at",
+        )
+    })?;
+    let updated_at = Utc::now().to_rfc3339();
     let expires_at = match req.kind {
         ObjectKind::Clipboard => {
-            let created = chrono::DateTime::parse_from_rfc3339(&now).ok();
+            let created = chrono::DateTime::parse_from_rfc3339(&created_at).ok();
             created.map(|created| {
                 (created + Duration::days(state.config().clipboard.ttl_days)).to_rfc3339()
             })
@@ -164,8 +186,8 @@ pub async fn init_object(
                 nonce: Set(payload.nonce.clone()),
                 ciphertext_size: Set(payload.ciphertext_size),
                 sha256_ciphertext: Set(payload.sha256_ciphertext.clone()),
-                created_at: Set(now.clone()),
-                updated_at: Set(now.clone()),
+                created_at: Set(created_at.clone()),
+                updated_at: Set(updated_at.clone()),
                 status: Set(if payload.inline_ciphertext.is_some() {
                     "complete"
                 } else {
@@ -176,7 +198,8 @@ pub async fn init_object(
         })
         .collect();
 
-    let now_str = now.as_str();
+    let created_at_str = created_at.as_str();
+    let updated_at_str = updated_at.as_str();
     let state_ref = &state;
     let inserted_event = with_txn(state.db(), "init_object", async move |txn| {
         let object = objects::ActiveModel {
@@ -185,10 +208,11 @@ pub async fn init_object(
             kind: Set(kind.to_string()),
             meta_ciphertext: Set(req.meta_ciphertext),
             meta_nonce: Set(req.meta_nonce),
-            created_at: Set(now_str.to_owned()),
-            updated_at: Set(now_str.to_owned()),
+            created_at: Set(created_at_str.to_owned()),
+            updated_at: Set(updated_at_str.to_owned()),
             expires_at: Set(expires_at),
             source_device_id: Set(device_id),
+            envelope: Set(envelope_bytes),
             status: Set(if all_inline { "complete" } else { "pending" }.into()),
         };
         object.insert(txn).await.map_err(|e| match e.sql_err() {
@@ -235,7 +259,7 @@ pub async fn init_object(
                 user_id,
                 kind,
                 object_id,
-                now_str,
+                created_at_str,
                 state_ref.next_event_seq(),
             )
             .await?;
@@ -250,7 +274,14 @@ pub async fn init_object(
     staged.commit();
 
     if let Some(inserted) = inserted_event {
-        broadcast_created(&state, user_id, inserted.seq, kind, &object_id_text, &now);
+        broadcast_created(
+            &state,
+            user_id,
+            inserted.seq,
+            kind,
+            &object_id_text,
+            &created_at,
+        );
         if kind == ObjectKind::Clipboard {
             spawn_clipboard_trim(state.clone(), user_id);
         }
@@ -693,6 +724,7 @@ struct ListedObjectRow {
     meta_nonce: Vec<u8>,
     created_at: String,
     source_device_id: Uuid,
+    envelope: Vec<u8>,
 }
 
 #[derive(Debug, DerivePartialModel)]
@@ -805,8 +837,55 @@ pub async fn list_objects(
             .push(payload);
     }
 
+    let source_device_ids: Vec<Uuid> = objects
+        .iter()
+        .map(|object| object.source_device_id)
+        .collect();
+    let device_public_keys = if source_device_ids.is_empty() {
+        HashMap::new()
+    } else {
+        devices::Entity::find()
+            .filter(devices::Column::Id.is_in(source_device_ids))
+            .filter(devices::Column::UserId.eq(auth.user_id))
+            .select_only()
+            .column(devices::Column::Id)
+            .column(devices::Column::SigningPublicKey)
+            .into_tuple::<(Uuid, Vec<u8>)>()
+            .all(state.db())
+            .await
+            .map_err(|e| {
+                error!(
+                    user_id = %auth.user_id,
+                    error = %e,
+                    "Failed to load source device signing keys while listing objects",
+                );
+                ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+            })?
+            .into_iter()
+            .collect::<HashMap<_, _>>()
+    };
+
     let mut items = Vec::with_capacity(objects.len());
     for object in &objects {
+        let envelope = postcard::from_bytes(&object.envelope).map_err(|e| {
+            error!(
+                object_id = %object.id,
+                error = %e,
+                "Stored object envelope could not be decoded",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+        let source_device_signing_public_key = device_public_keys
+            .get(&object.source_device_id)
+            .cloned()
+            .ok_or_else(|| {
+                error!(
+                    object_id = %object.id,
+                    source_device_id = %object.source_device_id,
+                    "Object source device row is missing while listing objects",
+                );
+                ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+            })?;
         items.push(ObjectListItem {
             id: object.id.into(),
             kind: object.kind.parse().map_err(|_| {
@@ -832,6 +911,8 @@ pub async fn list_objects(
                 .collect(),
             created_at: object.created_at.clone(),
             source_device_id: object.source_device_id.into(),
+            source_device_signing_public_key,
+            envelope,
         });
     }
 
@@ -1078,6 +1159,147 @@ pub async fn delete_object(
     });
 
     Ok(Postcard(OkResponse { ok: true }))
+}
+
+async fn validate_object_init_envelope(
+    state: &AppState,
+    user_id: Uuid,
+    device_id: Uuid,
+    req: &ObjectInitRequest,
+) -> Result<(), ApiError> {
+    let body = &req.envelope.body;
+    let object_id = req.id.into_uuid();
+    if body.object_id != req.id
+        || body.object_type != req.kind
+        || body.object_version != 1
+        || body.source_device_id.into_uuid() != device_id
+        || body.operation != ObjectEnvelopeOperation::Create
+        || body.meta_nonce != req.meta_nonce
+    {
+        debug!(
+            object_id = %object_id,
+            device_id = %device_id,
+            "Rejected object init with envelope fields that do not match request context",
+        );
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::InvalidObjectEnvelope,
+            "Object envelope does not match request",
+        ));
+    }
+
+    let meta_hash = crypto::sha256(&req.meta_ciphertext);
+    if body.sha256_meta_ciphertext.as_slice() != meta_hash.as_slice() {
+        debug!(
+            object_id = %object_id,
+            "Rejected object init with metadata hash mismatch in envelope",
+        );
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::InvalidObjectEnvelope,
+            "Object envelope metadata hash mismatch",
+        ));
+    }
+
+    let mut payloads_by_id = HashMap::new();
+    for payload in &req.payloads {
+        if payloads_by_id.insert(payload.id, payload).is_some() {
+            debug!(
+                object_id = %object_id,
+                payload_id = %payload.id,
+                "Rejected object init with duplicate payload id",
+            );
+            return Err(ApiError::from_code_with_message(
+                ApiErrorCode::DuplicateObjectPayloadId,
+                "Duplicate object payload id",
+            ));
+        }
+    }
+    if body.payloads.len() != payloads_by_id.len() {
+        debug!(
+            object_id = %object_id,
+            request_payloads = payloads_by_id.len(),
+            envelope_payloads = body.payloads.len(),
+            "Rejected object init with mismatched envelope payload count",
+        );
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::InvalidObjectEnvelope,
+            "Object envelope payload set mismatch",
+        ));
+    }
+
+    for envelope_payload in &body.payloads {
+        let Some(payload) = payloads_by_id.remove(&envelope_payload.id) else {
+            debug!(
+                object_id = %object_id,
+                payload_id = %envelope_payload.id,
+                "Rejected object init with envelope payload missing from request",
+            );
+            return Err(ApiError::from_code_with_message(
+                ApiErrorCode::InvalidObjectEnvelope,
+                "Object envelope payload set mismatch",
+            ));
+        };
+        validate_envelope_payload(object_id, payload, envelope_payload)?;
+    }
+
+    let public_key = devices::Entity::find_by_id(device_id)
+        .filter(devices::Column::UserId.eq(user_id))
+        .select_only()
+        .column(devices::Column::SigningPublicKey)
+        .into_tuple::<Vec<u8>>()
+        .one(state.db())
+        .await
+        .map_err(|e| {
+            error!(
+                device_id = %device_id,
+                user_id = %user_id,
+                error = %e,
+                "Failed to load device signing key for object envelope validation",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?
+        .ok_or_else(|| {
+            warn!(
+                device_id = %device_id,
+                user_id = %user_id,
+                "Authenticated session references missing device row",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Unauthorized, "Unauthorized")
+        })?;
+
+    crypto::verify_object_envelope_signature(&public_key, &req.envelope).map_err(|e| {
+        warn!(
+            object_id = %object_id,
+            device_id = %device_id,
+            error = %e,
+            "Rejected object init with invalid envelope signature",
+        );
+        ApiError::from_code_with_message(
+            ApiErrorCode::InvalidObjectEnvelope,
+            "Invalid object envelope signature",
+        )
+    })
+}
+
+fn validate_envelope_payload(
+    object_id: Uuid,
+    payload: &ObjectPayloadInit,
+    envelope_payload: &clipper_core::models::ObjectEnvelopePayloadV1,
+) -> Result<(), ApiError> {
+    if envelope_payload.nonce != payload.nonce
+        || envelope_payload.ciphertext_size != payload.ciphertext_size
+        || envelope_payload.sha256_ciphertext != payload.sha256_ciphertext
+    {
+        debug!(
+            object_id = %object_id,
+            payload_id = %payload.id,
+            "Rejected object init with envelope payload metadata mismatch",
+        );
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::InvalidObjectEnvelope,
+            "Object envelope payload metadata mismatch",
+        ));
+    }
+    Ok(())
 }
 
 async fn object_for_upload(
@@ -1391,8 +1613,11 @@ async fn remove_paths(paths: Vec<std::path::PathBuf>) {
 mod tests {
     use axum::{body::to_bytes, http::StatusCode};
     use clipper_core::{
-        crypto::{XCHACHA20_NONCE_BYTES, sha256},
-        models::{ObjectPayloadComplete, ObjectPayloadInit},
+        crypto::{self, XCHACHA20_NONCE_BYTES, sha256},
+        models::{
+            ObjectEnvelopeBodyV1, ObjectEnvelopeOperation, ObjectEnvelopePayloadV1,
+            ObjectEnvelopeV1, ObjectPayloadComplete, ObjectPayloadInit,
+        },
     };
     use sea_orm::Database;
     use tempfile::TempDir;
@@ -1465,13 +1690,20 @@ mod tests {
         user_id
     }
 
-    async fn insert_device(state: &AppState, user_id: Uuid, id: Uuid) {
+    async fn insert_device(
+        state: &AppState,
+        user_id: Uuid,
+        id: Uuid,
+    ) -> [u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES] {
         let now = Utc::now().to_rfc3339();
+        let signing_secret_key = crypto::generate_device_signing_secret_key();
+        let signing_public_key = crypto::device_signing_public_key(&signing_secret_key);
         devices::ActiveModel {
             id: Set(id),
             user_id: Set(user_id),
             name: Set("test-device".into()),
             platform: Set("test".into()),
+            signing_public_key: Set(signing_public_key.to_vec()),
             created_at: Set(now.clone()),
             updated_at: Set(now.clone()),
             last_seen_at: Set(now),
@@ -1479,6 +1711,7 @@ mod tests {
         .insert(state.db())
         .await
         .expect("insert device");
+        signing_secret_key
     }
 
     fn init_request(
@@ -1487,25 +1720,75 @@ mod tests {
         kind: ObjectKind,
         ciphertext: &[u8],
         inline: bool,
+        device_id: Uuid,
+        signing_secret_key: &[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
     ) -> ObjectInitRequest {
+        let meta_nonce = vec![1_u8; XCHACHA20_NONCE_BYTES];
+        let meta_ciphertext = b"encrypted metadata".to_vec();
+        let payload_nonce = vec![2_u8; XCHACHA20_NONCE_BYTES];
+        let payload_hash = sha256(ciphertext).to_vec();
+        let envelope = signed_envelope(
+            object_id.parse().expect("object id"),
+            kind,
+            meta_nonce.clone(),
+            &meta_ciphertext,
+            vec![ObjectEnvelopePayloadV1 {
+                id: payload_id.parse().expect("payload id"),
+                nonce: payload_nonce.clone(),
+                ciphertext_size: ciphertext.len() as i64,
+                sha256_ciphertext: payload_hash.clone(),
+            }],
+            device_id,
+            signing_secret_key,
+        );
         ObjectInitRequest {
             id: object_id.parse().expect("object id"),
             kind,
-            meta_nonce: vec![1_u8; XCHACHA20_NONCE_BYTES],
-            meta_ciphertext: b"encrypted metadata".to_vec(),
+            meta_nonce,
+            meta_ciphertext,
             payloads: vec![ObjectPayloadInit {
                 id: payload_id.parse().expect("payload id"),
-                nonce: vec![2_u8; XCHACHA20_NONCE_BYTES],
+                nonce: payload_nonce,
                 ciphertext_size: ciphertext.len() as i64,
-                sha256_ciphertext: sha256(ciphertext).to_vec(),
+                sha256_ciphertext: payload_hash,
                 inline_ciphertext: inline.then(|| ciphertext.to_vec()),
             }],
+            envelope,
+        }
+    }
+
+    fn signed_envelope(
+        object_id: clipper_core::models::ObjectId,
+        kind: ObjectKind,
+        meta_nonce: Vec<u8>,
+        meta_ciphertext: &[u8],
+        payloads: Vec<ObjectEnvelopePayloadV1>,
+        device_id: Uuid,
+        signing_secret_key: &[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
+    ) -> ObjectEnvelopeV1 {
+        let body = ObjectEnvelopeBodyV1 {
+            object_id,
+            object_type: kind,
+            object_version: 1,
+            source_device_id: device_id.into(),
+            created_at: Utc::now().to_rfc3339(),
+            operation: ObjectEnvelopeOperation::Create,
+            meta_nonce,
+            sha256_meta_ciphertext: sha256(meta_ciphertext).to_vec(),
+            payloads,
+        };
+        ObjectEnvelopeV1 {
+            signature: crypto::sign_object_envelope_body(signing_secret_key, &body)
+                .expect("sign envelope"),
+            body,
         }
     }
 
     #[tokio::test]
     async fn init_rejects_wrong_payload_nonce_length_before_writing() {
         let (_state, data_dir) = test_state().await;
+        let device_id = Uuid::now_v7();
+        let signing_secret_key = crypto::generate_device_signing_secret_key();
         let object_id = Uuid::now_v7().to_string();
         let payload_id = Uuid::now_v7().to_string();
         let mut req = init_request(
@@ -1514,6 +1797,8 @@ mod tests {
             ObjectKind::Clipboard,
             b"payload",
             true,
+            device_id,
+            &signing_secret_key,
         );
         req.payloads[0].nonce = vec![2_u8; 12];
 
@@ -1532,6 +1817,8 @@ mod tests {
     #[tokio::test]
     async fn init_rejects_wrong_payload_sha256_length_before_writing() {
         let (_state, data_dir) = test_state().await;
+        let device_id = Uuid::now_v7();
+        let signing_secret_key = crypto::generate_device_signing_secret_key();
         let object_id = Uuid::now_v7().to_string();
         let payload_id = Uuid::now_v7().to_string();
         let mut req = init_request(
@@ -1540,6 +1827,8 @@ mod tests {
             ObjectKind::Clipboard,
             b"payload",
             true,
+            device_id,
+            &signing_secret_key,
         );
         req.payloads[0].sha256_ciphertext = vec![3_u8; SHA256_BYTES - 1];
 
@@ -1560,7 +1849,7 @@ mod tests {
         let (state, _data_dir) = test_state().await;
         let user_id = insert_user(&state).await;
         let device_id = Uuid::now_v7();
-        insert_device(&state, user_id, device_id).await;
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
         let object_id = Uuid::now_v7().to_string();
         let payload_id = Uuid::now_v7().to_string();
         let ciphertext = b"encrypted clipboard payload";
@@ -1574,6 +1863,8 @@ mod tests {
                 ObjectKind::Clipboard,
                 ciphertext,
                 true,
+                device_id,
+                &signing_secret_key,
             )),
         )
         .await
@@ -1612,24 +1903,45 @@ mod tests {
         let (state, _data_dir) = test_state().await;
         let user_id = insert_user(&state).await;
         let device_id = Uuid::now_v7();
-        insert_device(&state, user_id, device_id).await;
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
         let object_id = Uuid::now_v7().to_string();
+        let object_id_typed = object_id.parse().expect("object id");
         let object_uuid = object_id.parse::<Uuid>().expect("object id");
         let first_payload_id = Uuid::now_v7();
         let second_payload_id = Uuid::now_v7();
+        let meta_nonce = vec![1_u8; XCHACHA20_NONCE_BYTES];
+        let meta_ciphertext = b"encrypted metadata".to_vec();
         let payloads = [
             (first_payload_id, b"first encrypted payload".to_vec()),
             (second_payload_id, b"second encrypted payload".to_vec()),
         ];
+        let envelope_payloads = payloads
+            .iter()
+            .map(|(id, ciphertext)| ObjectEnvelopePayloadV1 {
+                id: (*id).into(),
+                nonce: vec![2_u8; XCHACHA20_NONCE_BYTES],
+                ciphertext_size: ciphertext.len() as i64,
+                sha256_ciphertext: sha256(ciphertext).to_vec(),
+            })
+            .collect::<Vec<_>>();
+        let envelope = signed_envelope(
+            object_id_typed,
+            ObjectKind::Clipboard,
+            meta_nonce.clone(),
+            &meta_ciphertext,
+            envelope_payloads,
+            device_id,
+            &signing_secret_key,
+        );
 
         let Postcard(resp) = init_object(
             State(state.clone()),
             Extension(auth(user_id, device_id)),
             postcard(ObjectInitRequest {
-                id: object_id.parse().expect("object id"),
+                id: object_id_typed,
                 kind: ObjectKind::Clipboard,
-                meta_nonce: vec![1_u8; XCHACHA20_NONCE_BYTES],
-                meta_ciphertext: b"encrypted metadata".to_vec(),
+                meta_nonce,
+                meta_ciphertext,
                 payloads: payloads
                     .iter()
                     .map(|(id, ciphertext)| ObjectPayloadInit {
@@ -1640,6 +1952,7 @@ mod tests {
                         inline_ciphertext: Some(ciphertext.clone()),
                     })
                     .collect(),
+                envelope,
             }),
         )
         .await
@@ -1673,25 +1986,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_maps_batched_duplicate_payload_insert_to_duplicate_payload_error() {
+    async fn init_rejects_duplicate_payload_id_before_insert() {
         let (state, _data_dir) = test_state().await;
         let user_id = insert_user(&state).await;
         let device_id = Uuid::now_v7();
-        insert_device(&state, user_id, device_id).await;
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
         let object_id = Uuid::now_v7();
         let payload_id = Uuid::now_v7();
         let ciphertext = b"encrypted file payload";
+        let meta_nonce = vec![1_u8; XCHACHA20_NONCE_BYTES];
+        let meta_ciphertext = b"encrypted metadata".to_vec();
+        let envelope = signed_envelope(
+            object_id.into(),
+            ObjectKind::File,
+            meta_nonce.clone(),
+            &meta_ciphertext,
+            vec![ObjectEnvelopePayloadV1 {
+                id: payload_id.into(),
+                nonce: vec![2_u8; XCHACHA20_NONCE_BYTES],
+                ciphertext_size: ciphertext.len() as i64,
+                sha256_ciphertext: sha256(ciphertext).to_vec(),
+            }],
+            device_id,
+            &signing_secret_key,
+        );
 
-        // Bypass request validation to cover the DB-error mapping branch used
-        // when a batched insert trips the object_payloads uniqueness constraint.
+        // Bypass request validation to cover route-level duplicate detection.
         let result = init_object(
             State(state.clone()),
             Extension(auth(user_id, device_id)),
             Postcard(ObjectInitRequest {
                 id: object_id.into(),
                 kind: ObjectKind::File,
-                meta_nonce: vec![1_u8; XCHACHA20_NONCE_BYTES],
-                meta_ciphertext: b"encrypted metadata".to_vec(),
+                meta_nonce,
+                meta_ciphertext,
                 payloads: vec![
                     ObjectPayloadInit {
                         id: payload_id.into(),
@@ -1708,6 +2036,7 @@ mod tests {
                         inline_ciphertext: None,
                     },
                 ],
+                envelope,
             }),
         )
         .await;
@@ -1748,7 +2077,7 @@ mod tests {
         let (state, _data_dir) = test_state().await;
         let user_id = insert_user(&state).await;
         let device_id = Uuid::now_v7();
-        insert_device(&state, user_id, device_id).await;
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
         let object_id = Uuid::now_v7().to_string();
         let payload_id = Uuid::now_v7().to_string();
         let ciphertext = b"encrypted file payload";
@@ -1762,6 +2091,8 @@ mod tests {
                 ObjectKind::File,
                 ciphertext,
                 false,
+                device_id,
+                &signing_secret_key,
             )),
         )
         .await
@@ -1814,7 +2145,7 @@ mod tests {
         let (state, data_dir) = test_state().await;
         let user_id = insert_user(&state).await;
         let device_id = Uuid::now_v7();
-        insert_device(&state, user_id, device_id).await;
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
         let object_id = Uuid::now_v7().to_string();
         let payload_id = Uuid::now_v7().to_string();
 
@@ -1827,6 +2158,8 @@ mod tests {
                 ObjectKind::Clipboard,
                 b"ok",
                 false,
+                device_id,
+                &signing_secret_key,
             )),
         )
         .await
@@ -1866,7 +2199,7 @@ mod tests {
         .expect("state");
         let user_id = insert_user(&state).await;
         let device_id = Uuid::now_v7();
-        insert_device(&state, user_id, device_id).await;
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
 
         let object_id = Uuid::now_v7().to_string();
         let payload_id = Uuid::now_v7().to_string();
@@ -1878,6 +2211,8 @@ mod tests {
             ObjectKind::File,
             b"123456789",
             false,
+            device_id,
+            &signing_secret_key,
         );
 
         let result = init_object(
@@ -1902,7 +2237,7 @@ mod tests {
         let (state, _data_dir) = test_state().await;
         let user_id = insert_user(&state).await;
         let device_id = Uuid::now_v7();
-        insert_device(&state, user_id, device_id).await;
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
 
         let clip_object_id = Uuid::now_v7().to_string();
         let clip_payload_id = Uuid::now_v7().to_string();
@@ -1915,6 +2250,8 @@ mod tests {
                 ObjectKind::Clipboard,
                 b"clip",
                 true,
+                device_id,
+                &signing_secret_key,
             )),
         )
         .await
@@ -1931,6 +2268,8 @@ mod tests {
                 ObjectKind::File,
                 b"file",
                 true,
+                device_id,
+                &signing_secret_key,
             )),
         )
         .await
@@ -1964,7 +2303,7 @@ mod tests {
         let (state, data_dir) = test_state_with_max_items(2).await;
         let user_id = insert_user(&state).await;
         let device_id = Uuid::now_v7();
-        insert_device(&state, user_id, device_id).await;
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
 
         let mut ids = Vec::new();
         for i in 0_u8..4 {
@@ -1979,6 +2318,8 @@ mod tests {
                     ObjectKind::Clipboard,
                     &[i; 8],
                     true,
+                    device_id,
+                    &signing_secret_key,
                 )),
             )
             .await

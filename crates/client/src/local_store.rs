@@ -10,13 +10,24 @@ use std::{path::PathBuf, sync::RwLock};
 #[cfg(target_family = "wasm")]
 use base64::Engine;
 use clipper_app_types::DecryptedClipboardItem;
+use clipper_core::crypto;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_family = "wasm"))]
+use tokio::io::AsyncWriteExt;
+use zeroize::Zeroizing;
 
 #[cfg(target_family = "wasm")]
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 const DEFAULT_PROFILE: &str = "default";
+const DEVICE_IDENTITY_FILE: &str = "device-identity-v1.json";
 #[cfg(target_family = "wasm")]
 const BROWSER_INDEX_LIMIT: usize = 1_000;
+
+#[derive(Debug, Clone)]
+pub struct DeviceSigningIdentity {
+    pub device_id: Option<String>,
+    pub signing_secret_key: Zeroizing<[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]>,
+}
 
 #[derive(Debug)]
 pub struct LocalStore {
@@ -65,6 +76,22 @@ impl LocalStore {
     pub async fn clipboard_payload(&self, id: &str) -> Result<Option<Vec<u8>>, LocalStoreError> {
         let item_id = validate_item_id(id)?;
         self.clipboard_payload_inner(&item_id).await
+    }
+
+    pub async fn load_or_create_device_signing_identity(
+        &self,
+    ) -> Result<DeviceSigningIdentity, LocalStoreError> {
+        self.load_or_create_device_signing_identity_inner().await
+    }
+
+    pub async fn persist_device_signing_identity(
+        &self,
+        identity: &DeviceSigningIdentity,
+    ) -> Result<(), LocalStoreError> {
+        if let Some(device_id) = identity.device_id.as_deref() {
+            validate_device_id(device_id)?;
+        }
+        self.persist_device_signing_identity_inner(identity).await
     }
 
     fn profile_id(&self) -> String {
@@ -162,12 +189,64 @@ impl LocalStore {
         }
     }
 
+    async fn load_or_create_device_signing_identity_inner(
+        &self,
+    ) -> Result<DeviceSigningIdentity, LocalStoreError> {
+        if let Some(record) = self.read_device_identity_record().await? {
+            match device_identity_from_record(record) {
+                Ok(identity) => return Ok(identity),
+                Err(error) => {
+                    tracing::warn!("Replacing invalid local device identity: {}", error);
+                }
+            }
+        }
+
+        let identity = new_device_signing_identity(None);
+        self.write_device_identity(&identity).await?;
+        Ok(identity)
+    }
+
+    async fn persist_device_signing_identity_inner(
+        &self,
+        identity: &DeviceSigningIdentity,
+    ) -> Result<(), LocalStoreError> {
+        self.write_device_identity(identity).await
+    }
+
+    async fn read_device_identity_record(
+        &self,
+    ) -> Result<Option<DeviceIdentityRecord>, LocalStoreError> {
+        let path = self.device_identity_path();
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn write_device_identity(
+        &self,
+        identity: &DeviceSigningIdentity,
+    ) -> Result<(), LocalStoreError> {
+        ensure_private_dir(&self.base_dir).await?;
+        let record = DeviceIdentityRecord {
+            device_id: identity.device_id.clone(),
+            signing_secret_key: identity.signing_secret_key.to_vec(),
+        };
+        let bytes = serde_json::to_vec_pretty(&record)?;
+        write_private_file_atomic(&self.device_identity_path(), &bytes).await
+    }
+
     fn profile_root(&self) -> PathBuf {
         self.base_dir.join(self.profile_id())
     }
 
     fn clipboard_dir(&self) -> PathBuf {
         self.profile_root().join("clipboard")
+    }
+
+    fn device_identity_path(&self) -> PathBuf {
+        self.base_dir.join(DEVICE_IDENTITY_FILE)
     }
 
     async fn read_clipboard_item_from_metadata_path(
@@ -263,6 +342,54 @@ impl LocalStore {
         parse_browser_clipboard_payload(&item_json).map(Some)
     }
 
+    async fn load_or_create_device_signing_identity_inner(
+        &self,
+    ) -> Result<DeviceSigningIdentity, LocalStoreError> {
+        let storage = browser_storage()?;
+        if let Some(json) = storage
+            .get_item(&self.device_identity_key())
+            .map_err(storage_error)?
+        {
+            match serde_json::from_str::<DeviceIdentityRecord>(&json)
+                .map_err(LocalStoreError::from)
+                .and_then(device_identity_from_record)
+            {
+                Ok(identity) => return Ok(identity),
+                Err(error) => {
+                    tracing::warn!("Replacing invalid local device identity: {}", error);
+                }
+            }
+        }
+
+        let identity = new_device_signing_identity(None);
+        self.write_browser_device_identity(&storage, &identity)?;
+        Ok(identity)
+    }
+
+    async fn persist_device_signing_identity_inner(
+        &self,
+        identity: &DeviceSigningIdentity,
+    ) -> Result<(), LocalStoreError> {
+        let storage = browser_storage()?;
+        self.write_browser_device_identity(&storage, identity)
+    }
+
+    fn write_browser_device_identity(
+        &self,
+        storage: &web_sys::Storage,
+        identity: &DeviceSigningIdentity,
+    ) -> Result<(), LocalStoreError> {
+        let record = DeviceIdentityRecord {
+            device_id: identity.device_id.clone(),
+            signing_secret_key: identity.signing_secret_key.to_vec(),
+        };
+        let json = serde_json::to_string(&record)?;
+        storage
+            .set_item(&self.device_identity_key(), &json)
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
     fn prepend_clipboard_index(
         &self,
         storage: &web_sys::Storage,
@@ -311,6 +438,20 @@ impl LocalStore {
     fn clipboard_item_key(&self, item_id: &str) -> String {
         format!("{}.clipboard.{item_id}", self.storage_prefix())
     }
+
+    fn device_identity_key(&self) -> String {
+        format!(
+            "clipper.client.v1.{}.device_identity_v1",
+            self.base_dir.display()
+        )
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DeviceIdentityRecord {
+    #[serde(default)]
+    device_id: Option<String>,
+    signing_secret_key: Vec<u8>,
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -405,6 +546,74 @@ fn validate_item_id(id: &str) -> Result<String, LocalStoreError> {
     Ok(uuid.to_string())
 }
 
+fn validate_device_id(id: &str) -> Result<String, LocalStoreError> {
+    let uuid =
+        uuid::Uuid::parse_str(id).map_err(|_| LocalStoreError::InvalidDeviceId(id.to_string()))?;
+    Ok(uuid.to_string())
+}
+
+fn new_device_signing_identity(device_id: Option<String>) -> DeviceSigningIdentity {
+    DeviceSigningIdentity {
+        device_id,
+        signing_secret_key: Zeroizing::new(crypto::generate_device_signing_secret_key()),
+    }
+}
+
+fn device_identity_from_record(
+    record: DeviceIdentityRecord,
+) -> Result<DeviceSigningIdentity, LocalStoreError> {
+    let device_id = record
+        .device_id
+        .map(|id| validate_device_id(&id))
+        .transpose()?;
+    let signing_secret_key: [u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES] = record
+        .signing_secret_key
+        .try_into()
+        .map_err(|_| LocalStoreError::InvalidDeviceSigningKey)?;
+    Ok(DeviceSigningIdentity {
+        device_id,
+        signing_secret_key: Zeroizing::new(signing_secret_key),
+    })
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn ensure_private_dir(path: &Path) -> Result<(), LocalStoreError> {
+    tokio::fs::create_dir_all(path).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn write_private_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), LocalStoreError> {
+    let tmp_path = path.with_extension(format!(
+        "{}.{}.tmp",
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("file"),
+        uuid::Uuid::now_v7()
+    ));
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .await?;
+    }
+    file.write_all(bytes).await?;
+    file.flush().await?;
+    drop(file);
+    tokio::fs::rename(&tmp_path, path).await?;
+    Ok(())
+}
+
 #[cfg(target_family = "wasm")]
 fn browser_storage() -> Result<web_sys::Storage, LocalStoreError> {
     let window =
@@ -436,6 +645,10 @@ pub enum LocalStoreError {
     PayloadDecode(String),
     #[error("invalid local clipboard item id: {0}")]
     InvalidId(String),
+    #[error("invalid local device id: {0}")]
+    InvalidDeviceId(String),
+    #[error("invalid local device signing key")]
+    InvalidDeviceSigningKey,
     #[error("browser local storage error: {0}")]
     BrowserStorage(String),
 }

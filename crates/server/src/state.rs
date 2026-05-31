@@ -41,6 +41,7 @@ pub struct AuthChallenge {
     /// challenge can never produce a verifying finalization.
     pub user_id: Option<Uuid>,
     pub server_login_state: Vec<u8>,
+    pub device_proof_challenge: Vec<u8>,
     expires_at: Instant,
 }
 
@@ -181,6 +182,7 @@ impl AppState {
         &self,
         user_id: Option<Uuid>,
         server_login_state: Vec<u8>,
+        device_proof_challenge: Vec<u8>,
     ) -> String {
         let now = Instant::now();
         let mut challenges = self.inner.auth_challenges.lock().expect("lock poisoned");
@@ -200,6 +202,7 @@ impl AppState {
             AuthChallenge {
                 user_id,
                 server_login_state,
+                device_proof_challenge,
                 expires_at: now + Duration::from_secs(self.config().auth.challenge_ttl_secs),
             },
         );

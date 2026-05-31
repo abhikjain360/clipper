@@ -21,13 +21,13 @@ Today the client keeps decrypted display state in memory:
 - file blobs are not kept in memory, and downloads happen on demand;
 - downloaded files are written to a user-selected target path.
 
-Implementation status: **step 1 below has landed**. The client now has a
+Implementation status: **step 1 below has landed**, and the server-sync create
+path now uses the signed object envelope shape from step 4. The client has a
 durable, per-profile clipboard repository in `crates/client/src/local_store.rs`
 (plaintext clipboard payloads + metadata on disk), and `AppState.clipboard_items`
 is rebuilt from it. File metadata is **not** yet cached locally (step 2) — file
 lists are still rebuilt from `GET /api/objects`, so the download path still
-depends on the server (see `docs/rust-code-review.md`, "File Download Only Finds
-Metadata In The First Page").
+depends on the server.
 
 The server stores the durable canonical repo today:
 

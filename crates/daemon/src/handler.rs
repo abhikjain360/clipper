@@ -365,8 +365,10 @@ async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) ->
         .unwrap_or(default_device_name());
 
     // If server_url is provided, reconfigure the engine
-    if let Some(url) = params.server_url.as_deref() {
-        engine.set_base_url(url).await;
+    if let Some(url) = params.server_url.as_deref()
+        && let Err(error) = engine.set_base_url(url).await
+    {
+        return client_error(id, error);
     }
 
     match engine
@@ -406,8 +408,10 @@ async fn cmd_register(
         .as_deref()
         .unwrap_or(default_device_name());
 
-    if let Some(url) = params.server_url.as_deref() {
-        engine.set_base_url(url).await;
+    if let Some(url) = params.server_url.as_deref()
+        && let Err(error) = engine.set_base_url(url).await
+    {
+        return client_error(id, error);
     }
 
     match engine

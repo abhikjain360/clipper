@@ -31,6 +31,7 @@ argon2 = "0.5.3"
 base64 = "0.22.1"
 chrono = { version = "0.4.44", features = ["serde"] }
 dirs = "6.0.0"
+ed25519-dalek = "2.2.0"
 futures-util = "0.3.32"
 garde = { version = "0.23.0", features = ["derive"] }
 getrandom = { version = "0.4.2", features = ["wasm_js"] }

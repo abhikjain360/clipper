@@ -185,7 +185,7 @@ mod imp {
             )),
             DaemonCommand::Login(params) => {
                 if let Some(server_url) = params.server_url.as_deref() {
-                    engine.set_base_url(server_url).await;
+                    engine.set_base_url(server_url).await?;
                 }
                 engine
                     .login_with_platform(
@@ -202,7 +202,7 @@ mod imp {
             }
             DaemonCommand::Register(params) => {
                 if let Some(server_url) = params.server_url.as_deref() {
-                    engine.set_base_url(server_url).await;
+                    engine.set_base_url(server_url).await?;
                 }
                 let username = engine
                     .register_with_platform(

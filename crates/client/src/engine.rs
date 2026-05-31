@@ -13,11 +13,11 @@ use zeroize::Zeroizing;
 
 use crate::{
     api_client::{
-        ApiClient, ClientError, decrypt_clipboard_meta, decrypt_clipboard_payload,
+        ApiClient, AuthDevice, ClientError, decrypt_clipboard_meta, decrypt_clipboard_payload,
         decrypt_file_blob_bytes, decrypt_file_meta_bytes, encrypt_clipboard_meta,
         encrypt_clipboard_payload, encrypt_file_blob_bytes, encrypt_file_meta_bytes,
     },
-    local_store::LocalStore,
+    local_store::{DeviceSigningIdentity, LocalStore},
 };
 
 const INLINE_OBJECT_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
@@ -25,6 +25,7 @@ const RECENT_CLIPBOARD_LIMIT: usize = 100;
 const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
 const CLIPBOARD_HYDRATION_CONCURRENCY: usize = 8;
 const LOCAL_PERSIST_CONCURRENCY: usize = 8;
+const OBJECT_ENVELOPE_VERSION_V1: u64 = 1;
 
 #[derive(Debug, Clone)]
 pub struct ClipboardPayload {
@@ -43,6 +44,7 @@ pub struct SyncEngine {
     api: Mutex<ApiClient>,
     local_store: LocalStore,
     encryption_key: RwLock<Option<Zeroizing<[u8; 32]>>>,
+    device_signing_key: RwLock<Option<Zeroizing<[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]>>>,
     state: RwLock<AppState>,
     state_tx: watch::Sender<u64>,
     state_rx: watch::Receiver<u64>,
@@ -57,32 +59,40 @@ impl SyncEngine {
     }
 
     pub fn new_with_data_dir(base_url: &str, data_dir: impl Into<PathBuf>) -> Arc<Self> {
+        Self::try_new_with_data_dir(base_url, data_dir).expect("invalid Clipper server URL")
+    }
+
+    pub fn try_new_with_data_dir(
+        base_url: &str,
+        data_dir: impl Into<PathBuf>,
+    ) -> Result<Arc<Self>, ClientError> {
         let (tx, rx) = watch::channel(0u64);
-        Arc::new(Self {
-            api: Mutex::new(ApiClient::new(base_url)),
+        Ok(Arc::new(Self {
+            api: Mutex::new(ApiClient::try_new(base_url)?),
             local_store: LocalStore::new(data_dir),
             encryption_key: RwLock::new(None),
+            device_signing_key: RwLock::new(None),
             state: RwLock::new(AppState::default()),
             state_tx: tx,
             state_rx: rx,
             state_version: std::sync::atomic::AtomicU64::new(0),
             last_seq: RwLock::new(0),
             suppressed_payload: RwLock::new(None),
-        })
+        }))
     }
 
     pub async fn get_state(&self) -> AppState {
         self.state.read().await.clone()
     }
 
-    pub async fn set_base_url(&self, url: &str) {
+    pub async fn set_base_url(&self, url: &str) -> Result<(), ClientError> {
         let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-        api.set_base_url(url);
+        api.set_base_url(url)
     }
 
     pub async fn base_url(&self) -> String {
         let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-        api.base_url().to_string()
+        api.base_url_display()
     }
 
     pub async fn set_saved_profile(&self, username: Option<String>, device_name: Option<String>) {
@@ -124,18 +134,37 @@ impl SyncEngine {
         device_name: &str,
         platform: &str,
     ) -> Result<(), ClientError> {
+        let mut signing_identity = self
+            .local_store
+            .load_or_create_device_signing_identity()
+            .await?;
+        let requested_device_id = optional_device_id(signing_identity.device_id.as_deref())?;
         let auth = {
             let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.login(passphrase, username, device_name, platform)
-                .await?
+            api.login(
+                passphrase,
+                username,
+                AuthDevice {
+                    id: requested_device_id,
+                    name: device_name,
+                    platform,
+                    signing_secret_key: &signing_identity.signing_secret_key,
+                },
+            )
+            .await?
         };
         let login_resp = auth.response;
+        signing_identity.device_id = Some(login_resp.device_id.clone());
+        self.local_store
+            .persist_device_signing_identity(&signing_identity)
+            .await?;
 
         self.finish_auth(
             device_name,
             login_resp.username.clone(),
             login_resp.device_id.clone(),
             auth.encryption_key,
+            signing_identity,
         )
         .await?;
 
@@ -162,18 +191,38 @@ impl SyncEngine {
         device_name: &str,
         platform: &str,
     ) -> Result<String, ClientError> {
+        let mut signing_identity = self
+            .local_store
+            .load_or_create_device_signing_identity()
+            .await?;
+        let requested_device_id = optional_device_id(signing_identity.device_id.as_deref())?;
         let auth = {
             let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.register(access_key, username, passphrase, device_name, platform)
-                .await?
+            api.register(
+                access_key,
+                username,
+                passphrase,
+                AuthDevice {
+                    id: requested_device_id,
+                    name: device_name,
+                    platform,
+                    signing_secret_key: &signing_identity.signing_secret_key,
+                },
+            )
+            .await?
         };
         let register_resp = auth.response;
+        signing_identity.device_id = Some(register_resp.device_id.clone());
+        self.local_store
+            .persist_device_signing_identity(&signing_identity)
+            .await?;
 
         self.finish_auth(
             device_name,
             register_resp.username.clone(),
             register_resp.device_id.clone(),
             auth.encryption_key,
+            signing_identity,
         )
         .await?;
 
@@ -192,11 +241,13 @@ impl SyncEngine {
         username: String,
         device_id: String,
         encryption_key: Zeroizing<[u8; 32]>,
+        signing_identity: DeviceSigningIdentity,
     ) -> Result<(), ClientError> {
         self.local_store
             .set_profile(profile_id_from_encryption_key(&encryption_key));
 
         *self.encryption_key.write().await = Some(encryption_key);
+        *self.device_signing_key.write().await = Some(signing_identity.signing_secret_key);
 
         {
             let mut state = self.state.write().await;
@@ -228,12 +279,43 @@ impl SyncEngine {
         Ok(())
     }
 
+    async fn current_device_signing_context(
+        &self,
+    ) -> Result<
+        (
+            String,
+            DeviceId,
+            Zeroizing<[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]>,
+        ),
+        ClientError,
+    > {
+        let device_id = {
+            let state = self.state.read().await;
+            state
+                .device_id
+                .clone()
+                .ok_or_else(|| ClientError::Other("No device_id".into()))?
+        };
+        let device_id_typed = device_id
+            .parse()
+            .map_err(|e| ClientError::Other(format!("Invalid device_id: {e}")))?;
+        let signing_key = {
+            let signing_key = self.device_signing_key.read().await;
+            let signing_key = signing_key
+                .as_ref()
+                .ok_or_else(|| ClientError::Other("No device signing key".into()))?;
+            Zeroizing::new(**signing_key)
+        };
+        Ok((device_id, device_id_typed, signing_key))
+    }
+
     pub async fn logout(&self) -> Result<(), ClientError> {
         {
             let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
             api.logout().await?;
         }
         *self.encryption_key.write().await = None;
+        *self.device_signing_key.write().await = None;
         {
             let mut state = self.state.write().await;
             *state = AppState::default();
@@ -299,19 +381,24 @@ impl SyncEngine {
             }
         }
 
-        let device_id = {
-            let state = self.state.read().await;
-            state
-                .device_id
-                .clone()
-                .ok_or_else(|| ClientError::Other("No device_id".into()))?
-        };
+        let (device_id, device_id_typed, signing_key) =
+            self.current_device_signing_context().await?;
 
         let object_uuid = uuid::Uuid::now_v7();
         let payload_uuid = uuid::Uuid::now_v7();
         let object_id = object_uuid.to_string();
         let payload_id = payload_uuid.to_string();
+        let object_id_typed: ObjectId = object_uuid.into();
+        let payload_id_typed: ObjectPayloadId = payload_uuid.into();
+        let created_at = chrono::Utc::now().to_rfc3339();
         let plaintext_size = data.len() as i64;
+        let aad_body = create_object_envelope_body_for_aad(
+            object_id_typed,
+            ObjectKind::Clipboard,
+            device_id_typed,
+            created_at.clone(),
+            vec![payload_id_typed],
+        );
         let (meta_nonce, meta_ciphertext, payload_nonce, encrypted_payload) = {
             let encryption_key = self.encryption_key.read().await;
             let encryption_key = encryption_key
@@ -321,9 +408,10 @@ impl SyncEngine {
                 mime_type: mime_type.to_string(),
                 size: Some(plaintext_size),
             };
-            let (meta_nonce, meta_ciphertext) = encrypt_clipboard_meta(&meta, encryption_key)?;
+            let (meta_nonce, meta_ciphertext) =
+                encrypt_clipboard_meta(&meta, encryption_key, &aad_body)?;
             let (payload_nonce, encrypted_payload) =
-                encrypt_clipboard_payload(data, encryption_key)?;
+                encrypt_clipboard_payload(data, encryption_key, &aad_body, payload_id_typed)?;
             (
                 meta_nonce,
                 meta_ciphertext,
@@ -334,18 +422,37 @@ impl SyncEngine {
 
         let payload_hash = crypto::sha256(&encrypted_payload).to_vec();
         let payload_size = encrypted_payload.len() as i64;
+        let envelope_body = create_object_envelope_body(
+            object_id_typed,
+            ObjectKind::Clipboard,
+            device_id_typed,
+            created_at.clone(),
+            meta_nonce.clone(),
+            crypto::sha256(&meta_ciphertext).to_vec(),
+            vec![ObjectEnvelopePayloadV1 {
+                id: payload_id_typed,
+                nonce: payload_nonce.clone(),
+                ciphertext_size: payload_size,
+                sha256_ciphertext: payload_hash.clone(),
+            }],
+        );
+        let envelope = ObjectEnvelopeV1 {
+            signature: crypto::sign_object_envelope_body(&signing_key, &envelope_body)?,
+            body: envelope_body,
+        };
         let init_req = ObjectInitRequest {
-            id: object_uuid.into(),
+            id: object_id_typed,
             kind: ObjectKind::Clipboard,
             meta_nonce,
             meta_ciphertext,
             payloads: vec![ObjectPayloadInit {
-                id: payload_uuid.into(),
+                id: payload_id_typed,
                 nonce: payload_nonce,
                 ciphertext_size: payload_size,
                 sha256_ciphertext: payload_hash.clone(),
                 inline_ciphertext: inline_ciphertext(&encrypted_payload),
             }],
+            envelope,
         };
 
         self.submit_single_payload_object(
@@ -358,7 +465,6 @@ impl SyncEngine {
         )
         .await?;
 
-        let created_at = chrono::Utc::now().to_rfc3339();
         let item = DecryptedClipboardItem {
             id: object_id.clone(),
             text: clipboard_display_text(mime_type, data),
@@ -548,13 +654,8 @@ impl SyncEngine {
         let mime_type =
             normalized_mime_type(mime_type).unwrap_or_else(|| mime_guess_from_filename(&filename));
 
-        let device_id = {
-            let state = self.state.read().await;
-            state
-                .device_id
-                .clone()
-                .ok_or_else(|| ClientError::Other("No device_id".into()))?
-        };
+        let (device_id, device_id_typed, signing_key) =
+            self.current_device_signing_context().await?;
 
         let meta = FileMeta {
             filename: filename.clone(),
@@ -566,31 +667,62 @@ impl SyncEngine {
         let payload_uuid = uuid::Uuid::now_v7();
         let file_id = file_uuid.to_string();
         let payload_id = payload_uuid.to_string();
+        let file_id_typed: ObjectId = file_uuid.into();
+        let payload_id_typed: ObjectPayloadId = payload_uuid.into();
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let aad_body = create_object_envelope_body_for_aad(
+            file_id_typed,
+            ObjectKind::File,
+            device_id_typed,
+            created_at.clone(),
+            vec![payload_id_typed],
+        );
         let (meta_nonce, meta_ciphertext, blob_nonce, encrypted_blob) = {
             let encryption_key = self.encryption_key.read().await;
             let encryption_key = encryption_key
                 .as_ref()
                 .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
-            let (meta_nonce, meta_ciphertext) = encrypt_file_meta_bytes(&meta, encryption_key)?;
-            let (blob_nonce, encrypted_blob) = encrypt_file_blob_bytes(data, encryption_key)?;
+            let (meta_nonce, meta_ciphertext) =
+                encrypt_file_meta_bytes(&meta, encryption_key, &aad_body)?;
+            let (blob_nonce, encrypted_blob) =
+                encrypt_file_blob_bytes(data, encryption_key, &aad_body, payload_id_typed)?;
             (meta_nonce, meta_ciphertext, blob_nonce, encrypted_blob)
         };
 
         let blob_hash = crypto::sha256(&encrypted_blob).to_vec();
         let blob_size = encrypted_blob.len() as i64;
+        let envelope_body = create_object_envelope_body(
+            file_id_typed,
+            ObjectKind::File,
+            device_id_typed,
+            created_at.clone(),
+            meta_nonce.clone(),
+            crypto::sha256(&meta_ciphertext).to_vec(),
+            vec![ObjectEnvelopePayloadV1 {
+                id: payload_id_typed,
+                nonce: blob_nonce.clone(),
+                ciphertext_size: blob_size,
+                sha256_ciphertext: blob_hash.clone(),
+            }],
+        );
+        let envelope = ObjectEnvelopeV1 {
+            signature: crypto::sign_object_envelope_body(&signing_key, &envelope_body)?,
+            body: envelope_body,
+        };
 
         let init_req = ObjectInitRequest {
-            id: file_uuid.into(),
+            id: file_id_typed,
             kind: ObjectKind::File,
             meta_nonce,
             meta_ciphertext,
             payloads: vec![ObjectPayloadInit {
-                id: payload_uuid.into(),
+                id: payload_id_typed,
                 nonce: blob_nonce,
                 ciphertext_size: blob_size,
                 sha256_ciphertext: blob_hash.clone(),
                 inline_ciphertext: inline_ciphertext(&encrypted_blob),
             }],
+            envelope,
         };
 
         self.submit_single_payload_object(
@@ -612,7 +744,7 @@ impl SyncEngine {
                     filename: filename.clone(),
                     mime_type: mime_type.clone(),
                     blob_size: data.len() as i64,
-                    created_at: chrono::Utc::now().to_rfc3339(),
+                    created_at,
                     source_device_id: device_id,
                 },
             );
@@ -623,22 +755,23 @@ impl SyncEngine {
     }
 
     pub async fn download_file_bytes(&self, file_id: &str) -> Result<Vec<u8>, ClientError> {
-        let (blob_nonce, encrypted_blob) = {
+        let (file_item, payload, encrypted_blob) = {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
             let files_resp = api
                 .list_objects(Some(ObjectKind::File), Some(500), None)
                 .await?;
             let file_item = files_resp
                 .items
-                .iter()
+                .into_iter()
                 .find(|f| f.id.to_string() == file_id)
                 .ok_or_else(|| ClientError::Other("File not found on server".into()))?;
-            let payload = single_payload(file_item)?;
-            let nonce = payload.nonce.clone();
+            verify_object_list_item_envelope(&file_item)?;
+            let payload = single_payload(&file_item)?.clone();
             let blob = api
                 .download_object_payload(file_id, &payload.id.to_string())
                 .await?;
-            (nonce, blob)
+            verify_payload_hash(&payload, &blob)?;
+            (file_item, payload, blob)
         };
 
         let plaintext = {
@@ -646,7 +779,13 @@ impl SyncEngine {
             let encryption_key = encryption_key
                 .as_ref()
                 .ok_or_else(|| ClientError::Other("Not logged in".into()))?;
-            decrypt_file_blob_bytes(&blob_nonce, &encrypted_blob, encryption_key)?
+            decrypt_file_blob_bytes(
+                &payload.nonce,
+                &encrypted_blob,
+                encryption_key,
+                &file_item.envelope.body,
+                payload.id,
+            )?
         };
         info!(file_id = %file_id, "File downloaded");
         Ok(plaintext)
@@ -822,7 +961,13 @@ impl SyncEngine {
         item: &ObjectListItem,
         encryption_key: &[u8; 32],
     ) -> Result<DecryptedClipboardObject, ClientError> {
-        let meta = decrypt_clipboard_meta(&item.meta_nonce, &item.meta_ciphertext, encryption_key)?;
+        verify_object_list_item_envelope(item)?;
+        let meta = decrypt_clipboard_meta(
+            &item.meta_nonce,
+            &item.meta_ciphertext,
+            encryption_key,
+            &item.envelope.body,
+        )?;
         if !is_supported_clipboard_mime_type(&meta.mime_type) {
             return Err(ClientError::Other(format!(
                 "Unsupported clipboard MIME type: {}",
@@ -834,8 +979,14 @@ impl SyncEngine {
         let encrypted_payload = api
             .download_object_payload(&item.id.to_string(), &payload.id.to_string())
             .await?;
-        let plaintext =
-            decrypt_clipboard_payload(&payload.nonce, &encrypted_payload, encryption_key)?;
+        verify_payload_hash(payload, &encrypted_payload)?;
+        let plaintext = decrypt_clipboard_payload(
+            &payload.nonce,
+            &encrypted_payload,
+            encryption_key,
+            &item.envelope.body,
+            payload.id,
+        )?;
         let text = clipboard_display_text(&meta.mime_type, &plaintext);
 
         Ok(DecryptedClipboardObject {
@@ -904,30 +1055,21 @@ impl SyncEngine {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite;
 
-        let (token, base_url) = {
+        let (token, ws_url, host) = {
             let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
             let t = api
                 .token()
                 .ok_or_else(|| ClientError::Other("No token".into()))?
                 .to_string();
-            let u = api.base_url().to_string();
-            (t, u)
+            let ws_url = api.websocket_url()?;
+            let host = api.base_url().host_str().unwrap_or("localhost").to_string();
+            (t, ws_url, host)
         };
 
-        let ws_url = base_url
-            .replace("https://", "wss://")
-            .replace("http://", "ws://");
-        let ws_url = format!("{}/api/ws", ws_url);
-
         let request = tungstenite::http::Request::builder()
-            .uri(&ws_url)
+            .uri(ws_url.as_str())
             .header("Authorization", format!("Bearer {}", token))
-            .header(
-                "Host",
-                url::Url::parse(&base_url)
-                    .map(|u| u.host_str().unwrap_or("localhost").to_string())
-                    .unwrap_or_else(|_| "localhost".into()),
-            )
+            .header("Host", host)
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
             .header("Sec-WebSocket-Version", "13")
@@ -1074,11 +1216,138 @@ fn single_payload(item: &ObjectListItem) -> Result<&ObjectPayloadDescriptor, Cli
     Ok(&item.payloads[0])
 }
 
+fn optional_device_id(device_id: Option<&str>) -> Result<Option<DeviceId>, ClientError> {
+    device_id
+        .map(|device_id| {
+            device_id
+                .parse()
+                .map_err(|e| ClientError::Other(format!("Invalid saved device id: {e}")))
+        })
+        .transpose()
+}
+
+fn create_object_envelope_body_for_aad(
+    object_id: ObjectId,
+    kind: ObjectKind,
+    source_device_id: DeviceId,
+    created_at: String,
+    payload_ids: Vec<ObjectPayloadId>,
+) -> ObjectEnvelopeBodyV1 {
+    create_object_envelope_body(
+        object_id,
+        kind,
+        source_device_id,
+        created_at,
+        Vec::new(),
+        Vec::new(),
+        payload_ids
+            .into_iter()
+            .map(|id| ObjectEnvelopePayloadV1 {
+                id,
+                nonce: Vec::new(),
+                ciphertext_size: 0,
+                sha256_ciphertext: Vec::new(),
+            })
+            .collect(),
+    )
+}
+
+fn create_object_envelope_body(
+    object_id: ObjectId,
+    kind: ObjectKind,
+    source_device_id: DeviceId,
+    created_at: String,
+    meta_nonce: Vec<u8>,
+    sha256_meta_ciphertext: Vec<u8>,
+    payloads: Vec<ObjectEnvelopePayloadV1>,
+) -> ObjectEnvelopeBodyV1 {
+    ObjectEnvelopeBodyV1 {
+        object_id,
+        object_type: kind,
+        object_version: OBJECT_ENVELOPE_VERSION_V1,
+        source_device_id,
+        created_at,
+        operation: ObjectEnvelopeOperation::Create,
+        meta_nonce,
+        sha256_meta_ciphertext,
+        payloads,
+    }
+}
+
+fn verify_object_list_item_envelope(item: &ObjectListItem) -> Result<(), ClientError> {
+    let body = &item.envelope.body;
+    let meta_hash = crypto::sha256(&item.meta_ciphertext);
+    if body.object_id != item.id
+        || body.object_type != item.kind
+        || body.object_version != OBJECT_ENVELOPE_VERSION_V1
+        || body.operation != ObjectEnvelopeOperation::Create
+        || body.source_device_id != item.source_device_id
+        || body.created_at != item.created_at
+        || body.meta_nonce != item.meta_nonce
+        || body.sha256_meta_ciphertext.as_slice() != meta_hash.as_slice()
+    {
+        return Err(object_envelope_error(
+            "object envelope does not match list item",
+        ));
+    }
+
+    if body.payloads.len() != item.payloads.len() {
+        return Err(object_envelope_error(
+            "object envelope payload set does not match list item",
+        ));
+    }
+    for envelope_payload in &body.payloads {
+        let Some(payload) = item
+            .payloads
+            .iter()
+            .find(|payload| payload.id == envelope_payload.id)
+        else {
+            return Err(object_envelope_error(
+                "object envelope references unknown payload",
+            ));
+        };
+        if envelope_payload.nonce != payload.nonce
+            || envelope_payload.ciphertext_size != payload.ciphertext_size
+            || envelope_payload.sha256_ciphertext != payload.sha256_ciphertext
+        {
+            return Err(object_envelope_error(
+                "object envelope payload metadata mismatch",
+            ));
+        }
+    }
+
+    crypto::verify_object_envelope_signature(&item.source_device_signing_public_key, &item.envelope)
+        .map_err(ClientError::from)
+}
+
+fn verify_payload_hash(
+    payload: &ObjectPayloadDescriptor,
+    ciphertext: &[u8],
+) -> Result<(), ClientError> {
+    let payload_hash = crypto::sha256(ciphertext);
+    if payload.sha256_ciphertext.as_slice() != payload_hash.as_slice() {
+        return Err(object_envelope_error(
+            "downloaded payload hash does not match object envelope",
+        ));
+    }
+    Ok(())
+}
+
+fn object_envelope_error(message: impl Into<String>) -> ClientError {
+    ClientError::Crypto(crypto::CryptoError::Signature(message.into()))
+}
+
 fn decrypt_file_object_item(
     item: &ObjectListItem,
     encryption_key: &[u8; 32],
 ) -> Result<DecryptedFileItem, ClientError> {
-    let meta = decrypt_file_meta_bytes(&item.meta_nonce, &item.meta_ciphertext, encryption_key)?;
+    verify_object_list_item_envelope(item)?;
+    let meta = decrypt_file_meta_bytes(
+        &item.meta_nonce,
+        &item.meta_ciphertext,
+        encryption_key,
+        &item.envelope.body,
+    )?;
     let payload = single_payload(item)?;
     Ok(DecryptedFileItem {
         id: item.id.to_string(),

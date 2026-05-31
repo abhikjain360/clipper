@@ -141,6 +141,10 @@ mod tests {
             user_id: Set(user_id),
             name: Set("test-device".into()),
             platform: Set("test".into()),
+            signing_public_key: Set(vec![
+                7;
+                clipper_core::crypto::DEVICE_SIGNING_PUBLIC_KEY_BYTES
+            ]),
             created_at: Set(now.clone()),
             updated_at: Set(now.clone()),
             last_seen_at: Set(now),

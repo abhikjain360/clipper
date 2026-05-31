@@ -12,6 +12,8 @@ pub struct Model {
     pub name: String,
     #[sea_orm(column_type = "Text")]
     pub platform: String,
+    #[sea_orm(column_type = "Blob")]
+    pub signing_public_key: Vec<u8>,
     #[sea_orm(column_type = "Text")]
     pub created_at: String,
     #[sea_orm(column_type = "Text")]

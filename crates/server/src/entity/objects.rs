@@ -21,6 +21,8 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub expires_at: Option<String>,
     pub source_device_id: Uuid,
+    #[sea_orm(column_type = "Blob")]
+    pub envelope: Vec<u8>,
     #[sea_orm(column_type = "Text")]
     pub status: String,
 }

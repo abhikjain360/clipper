@@ -15,44 +15,11 @@ Scope: `crates/core`, `crates/server`, `crates/client` (including
 Release-readiness notes at the bottom also mention Flutter, Android, and CI
 metadata when they affect whether the project is safe to publish.
 
-Highest-priority open risks: AEAD AAD does not bind object identity, so a
-hostile server can swap ciphertext between objects; three distinct paths can
-silently lose a user's own sync events (WebSocket subscribe/replay race, pruned
-events, and the client advancing its cursor before refresh); and decrypted
-plaintext escapes the local trust boundary (world-readable file downloads and a
-local cache that logout never wipes).
-
-## P1: Encrypted Payload Authentication Does Not Bind Object Metadata
-
-AAD constants are type-level only (`AAD_CLIPBOARD_META_V1`,
-`AAD_CLIPBOARD_PAYLOAD_V1`, `AAD_FILE_META_V1`, `AAD_FILE_BLOB_V1` in
-`crates/core/src/crypto.rs`); the client passes them verbatim
-(`crates/client/src/api_client.rs:466-609`). AAD never references object ID,
-payload ID, object kind, source device, timestamps, or the metadata/payload
-pairing, and a single data key encrypts every object for a user.
-
-A malicious or buggy server/relay can therefore move ciphertext between
-identities without AEAD detecting it: replay an old ciphertext under a new
-object ID, or pair one object's file metadata with another object's blob, and
-the client decrypts both as valid. This is reachable on the live file-download
-path: `SyncEngine::download_file_bytes` (`crates/client/src/engine.rs:625-653`)
-takes `payload.nonce` (`:637`) and the server-supplied ciphertext (`:638-640`)
-and decrypts via `decrypt_file_blob_bytes` with the fixed constant
-`AAD_FILE_BLOB_V1` (`crates/core/src/crypto.rs:528-532`). Nothing ties the
-returned blob to the requested object, so a request for file X answered with
-file Y's `(nonce, ciphertext)` verifies and yields Y's plaintext as X. The same
-holds for clipboard payloads via `AAD_CLIPBOARD_PAYLOAD_V1`. The multi-payload
-object split widened this surface because metadata and payload are separately
-encrypted but unbound to each other.
-
-Recommended fix:
-
-- Bind stable object identity into AAD (at minimum object ID, payload ID,
-  object kind, source device), and have the client cross-check the returned
-  blob against the object it requested; or
-- Move to signed/encrypted object envelopes as in
-  `docs/local-store-p2p-roadmap.md` (bind object ID, kind, source device,
-  created time, operation type, payload set, ciphertext hashes, version).
+Highest-priority open risks: three distinct paths can silently lose a user's own
+sync events (WebSocket subscribe/replay race, pruned events, and the client
+advancing its cursor before refresh), and decrypted plaintext escapes the local
+trust boundary (world-readable file downloads and a local cache that logout
+never wipes).
 
 ## P1: WebSocket Subscribe-After-Replay Race Drops Concurrently-Committed Events
 

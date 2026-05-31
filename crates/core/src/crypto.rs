@@ -5,8 +5,13 @@ use chacha20poly1305::{
 };
 pub use clipper_api_types::{
     ARGON2_MAX_M_COST_KIB, ARGON2_MAX_P_COST, ARGON2_MAX_T_COST, ARGON2_MIN_M_COST_KIB,
-    ARGON2_MIN_P_COST, ARGON2_MIN_T_COST, Argon2Params,
+    ARGON2_MIN_P_COST, ARGON2_MIN_T_COST, Argon2Params, DEVICE_LOGIN_PROOF_CHALLENGE_BYTES,
+    DEVICE_LOGIN_PROOF_SIGNATURE_BYTES, DEVICE_LOGIN_PROOF_VERSION,
+    DEVICE_SIGNING_PUBLIC_KEY_BYTES, DEVICE_SIGNING_SECRET_KEY_BYTES, DeviceLoginProofBodyV1,
+    OBJECT_ENVELOPE_SIGNATURE_BYTES, ObjectEnvelopeBodyV1, ObjectEnvelopeOperation,
+    ObjectEnvelopeV1, ObjectPayloadId,
 };
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use rand::Rng;
 use sha2::{Digest, Sha256, digest::OutputSizeUser};
@@ -88,6 +93,138 @@ pub fn sha256(data: &[u8]) -> [u8; SHA256_BYTES] {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().into()
+}
+
+/// Generate a random Ed25519 signing secret for this client device.
+pub fn generate_device_signing_secret_key() -> [u8; DEVICE_SIGNING_SECRET_KEY_BYTES] {
+    generate_bytes::<DEVICE_SIGNING_SECRET_KEY_BYTES>()
+}
+
+/// Derive the public Ed25519 verifying key for a device signing secret.
+pub fn device_signing_public_key(
+    secret_key: &[u8; DEVICE_SIGNING_SECRET_KEY_BYTES],
+) -> [u8; DEVICE_SIGNING_PUBLIC_KEY_BYTES] {
+    SigningKey::from_bytes(secret_key)
+        .verifying_key()
+        .to_bytes()
+}
+
+/// Canonical bytes signed by device keys for object provenance.
+pub fn object_envelope_body_bytes(body: &ObjectEnvelopeBodyV1) -> Result<Vec<u8>, CryptoError> {
+    postcard::to_allocvec(body).map_err(|e| CryptoError::Signature(format!("postcard: {e}")))
+}
+
+/// Canonical bytes signed by device keys for login proof-of-possession.
+pub fn device_login_proof_body_bytes(
+    body: &DeviceLoginProofBodyV1,
+) -> Result<Vec<u8>, CryptoError> {
+    postcard::to_allocvec(body).map_err(|e| CryptoError::Signature(format!("postcard: {e}")))
+}
+
+/// Sign a versioned object envelope body with the source device key.
+pub fn sign_object_envelope_body(
+    secret_key: &[u8; DEVICE_SIGNING_SECRET_KEY_BYTES],
+    body: &ObjectEnvelopeBodyV1,
+) -> Result<Vec<u8>, CryptoError> {
+    let signing_key = SigningKey::from_bytes(secret_key);
+    let body = object_envelope_body_bytes(body)?;
+    Ok(signing_key.sign(&body).to_bytes().to_vec())
+}
+
+/// Sign a login proof body with the local device key.
+pub fn sign_device_login_proof_body(
+    secret_key: &[u8; DEVICE_SIGNING_SECRET_KEY_BYTES],
+    body: &DeviceLoginProofBodyV1,
+) -> Result<Vec<u8>, CryptoError> {
+    let signing_key = SigningKey::from_bytes(secret_key);
+    let body = device_login_proof_body_bytes(body)?;
+    Ok(signing_key.sign(&body).to_bytes().to_vec())
+}
+
+/// Verify the source device signature over an object envelope.
+pub fn verify_object_envelope_signature(
+    public_key: &[u8],
+    envelope: &ObjectEnvelopeV1,
+) -> Result<(), CryptoError> {
+    let body = object_envelope_body_bytes(&envelope.body)?;
+    verify_device_signature(public_key, &body, &envelope.signature, "object signature")
+}
+
+/// Verify a device login proof signature.
+pub fn verify_device_login_proof_signature(
+    public_key: &[u8],
+    body: &DeviceLoginProofBodyV1,
+    signature: &[u8],
+) -> Result<(), CryptoError> {
+    let body = device_login_proof_body_bytes(body)?;
+    verify_device_signature(public_key, &body, signature, "device login proof")
+}
+
+fn verify_device_signature(
+    public_key: &[u8],
+    body: &[u8],
+    signature: &[u8],
+    context: &'static str,
+) -> Result<(), CryptoError> {
+    let public_key: &[u8; DEVICE_SIGNING_PUBLIC_KEY_BYTES] = public_key
+        .try_into()
+        .map_err(|_| CryptoError::Signature("invalid device public key length".into()))?;
+    let signature: &[u8; DEVICE_LOGIN_PROOF_SIGNATURE_BYTES] = signature
+        .try_into()
+        .map_err(|_| CryptoError::Signature(format!("invalid {context} length")))?;
+    let verifying_key = VerifyingKey::from_bytes(public_key)
+        .map_err(|e| CryptoError::Signature(format!("device public key: {e}")))?;
+    let signature = Signature::from_bytes(signature);
+    verifying_key
+        .verify(body, &signature)
+        .map_err(|e| CryptoError::Signature(format!("{context}: {e}")))
+}
+
+/// Canonical AAD for object metadata encryption.
+pub fn object_meta_aad_v1(body: &ObjectEnvelopeBodyV1) -> Result<Vec<u8>, CryptoError> {
+    object_aad_v1(body, None)
+}
+
+/// Canonical AAD for an object payload encryption.
+pub fn object_payload_aad_v1(
+    body: &ObjectEnvelopeBodyV1,
+    payload_id: ObjectPayloadId,
+) -> Result<Vec<u8>, CryptoError> {
+    object_aad_v1(body, Some(payload_id))
+}
+
+fn object_aad_v1(
+    body: &ObjectEnvelopeBodyV1,
+    payload_id: Option<ObjectPayloadId>,
+) -> Result<Vec<u8>, CryptoError> {
+    let aad = ObjectAadV1 {
+        domain: match payload_id {
+            Some(_) => "clipper:object-payload-aad:v1",
+            None => "clipper:object-meta-aad:v1",
+        },
+        object_id: body.object_id,
+        object_type: body.object_type,
+        object_version: body.object_version,
+        source_device_id: body.source_device_id,
+        created_at: body.created_at.as_str(),
+        operation: body.operation,
+        payload_ids: body.payloads.iter().map(|payload| payload.id).collect(),
+        payload_id,
+    };
+    postcard::to_allocvec(&aad).map_err(|e| CryptoError::Encrypt(format!("aad: {e}")))
+}
+
+#[derive(serde::Serialize)]
+struct ObjectAadV1<'a> {
+    domain: &'static str,
+    object_id: clipper_api_types::ObjectId,
+    object_type: clipper_api_types::ObjectKind,
+    object_version: u64,
+    source_device_id: clipper_api_types::DeviceId,
+    created_at: &'a str,
+    operation: ObjectEnvelopeOperation,
+    payload_ids: Vec<ObjectPayloadId>,
+    payload_id: Option<ObjectPayloadId>,
 }
 
 /// Derive the stored verifier for a registration access key using Argon2id.
@@ -523,16 +660,14 @@ pub enum CryptoError {
     Encrypt(String),
     #[error("decryption error: {0}")]
     Decrypt(String),
+    #[error("signature error: {0}")]
+    Signature(String),
     #[error("OPAQUE error: {0}")]
     Opaque(String),
 }
 
 // ── Associated data constants ──
 pub const AAD_CLIPBOARD_V1: &[u8] = b"clipper:clipboard:v1";
-pub const AAD_CLIPBOARD_META_V1: &[u8] = b"clipper:clipboard-meta:v1";
-pub const AAD_CLIPBOARD_PAYLOAD_V1: &[u8] = b"clipper:clipboard-payload:v1";
-pub const AAD_FILE_META_V1: &[u8] = b"clipper:file-meta:v1";
-pub const AAD_FILE_BLOB_V1: &[u8] = b"clipper:file-blob:v1";
 
 // ── Server-pepper at-rest wrapping ──
 //
@@ -583,7 +718,7 @@ mod tests {
     fn test_decrypt_wrong_aad_fails() {
         let key = derive_key(b"pass", b"0123456789abcdef", &Argon2Params::default()).unwrap();
         let (nonce, ct) = encrypt(&key, b"secret", AAD_CLIPBOARD_V1).unwrap();
-        assert!(decrypt(&key, &nonce, &ct, AAD_FILE_META_V1).is_err());
+        assert!(decrypt(&key, &nonce, &ct, b"clipper:test:wrong-aad:v1").is_err());
     }
 
     #[test]

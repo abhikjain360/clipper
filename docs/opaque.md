@@ -22,7 +22,8 @@ Cipher suite: `Ristretto255 + TripleDH + SHA-512 + Argon2id`
 
 ## State kept on the server
 
-After registration, the user row carries two opaque blobs.
+The `server_config` row carries one server-wide OPAQUE setup blob. After
+registration, each user row carries its own OPAQUE password file.
 
 ### `opaque_server_setup` (serialized `ServerSetup`)
 
@@ -34,17 +35,14 @@ opaque_server_setup = oprf_seed ‖ sk_S ‖ fake_sk
 - `(sk_S, pk_S = sk_S · B)`: server static AKE keypair. `pk_S` is recomputed
   from `sk_S` on deserialize, not stored separately.
 - `fake_sk`: random scalar that stock OPAQUE uses to fake a login response
-  for a non-existent user (client-enumeration mitigation); never touched by
-  registration. **Clipper does not get this mitigation**: because
-  `opaque_server_setup` is per-user, `routes::auth::challenge` looks the user
-  up first and returns `401` for an unknown username before any OPAQUE step,
-  so `fake_sk` is never used on the missing-user path and usernames are
-  enumerable. See the deviations section below.
+  for a non-existent user (client-enumeration mitigation). Clipper uses this
+  path by passing no password file into `opaque_server_login_start` when a
+  username is missing, so `challenge` still returns a normal-looking response.
 
-Per-user OPRF key (never stored; recomputed every request):
+Per-credential OPRF key (never stored; recomputed every request):
 
 ```
-id_U = "clipper:user:{user_id}:passphrase:v1"
+id_U = "clipper:user:{username}:passphrase:v1"
 k_U  = Expand(oprf_seed, id_U)
 ```
 
@@ -207,15 +205,63 @@ check  client_mac = expected_mac                               else abort  (wron
 output session_key
 ```
 
+### Device proof-of-possession
+
+OPAQUE proves knowledge of the account passphrase. It does not prove that the
+client presenting an existing `device_id` still holds that device's signing key,
+so Clipper layers a separate Ed25519 proof onto the same login challenge.
+
+When issuing `LoginChallengeResponse`, the server samples:
+
+```
+η_D ← random 32 bytes
+```
+
+and stores `η_D` next to `state_S` under the same `challenge_id`. The response
+includes `η_D` as `device_proof_challenge` for every username, including the
+fabricated unknown-user path, so the response shape does not reveal whether the
+account exists.
+
+If the client is reusing a known local device identity `(device_id, sk_D)`, it
+derives:
+
+```
+pk_D = Public(sk_D)
+π_D  = (
+  version = 1,
+  challenge_id,
+  η_D,
+  username,
+  device_id,
+  pk_D
+)
+σ_D = Sign(sk_D, Canon(π_D))
+```
+
+and sends `(device_id, pk_D, σ_D)` in `LoginRequest`. New devices omit `σ_D`
+because there is no existing server-side device key to prove yet.
+
+After OPAQUE finalization succeeds and before issuing a bearer session, the
+server checks existing-device reuse:
+
+```
+lookup devices[device_id] = (user_id, pk_D_stored)
+check user_id == authenticated user_id
+check pk_D == pk_D_stored
+check Verify(pk_D_stored, Canon(π_D), σ_D)
+```
+
+Only then does the server update `devices.last_seen_at` and create a session.
+This makes sessions and audit state reflect actual possession of the device key.
+It does not protect against intentional key copying: anyone with `sk_D` can
+produce both this login proof and object-envelope signatures.
+
 ## Clipper deviations from a "stock" OPAQUE deployment
 
-- `opaque_server_setup` is **per user**, not global: each user has
-  independent `oprf_seed`, `sk_S`, `fake_sk`. A consequence is that the
-  standard OPAQUE enumeration defense (a global setup that fabricates a
-  response for unknown users via `fake_sk`) does not apply here — the server
-  must look up the per-user setup first, so unknown usernames are
-  distinguishable. Username enumeration is therefore an accepted property of
-  this design, not something `fake_sk` mitigates.
+- `opaque_server_setup` is server-wide and lives in `server_config`, not on
+  each user row. This lets `challenge` use OPAQUE's fake-record path for
+  unknown usernames while still deriving real user credentials from the same
+  global setup.
 - `session_key` is discarded after login; clipper authenticates the session
   with a fresh random bearer token issued by `issue_session` after
   `opaque_server_login_finish` succeeds.
@@ -237,7 +283,7 @@ purely a storage-boundary concern. See `docs/server-secret.md` for ops.
 
 Wrapped on disk:
 
-- `users.opaque_server_setup`
+- `server_config.opaque_server_setup`
 - `users.opaque_password_file`
 - `users.encryption_salt` (legacy non-null placeholder until a schema
   migration removes it)
