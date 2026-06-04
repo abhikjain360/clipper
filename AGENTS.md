@@ -6,27 +6,21 @@
   load the flake tools automatically, so run commands directly from the repo.
 - If the environment has not been allowed yet, run `direnv allow` once. Do not
   wrap routine commands in `nix develop`.
-- The flake provides Flutter, Dart, Java, Android helper environment, C/C++
-  toolchain pieces, `cargo-edit`, `cargo-udeps`,
-  `flutter_rust_bridge_codegen`, CocoaPods, `sea-orm-cli`, `osv-scanner`,
-  `wasm-pack`, and `nixfmt`. Rust comes from
-  [fenix](https://github.com/nix-community/fenix): the stable channel (the
+- The flake provides Rust from fenix, Node 24, pnpm, wasm-pack, Tauri desktop
+  build dependencies, React Native/UniFFI codegen helpers, `cargo-edit`,
+  `cargo-udeps`, `sea-orm-cli`, `osv-scanner`, `nixfmt`, and the supporting
+  C/C++ toolchain pieces. Rust comes from
+  [fenix](https://github.com/nix-community/fenix): the stable channel is the
   default toolchain on `$PATH`, with `rustfmt`, `clippy`, `rust-src`,
-  `rust-analyzer`, and the Android + `wasm32-unknown-unknown` `rust-std`
-  targets) and a pinned nightly (exposed at `$CLIPPER_RUST_NIGHTLY_BIN`) for
-  unstable rustfmt options and Flutter Rust Bridge web builds. Bump either
-  toolchain by editing `rustStableDate` / `rustNightlyDate` in `flake.nix`
-  and supplying the new `nix-prefetch-url` manifest hash.
-- Cargokit's Android plugin build (`app/rust_builder/cargokit`) is patched to
-  prefer the fenix toolchain via `CARGOKIT_CARGO` / `CARGOKIT_RUSTC` instead
-  of calling `rustup`. If you re-vendor cargokit, reapply that patch — see
-  `app/rust_builder/cargokit/PATCHES.md`.
-- The intent is not to make every mobile platform detail pure Nix. Use the
-  flake for CLI, codegen, dependency, and build tooling. Emulators, Xcode, host
-  Android SDK/NDK installs, signing, and other OS-tied platform setup can come
-  from the host system; the flake discovers those where practical.
-- If Android Gradle picks up the wrong Flutter SDK, run `cd app && flutter pub
-  get` to refresh `app/android/local.properties` with the flake Flutter path.
+  `rust-analyzer`, and the browser wasm plus Android `rust-std` targets; the
+  pinned nightly is exposed at `$CLIPPER_RUST_NIGHTLY_BIN` for unstable rustfmt
+  options. Bump either toolchain by editing `rustStableDate` /
+  `rustNightlyDate` in `flake.nix` and supplying the new `nix-prefetch-url`
+  manifest hash.
+- The intent is not to make every native platform detail pure Nix. Use the flake
+  for CLI, dependency, codegen, and build tooling. OS-tied signing and packaging
+  details, plus Android SDK/NDK and emulators, can come from the host system
+  where needed.
 
 ## Common Commands
 
@@ -39,28 +33,22 @@
 - Unused Rust dependency scan: `nix run .#udeps`
 - Rust workspace check: `cargo check --workspace`
 - Rust tests: `cargo test --workspace`
-- WASM bridge check: `nix run .#wasm-check`
-- Flutter dependencies: `cd app && flutter pub get`
-- Flutter analysis/tests: `cd app && flutter analyze && flutter test`
-- Regenerate Flutter Rust Bridge after Rust API changes:
-
-  ```sh
-  nix run .#frb-generate
-  ```
-
-- Rebuild the Flutter Rust Bridge web package: `nix run .#frb-build-web`
-- Build the Flutter web client: `nix run .#web-build`
-- Serve the Flutter web client locally: `nix run .#web-serve`
-  - Flutter Rust Bridge requires shared-memory wasm and cross-origin isolation
-    for the wasm worker. Use these wrappers instead of generic build or static
-    file server commands.
-- Build the macOS Flutter app: `nix run .#macos-build`
-  - This wrapper is Darwin-only. It uses host Flutter/Xcode for app packaging
-    because Flutter mutates copied macOS engine framework artifacts during the
-    build, but keeps Rust on the flake-provided fenix toolchain through
-    `CARGOKIT_CARGO` / `CARGOKIT_RUSTC`.
-  - It defaults `FLUTTER_SWIFT_PACKAGE_MANAGER=false` so newer host Flutter
-    versions do not rewrite the current CocoaPods-based macOS project.
+- Browser wasm adapter check: `nix run .#wasm-check`
+- Web lint/type check: `nix run .#web-check`
+- Build the standalone web client: `nix run .#web-build`
+- Serve the standalone web client locally: `nix run .#web-serve`
+  - These wrappers regenerate the `crates/web-wasm` package before invoking
+    Vite.
+- Run the Tauri desktop shell: `nix run .#tauri-dev`
+- Build the Tauri desktop shell: `nix run .#tauri-build`
+  - These wrappers install the pnpm workspace from `pnpm-lock.yaml`, use the
+    flake Rust toolchain, regenerate the browser wasm package for Vite, and
+    invoke the Tauri CLI from `web/package.json`.
+- Mobile lint/type check: `nix run .#mobile-check`
+- Generate the Android React Native UniFFI bridge:
+  `nix run .#mobile-uniffi-android`
+- Start the Expo development server: `nix run .#mobile-start`
+- Run the Android React Native app: `nix run .#mobile-android`
 
 - Local server setup and serve:
 
@@ -87,54 +75,47 @@
 
 ## Dependency Notes
 
-- Keep Rust and Dart `flutter_rust_bridge` versions aligned. After changing
-  either side, regenerate FRB files and check both Rust and Flutter.
-- The app Rust crate disables FRB's own `anyhow` feature while keeping
-  logging/user utilities enabled. `anyhow` can still appear transitively through
-  FRB's `allo-isolate` dependency on non-wasm targets; do not add direct
-  `anyhow` dependencies in repo crates.
 - Use typed Rust errors with `thiserror`. Binary entrypoints should log via
   `tracing` and exit with typed error codes where useful; do not force stderr
   output with `eprintln!`.
-- Use the configured logger (`tracing` in Rust code) for diagnostics instead
-  of direct `println!`, `eprintln!`, or `dbg!` calls.
-- `sha2` must stay on the `0.10` line while `opaque-ke` depends on the
-  `digest` 0.10 trait ecosystem.
-- `app/rust_builder/cargokit/build_tool` keeps runtime dependencies pinned
-  because its bundle tool runner does not use `pubspec.lock`.
+- Use the configured logger (`tracing` in Rust code) for diagnostics instead of
+  direct `println!`, `eprintln!`, or `dbg!` calls.
+- `sha2` must stay on the `0.10` line while `opaque-ke` depends on the `digest`
+  0.10 trait ecosystem.
 
 ## Boundaries
 
 - Shared HTTP/WebSocket payloads live in `crates/api-types`.
 - Daemon IPC types live in `crates/daemon-types`.
 - Display-ready app state lives in `crates/app-types`.
-- Flutter Rust Bridge types in `app/rust/src/api/clipper.rs` are adapter types
-  only. Keep conversions exhaustive so state schema changes fail at compile
-  time.
-- Server schema changes live in `crates/server/src/migration/*.rs`; keep
-  SeaORM entities aligned by regenerating them with `sea-orm-cli`. Do not
-  hand-edit generated entity files as the final change.
+- Browser wasm bindings live in `crates/web-wasm`.
+- Tauri desktop commands live in `web/src-tauri`.
+- Shared browser/native React UI lives in `web/src`.
+- React Native mobile UI lives in `mobile/src` and uses Tamagui as well.
+- Shared frontend contracts live in `packages/shared`.
+- React Native UniFFI package glue lives in `packages/mobile-bridge`.
+- Mobile UniFFI bindings are exported by `crates/mobile-uniffi`; app-visible
+  records should be derived on `crates/app-types` types where practical.
+- Server schema changes live in `crates/server/src/migration/*.rs`; keep SeaORM
+  entities aligned by regenerating them with `sea-orm-cli`. Do not hand-edit
+  generated entity files as the final change.
 - `event_log.seq` is an application-assigned monotonic microsecond timestamp
   (see `AppState::next_event_seq`), not a database autoincrement. It is the
-  sync cursor, so it must stay strictly increasing and unique; allocate it
-  only while the surrounding transaction already holds the write lock so seq
-  order matches commit order.
-- This project is not deployed anywhere yet. Do not preserve legacy schema,
-  API, ciphertext, or local-storage compatibility unless explicitly asked;
-  prefer coherent current design over compatibility migrations for abandoned
-  local state.
+  sync cursor, so it must stay strictly increasing and unique; allocate it only
+  while the surrounding transaction already holds the write lock so seq order
+  matches commit order.
+- This project is not deployed anywhere yet. Do not preserve legacy schema, API,
+  ciphertext, or local-storage compatibility unless explicitly asked; prefer
+  coherent current design over compatibility migrations for abandoned local
+  state.
 - Auth is multi-user: access keys are one-time registration invites stored as
   hashes, while user passphrases must only flow through OPAQUE registration and
   login. Server handlers must scope private data by authenticated `user_id`.
 - Server auth blobs (`users.opaque_server_setup`,
   `users.opaque_password_file`, `users.encryption_salt`,
-  `server_config.access_key_hash_salt`) are AEAD-wrapped at rest with a
-  pepper sourced from `CLIPPER_SERVER_SECRET` / `CLIPPER_SERVER_SECRET_FILE`.
-  Use `crates/server/src/secret_storage.rs` helpers at the storage
-  boundary — never insert plaintext into those columns. Access-key
-  hashes use the same pepper as Argon2's `secret`. See
-  `docs/server-secret.md` for ops, `docs/opaque.md` for the wrap layer
-  in relation to OPAQUE.
-- When auth state or auth commands cross the Flutter Rust Bridge, update the
-  bridge adapter and regenerate FRB output so Dart, daemon IPC, and Rust stay
-  aligned.
+  `server_config.access_key_hash_salt`) are AEAD-wrapped at rest with a pepper
+  sourced from `CLIPPER_SERVER_SECRET` / `CLIPPER_SERVER_SECRET_FILE`. Use
+  `crates/server/src/secret_storage.rs` helpers at the storage boundary - never
+  insert plaintext into those columns. Access-key hashes use the same pepper as
+  Argon2's `secret`. See `docs/server-secret.md` for ops, `docs/opaque.md` for
+  the wrap layer in relation to OPAQUE.

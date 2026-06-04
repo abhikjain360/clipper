@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "name": "Clipper",
+    "slug": "clipper",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "clipper",
+    "userInterfaceStyle": "dark",
+    "assetBundlePatterns": ["**/*"],
+    "android": {
+      "package": "com.clipper.mobile"
+    },
+    "plugins": []
+  }
+}

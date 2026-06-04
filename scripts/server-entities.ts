@@ -24,9 +24,7 @@ function generateServerSecret(): string {
   return btoa(binary);
 }
 
-function withEphemeralServerSecret(
-  env: Readonly<Record<string, string>>,
-): Record<string, string> {
+function withEphemeralServerSecret(env: Readonly<Record<string, string>>): Record<string, string> {
   if (
     nonEmpty(env[SERVER_SECRET_ENV]) !== undefined ||
     nonEmpty(env[SERVER_SECRET_FILE_ENV]) !== undefined
@@ -44,10 +42,12 @@ async function main(): Promise<void> {
   const initialEnv = Deno.env.toObject();
   const scriptDir = moduleDir(import.meta.url);
   const repoRoot = await findRepoRoot(initialEnv, [joinPath(scriptDir, "..")]);
-  const env = withEphemeralServerSecret(useStableToolchain({
-    ...initialEnv,
-    RUST_LOG: nonEmpty(initialEnv.RUST_LOG) ?? "warn",
-  }));
+  const env = withEphemeralServerSecret(
+    useStableToolchain({
+      ...initialEnv,
+      RUST_LOG: nonEmpty(initialEnv.RUST_LOG) ?? "warn",
+    }),
+  );
   const cargo = await requireExecutableFromPath("cargo", env);
   const seaOrmCli = await requireExecutableFromPath("sea-orm-cli", env);
   const tempDir = await Deno.makeTempDir({
@@ -56,11 +56,10 @@ async function main(): Promise<void> {
 
   try {
     const dataDir = joinPath(tempDir, "data");
-    await runCommand(
-      cargo,
-      ["run", "-q", "-p", "clipper-server", "--", "init", "-d", dataDir],
-      { cwd: repoRoot, env },
-    );
+    await runCommand(cargo, ["run", "-q", "-p", "clipper-server", "--", "init", "-d", dataDir], {
+      cwd: repoRoot,
+      env,
+    });
     await runCommand(
       seaOrmCli,
       [

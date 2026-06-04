@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license-file.workspace = true
 
+[features]
+default = []
+uniffi = ["dep:uniffi"]
+
 [dependencies]
 serde.workspace = true
 strum.workspace = true
+uniffi = { workspace = true, optional = true }

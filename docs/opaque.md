@@ -267,7 +267,7 @@ produce both this login proof and object-envelope signatures.
   `opaque_server_login_finish` succeeds.
 - `export_key` is used only on the client. Clipper derives its local
   data-encryption key as `HKDF-SHA256(export_key,
-  "clipper:opaque-export:data-key:v1")`; the server never receives this
+"clipper:opaque-export:data-key:v1")`; the server never receives this
   key and no longer returns a separate encryption salt/KDF parameter set.
 - Access keys are an invite-gate that lives entirely outside OPAQUE.
 

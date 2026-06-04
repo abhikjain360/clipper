@@ -1,0 +1,33 @@
+{
+  "categories": {
+    "correctness": "error",
+    "perf": "warn",
+    "suspicious": "warn"
+  },
+  "env": {
+    "browser": true,
+    "es2024": true,
+    "node": true
+  },
+  "globals": {
+    "Deno": "readonly"
+  },
+  "rules": {
+    "no-await-in-loop": "off",
+    "no-unmodified-loop-condition": "off"
+  },
+  "ignorePatterns": [
+    "node_modules",
+    "target",
+    "dist",
+    "web/dist",
+    "web/.tamagui",
+    "web/src/generated",
+    "packages/mobile-bridge/android/generated",
+    "packages/mobile-bridge/android/src/main/jniLibs",
+    "packages/mobile-bridge/cpp/generated",
+    "packages/mobile-bridge/ios/generated",
+    "packages/mobile-bridge/src/generated",
+    "mobile/.expo"
+  ]
+}

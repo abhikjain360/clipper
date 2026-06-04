@@ -30,11 +30,11 @@ function api(
   method: string,
   path: string,
   body?: unknown,
-  token?: string,
+  bearerToken?: string,
 ): Promise<Response> {
   const headers: Record<string, string> = {};
   if (body) headers["Content-Type"] = "application/json";
-  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (bearerToken) headers["Authorization"] = `Bearer ${bearerToken}`;
   return fetch(`${BASE}${path}`, {
     method,
     headers,
@@ -74,10 +74,7 @@ console.log("\n=== 3. Sync bootstrap ===");
   const json = await res.json();
   assert(typeof json.device === "object", "has device info");
   assert(typeof json.latest_seq === "number", "has latest_seq");
-  assert(
-    typeof json.server.encryption_salt_b64 === "string",
-    "has encryption_salt_b64",
-  );
+  assert(typeof json.server.encryption_salt_b64 === "string", "has encryption_salt_b64");
 }
 
 console.log("\n=== 4. Logout ===");
@@ -87,10 +84,7 @@ console.log("\n=== 4. Logout ===");
 
   // Verify token is invalidated
   const afterRes = await api("GET", "/api/objects", undefined, token);
-  assert(
-    afterRes.status === 401,
-    `post-logout status 401 (got ${afterRes.status})`,
-  );
+  assert(afterRes.status === 401, `post-logout status 401 (got ${afterRes.status})`);
   await afterRes.body?.cancel();
 }
 

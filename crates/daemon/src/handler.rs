@@ -361,15 +361,35 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     bytes
 }
 
+async fn ensure_requested_base_url(
+    engine: &Arc<SyncEngine>,
+    requested: &str,
+) -> Result<(), ClientError> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Ok(());
+    }
+    let configured = engine.base_url();
+    if normalize_server_url(requested) == normalize_server_url(&configured) {
+        return Ok(());
+    }
+    Err(ClientError::InvalidServerUrl(format!(
+        "Server URL is fixed at client init: configured {configured}, requested {requested}"
+    )))
+}
+
+fn normalize_server_url(url: &str) -> &str {
+    url.trim().trim_end_matches('/')
+}
+
 async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) -> DaemonResponse {
     let device_name = params
         .device_name
         .as_deref()
         .unwrap_or(default_device_name());
 
-    // If server_url is provided, reconfigure the engine
     if let Some(url) = params.server_url.as_deref()
-        && let Err(error) = engine.set_base_url(url).await
+        && let Err(error) = ensure_requested_base_url(engine, url).await
     {
         return client_error(id, error);
     }
@@ -385,7 +405,7 @@ async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) ->
     {
         Ok(()) => {
             // Store credentials in Keychain
-            let url = engine.base_url().await;
+            let url = engine.base_url();
             let state = engine.get_state().await;
             let creds = Credentials {
                 device_name: device_name.to_string(),
@@ -412,7 +432,7 @@ async fn cmd_register(
         .unwrap_or(default_device_name());
 
     if let Some(url) = params.server_url.as_deref()
-        && let Err(error) = engine.set_base_url(url).await
+        && let Err(error) = ensure_requested_base_url(engine, url).await
     {
         return client_error(id, error);
     }
@@ -428,7 +448,7 @@ async fn cmd_register(
         .await
     {
         Ok(username) => {
-            let url = engine.base_url().await;
+            let url = engine.base_url();
             let creds = Credentials {
                 device_name: device_name.to_string(),
                 server_url: url,

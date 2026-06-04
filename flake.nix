@@ -2,7 +2,6 @@
   description = "Clipper development environment";
 
   inputs = {
-    # Use unstable until the latest stable Nix channel has Dart >= 3.11.1.
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     fenix = {
       url = "github:nix-community/fenix";
@@ -19,21 +18,43 @@
         "x86_64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-      rustStableDate = "2026-04-16";
-      rustStableManifestSha256 = "sha256-gh/xTkxKHL4eiRXzWv8KP7vfjSk61Iq48x47BEDFgfk=";
-      rustNightlyDate = "2026-05-24";
-      rustNightlyManifestSha256 = "sha256-gARSjceSEFY+8IYGJFhN8O+oqKPN/eyMFW+aqGVu9hk=";
+      rustStableDate = "2026-05-28";
+      rustStableManifestSha256 = "sha256-mvUGEOHYJpn3ikC5hckneuGixaC+yGrkMM/liDIDgoU=";
+      rustNightlyDate = "2026-06-04";
+      rustNightlyManifestSha256 = "sha256-gQBIgkaAydtk9H+rmJBeyHNfZr/m1GybGmyApwvGF8E=";
+      wasmRustTarget = "wasm32-unknown-unknown";
       androidRustTargets = [
         "aarch64-linux-android"
         "armv7-linux-androideabi"
         "i686-linux-android"
         "x86_64-linux-android"
       ];
-      wasmRustTarget = "wasm32-unknown-unknown";
+      stableRustTargets = [ wasmRustTarget ] ++ androidRustTargets;
       # Interpolate the directory so every script shares one /nix/store path
       # and can resolve sibling helpers.
       scriptsDir = ./scripts;
       mkPkgs = system: import nixpkgs { inherit system; };
+      raiseOpenFileLimit = ''
+        case "$(ulimit -n)" in
+          unlimited) ;;
+          *[!0-9]*) ;;
+          *)
+            if [ "$(ulimit -n)" -lt 4096 ]; then
+              ulimit -n 4096 2>/dev/null || true
+            fi
+            ;;
+        esac
+      '';
+      mkPnpm =
+        pkgs:
+        pkgs.writeShellApplication {
+          name = "pnpm";
+          runtimeInputs = [ pkgs.pnpm ];
+          text = ''
+            ${raiseOpenFileLimit}
+            exec ${pkgs.pnpm}/bin/pnpm "$@"
+          '';
+        };
       mkRustToolchains =
         system:
         let
@@ -61,9 +82,7 @@
               stableChannel.rust-src
               stableChannel.rust-analyzer
             ]
-            ++ map (t: (fenixPkgs.targets.${t}.toolchainOf stableArgs).rust-std) (
-              androidRustTargets ++ [ wasmRustTarget ]
-            )
+            ++ map (t: (fenixPkgs.targets.${t}.toolchainOf stableArgs).rust-std) stableRustTargets
           );
           nightly = fenixPkgs.combine [
             nightlyChannel.cargo
@@ -78,42 +97,63 @@
         let
           pkgs = mkPkgs system;
           toolchains = mkRustToolchains system;
+          nodejsLts = pkgs.nodejs_24;
+          pnpm = mkPnpm pkgs;
           baseRuntimeInputs = with pkgs; [
             bash
             coreutils
             git
           ];
+          denoRuntimeInputs = baseRuntimeInputs ++ [ pkgs.deno ];
+          jsRuntimeInputs = [
+            nodejsLts
+            pnpm
+          ];
           fmtRuntimeInputs =
-            baseRuntimeInputs
+            denoRuntimeInputs
             ++ (with pkgs; [
-              dart
-              deno
               nixfmt
             ])
+            ++ jsRuntimeInputs
             ++ [ toolchains.nightly ];
-          rustRuntimeInputs = baseRuntimeInputs ++ [ toolchains.nightly ];
-          frbGenerateRuntimeInputs =
-            baseRuntimeInputs
+          rustRuntimeInputs = denoRuntimeInputs ++ [ toolchains.nightly ];
+          webRuntimeInputs =
+            denoRuntimeInputs
             ++ (with pkgs; [
-              dart
-              flutter
-              flutter_rust_bridge_codegen
-            ])
-            ++ [ toolchains.stable ];
-          frbWebRuntimeInputs =
-            frbGenerateRuntimeInputs
-            ++ (with pkgs; [
-              deno
               wasm-pack
             ])
-            ++ [ toolchains.nightly ];
-          webServeRuntimeInputs = baseRuntimeInputs ++ [ pkgs.deno ];
-          macosBuildRuntimeInputs =
-            baseRuntimeInputs
-            ++ [ pkgs.deno ]
+            ++ jsRuntimeInputs
+            ++ [ toolchains.stable ];
+          mobileRuntimeInputs =
+            denoRuntimeInputs
+            ++ jsRuntimeInputs
+            ++ (with pkgs; [
+              cargo-ndk
+            ])
+            ++ [ toolchains.stable ];
+          tauriRuntimeInputs =
+            webRuntimeInputs
+            ++ (with pkgs; [
+              openssl
+              pkg-config
+            ])
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux (
+              with pkgs;
+              [
+                atk
+                cairo
+                gdk-pixbuf
+                glib
+                gtk3
+                libayatana-appindicator
+                libsoup_3
+                pango
+                webkitgtk_4_1
+              ]
+            )
             ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-              pkgs.cocoapods
-              toolchains.stable
+              pkgs.apple-sdk_15
+              pkgs.libiconv
             ];
           nightlyEnv = ''
             export CLIPPER_RUST_NIGHTLY_BIN="${toolchains.nightly}/bin"
@@ -124,13 +164,22 @@
           wasmEnv = ''
             export CLIPPER_WASM_TARGET="${wasmRustTarget}"
           '';
-          flutterEnv = ''
-            export FLUTTER_ROOT="${pkgs.flutter}"
-          '';
-          cargokitStableEnv = stableEnv + ''
-            export CARGOKIT_CARGO="${toolchains.stable}/bin/cargo"
-            export CARGOKIT_RUSTC="${toolchains.stable}/bin/rustc"
-          '';
+          denoTaskPermissions = [
+            "--allow-env"
+            "--allow-read"
+            "--allow-run"
+          ];
+          mobileTaskPermissions = [
+            "--allow-env"
+            "--allow-read"
+            "--allow-write"
+            "--allow-run"
+          ];
+          mkTaskSpec = task: {
+            denoScript = "tasks.ts";
+            denoArgs = [ task ];
+            denoPermissions = denoTaskPermissions;
+          };
         in
         {
           fmt = {
@@ -138,119 +187,57 @@
             description = "Format all Clipper sources";
             runtimeInputs = fmtRuntimeInputs;
             env = nightlyEnv;
-            text = ''
-              # shellcheck disable=SC1091
-              source ${scriptsDir}/common.sh
-
-              clipper_enter_repo
-              clipper_use_nightly
-
-              nixfmt flake.nix
-              cargo fmt --all
-              deno fmt scripts/*.ts test-server.ts
-              dart format app/lib app/test app/integration_test app/test_driver
-            '';
-          };
+          }
+          // mkTaskSpec "fmt";
 
           rustfmt = {
             program = "clipper-rustfmt";
             description = "Format Rust sources with the pinned nightly toolchain";
             runtimeInputs = rustRuntimeInputs;
             env = nightlyEnv;
-            text = ''
-              # shellcheck disable=SC1091
-              source ${scriptsDir}/common.sh
-
-              clipper_enter_repo
-              clipper_use_nightly
-
-              exec cargo fmt --all "$@"
-            '';
-          };
+          }
+          // mkTaskSpec "rustfmt";
 
           audit = {
             program = "clipper-audit";
             description = "Scan dependency manifests with OSV-Scanner";
             runtimeInputs =
-              baseRuntimeInputs
+              denoRuntimeInputs
               ++ (with pkgs; [
                 osv-scanner
               ])
               ++ [ toolchains.stable ];
             env = stableEnv;
-            text = ''
-              # shellcheck disable=SC1091
-              source ${scriptsDir}/common.sh
+          }
+          // mkTaskSpec "audit";
 
-              clipper_enter_repo
-              clipper_use_stable
-
-              if [ "$#" -eq 0 ]; then
-                set -- scan source -r "$CLIPPER_REPO_ROOT"
-              fi
-
-              exec osv-scanner "$@"
-            '';
-          };
+          js-check = {
+            program = "clipper-js-check";
+            description = "Lint and type check all TypeScript and JavaScript sources";
+            runtimeInputs = denoRuntimeInputs ++ jsRuntimeInputs;
+          }
+          // mkTaskSpec "js-check";
 
           udeps = {
             program = "clipper-udeps";
             description = "Detect unused Rust dependencies with cargo-udeps";
             runtimeInputs =
-              baseRuntimeInputs
+              denoRuntimeInputs
               ++ (with pkgs; [
                 cargo-udeps
               ])
               ++ [ toolchains.nightly ];
             env = nightlyEnv;
-            text = ''
-              # shellcheck disable=SC1091
-              source ${scriptsDir}/common.sh
-
-              clipper_enter_repo
-              clipper_use_nightly
-
-              if [ "$#" -eq 0 ]; then
-                set -- --workspace --all-targets --locked
-              fi
-
-              exec cargo udeps "$@"
-            '';
-          };
+          }
+          // mkTaskSpec "udeps";
 
           wasm-check = {
             program = "clipper-wasm-check";
-            description = "Check the Rust app crate for wasm32-unknown-unknown";
-            runtimeInputs = rustRuntimeInputs;
-            env = nightlyEnv + wasmEnv;
-            text = ''
-              # shellcheck disable=SC1091
-              source ${scriptsDir}/common.sh
-
-              clipper_require_env CLIPPER_WASM_TARGET
-              clipper_enter_repo
-              clipper_use_nightly
-
-              exec cargo check -p rust_lib_clipper_app --target "$CLIPPER_WASM_TARGET" "$@"
-            '';
-          };
-
-          frb-generate = {
-            program = "clipper-frb-generate";
-            description = "Regenerate Flutter Rust Bridge bindings";
-            runtimeInputs = frbGenerateRuntimeInputs;
-            env = flutterEnv;
-            text = ''
-              # shellcheck disable=SC1091
-              source ${scriptsDir}/common.sh
-
-              clipper_require_env FLUTTER_ROOT
-              clipper_enter_app
-
-              export FLUTTER_ROOT
-              exec flutter_rust_bridge_codegen generate "$@"
-            '';
-          };
+            description = "Check the standalone web wasm crate for wasm32-unknown-unknown";
+            runtimeInputs = denoRuntimeInputs ++ [ toolchains.stable ];
+            env = stableEnv + wasmEnv;
+          }
+          // mkTaskSpec "wasm-check";
 
           server-entities = {
             program = "clipper-server-entities";
@@ -263,9 +250,8 @@
             ];
             description = "Regenerate SeaORM server entities from the current schema";
             runtimeInputs =
-              baseRuntimeInputs
+              denoRuntimeInputs
               ++ (with pkgs; [
-                deno
                 sea-orm-cli
                 sqlite
               ])
@@ -273,60 +259,79 @@
             env = stableEnv;
           };
 
-          frb-build-web = {
-            program = "clipper-frb-build-web";
-            denoScript = "frb-build-web.ts";
-            denoPermissions = [
-              "--allow-env"
-              "--allow-read"
-              "--allow-write"
-              "--allow-run"
-            ];
-            description = "Build Flutter Rust Bridge wasm artifacts";
-            runtimeInputs = frbWebRuntimeInputs;
-            env = nightlyEnv + flutterEnv;
-          };
-
           web-build = {
             program = "clipper-web-build";
-            denoScript = "web-build.ts";
-            denoPermissions = [
-              "--allow-env"
-              "--allow-read"
-              "--allow-write"
-              "--allow-run"
-            ];
-            description = "Build the Flutter web application";
-            runtimeInputs = frbWebRuntimeInputs;
-            env = nightlyEnv + wasmEnv + flutterEnv;
-          };
+            description = "Build the standalone web application";
+            runtimeInputs = webRuntimeInputs;
+            env = stableEnv + wasmEnv;
+          }
+          // mkTaskSpec "web-build";
 
           web-serve = {
             program = "clipper-web-serve";
-            denoScript = "web-serve.ts";
-            denoPermissions = [
-              "--allow-env=CLIPPER_WEB_ROOT,CLIPPER_REPO_ROOT"
-              "--allow-read"
-              "--allow-net=127.0.0.1"
-              "--allow-run=git"
-            ];
-            description = "Serve the Flutter web build with required cross-origin isolation headers";
-            runtimeInputs = webServeRuntimeInputs;
-          };
-        }
-        // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
-          macos-build = {
-            program = "clipper-macos-build";
-            denoScript = "macos-build.ts";
-            denoPermissions = [
-              "--allow-env"
-              "--allow-read"
-              "--allow-run"
-            ];
-            description = "Build the macOS Flutter app with host Flutter/Xcode and Nix Rust";
-            runtimeInputs = macosBuildRuntimeInputs;
-            env = cargokitStableEnv;
-          };
+            description = "Serve the standalone web application with Vite";
+            runtimeInputs = webRuntimeInputs;
+            env = stableEnv + wasmEnv;
+          }
+          // mkTaskSpec "web-serve";
+
+          web-check = {
+            program = "clipper-web-check";
+            description = "Lint and type check the standalone web application";
+            runtimeInputs = webRuntimeInputs;
+            env = stableEnv + wasmEnv;
+          }
+          // mkTaskSpec "web-check";
+
+          tauri-dev = {
+            program = "clipper-tauri-dev";
+            description = "Run the Tauri desktop shell";
+            runtimeInputs = tauriRuntimeInputs;
+            env = stableEnv + wasmEnv;
+          }
+          // mkTaskSpec "tauri-dev";
+
+          tauri-build = {
+            program = "clipper-tauri-build";
+            description = "Build the Tauri desktop shell";
+            runtimeInputs = tauriRuntimeInputs;
+            env = stableEnv + wasmEnv;
+          }
+          // mkTaskSpec "tauri-build";
+
+          mobile-check = {
+            program = "clipper-mobile-check";
+            description = "Type check and lint the React Native mobile packages";
+            runtimeInputs = mobileRuntimeInputs;
+            env = stableEnv;
+          }
+          // mkTaskSpec "mobile-check";
+
+          mobile-start = {
+            program = "clipper-mobile-start";
+            description = "Start the Expo React Native development server";
+            runtimeInputs = mobileRuntimeInputs;
+            env = stableEnv;
+          }
+          // mkTaskSpec "mobile-start";
+
+          mobile-android = {
+            program = "clipper-mobile-android";
+            description = "Generate the UniFFI bridge and run the Android React Native app";
+            runtimeInputs = mobileRuntimeInputs;
+            env = stableEnv;
+            denoPermissions = mobileTaskPermissions;
+          }
+          // mkTaskSpec "mobile-android";
+
+          mobile-uniffi-android = {
+            program = "clipper-mobile-uniffi-android";
+            description = "Generate the Android React Native UniFFI bridge";
+            runtimeInputs = mobileRuntimeInputs;
+            env = stableEnv;
+            denoPermissions = mobileTaskPermissions;
+          }
+          // mkTaskSpec "mobile-uniffi-android";
         };
       mkCommandScripts =
         system:
@@ -337,22 +342,24 @@
             cfg:
             let
               denoPermissions = pkgs.lib.escapeShellArgs (cfg.denoPermissions or [ ]);
+              denoScript = pkgs.lib.escapeShellArg "${scriptsDir}/${cfg.denoScript}";
+              denoArgs = pkgs.lib.escapeShellArgs (cfg.denoArgs or [ ]);
             in
             if cfg ? text then
               ''
+                ${raiseOpenFileLimit}
                 ${cfg.env or ""}
                 ${cfg.text}
               ''
             else if cfg ? denoScript then
               ''
+                ${raiseOpenFileLimit}
                 ${cfg.env or ""}
-                # shellcheck disable=SC1091
-                source ${scriptsDir}/common.sh
-
-                deno run ${denoPermissions} "$CLIPPER_REPO_ROOT/scripts/${cfg.denoScript}" "$@"
+                exec deno run ${denoPermissions} ${denoScript} ${denoArgs} "$@"
               ''
             else
               ''
+                ${raiseOpenFileLimit}
                 ${cfg.env or ""}
                 bash ${scriptsDir}/${cfg.script} "$@"
               '';
@@ -378,6 +385,8 @@
           pkgs = mkPkgs system;
           lib = pkgs.lib;
           toolchains = mkRustToolchains system;
+          nodejsLts = pkgs.nodejs_24;
+          pnpm = mkPnpm pkgs;
           darwinInputs = lib.optionals pkgs.stdenv.isDarwin [
             pkgs.apple-sdk_15
             pkgs.libiconv
@@ -388,14 +397,10 @@
             packages =
               (with pkgs; [
                 cargo-edit
+                cargo-ndk
                 cargo-udeps
                 cmake
-                cocoapods
-                dart
                 deno
-                flutter
-                flutter_rust_bridge_codegen
-                jdk17
                 llvmPackages.clang
                 llvmPackages.libclang
                 ninja
@@ -408,19 +413,34 @@
                 wasm-pack
               ])
               ++ [
+                nodejsLts
+                pnpm
+              ]
+              ++ lib.optionals pkgs.stdenv.isLinux (
+                with pkgs;
+                [
+                  atk
+                  cairo
+                  gdk-pixbuf
+                  glib
+                  gtk3
+                  libayatana-appindicator
+                  libsoup_3
+                  pango
+                  webkitgtk_4_1
+                ]
+              )
+              ++ [
                 toolchains.stable
               ]
               ++ darwinInputs;
 
             env = {
+              CLIPPER_NODE_BIN = "${nodejsLts}/bin";
+              CLIPPER_PNPM_BIN = "${pnpm}/bin";
               CLIPPER_STABLE_BIN = "${toolchains.stable}/bin";
               CLIPPER_WASM_TARGET = "${wasmRustTarget}";
-              CARGOKIT_CARGO = "${toolchains.stable}/bin/cargo";
-              CARGOKIT_RUSTC = "${toolchains.stable}/bin/rustc";
               CLIPPER_RUST_NIGHTLY_BIN = "${toolchains.nightly}/bin";
-              COCOAPODS_DISABLE_STATS = "1";
-              FLUTTER_ROOT = "${pkgs.flutter}";
-              JAVA_HOME = "${pkgs.jdk17.home}";
               LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
               RUST_BACKTRACE = "1";
               RUST_SRC_PATH = "${toolchains.stable}/lib/rustlib/src/rust/library";

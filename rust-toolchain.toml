@@ -3,9 +3,9 @@ channel = "stable"
 profile = "minimal"
 components = ["clippy", "rustfmt", "rust-src"]
 targets = [
-    "aarch64-linux-android",
-    "armv7-linux-androideabi",
-    "i686-linux-android",
-    "wasm32-unknown-unknown",
-    "x86_64-linux-android",
+  "aarch64-linux-android",
+  "armv7-linux-androideabi",
+  "i686-linux-android",
+  "wasm32-unknown-unknown",
+  "x86_64-linux-android",
 ]

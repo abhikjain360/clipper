@@ -32,56 +32,41 @@ bearer tokens or sync metadata from plain HTTP.
 
 `crates/server` is the Axum API and SQLite storage.
 `crates/client` is the shared Rust sync client.
+`crates/web-wasm` is the wasm-bindgen adapter for the browser client.
+`crates/mobile-uniffi` is the UniFFI adapter for React Native mobile.
 `crates/daemon` is the local macOS/Linux background process.
-`app` is the Flutter app and Flutter Rust Bridge adapter.
+`web` is the Vite/React client shared by the browser build and Tauri shell.
+`web/src-tauri` is the native Tauri desktop shell.
+`mobile` is the React Native/Expo Android client.
+`packages/shared` contains frontend contracts shared by web, Tauri, and mobile.
+`packages/mobile-bridge` contains the React Native UniFFI package glue.
 `docs` has the longer notes.
 
 ## Platforms
 
-The Flutter bridge is wired for macOS, Linux, Android, and web.
+The browser client is a Vite/React app that uses the shared Rust sync client
+through `crates/web-wasm`.
 
-macOS runs the Flutter app against a local `clipper-daemon` over a Unix socket.
-The daemon owns sync, clipboard watching, and Keychain-backed profile storage.
+The native desktop client is a Tauri shell around the same React UI. Its Rust
+backend runs `clipper-client` in-process, stores client data under the app data
+directory, and uses Tauri plugins for native file dialogs and clipboard access.
+On macOS and Linux, `clipper-client` starts its platform clipboard watcher after
+login.
 
-Linux also runs the Flutter app against `clipper-daemon` over a Unix socket. The
-daemon is a per-user process, started through `systemd --user` when available
-and falling back to a direct spawn. Wayland clipboard sync uses data-control via
-`wl-clipboard-rs`; X11 clipboard support is intentionally not implemented.
-
-Android runs the same Rust sync engine in-process behind the Flutter bridge.
-The emulator default server URL is `http://10.0.2.2:8787`.
-
-Android can keep the sync engine alive in a foreground service after the app has
-been opened and the user is logged in. The service shows a persistent
-notification with a Stop action and is for network sync only. Android does not
-allow a normal background app or foreground service to continuously read the
-system clipboard; clipboard reads require the app to have input focus unless it
-is the default input method or a privileged system app. For Android clipboard
-push, open Clipper and use **Add Current Clipboard** from the Clipboard tab.
+The mobile client is React Native/Expo for Android. It has native RN components
+under `mobile/src`, shares frontend contracts through `packages/shared`, and
+talks to `clipper-client` through `crates/mobile-uniffi` plus
+`packages/mobile-bridge`. iOS is not wired into the app yet, but the bridge
+layout keeps it mostly additive.
 
 The web client does not watch the clipboard in the background. It can display
 synced clipboard history and can add the current text clipboard entry through
 the Clipboard tab when the browser grants access.
 
 ```sh
-cd app && flutter run -d android
+nix run .#tauri-dev
+nix run .#tauri-build
 ```
-
-macOS app packaging currently uses host Flutter and Xcode, while Rust artifacts
-still use the Nix-pinned Rust toolchain through `CARGOKIT_CARGO` /
-`CARGOKIT_RUSTC`. Use the wrapper so the Xcode environment is sanitized and the
-daemon build uses the same pinned Rust toolchain:
-
-```sh
-nix run .#macos-build
-```
-
-By default the wrapper looks for Homebrew Flutter at `/opt/homebrew/bin/flutter`
-or `/usr/local/bin/flutter`, builds `--debug`, and disables Flutter's Swift
-Package Manager integration so the current CocoaPods-based macOS project is not
-rewritten by newer host Flutter versions. Override with
-`CLIPPER_HOST_FLUTTER=/path/to/flutter` and pass normal Flutter build flags
-after `--`, for example `nix run .#macos-build -- --release`.
 
 ## Development
 
@@ -98,28 +83,29 @@ nix run .#fmt
 nix run .#audit
 nix run .#udeps
 cargo test --workspace
-cd app && flutter analyze && flutter test
 nix run .#wasm-check
+nix run .#web-check
+nix run .#mobile-check
+cargo check -p clipper-desktop
 ```
 
-After Rust bridge API changes:
-
-```sh
-nix run .#frb-generate
-```
-
-Web build:
+Web and native builds:
 
 ```sh
 nix run .#web-build
 nix run .#web-serve
+nix run .#tauri-dev
+nix run .#tauri-build
+nix run .#mobile-start
+nix run .#mobile-uniffi-android
+nix run .#mobile-android
 ```
 
-The web build must use the flake wrapper and be served with cross-origin
-isolation headers because Flutter Rust Bridge starts a shared-memory Rust wasm
-worker. `nix run .#web-serve` serves `app/build/web` with those headers; a
-generic static file server such as `python -m http.server` will show a blank
-page or startup error.
+`nix run .#web-build` builds `crates/web-wasm` with `wasm-pack`, installs the
+pnpm workspace from `pnpm-lock.yaml`, and emits the Vite production build under
+`web/dist`. `nix run .#web-serve` regenerates the wasm package and starts the
+Vite dev server. `nix run .#tauri-dev` and `nix run .#tauri-build` install the
+same workspace and invoke Tauri against `web/src-tauri`.
 
 The browser client receives live sync events over a ticketed WebSocket path:
 it mints a short-lived ticket over authenticated HTTP and then connects to the
@@ -140,7 +126,6 @@ cargo run -p clipper-server -- serve --data-dir data/clipper-server
 ```
 
 The app defaults to `http://127.0.0.1:8787`.
-Android emulator loopback is `http://10.0.2.2:8787`.
 Keep the same server secret for `init`, `add-access-key`, and `serve`; the
 database cannot be opened with a different secret.
 

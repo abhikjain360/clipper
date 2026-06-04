@@ -1,75 +1,6 @@
 export type Env = Readonly<Record<string, string>>;
 
 const textDecoder = new TextDecoder();
-const rustcWasmWarningFilterScript =
-  `#!/usr/bin/env -S deno run --quiet --ext=js --allow-env=CLIPPER_REAL_RUSTC --allow-run
-const decoder = new TextDecoder();
-const encoder = new TextEncoder();
-
-function removeUnstableAtomicsJsonDiagnostics(text) {
-  return text.replace(
-    /^\\{"\\$message_type":"diagnostic","message":"unstable feature specified for \`-Ctarget-feature\`: \`atomics\`".*\\n?/gm,
-    "",
-  );
-}
-
-function removeJsonWarningSummariesIfClean(text) {
-  const withoutSummary = text.replace(
-    /^\\{"\\$message_type":"diagnostic","message":"\\d+ warnings? emitted".*\\n?/gm,
-    "",
-  );
-
-  return /"\\$message_type":"diagnostic".*"level":"warning"/s.test(withoutSummary)
-    ? text
-    : withoutSummary;
-}
-
-function removeTextWarningSummariesIfClean(text) {
-  const withoutSummary = text
-    .replace(
-      /^\\{"\\$message_type":"diagnostic","message":"\\d+ warnings? emitted".*\\n?/gm,
-      "",
-    )
-    .replace(/warning: \\d+ warnings? emitted\\n\\n?/g, "");
-
-  return withoutSummary.includes("warning:") ||
-      /"\\$message_type":"diagnostic".*"level":"warning"/s.test(withoutSummary)
-    ? text
-    : withoutSummary;
-}
-
-function filterStdout(text) {
-  return removeJsonWarningSummariesIfClean(
-    removeUnstableAtomicsJsonDiagnostics(text),
-  );
-}
-
-function filterStderr(text) {
-  return removeTextWarningSummariesIfClean(
-    removeUnstableAtomicsJsonDiagnostics(text).replace(
-      /warning: unstable feature specified for \`-Ctarget-feature\`: \`atomics\`\\n  \\|\\n  = note: this feature is not stably supported; its behavior can change in the future\\n\\n/g,
-      "",
-    ),
-  );
-}
-
-const realRustc = Deno.env.get("CLIPPER_REAL_RUSTC");
-if (realRustc === undefined || realRustc.length === 0) {
-  console.error("CLIPPER_REAL_RUSTC is required");
-  Deno.exit(1);
-}
-
-const output = await new Deno.Command(realRustc, {
-  args: Deno.args,
-  stdin: "inherit",
-  stdout: "piped",
-  stderr: "piped",
-}).output();
-
-await Deno.stdout.write(encoder.encode(filterStdout(decoder.decode(output.stdout))));
-await Deno.stderr.write(encoder.encode(filterStderr(decoder.decode(output.stderr))));
-Deno.exit(output.code);
-`;
 
 export function nonEmpty(value: string | undefined): string | undefined {
   return value === undefined || value.length === 0 ? undefined : value;
@@ -134,10 +65,7 @@ export function prependPath(env: Env, path: string): Record<string, string> {
   };
 }
 
-export function useToolchainPath(
-  env: Env,
-  toolchainBin: string,
-): Record<string, string> {
+export function useToolchainPath(env: Env, toolchainBin: string): Record<string, string> {
   if (toolchainBin.length === 0) {
     throw new Error("toolchain path is required");
   }
@@ -151,33 +79,6 @@ export function useStableToolchain(env: Env): Record<string, string> {
 
 export function useNightlyToolchain(env: Env): Record<string, string> {
   return useToolchainPath(env, requireEnv(env, "CLIPPER_RUST_NIGHTLY_BIN"));
-}
-
-export function wasmSharedMemoryRustflags(): string {
-  return [
-    "-C target-feature=+atomics,+bulk-memory,+mutable-globals",
-    "-C link-arg=--shared-memory",
-    "-C link-arg=--import-memory",
-    "-C link-arg=--max-memory=4294967296",
-    "-C link-arg=--export=__heap_base",
-    "-C link-arg=--export=__wasm_init_tls",
-    "-C link-arg=--export=__tls_size",
-    "-C link-arg=--export=__tls_align",
-    "-C link-arg=--export=__tls_base",
-  ].join(" ");
-}
-
-export function useWasmSharedMemoryRustflags(
-  env: Env,
-): Record<string, string> {
-  const existing = nonEmpty(env.RUSTFLAGS);
-  const sharedFlags = wasmSharedMemoryRustflags();
-  return {
-    ...env,
-    RUSTFLAGS: existing === undefined
-      ? sharedFlags
-      : `${existing} ${sharedFlags}`,
-  };
 }
 
 async function statPath(path: string): Promise<Deno.FileInfo | undefined> {
@@ -209,7 +110,7 @@ export async function executableFromPath(
   env: Env = Deno.env.toObject(),
 ): Promise<string | undefined> {
   if (name.includes("/")) {
-    return await executableFileExists(name) ? name : undefined;
+    return (await executableFileExists(name)) ? name : undefined;
   }
 
   for (const dir of (env.PATH ?? "").split(":")) {
@@ -255,35 +156,6 @@ export async function runCommand(
   }
 }
 
-export async function useWasmRustcWarningFilter(
-  env: Env,
-): Promise<{
-  readonly cleanup: () => Promise<void>;
-  readonly env: Record<string, string>;
-}> {
-  const realRustc = await requireExecutableFromPath("rustc", env);
-  const wrapperDir = await Deno.makeTempDir({
-    prefix: "clipper-rustc-wasm-filter.",
-  });
-  const wrapper = joinPath(wrapperDir, "rustc");
-
-  await Deno.writeTextFile(wrapper, rustcWasmWarningFilterScript);
-  if (Deno.build.os !== "windows") {
-    await Deno.chmod(wrapper, 0o755);
-  }
-
-  return {
-    env: prependPath({ ...env, CLIPPER_REAL_RUSTC: realRustc }, wrapperDir),
-    cleanup: async () => {
-      try {
-        await Deno.remove(wrapperDir, { recursive: true });
-      } catch (error) {
-        if (!(error instanceof Deno.errors.NotFound)) throw error;
-      }
-    },
-  };
-}
-
 async function gitRepoRoot(startDir: string): Promise<string | undefined> {
   if (!(await directoryExists(startDir))) return undefined;
 
@@ -304,16 +176,14 @@ export async function findRepoRoot(
   fallbackStartDirs: readonly string[],
 ): Promise<string> {
   const configured = nonEmpty(env.CLIPPER_REPO_ROOT);
-  if (configured !== undefined && await directoryExists(configured)) {
+  if (configured !== undefined && (await directoryExists(configured))) {
     return await Deno.realPath(configured);
   }
 
   const startDirs = [Deno.cwd(), ...fallbackStartDirs];
   const seen = new Set<string>();
   for (const startDir of startDirs) {
-    const key = await directoryExists(startDir)
-      ? await Deno.realPath(startDir)
-      : startDir;
+    const key = (await directoryExists(startDir)) ? await Deno.realPath(startDir) : startDir;
     if (seen.has(key)) continue;
     seen.add(key);
 

@@ -1,13 +1,17 @@
 //! Sync engine: manages client state, WebSocket connection, and clipboard/file operations.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 pub use clipper_app_types::{
-    AppState, ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem,
+    AppState, ClipboardPayload, ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem,
 };
 use clipper_core::{crypto, models::*};
 use futures_util::{StreamExt, stream};
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::sync::{RwLock, watch};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
@@ -29,13 +33,6 @@ const OBJECT_ENVELOPE_VERSION_V1: u64 = 1;
 #[cfg(target_family = "wasm")]
 const WS_TICKET_PROTOCOL: &str = "clipper-ticket";
 
-#[derive(Debug, Clone)]
-pub struct ClipboardPayload {
-    pub mime_type: String,
-    pub bytes: Vec<u8>,
-    pub text: Option<String>,
-}
-
 struct DecryptedClipboardObject {
     item: DecryptedClipboardItem,
     payload: Vec<u8>,
@@ -43,13 +40,12 @@ struct DecryptedClipboardObject {
 
 /// The sync engine that owns all client state.
 pub struct SyncEngine {
-    api: Mutex<ApiClient>,
+    api: ApiClient,
     local_store: LocalStore,
     encryption_key: RwLock<Option<Zeroizing<[u8; 32]>>>,
     device_signing_key: RwLock<Option<Zeroizing<[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]>>>,
     state: RwLock<AppState>,
     state_tx: watch::Sender<u64>,
-    state_rx: watch::Receiver<u64>,
     state_version: std::sync::atomic::AtomicU64,
     ws_restart_tx: watch::Sender<u64>,
     ws_restart_rx: watch::Receiver<u64>,
@@ -65,16 +61,15 @@ impl SyncEngine {
         base_url: &str,
         data_dir: impl Into<PathBuf>,
     ) -> Result<Arc<Self>, ClientError> {
-        let (tx, rx) = watch::channel(0u64);
+        let (tx, _) = watch::channel(0u64);
         let (ws_restart_tx, ws_restart_rx) = watch::channel(0u64);
         Ok(Arc::new(Self {
-            api: Mutex::new(ApiClient::try_new(base_url)?),
+            api: ApiClient::try_new(base_url)?,
             local_store: LocalStore::new(data_dir),
             encryption_key: RwLock::new(None),
             device_signing_key: RwLock::new(None),
             state: RwLock::new(AppState::default()),
             state_tx: tx,
-            state_rx: rx,
             state_version: std::sync::atomic::AtomicU64::new(0),
             ws_restart_tx,
             ws_restart_rx,
@@ -86,14 +81,8 @@ impl SyncEngine {
         self.state.read().await.clone()
     }
 
-    pub async fn set_base_url(&self, url: &str) -> Result<(), ClientError> {
-        let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-        api.set_base_url(url)
-    }
-
-    pub async fn base_url(&self) -> String {
-        let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-        api.base_url_display()
+    pub fn base_url(&self) -> String {
+        self.api.base_url_display()
     }
 
     pub async fn set_saved_profile(&self, username: Option<String>, device_name: Option<String>) {
@@ -105,14 +94,28 @@ impl SyncEngine {
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
-        self.state_rx.clone()
+        self.state_tx.subscribe()
+    }
+
+    pub fn state_version(&self) -> u64 {
+        self.state_version.load(Ordering::Acquire)
+    }
+
+    pub async fn wait_for_state_change_after(&self, seen_version: u64) -> Result<u64, ClientError> {
+        let mut rx = self.subscribe();
+        loop {
+            let current = *rx.borrow_and_update();
+            if current > seen_version {
+                return Ok(current);
+            }
+            rx.changed()
+                .await
+                .map_err(|_| ClientError::Other("state stream closed".into()))?;
+        }
     }
 
     fn bump_version(&self) {
-        let v = self
-            .state_version
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
+        let v = self.state_version.fetch_add(1, Ordering::AcqRel) + 1;
         _ = self.state_tx.send(v);
     }
 
@@ -130,9 +133,9 @@ impl SyncEngine {
             .load_or_create_device_signing_identity()
             .await?;
         let requested_device_id = optional_device_id(signing_identity.device_id.as_deref())?;
-        let auth = {
-            let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.login(
+        let auth = self
+            .api
+            .login(
                 passphrase,
                 username,
                 AuthDevice {
@@ -142,8 +145,7 @@ impl SyncEngine {
                     signing_secret_key: &signing_identity.signing_secret_key,
                 },
             )
-            .await?
-        };
+            .await?;
         let login_resp = auth.response;
         signing_identity.device_id = Some(login_resp.device_id.clone());
         self.local_store
@@ -176,9 +178,9 @@ impl SyncEngine {
             .load_or_create_device_signing_identity()
             .await?;
         let requested_device_id = optional_device_id(signing_identity.device_id.as_deref())?;
-        let auth = {
-            let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.register(
+        let auth = self
+            .api
+            .register(
                 access_key,
                 username,
                 passphrase,
@@ -189,8 +191,7 @@ impl SyncEngine {
                     signing_secret_key: &signing_identity.signing_secret_key,
                 },
             )
-            .await?
-        };
+            .await?;
         let register_resp = auth.response;
         signing_identity.device_id = Some(register_resp.device_id.clone());
         self.local_store
@@ -287,10 +288,7 @@ impl SyncEngine {
     }
 
     pub async fn logout(&self) -> Result<(), ClientError> {
-        {
-            let mut api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.logout().await?;
-        }
+        self.api.logout().await?;
         *self.encryption_key.write().await = None;
         *self.device_signing_key.write().await = None;
         {
@@ -555,7 +553,7 @@ impl SyncEngine {
         payload_size: i64,
         payload_hash: Vec<u8>,
     ) -> Result<i64, ClientError> {
-        let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
+        let api = &self.api;
         let init_resp = api.object_init(init_req).await?;
         let payload_id_typed = payload_id
             .parse()
@@ -737,7 +735,7 @@ impl SyncEngine {
 
     pub async fn download_file_bytes(&self, file_id: &str) -> Result<Vec<u8>, ClientError> {
         let (file_item, payload, encrypted_blob) = {
-            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
+            let api = &self.api;
             let file_item = api.get_object(file_id).await?;
             verify_object_list_item_envelope(&file_item)?;
             if file_item.kind != ObjectKind::File {
@@ -798,7 +796,7 @@ impl SyncEngine {
 
     pub async fn delete_file(&self, file_id: &str) -> Result<(), ClientError> {
         let delete_resp = {
-            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
+            let api = &self.api;
             api.delete_object(file_id).await?
         };
         let visible = self
@@ -908,10 +906,7 @@ impl SyncEngine {
         generation: u64,
         stream_start_seq: i64,
     ) -> Result<(), ClientError> {
-        let api = {
-            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.clone()
-        };
+        let api = &self.api;
         let encryption_key = self.current_encryption_key().await?;
         let mut after = None;
         loop {
@@ -958,10 +953,7 @@ impl SyncEngine {
         generation: u64,
         stream_start_seq: i64,
     ) -> Result<(), ClientError> {
-        let api = {
-            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.clone()
-        };
+        let api = &self.api;
         let encryption_key = self.current_encryption_key().await?;
         let mut after = None;
         loop {
@@ -974,20 +966,16 @@ impl SyncEngine {
                 )
                 .await?;
             let objects = stream::iter(page.items)
-                .map(|item| {
-                    let api = &api;
-                    let encryption_key = encryption_key;
-                    async move {
-                        let created_seq = item.created_seq;
-                        match self
-                            .decrypt_clipboard_object_item_with_api(api, &item, &encryption_key)
-                            .await
-                        {
-                            Ok(object) => Some((object, created_seq)),
-                            Err(e) => {
-                                warn!(id = %item.id, "Failed to load clipboard object: {}", e);
-                                None
-                            }
+                .map(|item| async move {
+                    let created_seq = item.created_seq;
+                    match self
+                        .decrypt_clipboard_object_item_with_api(api, &item, &encryption_key)
+                        .await
+                    {
+                        Ok(object) => Some((object, created_seq)),
+                        Err(e) => {
+                            warn!(id = %item.id, "Failed to load clipboard object: {}", e);
+                            None
                         }
                     }
                 })
@@ -1176,10 +1164,7 @@ impl SyncEngine {
         object_id: ObjectId,
         event_seq: i64,
     ) -> Result<(), ClientError> {
-        let api = {
-            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            api.clone()
-        };
+        let api = &self.api;
         let object_id_text = object_id.to_string();
         let item = match api.get_object(&object_id_text).await {
             Ok(item) => item,
@@ -1209,7 +1194,7 @@ impl SyncEngine {
         match kind {
             ObjectKind::Clipboard => {
                 let object = self
-                    .decrypt_clipboard_object_item_with_api(&api, &item, &encryption_key)
+                    .decrypt_clipboard_object_item_with_api(api, &item, &encryption_key)
                     .await?;
                 self.persist_clipboard_snapshot_item(&object, item.created_seq, generation)
                     .await?;
@@ -1292,7 +1277,7 @@ impl SyncEngine {
         use tokio_tungstenite::tungstenite;
 
         let (token, ws_url, host) = {
-            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
+            let api = &self.api;
             let t = api
                 .token()
                 .ok_or(ClientError::NotAuthenticated)?
@@ -1464,13 +1449,11 @@ impl SyncEngine {
 
     #[cfg(target_family = "wasm")]
     async fn ws_connect(self: &Arc<Self>) -> Result<(), ClientError> {
-        let ws_url = {
-            let api: tokio::sync::MutexGuard<'_, ApiClient> = self.api.lock().await;
-            let ticket = api.websocket_ticket().await?;
-            (api.websocket_ticket_url()?, ticket.ticket)
-        };
+        let api = &self.api;
+        let ticket = api.websocket_ticket().await?;
+        let ws_url = api.websocket_ticket_url()?;
 
-        let mut ws = BrowserWs::connect(ws_url.0.as_str(), &ws_url.1).await?;
+        let mut ws = BrowserWs::connect(ws_url.as_str(), &ticket.ticket).await?;
 
         let hello = WsClientMessage::Hello;
         let hello_json =

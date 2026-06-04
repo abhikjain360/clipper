@@ -918,14 +918,6 @@ impl LocalStore {
         Ok(())
     }
 
-    async fn object_record_inner(
-        &self,
-        object_id: &str,
-    ) -> Result<Option<LocalObjectRecord>, LocalStoreError> {
-        let storage = browser_storage()?;
-        self.browser_object_record(&storage, object_id)
-    }
-
     async fn remove_object_inner(&self, object_id: &str) -> Result<(), LocalStoreError> {
         let storage = browser_storage()?;
         if let Some(record) = self.browser_object_record(&storage, object_id)? {

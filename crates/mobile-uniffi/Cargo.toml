@@ -1,0 +1,18 @@
+[package]
+name = "clipper-mobile-uniffi"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+clipper-app-types = { workspace = true, features = ["uniffi"] }
+clipper-client.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+uniffi.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

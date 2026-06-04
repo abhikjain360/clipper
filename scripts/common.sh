@@ -41,9 +41,9 @@ clipper_enter_repo() {
   cd "$CLIPPER_REPO_ROOT"
 }
 
-clipper_enter_app() {
+clipper_enter_mobile() {
   clipper_enter_repo
-  cd app
+  cd mobile
 }
 
 clipper_require_env() {

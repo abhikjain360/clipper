@@ -3,9 +3,8 @@
 //! Newline-delimited JSON over Unix socket.
 //!
 //! This crate is the single source of truth for the daemon IPC wire format.
-//! The Flutter bridge and the macOS daemon both use these types; Android uses
-//! the same command enum in-process so it cannot drift from the daemon command
-//! surface.
+//! The local daemon and any daemon clients should use these types so request,
+//! response, and event payloads cannot drift.
 
 use clipper_api_types::{ApiErrorCode, ErrorResponse};
 use clipper_app_types::AppState;

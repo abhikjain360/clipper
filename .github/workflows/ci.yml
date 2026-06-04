@@ -129,7 +129,7 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@87b14cf437d03d37989d87f0fa5ce4f5dc1a330b
       - run: nix run .#audit
 
-  flutter:
+  web-native:
     needs: gate
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
@@ -138,13 +138,21 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d
       - uses: DeterminateSystems/magic-nix-cache-action@87b14cf437d03d37989d87f0fa5ce4f5dc1a330b
-      - name: Cache pub cache
+      - name: Cache pnpm
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
-            ~/.pub-cache
-            app/.dart_tool
-          key: pub-${{ runner.os }}-${{ hashFiles('app/pubspec.lock') }}
-          restore-keys: pub-${{ runner.os }}-
-      - name: Analyze and test
-        run: nix develop --command bash -c 'cd app && flutter pub get && flutter analyze && flutter test'
+            ~/.local/share/pnpm/store
+            node_modules
+            web/node_modules
+            mobile/node_modules
+            packages/mobile-bridge/node_modules
+            packages/shared/node_modules
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+      - name: Web lint and type check
+        run: nix run .#web-check
+      - name: Mobile lint and type check
+        run: nix run .#mobile-check
+      - name: Tauri no-bundle build
+        run: nix run .#tauri-build -- --no-bundle

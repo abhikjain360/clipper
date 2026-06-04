@@ -11,11 +11,6 @@ I am using this project to see how far I can write high-quality software while
 relying heavily on agentic coding, without handing off the design judgment,
 review responsibility, or maintenance ownership that quality still requires.
 
-That makes outside pull requests a poor fit for now. Reviewing and coordinating
-PRs would change the experiment as much as it would change the project, and it
-would add process before either the product or the contribution model has
-settled.
-
 You are still welcome to read the code, run it locally, fork it, experiment, and
 send feedback. This guide documents the development setup and checks so the
 project is easy to work with even while upstream pull requests are closed.
@@ -38,29 +33,26 @@ direnv allow
 After direnv has loaded the shell, run commands directly from the repository. Do
 not wrap routine commands in `nix develop`.
 
-The flake provides the Rust, Flutter, Dart, Java, Android helper, C/C++,
-Flutter Rust Bridge, SeaORM, CocoaPods, OSV Scanner, wasm, and formatting tools
-used by this repo. Android SDK/NDK installs, emulators, Xcode, signing, and
-other OS-tied platform setup still come from the host system.
-
-If Android Gradle picks up the wrong Flutter SDK, refresh the generated local
-properties file:
-
-```sh
-cd app && flutter pub get
-```
-
-More detail is in [docs/development-environment.md](docs/development-environment.md).
+The flake provides Rust, Node 24, pnpm, wasm-pack, Tauri desktop build
+dependencies, React Native/UniFFI codegen helpers, SeaORM, OSV Scanner, and
+formatting tools used by this repo. More detail is in
+[docs/development-environment.md](docs/development-environment.md).
 
 ## Repository Layout
 
 - `crates/server` contains the Axum API and SQLite storage.
 - `crates/client` contains the shared Rust sync client.
-- `crates/daemon` contains the macOS/Linux background process.
+- `crates/daemon` contains the local background process.
 - `crates/api-types` contains shared HTTP and WebSocket payloads.
 - `crates/daemon-types` contains daemon IPC types.
 - `crates/app-types` contains display-ready app state.
-- `app` contains the Flutter app and Flutter Rust Bridge adapter.
+- `crates/web-wasm` contains the browser wasm adapter.
+- `crates/mobile-uniffi` contains the React Native UniFFI adapter.
+- `packages/shared` contains shared frontend contracts.
+- `packages/mobile-bridge` contains React Native UniFFI package glue.
+- `web/src` contains the shared React UI for browser and native desktop.
+- `web/src-tauri` contains the Tauri desktop shell and command adapter.
+- `mobile/src` contains the React Native mobile UI.
 - `docs` contains longer design and operations notes.
 
 ## Common Checks
@@ -74,8 +66,10 @@ nix run .#audit
 nix run .#udeps
 cargo check --workspace
 cargo test --workspace
-cd app && flutter analyze && flutter test
 nix run .#wasm-check
+nix run .#web-check
+nix run .#mobile-check
+nix run .#tauri-build -- --no-bundle
 ```
 
 Do not run `cargo fmt` directly. This repository's `rustfmt.toml` uses
@@ -91,28 +85,25 @@ For Rust-only formatting, use:
 nix run .#rustfmt
 ```
 
-## Flutter Rust Bridge
+## Web And Native
 
-Regenerate Flutter Rust Bridge output after Rust bridge API changes:
+The browser and native desktop clients share React UI/components in `web/src`.
+The split is at the backend adapter boundary:
 
-```sh
-nix run .#frb-generate
-```
+- Browser: `web/src/backend/wasm.ts` -> `crates/web-wasm`.
+- Native desktop: `web/src/backend/tauri.ts` -> `web/src-tauri`.
 
-Keep Rust and Dart `flutter_rust_bridge` versions aligned. The bridge adapter
-types in `app/rust/src/api/clipper.rs` should stay adapter-only, with exhaustive
-conversions so state schema changes fail at compile time.
-
-For web artifacts, use the project wrappers:
+Use the project wrappers:
 
 ```sh
-nix run .#frb-build-web
 nix run .#web-build
 nix run .#web-serve
+nix run .#tauri-dev
+nix run .#tauri-build
+nix run .#mobile-start
+nix run .#mobile-uniffi-android
+nix run .#mobile-android
 ```
-
-The web client requires shared-memory wasm and cross-origin isolation headers.
-Use `nix run .#web-serve` rather than a generic static file server.
 
 ## Local Server
 
@@ -147,8 +138,7 @@ cargo run -p clipper-server -- add-access-key \
   --access-key "$ACCESS_KEY"
 ```
 
-The app defaults to `http://127.0.0.1:8787`. Android emulators should use
-`http://10.0.2.2:8787`.
+The app defaults to `http://127.0.0.1:8787`.
 
 ## Schema And Generated Code
 
@@ -161,9 +151,6 @@ nix run .#server-entities
 
 Do not hand-edit generated entity files as the final change.
 
-When auth state or auth commands cross Flutter Rust Bridge, update the bridge
-adapter and regenerate bridge output so Dart, daemon IPC, and Rust stay aligned.
-
 ## Coding Notes
 
 - Use typed Rust errors with `thiserror`.
@@ -175,15 +162,3 @@ adapter and regenerate bridge output so Dart, daemon IPC, and Rust stay aligned.
 - Scope server private data by authenticated `user_id`.
 - Use `crates/server/src/secret_storage.rs` helpers at the storage boundary for
   AEAD-wrapped auth blobs. Do not insert plaintext into those protected columns.
-
-## Working Locally
-
-Because upstream pull requests are closed for now, the most useful workflow is:
-
-1. Fork the repository or work on a local branch.
-2. Make the smallest coherent change.
-3. Run the relevant checks from this guide.
-4. Keep notes about design tradeoffs, test coverage, and any skipped checks.
-
-If upstream contribution policy changes later, this file will be updated with
-the current review and submission process.

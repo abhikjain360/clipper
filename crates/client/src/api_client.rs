@@ -1,5 +1,7 @@
 //! HTTP + WebSocket client for the Clipper server.
 
+use std::sync::RwLock;
+
 use clipper_core::{crypto, models::*};
 use reqwest::{Client, header};
 use serde::{Serialize, de::DeserializeOwned};
@@ -10,11 +12,10 @@ use zeroize::Zeroizing;
 const POSTCARD_ERROR_PREVIEW_BYTES: usize = 64;
 
 /// Clipper API client.
-#[derive(Clone)]
 pub struct ApiClient {
     http: Client,
     base_url: Url,
-    token: Option<String>,
+    token: RwLock<Option<String>>,
 }
 
 pub struct AuthResult<T> {
@@ -39,24 +40,20 @@ impl ApiClient {
         Ok(Self {
             http: Client::new(),
             base_url: parse_server_url(base_url)?,
-            token: None,
+            token: RwLock::new(None),
         })
     }
 
-    pub fn token(&self) -> Option<&str> {
-        self.token.as_deref()
+    pub fn token(&self) -> Option<String> {
+        self.token.read().expect("api token lock poisoned").clone()
     }
 
-    pub fn base_url(&self) -> &Url {
-        &self.base_url
+    pub fn base_url(&self) -> Url {
+        self.base_url.clone()
     }
 
     pub fn base_url_display(&self) -> String {
         display_server_url(&self.base_url)
-    }
-
-    pub fn set_base_url(&mut self, url: &str) -> Result<(), ClientError> {
-        parse_server_url(url).map(|url| self.base_url = url)
     }
 
     pub fn websocket_url(&self) -> Result<Url, ClientError> {
@@ -106,7 +103,11 @@ impl ApiClient {
     }
 
     fn auth_header(&self) -> Option<String> {
-        self.token.as_ref().map(|t| format!("Bearer {}", t))
+        self.token().map(|t| format!("Bearer {}", t))
+    }
+
+    fn set_token(&self, token: Option<String>) {
+        *self.token.write().expect("api token lock poisoned") = token;
     }
 
     async fn checked_response(resp: reqwest::Response) -> Result<reqwest::Response, ClientError> {
@@ -162,7 +163,7 @@ impl ApiClient {
     // ── Auth ──
 
     pub async fn login(
-        &mut self,
+        &self,
         passphrase: &str,
         username: &str,
         device: AuthDevice<'_>,
@@ -226,7 +227,7 @@ impl ApiClient {
             .await?;
 
         let login_resp: LoginResponse = Self::postcard_response(resp).await?;
-        self.token = Some(login_resp.token.clone());
+        self.set_token(Some(login_resp.token.clone()));
         debug!("Logged in, device_id={}", login_resp.device_id);
         Ok(AuthResult {
             response: login_resp,
@@ -249,7 +250,7 @@ impl ApiClient {
     }
 
     pub async fn register(
-        &mut self,
+        &self,
         access_key: &str,
         username: &str,
         passphrase: &str,
@@ -299,7 +300,7 @@ impl ApiClient {
             .await?;
 
         let register_resp: RegisterFinishResponse = Self::postcard_response(resp).await?;
-        self.token = Some(register_resp.token.clone());
+        self.set_token(Some(register_resp.token.clone()));
         debug!(
             user_id = %register_resp.user_id,
             device_id = %register_resp.device_id,
@@ -311,7 +312,7 @@ impl ApiClient {
         })
     }
 
-    pub async fn logout(&mut self) -> Result<(), ClientError> {
+    pub async fn logout(&self) -> Result<(), ClientError> {
         let resp = self
             .http
             .post(self.api_url(&["auth", "logout"])?)
@@ -322,7 +323,7 @@ impl ApiClient {
         if !resp.status().is_success() {
             warn!("Logout returned {}", resp.status());
         }
-        self.token = None;
+        self.set_token(None);
         Ok(())
     }
 
@@ -485,7 +486,7 @@ fn validate_server_url(url: &Url) -> Result<(), ClientError> {
 
     match url.scheme() {
         "https" => Ok(()),
-        "http" if is_loopback_host(url) || is_android_emulator_host(url) => Ok(()),
+        "http" if is_loopback_host(url) => Ok(()),
         "http" => Err(ClientError::InvalidServerUrl(
             "Plain HTTP is only allowed for localhost servers".into(),
         )),
@@ -502,15 +503,6 @@ fn is_loopback_host(url: &Url) -> bool {
         Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
         None => false,
     }
-}
-
-fn is_android_emulator_host(url: &Url) -> bool {
-    matches!(
-        url.host(),
-        Some(url::Host::Ipv4(addr))
-            if addr == std::net::Ipv4Addr::new(10, 0, 2, 2)
-                || addr == std::net::Ipv4Addr::new(10, 0, 3, 2)
-    )
 }
 
 fn is_postcard_content_type(value: Option<&str>) -> bool {
@@ -847,12 +839,6 @@ mod tests {
         assert!(parse_server_url("http://127.0.0.1:8787").is_ok());
         assert!(parse_server_url("http://[::1]:8787").is_ok());
         assert!(parse_server_url("http://localhost:8787").is_ok());
-    }
-
-    #[test]
-    fn server_url_allows_android_emulator_host_http() {
-        assert!(parse_server_url("http://10.0.2.2:8787").is_ok());
-        assert!(parse_server_url("http://10.0.3.2:8787").is_ok());
     }
 
     fn assert_invalid_server_url(input: &str) {

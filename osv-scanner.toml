@@ -4,3 +4,122 @@ version = "0.9.10"
 ecosystem = "crates.io"
 vulnerability.ignore = true
 reason = "Pulled into Cargo.lock through sea-orm-migration's scanner-visible sea-orm-cli/sqlx-mysql metadata path; the server uses SQLite migrations only, and OSV reports no fixed rsa version."
+
+[[PackageOverrides]]
+name = "atk"
+version = "0.18.2"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed atk release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+
+[[PackageOverrides]]
+name = "atk-sys"
+version = "0.18.2"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed atk-sys release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+
+[[PackageOverrides]]
+name = "gdk"
+version = "0.18.2"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gdk release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+
+[[PackageOverrides]]
+name = "gdk-sys"
+version = "0.18.2"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gdk-sys release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+
+[[PackageOverrides]]
+name = "gdkwayland-sys"
+version = "0.18.2"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gdkwayland-sys release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+
+[[PackageOverrides]]
+name = "gdkx11"
+version = "0.18.2"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gdkx11 release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+
+[[PackageOverrides]]
+name = "gdkx11-sys"
+version = "0.18.2"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gdkx11-sys release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+
+[[PackageOverrides]]
+name = "glib"
+version = "0.18.5"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk. glib 0.20 cannot be forced independently because gtk 0.18 depends on the 0.18 binding line; revisit when Tauri/Wry upgrades the GTK stack."
+
+[[PackageOverrides]]
+name = "gtk"
+version = "0.18.2"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gtk release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+
+[[PackageOverrides]]
+name = "gtk-sys"
+version = "0.18.2"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gtk-sys release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+
+[[PackageOverrides]]
+name = "gtk3-macros"
+version = "0.18.2"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk; no fixed gtk3-macros release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+
+[[PackageOverrides]]
+name = "proc-macro-error"
+version = "1.0.4"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive through glib-macros/gtk3-macros in Tauri's Linux GTK stack; no direct manifest upgrade removes it while Tauri/Wry stays on gtk-rs 0.18."
+
+[[PackageOverrides]]
+name = "unic-char-property"
+version = "0.9.0"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive through Tauri's urlpattern 0.3.0 dependency; no fixed unic/urlpattern upgrade is available from current Tauri manifests."
+
+[[PackageOverrides]]
+name = "unic-char-range"
+version = "0.9.0"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive through Tauri's urlpattern 0.3.0 dependency; no fixed unic/urlpattern upgrade is available from current Tauri manifests."
+
+[[PackageOverrides]]
+name = "unic-common"
+version = "0.9.0"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive through Tauri's urlpattern 0.3.0 dependency; no fixed unic/urlpattern upgrade is available from current Tauri manifests."
+
+[[PackageOverrides]]
+name = "unic-ucd-ident"
+version = "0.9.0"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive through Tauri's urlpattern 0.3.0 dependency; no fixed unic/urlpattern upgrade is available from current Tauri manifests."
+
+[[PackageOverrides]]
+name = "unic-ucd-version"
+version = "0.9.0"
+ecosystem = "crates.io"
+vulnerability.ignore = true
+reason = "Transitive through Tauri's urlpattern 0.3.0 dependency; no fixed unic/urlpattern upgrade is available from current Tauri manifests."

@@ -1,14 +1,16 @@
 [workspace]
 members = [
-    "crates/api-types",
-    "crates/app-types",
-    "crates/core",
-    "crates/server",
-    "crates/client",
-    "crates/daemon",
-    "crates/daemon-types",
-    "crates/fs-txn",
-    "app/rust",
+  "crates/api-types",
+  "crates/app-types",
+  "crates/core",
+  "crates/server",
+  "crates/client",
+  "crates/daemon",
+  "crates/daemon-types",
+  "crates/fs-txn",
+  "crates/mobile-uniffi",
+  "crates/web-wasm",
+  "web/src-tauri",
 ]
 resolver = "3"
 
@@ -42,13 +44,21 @@ rand = "0.10.1"
 security-framework = "3.7.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+serde-wasm-bindgen = "0.6.5"
 sha2 = "0.10.9"
 strum = { version = "0.28.0", features = ["derive"] }
+tauri = "2.11.2"
+tauri-build = "2.6.2"
+tauri-plugin-clipboard-manager = "2.3.2"
+tauri-plugin-dialog = "2.7.1"
 tempfile = "3"
 thiserror = "2.0.18"
 tokio = "1.52.3"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+uniffi = "0.31.1"
 uuid = "1.23.2"
+wasm-bindgen = "0.2.122"
+wasm-bindgen-futures = "0.4.72"
 wl-clipboard-rs = "0.9.3"
 zeroize = { version = "1.8.2", features = ["derive"] }

@@ -20,25 +20,34 @@ data/
 coverage/
 lcov.info
 
-# Flutter
-app/.dart_tool/
-app/.flutter-plugins
-app/.flutter-plugins-dependencies
-app/build/
-app/macos/Flutter/ephemeral/
-app/macos/Pods/
-app/pubspec.lock
-app/android/.gradle/
-app/android/.kotlin/
-app/android/build/
-app/android/app/build/
-app/android/local.properties
+# Web
+node_modules/
+web/.tamagui/
+web/dist/
+web/node_modules/
+web/src-tauri/gen/
+web/src/generated/
+mobile/node_modules/
+mobile/.expo/
+mobile/android/
+mobile/ios/
+packages/*/node_modules/
+packages/mobile-bridge/android/CMakeLists.txt
+packages/mobile-bridge/android/build.gradle
+packages/mobile-bridge/android/cpp-adapter.cpp
+packages/mobile-bridge/android/generated/
+packages/mobile-bridge/android/src/main/AndroidManifest.xml
+packages/mobile-bridge/android/src/main/jniLibs/
+packages/mobile-bridge/cpp/clipper-mobile-bridge.cpp
+packages/mobile-bridge/cpp/clipper-mobile-bridge.h
+packages/mobile-bridge/cpp/generated/
+packages/mobile-bridge/ios/generated/
+packages/mobile-bridge/src/NativeMobileBridge.ts
+packages/mobile-bridge/src/generated/
+packages/mobile-bridge/src/index.ts
 
-# Xcode
-*.xcworkspace
-!app/macos/Runner.xcworkspace
+# Native build metadata
 *.xcuserdata
-app/macos/Runner.xcodeproj/xcshareddata/
 DerivedData/
 
 # Editors

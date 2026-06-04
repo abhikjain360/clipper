@@ -1,14 +1,19 @@
 //! App-visible decrypted state.
 //!
 //! This crate is the single source of truth for state shared between the sync
-//! engine, daemon IPC state events, and the Flutter bridge. It deliberately
-//! contains decrypted/display-ready data, not encrypted server API payloads.
+//! engine, daemon IPC state events, browser wasm bindings, and Tauri commands.
+//! It deliberately contains decrypted/display-ready data, not encrypted server
+//! API payloads.
 
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display, EnumString};
 
+#[cfg(feature = "uniffi")]
+uniffi::setup_scaffolding!();
+
 /// A decrypted clipboard item for display.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DecryptedClipboardItem {
     pub id: String,
     pub text: String,
@@ -20,6 +25,7 @@ pub struct DecryptedClipboardItem {
 
 /// A decrypted file item for display.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DecryptedFileItem {
     pub id: String,
     pub filename: String,
@@ -33,6 +39,7 @@ pub struct DecryptedFileItem {
 #[derive(
     Debug, Clone, Default, PartialEq, Serialize, Deserialize, AsRefStr, Display, EnumString,
 )]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[strum(serialize_all = "PascalCase")]
 pub enum ConnectionStatus {
     #[default]
@@ -45,6 +52,7 @@ pub enum ConnectionStatus {
 
 /// The full UI state exposed to the app.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AppState {
     pub logged_in: bool,
     #[serde(default)]
@@ -55,4 +63,13 @@ pub struct AppState {
     pub clipboard_items: Vec<DecryptedClipboardItem>,
     pub files: Vec<DecryptedFileItem>,
     pub error: Option<String>,
+}
+
+/// A decrypted clipboard payload fetched on demand.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ClipboardPayload {
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+    pub text: Option<String>,
 }

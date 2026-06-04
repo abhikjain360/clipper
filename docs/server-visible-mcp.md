@@ -6,10 +6,9 @@ Default stays private.
 
 Client boundary:
 
-- macOS and Linux app transitions go through the local daemon and shared Rust
-  client engine.
-- Android and web app transitions go through the same Rust client engine
-  in-process.
+- Browser transitions go through the wasm adapter and shared Rust client engine.
+- Native desktop transitions go through Tauri commands and the same Rust client
+  engine in-process.
 - Platform UI code may request a visibility change, but only client-side code
   may decrypt private data before uploading a server-readable form.
 
@@ -51,10 +50,9 @@ Invariant:
 - uploads encrypted form
 - server deletes readable storage and index rows
 
-Review note: both transitions must be implemented consistently across
-macOS/Linux daemon clients and Android/web in-process clients. The server must
-not be given private-mode plaintext as part of normal sync, bootstrap, list,
-download, or WebSocket flows.
+Review note: both transitions must be implemented consistently across browser
+and Tauri desktop clients. The server must not be given private-mode plaintext
+as part of normal sync, bootstrap, list, download, or WebSocket flows.
 
 ## Files
 

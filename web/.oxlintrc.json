@@ -1,0 +1,12 @@
+{
+    "categories": {
+        "correctness": "error",
+        "perf": "warn",
+        "suspicious": "warn"
+    },
+    "env": {
+        "browser": true,
+        "es2024": true
+    },
+    "ignorePatterns": ["dist", "node_modules", "public/pkg"]
+}

@@ -1,0 +1,41 @@
+{
+  "name": "@clipper/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "android": "expo run:android",
+    "check": "tsgo --noEmit",
+    "fmt": "oxfmt --write .",
+    "fmt:check": "oxfmt --check .",
+    "lint": "oxlint .",
+    "preandroid": "pnpm --dir ../packages/mobile-bridge run ubrn:android",
+    "start": "expo start"
+  },
+  "dependencies": {
+    "@clipper/mobile-bridge": "workspace:*",
+    "@clipper/shared": "workspace:*",
+    "@tamagui/config": "2.1.0",
+    "@tamagui/core": "2.1.0",
+    "expo": "56.0.8",
+    "expo-clipboard": "56.0.3",
+    "expo-document-picker": "56.0.4",
+    "expo-file-system": "56.0.7",
+    "expo-sharing": "56.0.15",
+    "lucide-react-native": "1.17.0",
+    "react": "19.2.7",
+    "react-native": "0.85.3",
+    "react-native-svg": "15.15.5",
+    "tamagui": "2.1.0"
+  },
+  "devDependencies": {
+    "@react-native/typescript-config": "0.85.3",
+    "@types/react": "19.2.16",
+    "@typescript/native-preview": "7.0.0-dev.20260603.1",
+    "babel-preset-expo": "56.0.14",
+    "oxfmt": "0.53.0",
+    "oxlint": "1.68.0",
+    "typescript": "6.0.3"
+  },
+  "packageManager": "pnpm@11.4.0"
+}

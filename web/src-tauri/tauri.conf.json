@@ -1,0 +1,38 @@
+{
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "Clipper",
+    "version": "0.1.0",
+    "identifier": "com.clipper.desktop",
+    "build": {
+        "beforeDevCommand": "pnpm run dev",
+        "devUrl": "http://127.0.0.1:53880",
+        "beforeBuildCommand": "pnpm run build",
+        "frontendDist": "../dist"
+    },
+    "app": {
+        "windows": [
+            {
+                "title": "Clipper",
+                "width": 1100,
+                "height": 760,
+                "minWidth": 720,
+                "minHeight": 520
+            }
+        ],
+        "security": {
+            "capabilities": ["default"],
+            "csp": null
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": "all",
+        "icon": [
+            "icons/app_icon_32.png",
+            "icons/app_icon_128.png",
+            "icons/app_icon_256.png",
+            "icons/app_icon_512.png",
+            "icons/app_icon_1024.png"
+        ]
+    }
+}

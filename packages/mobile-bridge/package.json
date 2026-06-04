@@ -1,0 +1,52 @@
+{
+  "name": "@clipper/mobile-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/abhikjain360/clipper.git",
+    "directory": "packages/mobile-bridge"
+  },
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "react-native": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./adapter": "./src/adapter.ts"
+  },
+  "scripts": {
+    "check": "tsgo --noEmit",
+    "fmt": "oxfmt --write .",
+    "fmt:check": "oxfmt --check .",
+    "lint": "oxlint .",
+    "ubrn:android": "ubrn build android --config ubrn.config.yaml --and-generate",
+    "ubrn:ios": "ubrn build ios --config ubrn.config.yaml --and-generate"
+  },
+  "dependencies": {
+    "@clipper/shared": "workspace:*",
+    "@ubjs/core": "0.31.0-3",
+    "uniffi-bindgen-react-native": "0.31.0-3"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.16",
+    "@typescript/native-preview": "7.0.0-dev.20260603.1",
+    "oxfmt": "0.53.0",
+    "oxlint": "1.68.0",
+    "typescript": "6.0.3"
+  },
+  "peerDependencies": {
+    "react-native": "*"
+  },
+  "codegenConfig": {
+    "name": "ClipperMobileBridgeSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "com.clipper.mobilebridge"
+    },
+    "outputDir": {
+      "android": "android/generated",
+      "ios": "ios/generated"
+    }
+  }
+}

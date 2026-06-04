@@ -29,10 +29,10 @@ tokens or sync metadata over plain HTTP.
 There are no released versions yet. Only the current `main` branch is supported,
 and fixes land on `main` without backports.
 
-| Version          | Supported |
-| ---------------- | --------- |
-| `main`           | ✅        |
-| tagged releases  | none yet  |
+| Version         | Supported |
+| --------------- | --------- |
+| `main`          | ✅        |
+| tagged releases | none yet  |
 
 ## Reporting a vulnerability
 
@@ -41,8 +41,8 @@ requests.
 
 - Preferred: use GitHub's private vulnerability reporting. Open the repository's
   **Security** tab and choose **"Report a vulnerability"**.
-  (Maintainers: enable this under *Settings → Code security and analysis →
-  Private vulnerability reporting*.)
+  (Maintainers: enable this under _Settings → Code security and analysis →
+  Private vulnerability reporting_.)
 - Before reporting, please skim [`docs/rust-code-review.md`](docs/rust-code-review.md):
   many issues are already known and tracked there. Confirming that a tracked
   issue is exploitable in practice is still useful, but a brand-new finding is
@@ -67,5 +67,5 @@ Some residual risks are intentional tradeoffs for now and are listed in the
 "Accepted / Intentional Tradeoffs" section of
 [`docs/rust-code-review.md`](docs/rust-code-review.md) (for example, the
 same-user local IPC trust boundary and the plaintext local clipboard cache).
-Reporting that these *documented* tradeoffs exist is not a vulnerability — but
+Reporting that these _documented_ tradeoffs exist is not a vulnerability — but
 reporting that one is materially worse than documented is welcome.

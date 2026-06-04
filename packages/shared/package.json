@@ -1,0 +1,21 @@
+{
+  "name": "@clipper/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check": "tsgo --noEmit",
+    "fmt": "oxfmt --write .",
+    "fmt:check": "oxfmt --check .",
+    "lint": "oxlint ."
+  },
+  "devDependencies": {
+    "@typescript/native-preview": "7.0.0-dev.20260603.1",
+    "oxfmt": "0.53.0",
+    "oxlint": "1.68.0",
+    "typescript": "6.0.3"
+  }
+}
