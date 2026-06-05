@@ -131,28 +131,9 @@ pub async fn register_start(
     let access_key_hash =
         verify_unused_registration_access_key(&state, &db_config, &req.access_key).await?;
 
-    // Reject obviously-taken usernames before we expend any OPAQUE work.
-    // The final guarantee comes from the unique constraint in register_finish.
-    let existing = users::Entity::find()
-        .filter(users::Column::Username.eq(&req.username))
-        .select_only()
-        .column(users::Column::Id)
-        .into_tuple::<Uuid>()
-        .one(state.db())
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Failed to look up username in register_start");
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
-        })?;
-    if existing.is_some() {
-        return Err(error_response(
-            StatusCode::CONFLICT,
-            "Username already taken",
-        ));
-    }
-
-    // start OPAQUE against the server-wide setup
-
+    // Username uniqueness is enforced at register_finish by the users.username
+    // unique constraint. Keeping register_start response-shaped for taken and
+    // available names avoids a username-existence oracle.
     let opaque_server_setup = unwrap_global_opaque_server_setup(&state, &db_config)?;
     let user_id = Uuid::now_v7();
     // id_U = "clipper:user:{username}:passphrase:v1".
@@ -243,7 +224,9 @@ pub async fn register_finish(
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
         })?;
 
-    users::ActiveModel {
+    consume_registration_access_key(&txn, &pending.access_key_hash, &now, pending.user_id).await?;
+
+    let user_insert = users::ActiveModel {
         id: Set(pending.user_id),
         username: Set(pending.username.clone()),
         opaque_password_file: Set(wrapped_opaque_password_file),
@@ -253,50 +236,39 @@ pub async fn register_finish(
         updated_at: Set(now.clone()),
     }
     .insert(&txn)
-    .await
-    .map_err(|e| match e.sql_err() {
-        Some(SqlErr::UniqueConstraintViolation(_)) => {
-            warn!(
-                user_id = %pending.user_id,
-                username = %pending.username,
-                "Concurrent register_finish lost a uniqueness race (access_key_hash or username)",
-            );
-            error_response(StatusCode::CONFLICT, "Registration conflict")
-        }
-        _ => {
-            error!(error = %e, "Failed to insert user row");
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
-        }
-    })?;
-
-    let consumed = access_keys::Entity::update_many()
-        .col_expr(
-            access_keys::Column::UsedAt,
-            sea_orm::sea_query::Expr::value(now.clone()),
-        )
-        .col_expr(
-            access_keys::Column::UsedByUserId,
-            sea_orm::sea_query::Expr::value(pending.user_id),
-        )
-        .filter(access_keys::Column::KeyHash.eq(pending.access_key_hash))
-        .filter(access_keys::Column::UsedAt.is_null())
-        .exec(&txn)
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Failed to mark access key consumed");
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
-        })?;
-    if consumed.rows_affected != 1 {
-        warn!(
-            user_id = %pending.user_id,
-            rows_affected = consumed.rows_affected,
-            "Access key consumption race detected during register_finish",
-        );
-        return Err(error_response(
-            StatusCode::CONFLICT,
-            "Access key already used",
-        ));
+    .await;
+    if let Err(e) = user_insert {
+        return match e.sql_err() {
+            Some(SqlErr::UniqueConstraintViolation(_)) => {
+                warn!(
+                    user_id = %pending.user_id,
+                    username = %pending.username,
+                    "Registration failed after consuming access key because username or access key is already bound",
+                );
+                txn.commit().await.map_err(|e| {
+                    error!(
+                        error = %e,
+                        "Failed to commit consumed access key after registration conflict",
+                    );
+                    error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+                })?;
+                Err(error_response(
+                    StatusCode::CONFLICT,
+                    "Registration conflict",
+                ))
+            }
+            _ => {
+                error!(error = %e, "Failed to insert user row");
+                Err(error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database error",
+                ))
+            }
+        };
     }
+
+    bind_consumed_registration_access_key_to_user(&txn, &pending.access_key_hash, pending.user_id)
+        .await?;
 
     let session = issue_session(
         &txn,
@@ -331,6 +303,80 @@ pub async fn register_finish(
         device_id: session.device_id.to_string(),
         server: ServerInfo {},
     }))
+}
+
+async fn consume_registration_access_key<C>(
+    db: &C,
+    access_key_hash: &str,
+    now: &str,
+    user_id: Uuid,
+) -> Result<(), ApiError>
+where
+    C: ConnectionTrait,
+{
+    let consumed = access_keys::Entity::update_many()
+        .col_expr(
+            access_keys::Column::UsedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(access_keys::Column::KeyHash.eq(access_key_hash))
+        .filter(access_keys::Column::UsedAt.is_null())
+        .exec(db)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Failed to mark access key consumed");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
+    if consumed.rows_affected != 1 {
+        warn!(
+            user_id = %user_id,
+            rows_affected = consumed.rows_affected,
+            "Access key consumption race detected during register_finish",
+        );
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "Access key already used",
+        ));
+    }
+
+    Ok(())
+}
+
+async fn bind_consumed_registration_access_key_to_user<C>(
+    db: &C,
+    access_key_hash: &str,
+    user_id: Uuid,
+) -> Result<(), ApiError>
+where
+    C: ConnectionTrait,
+{
+    let bound = access_keys::Entity::update_many()
+        .col_expr(
+            access_keys::Column::UsedByUserId,
+            sea_orm::sea_query::Expr::value(user_id),
+        )
+        .filter(access_keys::Column::KeyHash.eq(access_key_hash))
+        .filter(access_keys::Column::UsedAt.is_not_null())
+        .filter(access_keys::Column::UsedByUserId.is_null())
+        .exec(db)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Failed to bind consumed access key to user");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
+    if bound.rows_affected != 1 {
+        error!(
+            user_id = %user_id,
+            rows_affected = bound.rows_affected,
+            "Consumed access key could not be bound to newly inserted user",
+        );
+        return Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error",
+        ));
+    }
+
+    Ok(())
 }
 
 /// OPAQUE login round 2, server side. Math in `docs/opaque.md`.
@@ -1110,6 +1156,52 @@ mod tests {
         .expect("login");
         assert_eq!(login_resp.user_id, user_id.to_string());
         assert_eq!(login_resp.username, "alice");
+    }
+
+    #[tokio::test]
+    async fn register_start_does_not_reveal_existing_username() {
+        let passphrase = b"existing user passphrase";
+        let (state, _data_dir) = test_state(passphrase).await;
+        let access_key = "second-invite-key-with-entropy";
+        let new_passphrase = b"new user private passphrase";
+        insert_access_key(&state, access_key).await;
+
+        let (start_req, client_state) =
+            registration_start_request(access_key, "alice", new_passphrase);
+        let Postcard(start_resp) = register_start(State(state.clone()), validated(start_req))
+            .await
+            .expect("register start must not reveal that username exists");
+
+        assert!(!start_resp.registration_id.is_empty());
+        assert!(!start_resp.user_id.is_empty());
+        assert!(!start_resp.registration_response.is_empty());
+
+        let finish_req = registration_finish_request(start_resp, &client_state, new_passphrase);
+        let err = register_finish(
+            State(state.clone()),
+            client_ip(),
+            HeaderMap::new(),
+            validated(finish_req),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+
+        let used_key =
+            access_keys::Entity::find_by_id(access_key_hash_for_state(&state, access_key).await)
+                .one(state.db())
+                .await
+                .expect("query access key")
+                .expect("access key");
+        assert!(used_key.used_at.is_some());
+        assert_eq!(used_key.used_by_user_id, None);
+
+        let (retry_req, _retry_client_state) =
+            registration_start_request(access_key, "bob", new_passphrase);
+        let retry_err = register_start(State(state), validated(retry_req))
+            .await
+            .unwrap_err();
+        assert_eq!(retry_err.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
