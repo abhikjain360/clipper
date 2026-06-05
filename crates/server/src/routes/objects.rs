@@ -630,7 +630,6 @@ pub async fn complete_object(
         error!(error = %e, "Failed to begin complete_object transaction");
         ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
-    let created_seq = state.next_event_seq();
 
     object_payloads::Entity::update_many()
         .col_expr(
@@ -652,6 +651,11 @@ pub async fn complete_object(
             );
             ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
+
+    // Allocated after the payload update above has taken the write lock, so seq
+    // order matches commit order even if the SQLite pool grows beyond one
+    // connection.
+    let created_seq = state.next_event_seq();
 
     let updated = objects::Entity::update_many()
         .col_expr(
@@ -2090,7 +2094,7 @@ mod tests {
             ObjectEnvelopeV1, ObjectPayloadComplete, ObjectPayloadInit,
         },
     };
-    use sea_orm::Database;
+    use sea_orm::{ConnectionTrait, Database};
     use tempfile::TempDir;
 
     use super::*;
@@ -2704,6 +2708,123 @@ mod tests {
         assert_eq!(list.items.len(), 1);
         assert_eq!(list.items[0].id.to_string(), object_id);
         assert_eq!(list.items[0].created_seq, complete_resp.created_seq);
+    }
+
+    #[tokio::test]
+    async fn complete_object_does_not_allocate_seq_before_first_write() {
+        let (initial_state, data_dir) = test_state().await;
+        let user_id = insert_user(&initial_state).await;
+        let seeded_seq = Utc::now().timestamp_micros() + 30 * 24 * 60 * 60 * 1_000_000;
+        event_log::ActiveModel {
+            seq: Set(seeded_seq),
+            user_id: Set(user_id),
+            event_type: Set(ObjectEventType::Created.to_string()),
+            object_kind: Set(ObjectKind::File.to_string()),
+            object_id: Set(Uuid::now_v7()),
+            created_at: Set(Utc::now().to_rfc3339()),
+        }
+        .insert(initial_state.db())
+        .await
+        .expect("seed event seq");
+
+        let mut config = crate::config::ServerConfig::default();
+        config.server.data_dir = data_dir.path().to_path_buf();
+        let state = AppState::open_with_db_and_config(
+            initial_state.db().clone(),
+            config,
+            crate::secret::ServerSecrets::test_fixture(),
+        )
+        .await
+        .expect("reseeded state");
+
+        let device_id = Uuid::now_v7();
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
+        let object_id = Uuid::now_v7().to_string();
+        let payload_id = Uuid::now_v7().to_string();
+        let ciphertext = b"encrypted file payload";
+        let req = init_request(
+            object_id.clone(),
+            payload_id.clone(),
+            ObjectKind::File,
+            ciphertext,
+            false,
+            device_id,
+            &signing_secret_key,
+        );
+
+        init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(req),
+        )
+        .await
+        .expect("init");
+        upload_payload(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path((object_id.clone(), payload_id.clone())),
+            Body::from(ciphertext.to_vec()),
+        )
+        .await
+        .expect("upload");
+
+        state
+            .db()
+            .execute_unprepared(
+                r#"
+                CREATE TRIGGER fail_payload_complete
+                BEFORE UPDATE OF status ON object_payloads
+                WHEN NEW.status = 'complete'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced payload update failure');
+                END;
+                "#,
+            )
+            .await
+            .expect("create trigger");
+
+        let err = complete_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path(object_id.clone()),
+            postcard(ObjectCompleteRequest {
+                payloads: vec![ObjectPayloadComplete {
+                    id: payload_id.parse().expect("payload id"),
+                    ciphertext_size: ciphertext.len() as i64,
+                    sha256_ciphertext: sha256(ciphertext).to_vec(),
+                }],
+            }),
+        )
+        .await
+        .expect_err("forced first write failure should fail completion");
+        assert_eq!(err.body().code, ApiErrorCode::Database);
+
+        state
+            .db()
+            .execute_unprepared("DROP TRIGGER fail_payload_complete")
+            .await
+            .expect("drop trigger");
+
+        let Postcard(complete_resp) = complete_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path(object_id),
+            postcard(ObjectCompleteRequest {
+                payloads: vec![ObjectPayloadComplete {
+                    id: payload_id.parse().expect("payload id"),
+                    ciphertext_size: ciphertext.len() as i64,
+                    sha256_ciphertext: sha256(ciphertext).to_vec(),
+                }],
+            }),
+        )
+        .await
+        .expect("complete after dropping trigger");
+
+        assert_eq!(
+            complete_resp.created_seq,
+            seeded_seq + 1,
+            "failed first write must not consume an event seq"
+        );
     }
 
     #[tokio::test]
