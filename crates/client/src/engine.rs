@@ -135,15 +135,15 @@ impl SyncEngine {
         device_name: &str,
         platform: &str,
     ) -> Result<(), ClientError> {
+        let prepared = self.api.login_prepare(passphrase, username).await?;
         let mut signing_identity = self
             .local_store
-            .load_or_create_device_signing_identity()
+            .load_or_create_device_signing_identity(&prepared.device_identity_wrapping_key)
             .await?;
         let requested_device_id = optional_device_id(signing_identity.device_id.as_deref())?;
         let auth = self
             .api
-            .login(
-                passphrase,
+            .login_finish(
                 username,
                 AuthDevice {
                     id: requested_device_id,
@@ -151,19 +151,24 @@ impl SyncEngine {
                     platform,
                     signing_secret_key: &signing_identity.signing_secret_key,
                 },
+                prepared,
             )
             .await?;
-        let login_resp = auth.response;
+        let crate::api_client::AuthResult {
+            response: login_resp,
+            encryption_key,
+            device_identity_wrapping_key,
+        } = auth;
         signing_identity.device_id = Some(login_resp.device_id.clone());
         self.local_store
-            .persist_device_signing_identity(&signing_identity)
+            .persist_device_signing_identity(&signing_identity, &device_identity_wrapping_key)
             .await?;
 
         self.finish_auth(
             device_name,
             login_resp.username.clone(),
             login_resp.device_id.clone(),
-            auth.encryption_key,
+            encryption_key,
             signing_identity,
         )
         .await?;
@@ -180,36 +185,42 @@ impl SyncEngine {
         device_name: &str,
         platform: &str,
     ) -> Result<String, ClientError> {
+        let prepared = self
+            .api
+            .register_prepare(access_key, username, passphrase)
+            .await?;
         let mut signing_identity = self
             .local_store
-            .load_or_create_device_signing_identity()
+            .load_or_create_device_signing_identity(&prepared.device_identity_wrapping_key)
             .await?;
         let requested_device_id = optional_device_id(signing_identity.device_id.as_deref())?;
         let auth = self
             .api
-            .register(
-                access_key,
-                username,
-                passphrase,
+            .register_finish(
                 AuthDevice {
                     id: requested_device_id,
                     name: device_name,
                     platform,
                     signing_secret_key: &signing_identity.signing_secret_key,
                 },
+                prepared,
             )
             .await?;
-        let register_resp = auth.response;
+        let crate::api_client::AuthResult {
+            response: register_resp,
+            encryption_key,
+            device_identity_wrapping_key,
+        } = auth;
         signing_identity.device_id = Some(register_resp.device_id.clone());
         self.local_store
-            .persist_device_signing_identity(&signing_identity)
+            .persist_device_signing_identity(&signing_identity, &device_identity_wrapping_key)
             .await?;
 
         self.finish_auth(
             device_name,
             register_resp.username.clone(),
             register_resp.device_id.clone(),
-            auth.encryption_key,
+            encryption_key,
             signing_identity,
         )
         .await?;

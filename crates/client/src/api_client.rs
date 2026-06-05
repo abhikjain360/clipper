@@ -21,6 +21,7 @@ pub struct ApiClient {
 pub struct AuthResult<T> {
     pub response: T,
     pub encryption_key: Zeroizing<[u8; 32]>,
+    pub device_identity_wrapping_key: Zeroizing<[u8; 32]>,
 }
 
 #[derive(Clone, Copy)]
@@ -29,6 +30,21 @@ pub struct AuthDevice<'a> {
     pub name: &'a str,
     pub platform: &'a str,
     pub signing_secret_key: &'a [u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
+}
+
+pub struct LoginPrepareResult {
+    pub challenge_id: String,
+    pub device_proof_challenge: Vec<u8>,
+    pub credential_finalization: Vec<u8>,
+    pub encryption_key: Zeroizing<[u8; 32]>,
+    pub device_identity_wrapping_key: Zeroizing<[u8; 32]>,
+}
+
+pub struct RegisterPrepareResult {
+    pub registration_id: String,
+    pub registration_upload: Vec<u8>,
+    pub encryption_key: Zeroizing<[u8; 32]>,
+    pub device_identity_wrapping_key: Zeroizing<[u8; 32]>,
 }
 
 impl ApiClient {
@@ -168,6 +184,15 @@ impl ApiClient {
         username: &str,
         device: AuthDevice<'_>,
     ) -> Result<AuthResult<LoginResponse>, ClientError> {
+        let prepared = self.login_prepare(passphrase, username).await?;
+        self.login_finish(username, device, prepared).await
+    }
+
+    pub async fn login_prepare(
+        &self,
+        passphrase: &str,
+        username: &str,
+    ) -> Result<LoginPrepareResult, ClientError> {
         validate_server_url(&self.base_url)?;
 
         let (credential_request, client_login_state) =
@@ -186,6 +211,32 @@ impl ApiClient {
 
         let challenge_resp: LoginChallengeResponse =
             Self::postcard_response(challenge_resp).await?;
+        let finish = crypto::opaque_client_login_finish(
+            &client_login_state,
+            passphrase.as_bytes(),
+            &challenge_resp.credential_response,
+        )?;
+        let encryption_key = crypto::derive_data_key_from_opaque_export_key(&finish.export_key);
+        let device_identity_wrapping_key =
+            crypto::derive_device_identity_wrapping_key_from_opaque_export_key(&finish.export_key);
+
+        Ok(LoginPrepareResult {
+            challenge_id: challenge_resp.challenge_id,
+            device_proof_challenge: challenge_resp.device_proof_challenge,
+            credential_finalization: finish.credential_finalization,
+            encryption_key,
+            device_identity_wrapping_key,
+        })
+    }
+
+    pub async fn login_finish(
+        &self,
+        username: &str,
+        device: AuthDevice<'_>,
+        prepared: LoginPrepareResult,
+    ) -> Result<AuthResult<LoginResponse>, ClientError> {
+        validate_server_url(&self.base_url)?;
+
         let device_signing_public_key =
             crypto::device_signing_public_key(device.signing_secret_key);
         let device_login_proof_signature = device
@@ -193,8 +244,8 @@ impl ApiClient {
             .map(|device_id| {
                 let proof_body = DeviceLoginProofBodyV1 {
                     version: DEVICE_LOGIN_PROOF_VERSION,
-                    challenge_id: challenge_resp.challenge_id.clone(),
-                    challenge: challenge_resp.device_proof_challenge.clone(),
+                    challenge_id: prepared.challenge_id.clone(),
+                    challenge: prepared.device_proof_challenge.clone(),
                     username: username.to_string(),
                     device_id,
                     device_signing_public_key: device_signing_public_key.to_vec(),
@@ -202,16 +253,10 @@ impl ApiClient {
                 crypto::sign_device_login_proof_body(device.signing_secret_key, &proof_body)
             })
             .transpose()?;
-        let finish = crypto::opaque_client_login_finish(
-            &client_login_state,
-            passphrase.as_bytes(),
-            &challenge_resp.credential_response,
-        )?;
-        let encryption_key = crypto::derive_data_key_from_opaque_export_key(&finish.export_key);
 
         let req = LoginRequest {
-            challenge_id: challenge_resp.challenge_id,
-            credential_finalization: finish.credential_finalization,
+            challenge_id: prepared.challenge_id,
+            credential_finalization: prepared.credential_finalization,
             device_id: device.id,
             device_signing_public_key: device_signing_public_key.to_vec(),
             device_login_proof_signature,
@@ -231,7 +276,8 @@ impl ApiClient {
         debug!("Logged in, device_id={}", login_resp.device_id);
         Ok(AuthResult {
             response: login_resp,
-            encryption_key,
+            encryption_key: prepared.encryption_key,
+            device_identity_wrapping_key: prepared.device_identity_wrapping_key,
         })
     }
 
@@ -256,6 +302,18 @@ impl ApiClient {
         passphrase: &str,
         device: AuthDevice<'_>,
     ) -> Result<AuthResult<RegisterFinishResponse>, ClientError> {
+        let prepared = self
+            .register_prepare(access_key, username, passphrase)
+            .await?;
+        self.register_finish(device, prepared).await
+    }
+
+    pub async fn register_prepare(
+        &self,
+        access_key: &str,
+        username: &str,
+        passphrase: &str,
+    ) -> Result<RegisterPrepareResult, ClientError> {
         validate_server_url(&self.base_url)?;
 
         let (registration_request, client_state) =
@@ -280,12 +338,30 @@ impl ApiClient {
             &start_resp.registration_response,
         )?;
         let encryption_key = crypto::derive_data_key_from_opaque_export_key(&finish.export_key);
+        let device_identity_wrapping_key =
+            crypto::derive_device_identity_wrapping_key_from_opaque_export_key(&finish.export_key);
+
+        Ok(RegisterPrepareResult {
+            registration_id: start_resp.registration_id,
+            registration_upload: finish.registration_upload,
+            encryption_key,
+            device_identity_wrapping_key,
+        })
+    }
+
+    pub async fn register_finish(
+        &self,
+        device: AuthDevice<'_>,
+        prepared: RegisterPrepareResult,
+    ) -> Result<AuthResult<RegisterFinishResponse>, ClientError> {
+        validate_server_url(&self.base_url)?;
+
         let device_signing_public_key =
             crypto::device_signing_public_key(device.signing_secret_key);
 
         let finish_req = RegisterFinishRequest {
-            registration_id: start_resp.registration_id,
-            registration_upload: finish.registration_upload,
+            registration_id: prepared.registration_id,
+            registration_upload: prepared.registration_upload,
             device_id: device.id,
             device_signing_public_key: device_signing_public_key.to_vec(),
             device_name: Some(device.name.to_string()),
@@ -308,7 +384,8 @@ impl ApiClient {
         );
         Ok(AuthResult {
             response: register_resp,
-            encryption_key,
+            encryption_key: prepared.encryption_key,
+            device_identity_wrapping_key: prepared.device_identity_wrapping_key,
         })
     }
 

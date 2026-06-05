@@ -12,10 +12,10 @@ importers:
   .:
     devDependencies:
       '@types/deno':
-        specifier: ^2.7.0
+        specifier: 2.7.0
         version: 2.7.0
       '@types/node':
-        specifier: ^25.9.1
+        specifier: 25.9.1
         version: 25.9.1
       '@typescript/native-preview':
         specifier: 7.0.0-dev.20260603.1

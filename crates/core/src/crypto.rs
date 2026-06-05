@@ -24,6 +24,8 @@ pub const ACCESS_KEY_HASH_SALT_BYTES: usize = 16;
 pub const ACCESS_KEY_HASH_BYTES: usize = 32;
 pub const SERVER_SECRET_BYTES: usize = 32;
 const OPAQUE_EXPORT_DATA_KEY_LABEL: &[u8] = b"clipper:opaque-export:data-key:v1";
+const OPAQUE_EXPORT_DEVICE_IDENTITY_WRAP_KEY_LABEL: &[u8] =
+    b"clipper:opaque-export:device-identity-wrap-key:v1";
 
 const ACCESS_KEY_HASH_PARAMS_DEFAULT: Argon2Params = Argon2Params {
     m_cost: 19 * 1024,
@@ -278,9 +280,20 @@ pub fn derive_key(
 
 /// Derive the client-side object encryption key from OPAQUE's stable export key.
 pub fn derive_data_key_from_opaque_export_key(export_key: &[u8]) -> Zeroizing<[u8; 32]> {
+    derive_opaque_export_key(export_key, OPAQUE_EXPORT_DATA_KEY_LABEL)
+}
+
+/// Derive the client-side wrapping key for the persisted device signing secret.
+pub fn derive_device_identity_wrapping_key_from_opaque_export_key(
+    export_key: &[u8],
+) -> Zeroizing<[u8; 32]> {
+    derive_opaque_export_key(export_key, OPAQUE_EXPORT_DEVICE_IDENTITY_WRAP_KEY_LABEL)
+}
+
+fn derive_opaque_export_key(export_key: &[u8], label: &[u8]) -> Zeroizing<[u8; 32]> {
     let hkdf = Hkdf::<Sha256>::new(None, export_key);
     let mut key = Zeroizing::new([0u8; 32]);
-    hkdf.expand(OPAQUE_EXPORT_DATA_KEY_LABEL, key.as_mut())
+    hkdf.expand(label, key.as_mut())
         .expect("HKDF-SHA256 output of 32 bytes is within limits");
     key
 }
@@ -669,6 +682,7 @@ pub const AAD_WRAP_OPAQUE_SERVER_SETUP_V1: &[u8] = b"clipper:wrap:opaque-server-
 pub const AAD_WRAP_OPAQUE_PASSWORD_FILE_V1: &[u8] = b"clipper:wrap:opaque-password-file:v1";
 pub const AAD_WRAP_ENCRYPTION_SALT_V1: &[u8] = b"clipper:wrap:encryption-salt:v1";
 pub const AAD_WRAP_ACCESS_KEY_HASH_SALT_V1: &[u8] = b"clipper:wrap:access-key-hash-salt:v1";
+pub const AAD_WRAP_DEVICE_SIGNING_SECRET_V1: &[u8] = b"clipper:wrap:device-signing-secret:v1";
 
 pub const HKDF_LABEL_OPAQUE_SERVER_SETUP_V1: &[u8] = b"clipper:hkdf:opaque-server-setup:v1";
 pub const HKDF_LABEL_OPAQUE_PASSWORD_FILE_V1: &[u8] = b"clipper:hkdf:opaque-password-file:v1";
@@ -784,6 +798,21 @@ mod tests {
 
         assert_eq!(*key1, *key2);
         assert_ne!(*key1, *key3);
+    }
+
+    #[test]
+    fn test_device_identity_wrap_key_is_stable_and_separated() {
+        let export_key = b"opaque export key material";
+        let key1 = derive_device_identity_wrapping_key_from_opaque_export_key(export_key);
+        let key2 = derive_device_identity_wrapping_key_from_opaque_export_key(export_key);
+        let key3 = derive_device_identity_wrapping_key_from_opaque_export_key(
+            b"different export key material",
+        );
+        let data_key = derive_data_key_from_opaque_export_key(export_key);
+
+        assert_eq!(*key1, *key2);
+        assert_ne!(*key1, *key3);
+        assert_ne!(*key1, *data_key);
     }
 
     #[test]

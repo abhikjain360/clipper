@@ -28,6 +28,7 @@ const DEFAULT_PROFILE: &str = "default";
 const CLIPBOARD_TEXT_PREVIEW_MAX_CHARS: usize = 512;
 #[cfg(not(target_family = "wasm"))]
 const DEVICE_IDENTITY_FILE: &str = "device-identity-v1.json";
+const DEVICE_IDENTITY_RECORD_VERSION_V2: u64 = 2;
 #[cfg(target_family = "wasm")]
 const OBJECT_INDEX_LIMIT: usize = 1_000;
 
@@ -417,18 +418,22 @@ impl LocalStore {
 
     pub async fn load_or_create_device_signing_identity(
         &self,
+        wrapping_key: &[u8; 32],
     ) -> Result<DeviceSigningIdentity, LocalStoreError> {
-        self.load_or_create_device_signing_identity_inner().await
+        self.load_or_create_device_signing_identity_inner(wrapping_key)
+            .await
     }
 
     pub async fn persist_device_signing_identity(
         &self,
         identity: &DeviceSigningIdentity,
+        wrapping_key: &[u8; 32],
     ) -> Result<(), LocalStoreError> {
         if let Some(device_id) = identity.device_id.as_deref() {
             validate_device_id(device_id)?;
         }
-        self.persist_device_signing_identity_inner(identity).await
+        self.persist_device_signing_identity_inner(identity, wrapping_key)
+            .await
     }
 
     async fn persist_clipboard_present_encrypted_inner(
@@ -798,10 +803,21 @@ impl LocalStore {
 impl LocalStore {
     async fn load_or_create_device_signing_identity_inner(
         &self,
+        wrapping_key: &[u8; 32],
     ) -> Result<DeviceSigningIdentity, LocalStoreError> {
         if let Some(record) = self.read_device_identity_record().await? {
-            match device_identity_from_record(record) {
-                Ok(identity) => return Ok(identity),
+            let migrate_plaintext = matches!(&record, StoredDeviceIdentityRecord::Plaintext(_));
+            match device_identity_from_record(record, wrapping_key) {
+                Ok(identity) => {
+                    if migrate_plaintext {
+                        self.write_device_identity(&identity, wrapping_key).await?;
+                    }
+                    return Ok(identity);
+                }
+                Err(
+                    error @ (LocalStoreError::DeviceIdentityDecrypt(_)
+                    | LocalStoreError::UnsupportedDeviceIdentityVersion(_)),
+                ) => return Err(error),
                 Err(error) => {
                     tracing::warn!("Replacing invalid local device identity: {}", error);
                 }
@@ -809,20 +825,21 @@ impl LocalStore {
         }
 
         let identity = new_device_signing_identity(None);
-        self.write_device_identity(&identity).await?;
+        self.write_device_identity(&identity, wrapping_key).await?;
         Ok(identity)
     }
 
     async fn persist_device_signing_identity_inner(
         &self,
         identity: &DeviceSigningIdentity,
+        wrapping_key: &[u8; 32],
     ) -> Result<(), LocalStoreError> {
-        self.write_device_identity(identity).await
+        self.write_device_identity(identity, wrapping_key).await
     }
 
     async fn read_device_identity_record(
         &self,
-    ) -> Result<Option<DeviceIdentityRecord>, LocalStoreError> {
+    ) -> Result<Option<StoredDeviceIdentityRecord>, LocalStoreError> {
         let path = self.device_identity_path();
         match tokio::fs::read(&path).await {
             Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
@@ -834,12 +851,10 @@ impl LocalStore {
     async fn write_device_identity(
         &self,
         identity: &DeviceSigningIdentity,
+        wrapping_key: &[u8; 32],
     ) -> Result<(), LocalStoreError> {
         ensure_private_dir(&self.base_dir).await?;
-        let record = DeviceIdentityRecord {
-            device_id: identity.device_id.clone(),
-            signing_secret_key: identity.signing_secret_key.to_vec(),
-        };
+        let record = encrypted_device_identity_record(identity, wrapping_key)?;
         let bytes = serde_json::to_vec_pretty(&record)?;
         write_private_file_atomic(&self.device_identity_path(), &bytes).await
     }
@@ -977,17 +992,27 @@ impl LocalStore {
 impl LocalStore {
     async fn load_or_create_device_signing_identity_inner(
         &self,
+        wrapping_key: &[u8; 32],
     ) -> Result<DeviceSigningIdentity, LocalStoreError> {
         let storage = browser_storage()?;
         if let Some(json) = storage
             .get_item(&self.device_identity_key())
             .map_err(storage_error)?
         {
-            match serde_json::from_str::<DeviceIdentityRecord>(&json)
-                .map_err(LocalStoreError::from)
-                .and_then(device_identity_from_record)
-            {
-                Ok(identity) => return Ok(identity),
+            let record = serde_json::from_str::<StoredDeviceIdentityRecord>(&json)
+                .map_err(LocalStoreError::from)?;
+            let migrate_plaintext = matches!(&record, StoredDeviceIdentityRecord::Plaintext(_));
+            match device_identity_from_record(record, wrapping_key) {
+                Ok(identity) => {
+                    if migrate_plaintext {
+                        self.write_browser_device_identity(&storage, &identity, wrapping_key)?;
+                    }
+                    return Ok(identity);
+                }
+                Err(
+                    error @ (LocalStoreError::DeviceIdentityDecrypt(_)
+                    | LocalStoreError::UnsupportedDeviceIdentityVersion(_)),
+                ) => return Err(error),
                 Err(error) => {
                     tracing::warn!("Replacing invalid local device identity: {}", error);
                 }
@@ -995,27 +1020,26 @@ impl LocalStore {
         }
 
         let identity = new_device_signing_identity(None);
-        self.write_browser_device_identity(&storage, &identity)?;
+        self.write_browser_device_identity(&storage, &identity, wrapping_key)?;
         Ok(identity)
     }
 
     async fn persist_device_signing_identity_inner(
         &self,
         identity: &DeviceSigningIdentity,
+        wrapping_key: &[u8; 32],
     ) -> Result<(), LocalStoreError> {
         let storage = browser_storage()?;
-        self.write_browser_device_identity(&storage, identity)
+        self.write_browser_device_identity(&storage, identity, wrapping_key)
     }
 
     fn write_browser_device_identity(
         &self,
         storage: &web_sys::Storage,
         identity: &DeviceSigningIdentity,
+        wrapping_key: &[u8; 32],
     ) -> Result<(), LocalStoreError> {
-        let record = DeviceIdentityRecord {
-            device_id: identity.device_id.clone(),
-            signing_secret_key: identity.signing_secret_key.to_vec(),
-        };
+        let record = encrypted_device_identity_record(identity, wrapping_key)?;
         let json = serde_json::to_string(&record)?;
         storage
             .set_item(&self.device_identity_key(), &json)
@@ -1195,7 +1219,22 @@ impl LocalStore {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct DeviceIdentityRecord {
+#[serde(untagged)]
+enum StoredDeviceIdentityRecord {
+    Encrypted(DeviceIdentityEncryptedRecord),
+    Plaintext(DeviceIdentityPlaintextRecord),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DeviceIdentityEncryptedRecord {
+    version: u64,
+    #[serde(default)]
+    device_id: Option<String>,
+    wrapped_signing_secret_key: Vec<u8>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DeviceIdentityPlaintextRecord {
     #[serde(default)]
     device_id: Option<String>,
     signing_secret_key: Vec<u8>,
@@ -1365,21 +1404,75 @@ fn new_device_signing_identity(device_id: Option<String>) -> DeviceSigningIdenti
     }
 }
 
+fn encrypted_device_identity_record(
+    identity: &DeviceSigningIdentity,
+    wrapping_key: &[u8; 32],
+) -> Result<DeviceIdentityEncryptedRecord, LocalStoreError> {
+    Ok(DeviceIdentityEncryptedRecord {
+        version: DEVICE_IDENTITY_RECORD_VERSION_V2,
+        device_id: identity.device_id.clone(),
+        wrapped_signing_secret_key: crypto::wrap_with_key(
+            wrapping_key,
+            identity.signing_secret_key.as_ref(),
+            crypto::AAD_WRAP_DEVICE_SIGNING_SECRET_V1,
+        )
+        .map_err(|error| LocalStoreError::DeviceIdentityEncrypt(error.to_string()))?,
+    })
+}
+
 fn device_identity_from_record(
-    record: DeviceIdentityRecord,
+    record: StoredDeviceIdentityRecord,
+    wrapping_key: &[u8; 32],
+) -> Result<DeviceSigningIdentity, LocalStoreError> {
+    match record {
+        StoredDeviceIdentityRecord::Encrypted(record) => {
+            if record.version != DEVICE_IDENTITY_RECORD_VERSION_V2 {
+                return Err(LocalStoreError::UnsupportedDeviceIdentityVersion(
+                    record.version,
+                ));
+            }
+            let device_id = record
+                .device_id
+                .map(|id| validate_device_id(&id))
+                .transpose()?;
+            let plaintext = crypto::unwrap_with_key(
+                wrapping_key,
+                &record.wrapped_signing_secret_key,
+                crypto::AAD_WRAP_DEVICE_SIGNING_SECRET_V1,
+            )
+            .map_err(|error| LocalStoreError::DeviceIdentityDecrypt(error.to_string()))?;
+            let signing_secret_key = device_signing_secret_key_from_vec(plaintext)?;
+            Ok(DeviceSigningIdentity {
+                device_id,
+                signing_secret_key: Zeroizing::new(signing_secret_key),
+            })
+        }
+        StoredDeviceIdentityRecord::Plaintext(record) => {
+            device_identity_from_plaintext_record(record)
+        }
+    }
+}
+
+fn device_identity_from_plaintext_record(
+    record: DeviceIdentityPlaintextRecord,
 ) -> Result<DeviceSigningIdentity, LocalStoreError> {
     let device_id = record
         .device_id
         .map(|id| validate_device_id(&id))
         .transpose()?;
-    let signing_secret_key: [u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES] = record
-        .signing_secret_key
-        .try_into()
-        .map_err(|_| LocalStoreError::InvalidDeviceSigningKey)?;
+    let signing_secret_key = device_signing_secret_key_from_vec(record.signing_secret_key)?;
     Ok(DeviceSigningIdentity {
         device_id,
         signing_secret_key: Zeroizing::new(signing_secret_key),
     })
+}
+
+fn device_signing_secret_key_from_vec(
+    bytes: Vec<u8>,
+) -> Result<[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES], LocalStoreError> {
+    bytes
+        .try_into()
+        .map_err(|_| LocalStoreError::InvalidDeviceSigningKey)
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -1455,6 +1548,12 @@ pub enum LocalStoreError {
     InvalidDeviceId(String),
     #[error("invalid local device signing key")]
     InvalidDeviceSigningKey,
+    #[error("unsupported local device identity version: {0}")]
+    UnsupportedDeviceIdentityVersion(u64),
+    #[error("encrypted local device identity error: {0}")]
+    DeviceIdentityEncrypt(String),
+    #[error("local device identity decrypt failed: {0}")]
+    DeviceIdentityDecrypt(String),
     #[error("encrypted local cache error: {0}")]
     EncryptedCache(String),
     #[error("browser local storage error: {0}")]
@@ -1548,6 +1647,93 @@ mod tests {
             },
             payload_ciphertext,
         }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn encrypts_device_identity_at_rest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        let wrapping_key = [3_u8; 32];
+        let identity = DeviceSigningIdentity {
+            device_id: Some(TEST_DEVICE_ID.into()),
+            signing_secret_key: Zeroizing::new([9_u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]),
+        };
+
+        store
+            .persist_device_signing_identity(&identity, &wrapping_key)
+            .await
+            .expect("persist identity");
+
+        let bytes = tokio::fs::read(store.device_identity_path())
+            .await
+            .expect("identity bytes");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("identity json");
+        assert_eq!(
+            json.get("version").and_then(serde_json::Value::as_u64),
+            Some(DEVICE_IDENTITY_RECORD_VERSION_V2)
+        );
+        assert!(json.get("wrapped_signing_secret_key").is_some());
+        assert!(json.get("signing_secret_key").is_none());
+
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("\"signing_secret_key\""));
+
+        let loaded = store
+            .load_or_create_device_signing_identity(&wrapping_key)
+            .await
+            .expect("load identity");
+        assert_eq!(loaded.device_id.as_deref(), Some(TEST_DEVICE_ID));
+        assert_eq!(
+            *loaded.signing_secret_key,
+            [9_u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]
+        );
+
+        let wrong_key = [4_u8; 32];
+        let err = store
+            .load_or_create_device_signing_identity(&wrong_key)
+            .await
+            .expect_err("wrong wrapping key should fail");
+        assert!(matches!(err, LocalStoreError::DeviceIdentityDecrypt(_)));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn migrates_plaintext_device_identity_to_encrypted_record() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        let wrapping_key = [5_u8; 32];
+        let legacy = DeviceIdentityPlaintextRecord {
+            device_id: Some(TEST_DEVICE_ID.into()),
+            signing_secret_key: vec![6_u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
+        };
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy).expect("legacy json");
+
+        ensure_private_dir(tmp.path()).await.expect("private dir");
+        write_private_file_atomic(&store.device_identity_path(), &legacy_bytes)
+            .await
+            .expect("write legacy identity");
+
+        let loaded = store
+            .load_or_create_device_signing_identity(&wrapping_key)
+            .await
+            .expect("load legacy identity");
+        assert_eq!(loaded.device_id.as_deref(), Some(TEST_DEVICE_ID));
+        assert_eq!(
+            *loaded.signing_secret_key,
+            [6_u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]
+        );
+
+        let bytes = tokio::fs::read(store.device_identity_path())
+            .await
+            .expect("migrated identity bytes");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("migrated json");
+        assert_eq!(
+            json.get("version").and_then(serde_json::Value::as_u64),
+            Some(DEVICE_IDENTITY_RECORD_VERSION_V2)
+        );
+        assert!(json.get("wrapped_signing_secret_key").is_some());
+        assert!(json.get("signing_secret_key").is_none());
     }
 
     #[tokio::test]
