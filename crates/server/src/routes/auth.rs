@@ -127,62 +127,9 @@ pub async fn register_start(
     State(state): State<AppState>,
     Postcard(req): Postcard<RegisterStartRequest>,
 ) -> Result<Postcard<RegisterStartResponse>, ApiError> {
-    let now = Utc::now().to_rfc3339();
     let db_config = load_server_config(&state).await?;
-
-    // verify access key
-
-    let access_key_hash_salt = secret_storage::unwrap_access_key_hash_salt(
-        state.secrets(),
-        &db_config.access_key_hash_salt,
-    )
-    .map_err(|e| {
-        error!(error = %e, "Failed to unwrap access_key_hash_salt");
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
-    })?;
-    // Argon2id is memory-hard and blocks for tens of milliseconds, so run it on
-    // the blocking pool instead of stalling an async worker for every (even
-    // invalid) registration attempt.
-    let access_key_attempt = req.access_key.clone();
-    let access_key_pepper = state.secrets().access_key_pepper;
-    let access_key_hash_params = state.config().crypto.access_key_hash_params;
-    let access_key_hash = tokio::task::spawn_blocking(move || {
-        access_key_hash(
-            &access_key_attempt,
-            &access_key_hash_salt,
-            &access_key_pepper,
-            &access_key_hash_params,
-        )
-    })
-    .await
-    .map_err(|e| {
-        error!(error = %e, "Access key hash task failed to join");
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error")
-    })?
-    .map_err(|e| {
-        error!(error = %e, "Failed to hash access key");
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error")
-    })?;
-    let access_key = access_keys::Entity::find_by_id(access_key_hash.clone())
-        .one(state.db())
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Failed to look up access key in register_start");
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
-        })?
-        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid access key"))?;
-
-    if access_key.used_at.is_some()
-        || access_key
-            .expires_at
-            .as_deref()
-            .is_some_and(|expires_at| expires_at <= now.as_str())
-    {
-        return Err(error_response(
-            StatusCode::UNAUTHORIZED,
-            "Invalid access key",
-        ));
-    }
+    let access_key_hash =
+        verify_unused_registration_access_key(&state, &db_config, &req.access_key).await?;
 
     // Reject obviously-taken usernames before we expend any OPAQUE work.
     // The final guarantee comes from the unique constraint in register_finish.
@@ -492,6 +439,67 @@ fn access_key_hash(
     access_key_hash_params: &crypto::Argon2Params,
 ) -> Result<String, clipper_core::crypto::CryptoError> {
     server_auth::hash_access_key(access_key, salt, secret, access_key_hash_params)
+}
+
+async fn verify_unused_registration_access_key(
+    state: &AppState,
+    db_config: &server_config::Model,
+    access_key_attempt: &str,
+) -> Result<String, ApiError> {
+    let access_key_hash_salt = secret_storage::unwrap_access_key_hash_salt(
+        state.secrets(),
+        &db_config.access_key_hash_salt,
+    )
+    .map_err(|e| {
+        error!(error = %e, "Failed to unwrap access_key_hash_salt");
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
+    })?;
+    // Argon2id is memory-hard and blocks for tens of milliseconds, so run it on
+    // the blocking pool instead of stalling an async worker for every (even
+    // invalid) registration attempt.
+    let access_key_attempt = access_key_attempt.to_owned();
+    let access_key_pepper = state.secrets().access_key_pepper;
+    let access_key_hash_params = state.config().crypto.access_key_hash_params;
+    let access_key_hash = tokio::task::spawn_blocking(move || {
+        access_key_hash(
+            &access_key_attempt,
+            &access_key_hash_salt,
+            &access_key_pepper,
+            &access_key_hash_params,
+        )
+    })
+    .await
+    .map_err(|e| {
+        error!(error = %e, "Access key hash task failed to join");
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error")
+    })?
+    .map_err(|e| {
+        error!(error = %e, "Failed to hash access key");
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error")
+    })?;
+    let access_key = access_keys::Entity::find_by_id(access_key_hash.clone())
+        .one(state.db())
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Failed to look up access key in register_start");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Invalid access key"))?;
+
+    let now = Utc::now().to_rfc3339();
+    if access_key.used_at.is_some()
+        || access_key
+            .expires_at
+            .as_deref()
+            .is_some_and(|expires_at| expires_at <= now.as_str())
+    {
+        return Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "Invalid access key",
+        ));
+    }
+
+    Ok(access_key_hash)
 }
 
 async fn load_server_config(state: &AppState) -> Result<server_config::Model, ApiError> {

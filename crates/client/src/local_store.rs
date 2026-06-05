@@ -89,7 +89,7 @@ pub struct EncryptedClipboardObject {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "sync_state", content = "record", rename_all = "snake_case")]
 enum StoredObjectRecord {
-    Present(StoredPresentObjectRecord),
+    Present(Box<StoredPresentObjectRecord>),
     PendingCreate(StoredSyncMarkerRecord),
     Deleted(StoredSyncMarkerRecord),
 }
@@ -152,6 +152,13 @@ struct LocalSyncControl {
     generation: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct StoredObjectSyncMeta {
+    created_seq: i64,
+    event_seq: i64,
+    seen_generation: Option<u64>,
+}
+
 #[derive(Debug)]
 pub struct LocalStore {
     base_dir: PathBuf,
@@ -204,9 +211,11 @@ impl LocalStore {
             item,
             payload,
             encrypted,
-            created_seq,
-            event_seq,
-            Some(sync.generation),
+            StoredObjectSyncMeta {
+                created_seq,
+                event_seq,
+                seen_generation: Some(sync.generation),
+            },
         )
         .await?;
         self.visible_state_inner(visible_clipboard_limit).await
@@ -231,9 +240,11 @@ impl LocalStore {
             item,
             payload,
             encrypted,
-            created_seq,
-            created_seq,
-            Some(generation),
+            StoredObjectSyncMeta {
+                created_seq,
+                event_seq: created_seq,
+                seen_generation: Some(generation),
+            },
         )
         .await?;
         self.visible_state_inner(visible_clipboard_limit)
@@ -442,22 +453,20 @@ impl LocalStore {
         item: &DecryptedClipboardItem,
         payload: &[u8],
         encrypted: &EncryptedClipboardObject,
-        created_seq: i64,
-        event_seq: i64,
-        seen_generation: Option<u64>,
+        sync_meta: StoredObjectSyncMeta,
     ) -> Result<(), LocalStoreError> {
         if let Some(StoredObjectRecord::Deleted(record)) =
             self.stored_object_record(item_id).await?
-            && record.event_seq > event_seq
+            && record.event_seq > sync_meta.event_seq
         {
             return Ok(());
         }
 
         let local_record = LocalObjectRecord {
             id: item.id.clone(),
-            seen_generation,
-            event_seq,
-            created_seq,
+            seen_generation: sync_meta.seen_generation,
+            event_seq: sync_meta.event_seq,
+            created_seq: sync_meta.created_seq,
             created_at: item.created_at.clone(),
             source_device_id: item.source_device_id.clone(),
             data: LocalObjectData::Clipboard(local_clipboard_record_from_payload(
@@ -467,14 +476,14 @@ impl LocalStore {
             )),
         };
         debug_assert_eq!(item_id, item.id);
-        let stored_record = StoredObjectRecord::Present(StoredPresentObjectRecord {
+        let stored_record = StoredObjectRecord::Present(Box::new(StoredPresentObjectRecord {
             id: item.id.clone(),
             kind: ObjectKind::Clipboard,
-            seen_generation,
-            event_seq,
-            created_seq,
+            seen_generation: sync_meta.seen_generation,
+            event_seq: sync_meta.event_seq,
+            created_seq: sync_meta.created_seq,
             encrypted: encrypted.object.clone(),
-        });
+        }));
         self.write_stored_clipboard_payload(item_id, &encrypted.payload_ciphertext)
             .await?;
         self.write_stored_object_record(&stored_record).await?;
@@ -511,14 +520,14 @@ impl LocalStore {
             }),
         };
         debug_assert_eq!(item_id, item.id);
-        let stored_record = StoredObjectRecord::Present(StoredPresentObjectRecord {
+        let stored_record = StoredObjectRecord::Present(Box::new(StoredPresentObjectRecord {
             id: item.id.clone(),
             kind: ObjectKind::File,
             seen_generation,
             event_seq,
             created_seq,
             encrypted: encrypted.clone(),
-        });
+        }));
         self.write_stored_object_record(&stored_record).await?;
         self.write_memory_record(local_record).await
     }
