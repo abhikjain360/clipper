@@ -1,4 +1,5 @@
 pub mod api_client;
+mod clipboard_privacy;
 pub mod engine;
 mod local_store;
 

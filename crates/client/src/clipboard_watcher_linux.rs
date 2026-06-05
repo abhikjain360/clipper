@@ -16,7 +16,7 @@ use clipper_core::crypto;
 use tracing::{debug, warn};
 use wl_clipboard_rs::paste::{self, ClipboardType, Error as PasteError, MimeType, Seat};
 
-use crate::engine::SyncEngine;
+use crate::{clipboard_privacy, engine::SyncEngine};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -107,6 +107,12 @@ fn read_clipboard(
         Err(error) => return Err(error.into()),
     };
 
+    if clipboard_has_password_manager_marker(&mime_types)? {
+        *last_digest = None;
+        debug!("Ignoring Wayland clipboard payload with password-manager marker");
+        return Ok(None);
+    }
+
     let Some(selected) = select_mime_type(&mime_types) else {
         *last_digest = None;
         debug!(
@@ -145,6 +151,48 @@ fn read_clipboard(
     *last_digest = Some(digest);
 
     Ok(Some(ClipboardRead { mime_type, bytes }))
+}
+
+pub fn current_clipboard_has_password_manager_marker() -> Result<bool, String> {
+    let mime_types = match paste::get_mime_types_ordered(ClipboardType::Regular, Seat::Unspecified)
+    {
+        Ok(mime_types) => mime_types,
+        Err(error) if is_empty_clipboard_error(&error) => return Ok(false),
+        Err(error) => {
+            debug!(
+                "Wayland clipboard privacy marker check unavailable: {}",
+                error
+            );
+            return Ok(false);
+        }
+    };
+
+    clipboard_has_password_manager_marker(&mime_types).map_err(|error| error.to_string())
+}
+
+fn clipboard_has_password_manager_marker(
+    mime_types: &[String],
+) -> Result<bool, ClipboardWatcherError> {
+    let Some(hint_mime_type) = clipboard_privacy::linux_password_manager_hint_mime_type(mime_types)
+    else {
+        return Ok(false);
+    };
+
+    let (mut pipe, _) = match paste::get_contents(
+        ClipboardType::Regular,
+        Seat::Unspecified,
+        MimeType::Specific(hint_mime_type),
+    ) {
+        Ok(result) => result,
+        Err(error) if is_empty_clipboard_error(&error) => return Ok(true),
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)?;
+    Ok(clipboard_privacy::is_linux_password_manager_secret_hint(
+        &bytes,
+    ))
 }
 
 fn select_mime_type(mime_types: &[String]) -> Option<SelectedMimeType> {

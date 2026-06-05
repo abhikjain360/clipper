@@ -235,10 +235,9 @@ async fn send_current_clipboard_text(
     window: tauri::Window,
     backend: State<'_, DesktopBackend>,
 ) -> CommandResult<Option<String>> {
-    let text = window
-        .clipboard()
-        .read_text()
-        .map_err(|error| CommandError::NativeClipboard(error.to_string()))?;
+    let Some(text) = read_current_clipboard_text(&window)? else {
+        return Ok(None);
+    };
     if text.is_empty() {
         return Ok(None);
     }
@@ -249,6 +248,34 @@ async fn send_current_clipboard_text(
             .send_clipboard_payload(TEXT_CLIPBOARD_MIME_TYPE, text.as_bytes())
             .await?,
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn read_current_clipboard_text(_window: &tauri::Window) -> CommandResult<Option<String>> {
+    Ok(clipper_client::clipboard_watcher::read_current_unconcealed_clipboard_text())
+}
+
+#[cfg(target_os = "linux")]
+fn read_current_clipboard_text(window: &tauri::Window) -> CommandResult<Option<String>> {
+    if clipper_client::clipboard_watcher::current_clipboard_has_password_manager_marker()
+        .map_err(CommandError::NativeClipboard)?
+    {
+        return Ok(None);
+    }
+
+    read_tauri_current_clipboard_text(window)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn read_current_clipboard_text(window: &tauri::Window) -> CommandResult<Option<String>> {
+    read_tauri_current_clipboard_text(window)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_tauri_current_clipboard_text(window: &tauri::Window) -> CommandResult<Option<String>> {
+    Ok(Some(window.clipboard().read_text().map_err(|error| {
+        CommandError::NativeClipboard(error.to_string())
+    })?))
 }
 
 #[tauri::command]
