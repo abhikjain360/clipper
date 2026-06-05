@@ -3,11 +3,5 @@
     "identifier": "default",
     "description": "Main Clipper desktop window permissions",
     "windows": ["main"],
-    "permissions": [
-        "core:default",
-        "dialog:allow-open",
-        "dialog:allow-save",
-        "clipboard-manager:allow-read-text",
-        "clipboard-manager:allow-write-text"
-    ]
+    "permissions": ["core:default"]
 }

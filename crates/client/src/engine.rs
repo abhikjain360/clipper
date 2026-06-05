@@ -21,7 +21,10 @@ use crate::{
         decrypt_file_blob_bytes, decrypt_file_meta_bytes, encrypt_clipboard_meta,
         encrypt_clipboard_payload, encrypt_file_blob_bytes, encrypt_file_meta_bytes,
     },
-    local_store::{DeviceSigningIdentity, LocalStore, LocalVisibleState},
+    local_store::{
+        DeviceSigningIdentity, EncryptedClipboardObject, EncryptedObject, LocalStore,
+        LocalVisibleState,
+    },
 };
 
 const INLINE_OBJECT_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
@@ -36,6 +39,7 @@ const WS_TICKET_PROTOCOL: &str = "clipper-ticket";
 struct DecryptedClipboardObject {
     item: DecryptedClipboardItem,
     payload: Vec<u8>,
+    encrypted: EncryptedClipboardObject,
 }
 
 /// The sync engine that owns all client state.
@@ -224,6 +228,7 @@ impl SyncEngine {
         encryption_key: Zeroizing<[u8; 32]>,
         signing_identity: DeviceSigningIdentity,
     ) -> Result<(), ClientError> {
+        let cache_key = *encryption_key;
         self.local_store
             .set_profile(profile_id_from_encryption_key(&encryption_key));
 
@@ -240,6 +245,15 @@ impl SyncEngine {
             state.error = None;
         }
         self.bump_version();
+
+        match self
+            .local_store
+            .hydrate_ciphertext_cache(&cache_key, RECENT_CLIPBOARD_LIMIT)
+            .await
+        {
+            Ok(visible) => self.publish_visible_state(visible).await,
+            Err(error) => warn!("Failed to hydrate local ciphertext cache: {}", error),
+        }
 
         {
             let engine = Arc::clone(self);
@@ -291,6 +305,7 @@ impl SyncEngine {
         self.api.logout().await?;
         *self.encryption_key.write().await = None;
         *self.device_signing_key.write().await = None;
+        self.local_store.clear_memory().await;
         {
             let mut state = self.state.write().await;
             *state = AppState::default();
@@ -422,6 +437,7 @@ impl SyncEngine {
             }],
             envelope,
         };
+        let encrypted = encrypted_clipboard_from_init(&init_req, encrypted_payload.clone());
 
         let created_seq = self
             .submit_single_payload_object(
@@ -444,9 +460,10 @@ impl SyncEngine {
         };
         let visible = self
             .local_store
-            .persist_local_clipboard_present(
+            .persist_local_clipboard_present_encrypted(
                 &item,
                 data,
+                &encrypted,
                 created_seq,
                 created_seq,
                 RECENT_CLIPBOARD_LIMIT,
@@ -602,7 +619,11 @@ impl SyncEngine {
 
     #[cfg(not(target_family = "wasm"))]
     pub async fn upload_file(&self, file_path: &str) -> Result<String, ClientError> {
-        let path = std::path::Path::new(file_path);
+        self.upload_file_path(std::path::Path::new(file_path)).await
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn upload_file_path(&self, path: &std::path::Path) -> Result<String, ClientError> {
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -704,6 +725,7 @@ impl SyncEngine {
             }],
             envelope,
         };
+        let encrypted = encrypted_object_from_init(&init_req);
 
         let created_seq = self
             .submit_single_payload_object(
@@ -726,7 +748,13 @@ impl SyncEngine {
         };
         let visible = self
             .local_store
-            .persist_local_file_present(&item, created_seq, created_seq, RECENT_CLIPBOARD_LIMIT)
+            .persist_local_file_present_encrypted(
+                &item,
+                &encrypted,
+                created_seq,
+                created_seq,
+                RECENT_CLIPBOARD_LIMIT,
+            )
             .await?;
         self.publish_visible_state(visible).await;
         info!(file_id = %file_id, filename = %filename, "File uploaded");
@@ -771,15 +799,25 @@ impl SyncEngine {
 
     #[cfg(not(target_family = "wasm"))]
     pub async fn download_file(&self, file_id: &str, target_path: &str) -> Result<(), ClientError> {
+        self.download_file_path(file_id, std::path::Path::new(target_path))
+            .await
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn download_file_path(
+        &self,
+        file_id: &str,
+        target_path: &std::path::Path,
+    ) -> Result<(), ClientError> {
         let plaintext = self.download_file_bytes(file_id).await?;
-        tokio::fs::write(std::path::Path::new(target_path), &plaintext)
+        tokio::fs::write(target_path, &plaintext)
             .await
             .map_err(|source| ClientError::Io {
                 context: "write file",
                 source,
             })?;
 
-        info!(file_id = %file_id, path = %target_path, "File downloaded");
+        info!(file_id = %file_id, path = %target_path.display(), "File downloaded");
         Ok(())
     }
 
@@ -921,8 +959,13 @@ impl SyncEngine {
             for item in page.items {
                 match decrypt_file_object_item(&item, &encryption_key) {
                     Ok(file) => {
-                        self.persist_file_snapshot_item(&file, item.created_seq, generation)
-                            .await?;
+                        self.persist_file_snapshot_item(
+                            &file,
+                            &encrypted_object_from_list_item(&item),
+                            item.created_seq,
+                            generation,
+                        )
+                        .await?;
                     }
                     Err(e) => warn!(id = %item.id, "Failed to decrypt file object: {}", e),
                 }
@@ -1013,12 +1056,19 @@ impl SyncEngine {
     async fn persist_file_snapshot_item(
         &self,
         file: &DecryptedFileItem,
+        encrypted: &EncryptedObject,
         created_seq: i64,
         generation: u64,
     ) -> Result<(), ClientError> {
         if let Some(visible) = self
             .local_store
-            .persist_snapshot_file_present(file, created_seq, generation, RECENT_CLIPBOARD_LIMIT)
+            .persist_snapshot_file_present_encrypted(
+                file,
+                encrypted,
+                created_seq,
+                generation,
+                RECENT_CLIPBOARD_LIMIT,
+            )
             .await?
         {
             self.publish_visible_state(visible).await;
@@ -1034,9 +1084,10 @@ impl SyncEngine {
     ) -> Result<(), ClientError> {
         if let Some(visible) = self
             .local_store
-            .persist_snapshot_clipboard_present(
+            .persist_snapshot_clipboard_present_encrypted(
                 &object.item,
                 &object.payload,
+                &object.encrypted,
                 created_seq,
                 generation,
                 RECENT_CLIPBOARD_LIMIT,
@@ -1089,6 +1140,10 @@ impl SyncEngine {
         let text = clipboard_display_text(&meta.mime_type, &plaintext);
 
         Ok(DecryptedClipboardObject {
+            encrypted: EncryptedClipboardObject {
+                object: encrypted_object_from_list_item(item),
+                payload_ciphertext: encrypted_payload,
+            },
             item: DecryptedClipboardItem {
                 id: item.id.to_string(),
                 text,
@@ -1201,8 +1256,13 @@ impl SyncEngine {
             }
             ObjectKind::File => {
                 let file = decrypt_file_object_item(&item, &encryption_key)?;
-                self.persist_file_snapshot_item(&file, item.created_seq, generation)
-                    .await?;
+                self.persist_file_snapshot_item(
+                    &file,
+                    &encrypted_object_from_list_item(&item),
+                    item.created_seq,
+                    generation,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -1701,6 +1761,47 @@ fn single_payload(item: &ObjectListItem) -> Result<&ObjectPayloadDescriptor, Cli
     }
 
     Ok(&item.payloads[0])
+}
+
+fn encrypted_clipboard_from_init(
+    init_req: &ObjectInitRequest,
+    payload_ciphertext: Vec<u8>,
+) -> EncryptedClipboardObject {
+    EncryptedClipboardObject {
+        object: encrypted_object_from_init(init_req),
+        payload_ciphertext,
+    }
+}
+
+fn encrypted_object_from_init(init_req: &ObjectInitRequest) -> EncryptedObject {
+    EncryptedObject {
+        meta_nonce: init_req.meta_nonce.clone(),
+        meta_ciphertext: init_req.meta_ciphertext.clone(),
+        payloads: init_req
+            .payloads
+            .iter()
+            .map(|payload| ObjectPayloadDescriptor {
+                id: payload.id,
+                nonce: payload.nonce.clone(),
+                ciphertext_size: payload.ciphertext_size,
+                sha256_ciphertext: payload.sha256_ciphertext.clone(),
+            })
+            .collect(),
+        created_at: init_req.envelope.body.created_at.clone(),
+        source_device_id: init_req.envelope.body.source_device_id.to_string(),
+        envelope: init_req.envelope.clone(),
+    }
+}
+
+fn encrypted_object_from_list_item(item: &ObjectListItem) -> EncryptedObject {
+    EncryptedObject {
+        meta_nonce: item.meta_nonce.clone(),
+        meta_ciphertext: item.meta_ciphertext.clone(),
+        payloads: item.payloads.clone(),
+        created_at: item.created_at.clone(),
+        source_device_id: item.source_device_id.to_string(),
+        envelope: item.envelope.clone(),
+    }
 }
 
 fn optional_device_id(device_id: Option<&str>) -> Result<Option<DeviceId>, ClientError> {

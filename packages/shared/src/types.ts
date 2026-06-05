@@ -57,11 +57,13 @@ export type ClipperBackend = {
   waitForStateChange: (seenVersion: number) => Promise<number>;
   refresh: () => Promise<void>;
   sendClipboardText: (text: string) => Promise<string>;
+  sendCurrentClipboardText?: () => Promise<string | null>;
   sendClipboardPayload: (mimeType: string, bytes: Uint8Array) => Promise<string>;
   clipboardPayload: (id: string) => Promise<ClipboardPayload>;
+  writeClipboardItemText?: (id: string) => Promise<void>;
   uploadFileBytes: (filename: string, mimeType: string, bytes: Uint8Array) => Promise<string>;
-  uploadFilePath?: (path: string) => Promise<string>;
+  uploadFileFromDialog?: () => Promise<string | null>;
   downloadFileBytes: (fileId: string) => Promise<Uint8Array>;
-  downloadFilePath?: (fileId: string, path: string) => Promise<void>;
+  downloadFileToDialog?: (fileId: string, defaultFilename: string) => Promise<boolean>;
   deleteFile: (fileId: string) => Promise<void>;
 };

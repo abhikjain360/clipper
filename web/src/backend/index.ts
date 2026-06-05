@@ -18,39 +18,11 @@ export async function defaultServerUrl(): Promise<string> {
 }
 
 export async function readClipboardText(): Promise<string> {
-    if (isTauriRuntime()) {
-        const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
-        return await readText();
-    }
-
     return await navigator.clipboard.readText();
 }
 
 export async function writeClipboardText(text: string): Promise<void> {
-    if (isTauriRuntime()) {
-        const { writeText } = await import("@tauri-apps/plugin-clipboard-manager");
-        await writeText(text);
-        return;
-    }
-
     await navigator.clipboard.writeText(text);
-}
-
-export async function openNativeFilePath(): Promise<string | null> {
-    if (!isTauriRuntime()) return null;
-
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const selected = await open({ directory: false, multiple: false });
-    if (typeof selected === "string") return selected;
-    if (Array.isArray(selected)) return selected[0] ?? null;
-    return null;
-}
-
-export async function saveNativeFilePath(defaultPath: string): Promise<string | null> {
-    if (!isTauriRuntime()) return null;
-
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    return await save({ defaultPath });
 }
 
 export function formatBackendError(error: unknown): string {

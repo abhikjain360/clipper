@@ -30,9 +30,7 @@ import {
     defaultServerUrl,
     formatBackendError,
     isTauriRuntime,
-    openNativeFilePath,
     readClipboardText,
-    saveNativeFilePath,
     writeClipboardText,
 } from "./backend";
 import type { AppState, ClipboardItem, FileItem } from "@clipper/shared";
@@ -335,17 +333,28 @@ function ClipboardPanel({
     onError: (error: string | null) => void;
 }) {
     const [busy, setBusy] = useState(false);
+    const nativeRuntime = isTauriRuntime();
 
     async function addClipboardText() {
         setBusy(true);
         onError(null);
         try {
+            const backend = await clipperBackend();
+            if (nativeRuntime && backend.sendCurrentClipboardText) {
+                const itemId = await backend.sendCurrentClipboardText();
+                if (!itemId) {
+                    onError("Clipboard is empty or unavailable");
+                    return;
+                }
+                onState(await backend.getState());
+                return;
+            }
+
             const text = await readClipboardText();
             if (!text) {
                 onError("Clipboard is empty or unavailable");
                 return;
             }
-            const backend = await clipperBackend();
             await backend.sendClipboardText(text);
             onState(await backend.getState());
         } catch (caught) {
@@ -359,6 +368,11 @@ function ClipboardPanel({
         onError(null);
         try {
             const backend = await clipperBackend();
+            if (nativeRuntime && backend.writeClipboardItemText) {
+                await backend.writeClipboardItemText(item.id);
+                return;
+            }
+
             const payload = await backend.clipboardPayload(item.id);
             const text = payload.text ?? new TextDecoder().decode(payload.bytes);
             await writeClipboardText(text);
@@ -448,16 +462,13 @@ function FilesPanel({
     }
 
     async function uploadNativeFile() {
-        const path = await openNativeFilePath();
-        if (!path) return;
-
         setBusy(true);
         onError(null);
         try {
             const backend = await clipperBackend();
-            if (!backend.uploadFilePath) throw new Error("Native file upload is unavailable");
-            await backend.uploadFilePath(path);
-            onState(await backend.getState());
+            if (!backend.uploadFileFromDialog) throw new Error("Native file upload is unavailable");
+            const uploadedId = await backend.uploadFileFromDialog();
+            if (uploadedId) onState(await backend.getState());
         } catch (caught) {
             onError(formatBackendError(caught));
         } finally {
@@ -478,10 +489,8 @@ function FilesPanel({
         onError(null);
         try {
             const backend = await clipperBackend();
-            if (nativeRuntime && backend.downloadFilePath) {
-                const path = await saveNativeFilePath(safeDownloadFilename(file.filename));
-                if (!path) return;
-                await backend.downloadFilePath(file.id, path);
+            if (nativeRuntime && backend.downloadFileToDialog) {
+                await backend.downloadFileToDialog(file.id, safeDownloadFilename(file.filename));
                 return;
             }
 

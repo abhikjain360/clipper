@@ -1,9 +1,14 @@
-use std::sync::{Arc, OnceLock};
+use std::{
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 use clipper_app_types::AppState;
 use clipper_client::engine::{ClipboardPayload, SyncEngine, TEXT_CLIPBOARD_MIME_TYPE};
 use serde::{Serialize, Serializer};
 use tauri::{Manager, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_dialog::DialogExt;
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
@@ -21,6 +26,10 @@ enum CommandError {
         configured: String,
         requested: String,
     },
+    #[error("native file dialog failed: {0}")]
+    NativeFileDialog(String),
+    #[error("native clipboard failed: {0}")]
+    NativeClipboard(String),
 }
 
 #[derive(Serialize)]
@@ -38,6 +47,8 @@ impl Serialize for CommandError {
             code: match self {
                 Self::Client(_) => "client",
                 Self::ServerUrlMismatch { .. } => "server_url_mismatch",
+                Self::NativeFileDialog(_) => "native_file_dialog",
+                Self::NativeClipboard(_) => "native_clipboard",
             },
             message: self.to_string(),
         }
@@ -99,11 +110,13 @@ pub fn run() {
             wait_for_state_change,
             refresh,
             send_clipboard_text,
+            send_current_clipboard_text,
             send_clipboard_payload,
             clipboard_payload,
-            upload_file_path,
+            write_clipboard_item_text,
+            upload_file_from_dialog,
             upload_file_bytes,
-            download_file_path,
+            download_file_to_dialog,
             download_file_bytes,
             delete_file,
         ])
@@ -218,6 +231,27 @@ async fn send_clipboard_text(
 }
 
 #[tauri::command]
+async fn send_current_clipboard_text(
+    window: tauri::Window,
+    backend: State<'_, DesktopBackend>,
+) -> CommandResult<Option<String>> {
+    let text = window
+        .clipboard()
+        .read_text()
+        .map_err(|error| CommandError::NativeClipboard(error.to_string()))?;
+    if text.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(
+        backend
+            .engine
+            .send_clipboard_payload(TEXT_CLIPBOARD_MIME_TYPE, text.as_bytes())
+            .await?,
+    ))
+}
+
+#[tauri::command]
 async fn send_clipboard_payload(
     backend: State<'_, DesktopBackend>,
     mime_type: String,
@@ -238,11 +272,39 @@ async fn clipboard_payload(
 }
 
 #[tauri::command]
-async fn upload_file_path(
+async fn write_clipboard_item_text(
+    window: tauri::Window,
     backend: State<'_, DesktopBackend>,
-    path: String,
-) -> CommandResult<String> {
-    Ok(backend.engine.upload_file(&path).await?)
+    id: String,
+) -> CommandResult<()> {
+    let payload = backend.engine.clipboard_payload(&id).await?;
+    let text = payload
+        .text
+        .unwrap_or_else(|| String::from_utf8_lossy(&payload.bytes).into_owned());
+    window
+        .clipboard()
+        .write_text(text)
+        .map_err(|error| CommandError::NativeClipboard(error.to_string()))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn upload_file_from_dialog(
+    window: tauri::Window,
+    backend: State<'_, DesktopBackend>,
+) -> CommandResult<Option<String>> {
+    let Some(path) = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Upload File")
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+
+    let path = dialog_path_to_path(path)?;
+    Ok(Some(backend.engine.upload_file_path(&path).await?))
 }
 
 #[tauri::command]
@@ -259,13 +321,26 @@ async fn upload_file_bytes(
 }
 
 #[tauri::command]
-async fn download_file_path(
+async fn download_file_to_dialog(
+    window: tauri::Window,
     backend: State<'_, DesktopBackend>,
     file_id: String,
-    path: String,
-) -> CommandResult<()> {
-    backend.engine.download_file(&file_id, &path).await?;
-    Ok(())
+    default_filename: String,
+) -> CommandResult<bool> {
+    let Some(path) = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Save File")
+        .set_file_name(safe_dialog_filename(&default_filename))
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+
+    let path = dialog_path_to_path(path)?;
+    backend.engine.download_file_path(&file_id, &path).await?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -284,6 +359,28 @@ async fn delete_file(backend: State<'_, DesktopBackend>, file_id: String) -> Com
 
 fn engine(backend: &DesktopBackend) -> Arc<SyncEngine> {
     Arc::clone(&backend.engine)
+}
+
+fn dialog_path_to_path(path: tauri_plugin_dialog::FilePath) -> CommandResult<PathBuf> {
+    path.into_path()
+        .map_err(|error| CommandError::NativeFileDialog(error.to_string()))
+}
+
+fn safe_dialog_filename(filename: &str) -> String {
+    let cleaned = filename
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect::<String>();
+    if cleaned.is_empty() {
+        "clipper-download".to_string()
+    } else {
+        cleaned
+    }
 }
 
 fn ensure_requested_base_url(engine: &Arc<SyncEngine>, requested: &str) -> CommandResult<()> {

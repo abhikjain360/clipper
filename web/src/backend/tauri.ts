@@ -22,18 +22,21 @@ export function tauriBackend(): ClipperBackend {
             invoke<number>("wait_for_state_change", { seenVersion }),
         refresh: () => invoke<void>("refresh"),
         sendClipboardText: (text) => invoke<string>("send_clipboard_text", { text }),
+        sendCurrentClipboardText: () => invoke<string | null>("send_current_clipboard_text"),
         sendClipboardPayload: (mimeType, bytes) =>
             invoke<string>("send_clipboard_payload", { mimeType, bytes: [...bytes] }),
         clipboardPayload: async (id) =>
             normalizeClipboardPayload(
                 await invoke<RawClipboardPayload>("clipboard_payload", { id }),
             ),
+        writeClipboardItemText: (id) => invoke<void>("write_clipboard_item_text", { id }),
         uploadFileBytes: (filename, mimeType, bytes) =>
             invoke<string>("upload_file_bytes", { filename, mimeType, bytes: [...bytes] }),
-        uploadFilePath: (path) => invoke<string>("upload_file_path", { path }),
+        uploadFileFromDialog: () => invoke<string | null>("upload_file_from_dialog"),
         downloadFileBytes: async (fileId) =>
             bytesFrom(await invoke<number[]>("download_file_bytes", { fileId })),
-        downloadFilePath: (fileId, path) => invoke<void>("download_file_path", { fileId, path }),
+        downloadFileToDialog: (fileId, defaultFilename) =>
+            invoke<boolean>("download_file_to_dialog", { fileId, defaultFilename }),
         deleteFile: (fileId) => invoke<void>("delete_file", { fileId }),
     };
 }
