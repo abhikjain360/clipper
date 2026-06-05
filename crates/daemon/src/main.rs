@@ -179,7 +179,7 @@ async fn run() -> DaemonResult<()> {
     let engine = SyncEngine::try_new_with_data_dir(server_url, data_dir.join("client"))?;
     if let Some(creds) = loaded_creds {
         engine
-            .set_saved_profile(creds.username, Some(creds.device_name))
+            .set_saved_profile(Some(creds.username), Some(creds.device_name))
             .await;
     }
 

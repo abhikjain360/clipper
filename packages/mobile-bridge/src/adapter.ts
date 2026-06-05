@@ -58,12 +58,21 @@ function mapAppState(state: NativeAppState): AppState {
   return {
     clipboard_items: state.clipboardItems.map(mapClipboardItem),
     connection_status: mapConnectionStatus(state.connectionStatus),
-    device_id: state.deviceId ?? null,
-    device_name: state.deviceName ?? null,
     error: state.error ?? null,
     files: state.files.map(mapFileItem),
-    logged_in: state.loggedIn,
-    username: state.username ?? null,
+    saved_profile: state.savedProfile
+      ? {
+          device_name: state.savedProfile.deviceName,
+          username: state.savedProfile.username,
+        }
+      : null,
+    session: state.session
+      ? {
+          device_id: state.session.deviceId,
+          device_name: state.session.deviceName,
+          username: state.session.username,
+        }
+      : null,
   };
 }
 

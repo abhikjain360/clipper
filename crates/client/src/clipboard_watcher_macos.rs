@@ -54,7 +54,7 @@ fn run_clipboard_watcher(rt: tokio::runtime::Handle, engine: Arc<SyncEngine>) {
         // Check if still logged in
         let logged_in = rt.block_on(async {
             let state = engine.get_state().await;
-            state.logged_in
+            state.is_logged_in()
         });
         if !logged_in {
             // Stop watching when logged out

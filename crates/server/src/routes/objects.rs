@@ -267,7 +267,13 @@ pub async fn init_object(
     // The transaction committed; keep the inline payload files on disk.
     staged.commit();
 
-    let created_seq = inserted_event.as_ref().map(|inserted| inserted.seq);
+    let response = if let Some(inserted) = inserted_event.as_ref() {
+        ObjectInitResponse::Complete {
+            created_seq: inserted.seq,
+        }
+    } else {
+        ObjectInitResponse::Pending { upload_urls }
+    };
     if let Some(inserted) = inserted_event {
         broadcast_created(
             &state,
@@ -285,11 +291,7 @@ pub async fn init_object(
 
     info!(device_id = %device_id, object_id = %object_id_text, kind = kind.as_ref(), "Object initialized");
 
-    Ok(Postcard(ObjectInitResponse {
-        upload_urls,
-        complete: all_inline,
-        created_seq,
-    }))
+    Ok(Postcard(response))
 }
 
 pub async fn upload_payload(
@@ -336,7 +338,7 @@ pub async fn upload_payload(
             status = %payload.status,
             "Accepted idempotent upload for already uploaded payload",
         );
-        return Ok(Postcard(OkResponse { ok: true }));
+        return Ok(Postcard(OkResponse {}));
     }
 
     if payload.status != "pending" {
@@ -466,7 +468,7 @@ pub async fn upload_payload(
     }
 
     info!(device_id = %auth.device_id, object_id = %object.id, payload_id = %payload_id, "Object payload uploaded");
-    Ok(Postcard(OkResponse { ok: true }))
+    Ok(Postcard(OkResponse {}))
 }
 
 pub async fn complete_object(
@@ -1703,11 +1705,7 @@ async fn idempotent_init_response(
             device_id = %device_id,
             "Accepted idempotent init for already complete object",
         );
-        return Ok(ObjectInitResponse {
-            upload_urls: Vec::new(),
-            complete: true,
-            created_seq: Some(created_seq),
-        });
+        return Ok(ObjectInitResponse::Complete { created_seq });
     }
 
     debug!(
@@ -1717,11 +1715,7 @@ async fn idempotent_init_response(
         upload_urls = upload_urls.len(),
         "Accepted idempotent init for pending object",
     );
-    Ok(ObjectInitResponse {
-        upload_urls,
-        complete: false,
-        created_seq: None,
-    })
+    Ok(ObjectInitResponse::Pending { upload_urls })
 }
 
 async fn set_object_created_seq<C>(
@@ -2138,6 +2132,20 @@ mod tests {
         Postcard::validated(value).expect("valid request")
     }
 
+    fn init_created_seq(response: ObjectInitResponse) -> i64 {
+        match response {
+            ObjectInitResponse::Complete { created_seq } => created_seq,
+            ObjectInitResponse::Pending { .. } => panic!("expected complete object init response"),
+        }
+    }
+
+    fn init_upload_urls(response: ObjectInitResponse) -> Vec<ObjectPayloadUpload> {
+        match response {
+            ObjectInitResponse::Pending { upload_urls } => upload_urls,
+            ObjectInitResponse::Complete { .. } => panic!("expected pending object init response"),
+        }
+    }
+
     async fn insert_user(state: &AppState) -> Uuid {
         let now = Utc::now().to_rfc3339();
         let user_id = Uuid::now_v7();
@@ -2348,9 +2356,7 @@ mod tests {
         .await
         .expect("init");
 
-        assert!(resp.complete);
-        assert!(resp.upload_urls.is_empty());
-        let created_seq = resp.created_seq.expect("inline init returns created_seq");
+        let created_seq = init_created_seq(resp);
         assert!(created_seq > 0);
         let broadcast = rx.try_recv().expect("created broadcast");
         assert_eq!(broadcast.user_id, user_id);
@@ -2469,8 +2475,7 @@ mod tests {
         .await
         .expect("init");
 
-        assert!(resp.complete);
-        assert!(resp.upload_urls.is_empty());
+        assert!(init_created_seq(resp) > 0);
 
         let rows = object_payloads::Entity::find()
             .filter(object_payloads::Column::ObjectId.eq(object_uuid))
@@ -2611,9 +2616,8 @@ mod tests {
         .await
         .expect("init");
 
-        assert!(!resp.complete);
-        assert_eq!(resp.upload_urls.len(), 1);
-        assert!(resp.created_seq.is_none());
+        let upload_urls = init_upload_urls(resp);
+        assert_eq!(upload_urls.len(), 1);
 
         upload_payload(
             State(state.clone()),
@@ -2631,9 +2635,7 @@ mod tests {
         )
         .await
         .expect("idempotent init after upload");
-        assert!(!idempotent_uploaded_init.complete);
-        assert!(idempotent_uploaded_init.upload_urls.is_empty());
-        assert!(idempotent_uploaded_init.created_seq.is_none());
+        assert!(init_upload_urls(idempotent_uploaded_init).is_empty());
 
         let mut rx = state.ws_tx().subscribe();
         let Postcard(complete_resp) = complete_object(
@@ -2682,11 +2684,9 @@ mod tests {
         )
         .await
         .expect("idempotent init after complete");
-        assert!(idempotent_complete_init.complete);
-        assert!(idempotent_complete_init.upload_urls.is_empty());
         assert_eq!(
-            idempotent_complete_init.created_seq,
-            Some(complete_resp.created_seq)
+            init_created_seq(idempotent_complete_init),
+            complete_resp.created_seq
         );
 
         let Postcard(list) = list_objects(

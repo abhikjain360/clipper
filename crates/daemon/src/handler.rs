@@ -410,7 +410,10 @@ async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) ->
             let creds = Credentials {
                 device_name: device_name.to_string(),
                 server_url: url,
-                username: state.username,
+                username: state
+                    .session
+                    .map(|session| session.username)
+                    .unwrap_or(params.username),
             };
             if let Err(e) = keychain::store_credentials(&creds) {
                 warn!("Failed to store server profile: {}", e);
@@ -452,7 +455,7 @@ async fn cmd_register(
             let creds = Credentials {
                 device_name: device_name.to_string(),
                 server_url: url,
-                username: Some(username.clone()),
+                username: username.clone(),
             };
             if let Err(e) = keychain::store_credentials(&creds) {
                 warn!("Failed to store server profile: {}", e);

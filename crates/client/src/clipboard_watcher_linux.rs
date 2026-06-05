@@ -59,7 +59,7 @@ pub fn start_clipboard_watcher(engine: Arc<SyncEngine>) {
 
             let logged_in = rt.block_on(async {
                 let state = engine.get_state().await;
-                state.logged_in
+                state.is_logged_in()
             });
             if !logged_in {
                 last_digest = None;

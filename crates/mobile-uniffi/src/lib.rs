@@ -303,7 +303,7 @@ mod tests {
 
         let decoded = client.get_state();
 
-        assert!(!decoded.logged_in);
+        assert!(decoded.session.is_none());
         assert_eq!(decoded.connection_status, Default::default());
     }
 }

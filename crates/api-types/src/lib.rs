@@ -405,10 +405,14 @@ pub struct ObjectPayloadUpload {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ObjectInitResponse {
-    pub upload_urls: Vec<ObjectPayloadUpload>,
-    pub complete: bool,
-    pub created_seq: Option<i64>,
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ObjectInitResponse {
+    Complete {
+        created_seq: i64,
+    },
+    Pending {
+        upload_urls: Vec<ObjectPayloadUpload>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -526,14 +530,10 @@ pub enum WsError {
 // -- Generic --
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct OkResponse {
-    pub ok: bool,
-}
+pub struct OkResponse {}
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct HealthResponse {
-    pub ok: bool,
-}
+pub struct HealthResponse {}
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, Display, EnumString,

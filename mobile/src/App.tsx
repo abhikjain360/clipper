@@ -87,8 +87,8 @@ function ClipperApp() {
 
   if (!state) return <CenteredStatus title="Starting Clipper" loading />;
 
-  if (!state.logged_in) {
-    return <LoginScreen initialUsername={state.username ?? ""} onState={setState} />;
+  if (!state.session) {
+    return <LoginScreen initialUsername={state.saved_profile?.username ?? ""} onState={setState} />;
   }
 
   return <HomeScreen state={state} onState={setState} />;

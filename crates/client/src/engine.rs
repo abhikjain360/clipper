@@ -7,7 +7,8 @@ use std::{
 };
 
 pub use clipper_app_types::{
-    AppState, ClipboardPayload, ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem,
+    AppState, AuthenticatedSession, ClipboardPayload, ConnectionStatus, DecryptedClipboardItem,
+    DecryptedFileItem, SavedProfile,
 };
 use clipper_core::{crypto, models::*};
 use futures_util::{StreamExt, stream};
@@ -91,8 +92,10 @@ impl SyncEngine {
 
     pub async fn set_saved_profile(&self, username: Option<String>, device_name: Option<String>) {
         let mut state = self.state.write().await;
-        state.username = username;
-        state.device_name = device_name;
+        state.saved_profile = username.map(|username| SavedProfile {
+            username,
+            device_name: device_name.unwrap_or_default(),
+        });
         drop(state);
         self.bump_version();
     }
@@ -237,10 +240,15 @@ impl SyncEngine {
 
         {
             let mut state = self.state.write().await;
-            state.logged_in = true;
-            state.username = Some(username);
-            state.device_id = Some(device_id);
-            state.device_name = Some(device_name.to_string());
+            state.session = Some(AuthenticatedSession {
+                username: username.clone(),
+                device_id: device_id.clone(),
+                device_name: device_name.to_string(),
+            });
+            state.saved_profile = Some(SavedProfile {
+                username,
+                device_name: device_name.to_string(),
+            });
             state.connection_status = ConnectionStatus::Connecting;
             state.error = None;
         }
@@ -285,8 +293,8 @@ impl SyncEngine {
         let device_id = {
             let state = self.state.read().await;
             state
-                .device_id
-                .clone()
+                .device_id()
+                .map(ToString::to_string)
                 .ok_or(ClientError::NotAuthenticated)?
         };
         let device_id_typed = device_id.parse().map_err(|source| ClientError::InvalidId {
@@ -328,6 +336,7 @@ impl SyncEngine {
             });
         }
 
+        let encryption_key = self.current_encryption_key().await?;
         let payload_digest = clipboard_payload_digest(mime_type, data);
         {
             let suppressed = self.suppressed_payload.read().await;
@@ -337,7 +346,7 @@ impl SyncEngine {
             {
                 debug!("Suppressed duplicate clipboard upload");
                 return self
-                    .latest_clipboard_item_id_for_digest(&payload_digest)
+                    .latest_clipboard_item_id_for_digest(&payload_digest, &encryption_key)
                     .await
                     .ok_or_else(|| ClientError::Other("Suppressed clipboard item missing".into()));
             }
@@ -352,7 +361,7 @@ impl SyncEngine {
                 && same_mime_type(&first.mime_type, mime_type)
                 && self
                     .local_store
-                    .clipboard_payload(&first.id)
+                    .clipboard_payload(&first.id, &encryption_key)
                     .await?
                     .as_deref()
                     .is_some_and(|payload| {
@@ -383,18 +392,14 @@ impl SyncEngine {
             vec![payload_id_typed],
         );
         let (meta_nonce, meta_ciphertext, payload_nonce, encrypted_payload) = {
-            let encryption_key = self.encryption_key.read().await;
-            let encryption_key = encryption_key
-                .as_ref()
-                .ok_or(ClientError::NotAuthenticated)?;
             let meta = ClipboardMeta {
                 mime_type: mime_type.to_string(),
                 size: Some(plaintext_size),
             };
             let (meta_nonce, meta_ciphertext) =
-                encrypt_clipboard_meta(&meta, encryption_key, &aad_body)?;
+                encrypt_clipboard_meta(&meta, &encryption_key, &aad_body)?;
             let (payload_nonce, encrypted_payload) =
-                encrypt_clipboard_payload(data, encryption_key, &aad_body, payload_id_typed)?;
+                encrypt_clipboard_payload(data, &encryption_key, &aad_body, payload_id_typed)?;
             (
                 meta_nonce,
                 meta_ciphertext,
@@ -479,13 +484,21 @@ impl SyncEngine {
         Ok(object_id)
     }
 
-    async fn latest_clipboard_item_id_for_digest(&self, digest: &[u8; 32]) -> Option<String> {
+    async fn latest_clipboard_item_id_for_digest(
+        &self,
+        digest: &[u8; 32],
+        encryption_key: &[u8; 32],
+    ) -> Option<String> {
         let items = {
             let state = self.state.read().await;
             state.clipboard_items.clone()
         };
         for item in items {
-            let Ok(Some(payload)) = self.local_store.clipboard_payload(&item.id).await else {
+            let Ok(Some(payload)) = self
+                .local_store
+                .clipboard_payload(&item.id, encryption_key)
+                .await
+            else {
                 continue;
             };
             if clipboard_payload_digest(&item.mime_type, &payload) == *digest {
@@ -502,9 +515,10 @@ impl SyncEngine {
         }
         .ok_or_else(|| ClientError::ItemNotFound { id: id.to_string() })?;
 
+        let encryption_key = self.current_encryption_key().await?;
         let bytes = self
             .local_store
-            .clipboard_payload(id)
+            .clipboard_payload(id, &encryption_key)
             .await?
             .ok_or_else(|| ClientError::PayloadNotFound { id: id.to_string() })?;
         let text = if is_text_mime_type(&item.mime_type) {
@@ -529,33 +543,29 @@ impl SyncEngine {
     }
 
     pub async fn copy_to_local(&self, id: &str) -> Result<String, ClientError> {
-        let state_item = {
+        let item = {
             let state = self.state.read().await;
-            state
-                .clipboard_items
-                .iter()
-                .find(|i| i.id == id)
-                .map(|item| (item.text.clone(), item.mime_type.clone()))
-        };
+            state.clipboard_items.iter().find(|i| i.id == id).cloned()
+        }
+        .ok_or_else(|| ClientError::ItemNotFound { id: id.to_string() })?;
 
-        let text = match state_item {
-            Some((text, mime_type)) => {
-                if !is_text_mime_type(&mime_type) {
-                    return Err(ClientError::Unsupported(format!(
-                        "Clipboard item is {mime_type}; copying non-text clipboard payloads is not wired to the OS clipboard yet"
-                    )));
-                }
-                text
-            }
-            None => self
-                .local_store
-                .clipboard_text(id)
-                .await?
-                .ok_or_else(|| ClientError::ItemNotFound { id: id.to_string() })?,
+        if !is_text_mime_type(&item.mime_type) {
+            return Err(ClientError::Unsupported(format!(
+                "Clipboard item is {}; copying non-text clipboard payloads is not wired to the OS clipboard yet",
+                item.mime_type
+            )));
         };
+        let encryption_key = self.current_encryption_key().await?;
+        let bytes = self
+            .local_store
+            .clipboard_payload(id, &encryption_key)
+            .await?
+            .ok_or_else(|| ClientError::PayloadNotFound { id: id.to_string() })?;
+        let text = String::from_utf8(bytes.clone())
+            .map_err(|e| ClientError::Other(format!("clipboard text utf8: {e}")))?;
 
         *self.suppressed_payload.write().await = Some((
-            clipboard_payload_digest(TEXT_CLIPBOARD_MIME_TYPE, text.as_bytes()),
+            clipboard_payload_digest(&item.mime_type, &bytes),
             std::time::Instant::now(),
         ));
         Ok(text)
@@ -578,19 +588,15 @@ impl SyncEngine {
                 kind: "payload id",
                 source,
             })?;
-        if init_resp.complete {
-            return init_resp.created_seq.ok_or_else(|| {
-                ClientError::UnexpectedResponse(
-                    "complete object response missing created_seq".into(),
-                )
-            });
-        }
+        let upload_urls = match init_resp {
+            ObjectInitResponse::Complete { created_seq } => return Ok(created_seq),
+            ObjectInitResponse::Pending { upload_urls } => upload_urls,
+        };
 
-        let upload_needed = init_resp
-            .upload_urls
+        let upload_needed = upload_urls
             .iter()
             .any(|upload| upload.id == payload_id_typed);
-        if !upload_needed && !init_resp.upload_urls.is_empty() {
+        if !upload_needed && !upload_urls.is_empty() {
             return Err(ClientError::UnexpectedResponse(
                 "object payload upload URL missing".into(),
             ));
@@ -1008,7 +1014,7 @@ impl SyncEngine {
                     after,
                 )
                 .await?;
-            let objects = stream::iter(page.items)
+            let mut objects = stream::iter(page.items)
                 .map(|item| async move {
                     let created_seq = item.created_seq;
                     match self
@@ -1023,11 +1029,9 @@ impl SyncEngine {
                     }
                 })
                 .buffer_unordered(CLIPBOARD_HYDRATION_CONCURRENCY)
-                .filter_map(std::future::ready)
-                .collect::<Vec<_>>()
-                .await;
+                .filter_map(std::future::ready);
 
-            for (object, created_seq) in objects {
+            while let Some((object, created_seq)) = objects.next().await {
                 self.persist_clipboard_snapshot_item(&object, created_seq, generation)
                     .await?;
             }
@@ -1293,7 +1297,7 @@ impl SyncEngine {
         loop {
             {
                 let state = self.state.read().await;
-                if !state.logged_in {
+                if !state.is_logged_in() {
                     return;
                 }
             }
@@ -1320,7 +1324,7 @@ impl SyncEngine {
 
             {
                 let state = self.state.read().await;
-                if !state.logged_in {
+                if !state.is_logged_in() {
                     return;
                 }
             }
@@ -1470,7 +1474,7 @@ impl SyncEngine {
         loop {
             {
                 let state = self.state.read().await;
-                if !state.logged_in {
+                if !state.is_logged_in() {
                     return;
                 }
             }
@@ -1497,7 +1501,7 @@ impl SyncEngine {
 
             {
                 let state = self.state.read().await;
-                if !state.logged_in {
+                if !state.is_logged_in() {
                     return;
                 }
             }

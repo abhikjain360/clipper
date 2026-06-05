@@ -24,8 +24,7 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 pub struct Credentials {
     pub device_name: String,
     pub server_url: String,
-    #[serde(default)]
-    pub username: Option<String>,
+    pub username: String,
 }
 
 pub type KeychainResult<T> = Result<T, KeychainError>;

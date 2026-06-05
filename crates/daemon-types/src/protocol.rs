@@ -9,7 +9,6 @@
 use clipper_api_types::{ApiErrorCode, ErrorResponse};
 use clipper_app_types::AppState;
 use serde::{Deserialize, Serialize};
-use strum::{AsRefStr, Display, EnumString};
 
 pub const IPC_AUTH_VERSION: u32 = 1;
 pub const IPC_AUTH_NONCE_BYTES: usize = 32;
@@ -150,32 +149,26 @@ pub struct RegisterResult {
 
 /// Response from daemon to app.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DaemonResponse {
-    pub id: String,
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<ErrorResponse>,
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DaemonResponse {
+    Success {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<serde_json::Value>,
+    },
+    Error {
+        id: String,
+        error: ErrorResponse,
+    },
 }
 
 impl DaemonResponse {
     pub fn success(id: String, result: Option<serde_json::Value>) -> Self {
-        Self {
-            id,
-            ok: true,
-            result,
-            error: None,
-        }
+        Self::Success { id, result }
     }
 
     pub fn error(id: String, error: ErrorResponse) -> Self {
-        Self {
-            id,
-            ok: false,
-            result: None,
-            error: Some(error),
-        }
+        Self::Error { id, error }
     }
 
     pub fn error_message(id: String, message: impl Into<String>) -> Self {
@@ -192,22 +185,10 @@ pub enum DaemonLine {
 
 /// Event pushed from daemon to app.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DaemonEvent {
-    pub event: DaemonEventKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub state: Option<AppState>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_challenge: Option<AuthChallenge>,
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, Display, EnumString,
-)]
-#[serde(rename_all = "snake_case")]
-#[strum(serialize_all = "snake_case")]
-pub enum DaemonEventKind {
-    AuthChallenge,
-    StateChanged,
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum DaemonEvent {
+    AuthChallenge { auth_challenge: AuthChallenge },
+    StateChanged { state: AppState },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,19 +199,13 @@ pub struct AuthChallenge {
 
 impl DaemonEvent {
     pub fn auth_challenge(challenge: AuthChallenge) -> Self {
-        Self {
-            event: DaemonEventKind::AuthChallenge,
-            state: None,
-            auth_challenge: Some(challenge),
+        Self::AuthChallenge {
+            auth_challenge: challenge,
         }
     }
 
     pub fn state_changed(state: AppState) -> Self {
-        Self {
-            event: DaemonEventKind::StateChanged,
-            state: Some(state),
-            auth_challenge: None,
-        }
+        Self::StateChanged { state }
     }
 }
 
@@ -250,12 +225,15 @@ mod tests {
         let resp = DaemonResponse::success("id1".into(), Some(serde_json::json!({"text": "hi"})));
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("error"));
-        assert!(json.contains(r#""ok":true"#));
+        assert!(json.contains(r#""status":"success""#));
 
         let parsed: DaemonResponse = serde_json::from_str(&json).unwrap();
-        assert!(parsed.ok);
-        assert!(parsed.error.is_none());
-        assert_eq!(parsed.result.unwrap()["text"], "hi");
+        match parsed {
+            DaemonResponse::Success { result, .. } => {
+                assert_eq!(result.unwrap()["text"], "hi");
+            }
+            DaemonResponse::Error { .. } => panic!("expected success response"),
+        }
     }
 
     #[test]
@@ -263,14 +241,16 @@ mod tests {
         let resp = DaemonResponse::error_message("id2".into(), "bad stuff");
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("result"));
-        assert!(json.contains(r#""ok":false"#));
+        assert!(json.contains(r#""status":"error""#));
 
         let parsed: DaemonResponse = serde_json::from_str(&json).unwrap();
-        assert!(!parsed.ok);
-        let error = parsed.error.unwrap();
-        assert_eq!(error.code, ApiErrorCode::Unknown);
-        assert_eq!(error.message, "bad stuff");
-        assert!(parsed.result.is_none());
+        match parsed {
+            DaemonResponse::Error { error, .. } => {
+                assert_eq!(error.code, ApiErrorCode::Unknown);
+                assert_eq!(error.message, "bad stuff");
+            }
+            DaemonResponse::Success { .. } => panic!("expected error response"),
+        }
     }
 
     /// Verify that the shared line union can parse both responses and events
@@ -278,13 +258,13 @@ mod tests {
     #[test]
     fn bridge_can_distinguish_response_from_event() {
         // A response has "id"
-        let resp_json = r#"{"id":"x","ok":true,"result":null}"#;
+        let resp_json = r#"{"status":"success","id":"x"}"#;
         let v: serde_json::Value = serde_json::from_str(resp_json).unwrap();
         assert!(v.get("id").is_some());
         assert!(v.get("event").is_none());
 
         // An event has "event" but no "id"
-        let event_json = r#"{"event":"state_changed","state":{"logged_in":false,"connection_status":"Disconnected","clipboard_items":[],"files":[]}}"#;
+        let event_json = r#"{"event":"state_changed","state":{"connection_status":"Disconnected","clipboard_items":[],"files":[]}}"#;
         let v: serde_json::Value = serde_json::from_str(event_json).unwrap();
         assert!(v.get("id").is_none());
         assert_eq!(v["event"], "state_changed");

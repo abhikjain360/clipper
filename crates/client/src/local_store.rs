@@ -1,8 +1,9 @@
 //! Client-side local cache.
 //!
 //! Persisted clipboard/file object cache records contain only encrypted object
-//! material. Decrypted display state and clipboard payload bytes live in memory
-//! for the active authenticated session.
+//! material. Decrypted display state keeps only bounded clipboard previews in
+//! memory; full clipboard payload bytes are decrypted from the local ciphertext
+//! record only for the operation that needs them.
 
 #[cfg(not(target_family = "wasm"))]
 use std::path::Path;
@@ -24,6 +25,7 @@ use crate::api_client::{
 };
 
 const DEFAULT_PROFILE: &str = "default";
+const CLIPBOARD_TEXT_PREVIEW_MAX_CHARS: usize = 512;
 #[cfg(not(target_family = "wasm"))]
 const DEVICE_IDENTITY_FILE: &str = "device-identity-v1.json";
 #[cfg(target_family = "wasm")]
@@ -35,26 +37,22 @@ pub struct DeviceSigningIdentity {
     pub signing_secret_key: Zeroizing<[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LocalSyncState {
-    Present,
-    PendingCreate,
-    Deleted,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalObjectRecord {
     pub id: String,
-    pub kind: ObjectKind,
-    pub sync_state: LocalSyncState,
     pub seen_generation: Option<u64>,
     pub event_seq: i64,
     pub created_seq: i64,
-    pub created_at: Option<String>,
-    pub source_device_id: Option<String>,
-    pub clipboard: Option<LocalClipboardRecord>,
-    pub file: Option<LocalFileRecord>,
+    pub created_at: String,
+    pub source_device_id: String,
+    pub data: LocalObjectData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "record", rename_all = "snake_case")]
+pub enum LocalObjectData {
+    Clipboard(LocalClipboardRecord),
+    File(LocalFileRecord),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,23 +86,58 @@ pub struct EncryptedClipboardObject {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredObjectRecord {
+#[serde(tag = "sync_state", content = "record", rename_all = "snake_case")]
+enum StoredObjectRecord {
+    Present(StoredPresentObjectRecord),
+    PendingCreate(StoredSyncMarkerRecord),
+    Deleted(StoredSyncMarkerRecord),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredPresentObjectRecord {
     id: String,
     kind: ObjectKind,
-    sync_state: LocalSyncState,
     seen_generation: Option<u64>,
     event_seq: i64,
     created_seq: i64,
-    #[serde(default)]
-    encrypted: Option<EncryptedObject>,
-    #[serde(default)]
-    clipboard_payload_ciphertext: Option<Vec<u8>>,
+    encrypted: EncryptedObject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredSyncMarkerRecord {
+    id: String,
+    kind: ObjectKind,
+    seen_generation: Option<u64>,
+    event_seq: i64,
+    created_seq: i64,
+}
+
+impl StoredObjectRecord {
+    fn id(&self) -> &str {
+        match self {
+            Self::Present(record) => &record.id,
+            Self::PendingCreate(record) | Self::Deleted(record) => &record.id,
+        }
+    }
+
+    fn kind(&self) -> ObjectKind {
+        match self {
+            Self::Present(record) => record.kind,
+            Self::PendingCreate(record) | Self::Deleted(record) => record.kind,
+        }
+    }
+
+    fn event_seq(&self) -> i64 {
+        match self {
+            Self::Present(record) => record.event_seq,
+            Self::PendingCreate(record) | Self::Deleted(record) => record.event_seq,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 struct MemoryState {
     records: HashMap<String, LocalObjectRecord>,
-    clipboard_payloads: HashMap<String, Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -263,24 +296,17 @@ impl LocalStore {
     ) -> Result<LocalVisibleState, LocalStoreError> {
         let mut memory = MemoryState::default();
         for record in self.all_stored_object_records().await? {
-            match decrypt_stored_object_record(&record, encryption_key) {
-                Ok(Some((local_record, payload))) => {
-                    if let Some(payload) = payload {
-                        memory
-                            .clipboard_payloads
-                            .insert(local_record.id.clone(), payload);
-                    }
+            match self
+                .decrypt_stored_object_record_preview(&record, encryption_key)
+                .await
+            {
+                Ok(Some(local_record)) => {
                     memory.records.insert(local_record.id.clone(), local_record);
                 }
-                Ok(None) => {
-                    if record.sync_state == LocalSyncState::Present && record.encrypted.is_none() {
-                        self.remove_stored_object_record_and_payloads(&record)
-                            .await?;
-                    }
-                }
+                Ok(None) => {}
                 Err(error) => {
                     tracing::warn!(
-                        object_id = %record.id,
+                        object_id = %record.id(),
                         "Failed to decrypt local cache record: {}",
                         error
                     );
@@ -379,16 +405,14 @@ impl LocalStore {
             .map(Some)
     }
 
-    pub async fn clipboard_text(&self, id: &str) -> Result<Option<String>, LocalStoreError> {
+    pub async fn clipboard_payload(
+        &self,
+        id: &str,
+        encryption_key: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, LocalStoreError> {
         let item_id = validate_item_id(id)?;
         let _sync = self.sync.lock().await;
-        self.clipboard_text_inner(&item_id).await
-    }
-
-    pub async fn clipboard_payload(&self, id: &str) -> Result<Option<Vec<u8>>, LocalStoreError> {
-        let item_id = validate_item_id(id)?;
-        let _sync = self.sync.lock().await;
-        self.clipboard_payload_inner(&item_id).await
+        self.clipboard_payload_inner(&item_id, encryption_key).await
     }
 
     pub async fn load_or_create_device_signing_identity(
@@ -417,8 +441,8 @@ impl LocalStore {
         event_seq: i64,
         seen_generation: Option<u64>,
     ) -> Result<(), LocalStoreError> {
-        if let Some(record) = self.stored_object_record(item_id).await?
-            && record.sync_state == LocalSyncState::Deleted
+        if let Some(StoredObjectRecord::Deleted(record)) =
+            self.stored_object_record(item_id).await?
             && record.event_seq > event_seq
         {
             return Ok(());
@@ -426,34 +450,30 @@ impl LocalStore {
 
         let local_record = LocalObjectRecord {
             id: item.id.clone(),
-            kind: ObjectKind::Clipboard,
-            sync_state: LocalSyncState::Present,
             seen_generation,
             event_seq,
             created_seq,
-            created_at: Some(item.created_at.clone()),
-            source_device_id: Some(item.source_device_id.clone()),
-            clipboard: Some(LocalClipboardRecord {
-                text: item.text.clone(),
-                mime_type: item.mime_type.clone(),
-                payload_size: item.payload_size,
-            }),
-            file: None,
+            created_at: item.created_at.clone(),
+            source_device_id: item.source_device_id.clone(),
+            data: LocalObjectData::Clipboard(local_clipboard_record_from_payload(
+                &item.mime_type,
+                payload,
+                item.payload_size,
+            )),
         };
         debug_assert_eq!(item_id, item.id);
-        let stored_record = StoredObjectRecord {
+        let stored_record = StoredObjectRecord::Present(StoredPresentObjectRecord {
             id: item.id.clone(),
             kind: ObjectKind::Clipboard,
-            sync_state: LocalSyncState::Present,
             seen_generation,
             event_seq,
             created_seq,
-            encrypted: Some(encrypted.object.clone()),
-            clipboard_payload_ciphertext: Some(encrypted.payload_ciphertext.clone()),
-        };
+            encrypted: encrypted.object.clone(),
+        });
+        self.write_stored_clipboard_payload(item_id, &encrypted.payload_ciphertext)
+            .await?;
         self.write_stored_object_record(&stored_record).await?;
-        self.write_memory_record(local_record, Some(payload.to_vec()))
-            .await
+        self.write_memory_record(local_record).await
     }
 
     async fn persist_file_present_encrypted_inner(
@@ -465,8 +485,8 @@ impl LocalStore {
         event_seq: i64,
         seen_generation: Option<u64>,
     ) -> Result<(), LocalStoreError> {
-        if let Some(record) = self.stored_object_record(item_id).await?
-            && record.sync_state == LocalSyncState::Deleted
+        if let Some(StoredObjectRecord::Deleted(record)) =
+            self.stored_object_record(item_id).await?
             && record.event_seq > event_seq
         {
             return Ok(());
@@ -474,33 +494,28 @@ impl LocalStore {
 
         let local_record = LocalObjectRecord {
             id: item.id.clone(),
-            kind: ObjectKind::File,
-            sync_state: LocalSyncState::Present,
             seen_generation,
             event_seq,
             created_seq,
-            created_at: Some(item.created_at.clone()),
-            source_device_id: Some(item.source_device_id.clone()),
-            clipboard: None,
-            file: Some(LocalFileRecord {
+            created_at: item.created_at.clone(),
+            source_device_id: item.source_device_id.clone(),
+            data: LocalObjectData::File(LocalFileRecord {
                 filename: item.filename.clone(),
                 mime_type: item.mime_type.clone(),
                 blob_size: item.blob_size,
             }),
         };
         debug_assert_eq!(item_id, item.id);
-        let stored_record = StoredObjectRecord {
+        let stored_record = StoredObjectRecord::Present(StoredPresentObjectRecord {
             id: item.id.clone(),
             kind: ObjectKind::File,
-            sync_state: LocalSyncState::Present,
             seen_generation,
             event_seq,
             created_seq,
-            encrypted: Some(encrypted.clone()),
-            clipboard_payload_ciphertext: None,
-        };
+            encrypted: encrypted.clone(),
+        });
         self.write_stored_object_record(&stored_record).await?;
-        self.write_memory_record(local_record, None).await
+        self.write_memory_record(local_record).await
     }
 
     async fn mark_pending_create_inner(
@@ -511,45 +526,38 @@ impl LocalStore {
         generation: u64,
     ) -> Result<bool, LocalStoreError> {
         match self.stored_object_record(object_id).await? {
-            Some(record)
-                if record.sync_state == LocalSyncState::Deleted
-                    && record.event_seq > created_seq =>
-            {
+            Some(StoredObjectRecord::Deleted(record)) if record.event_seq > created_seq => {
                 Ok(false)
             }
-            Some(record)
-                if record.sync_state == LocalSyncState::Present
-                    && record.event_seq >= created_seq =>
-            {
+            Some(StoredObjectRecord::Present(record)) if record.event_seq >= created_seq => {
                 Ok(false)
             }
-            Some(mut record) if record.sync_state == LocalSyncState::Present => {
+            Some(StoredObjectRecord::Present(mut record)) => {
                 record.event_seq = created_seq;
                 record.created_seq = created_seq;
                 record.seen_generation = Some(generation);
-                self.write_stored_object_record(&record).await?;
+                self.write_stored_object_record(&StoredObjectRecord::Present(record))
+                    .await?;
                 Ok(false)
             }
-            Some(mut record) if record.sync_state == LocalSyncState::PendingCreate => {
+            Some(StoredObjectRecord::PendingCreate(mut record)) => {
                 if created_seq >= record.event_seq {
                     record.event_seq = created_seq;
                     record.created_seq = created_seq;
                     record.seen_generation = Some(generation);
-                    self.write_stored_object_record(&record).await?;
+                    self.write_stored_object_record(&StoredObjectRecord::PendingCreate(record))
+                        .await?;
                 }
                 Ok(true)
             }
             _ => {
-                let record = StoredObjectRecord {
+                let record = StoredObjectRecord::PendingCreate(StoredSyncMarkerRecord {
                     id: object_id.to_string(),
                     kind,
-                    sync_state: LocalSyncState::PendingCreate,
                     seen_generation: Some(generation),
                     event_seq: created_seq,
                     created_seq,
-                    encrypted: None,
-                    clipboard_payload_ciphertext: None,
-                };
+                });
                 self.write_stored_object_record(&record).await?;
                 Ok(true)
             }
@@ -564,22 +572,19 @@ impl LocalStore {
         generation: u64,
     ) -> Result<(), LocalStoreError> {
         if let Some(record) = self.stored_object_record(object_id).await?
-            && record.event_seq >= event_seq
+            && record.event_seq() >= event_seq
         {
             return Ok(());
         }
         self.remove_payloads_for_object(kind, object_id).await?;
         self.remove_memory_record(object_id).await;
-        let record = StoredObjectRecord {
+        let record = StoredObjectRecord::Deleted(StoredSyncMarkerRecord {
             id: object_id.to_string(),
             kind,
-            sync_state: LocalSyncState::Deleted,
             seen_generation: Some(generation),
             event_seq,
             created_seq: event_seq,
-            encrypted: None,
-            clipboard_payload_ciphertext: None,
-        };
+        });
         self.write_stored_object_record(&record).await
     }
 
@@ -590,24 +595,26 @@ impl LocalStore {
         stream_start_seq: i64,
     ) -> Result<(), LocalStoreError> {
         for record in self.all_stored_object_records().await? {
-            if record.kind != kind {
+            if record.kind() != kind {
                 continue;
             }
-            match record.sync_state {
-                LocalSyncState::Present
-                    if record.created_seq <= stream_start_seq
-                        && record.seen_generation != Some(generation) =>
+            match &record {
+                StoredObjectRecord::Present(stored)
+                    if stored.created_seq <= stream_start_seq
+                        && stored.seen_generation != Some(generation) =>
                 {
                     self.remove_stored_object_record_and_payloads(&record)
                         .await?;
                 }
-                LocalSyncState::Deleted if record.seen_generation != Some(generation) => {
+                StoredObjectRecord::Deleted(stored)
+                    if stored.seen_generation != Some(generation) =>
+                {
                     self.remove_stored_object_record_and_payloads(&record)
                         .await?;
                 }
-                LocalSyncState::PendingCreate
-                    if record.created_seq <= stream_start_seq
-                        && record.seen_generation != Some(generation) =>
+                StoredObjectRecord::PendingCreate(stored)
+                    if stored.created_seq <= stream_start_seq
+                        && stored.seen_generation != Some(generation) =>
                 {
                     self.remove_stored_object_record_and_payloads(&record)
                         .await?;
@@ -648,37 +655,111 @@ impl LocalStore {
         Ok(records.iter().filter_map(file_item_from_record).collect())
     }
 
-    async fn clipboard_text_inner(&self, item_id: &str) -> Result<Option<String>, LocalStoreError> {
-        match self.clipboard_payload_inner(item_id).await? {
-            Some(payload) => Ok(Some(String::from_utf8(payload)?)),
-            None => Ok(None),
-        }
-    }
-
     async fn clipboard_payload_inner(
         &self,
         item_id: &str,
+        encryption_key: &[u8; 32],
     ) -> Result<Option<Vec<u8>>, LocalStoreError> {
-        Ok(self
-            .memory
-            .lock()
+        let Some(record) = self.stored_object_record(item_id).await? else {
+            return Ok(None);
+        };
+        self.decrypt_stored_clipboard_payload(&record, encryption_key)
             .await
-            .clipboard_payloads
-            .get(item_id)
-            .cloned())
     }
 
-    async fn write_memory_record(
+    async fn decrypt_stored_object_record_preview(
         &self,
-        record: LocalObjectRecord,
-        clipboard_payload: Option<Vec<u8>>,
-    ) -> Result<(), LocalStoreError> {
-        let mut memory = self.memory.lock().await;
-        if let Some(payload) = clipboard_payload {
-            memory.clipboard_payloads.insert(record.id.clone(), payload);
-        } else {
-            memory.clipboard_payloads.remove(&record.id);
+        record: &StoredObjectRecord,
+        encryption_key: &[u8; 32],
+    ) -> Result<Option<LocalObjectRecord>, LocalStoreError> {
+        let StoredObjectRecord::Present(record) = record else {
+            return Ok(None);
+        };
+
+        match record.kind {
+            ObjectKind::Clipboard => self
+                .decrypt_clipboard_record_preview(record, encryption_key)
+                .await
+                .map(Some),
+            ObjectKind::File => decrypt_file_record(record, encryption_key).map(Some),
         }
+    }
+
+    async fn decrypt_clipboard_record_preview(
+        &self,
+        record: &StoredPresentObjectRecord,
+        encryption_key: &[u8; 32],
+    ) -> Result<LocalObjectRecord, LocalStoreError> {
+        let encrypted = &record.encrypted;
+        let meta = decrypt_clipboard_meta(
+            &encrypted.meta_nonce,
+            &encrypted.meta_ciphertext,
+            encryption_key,
+            &encrypted.envelope.body,
+        )
+        .map_err(|error| LocalStoreError::EncryptedCache(error.to_string()))?;
+        let plaintext = self
+            .decrypt_present_clipboard_payload(record, encryption_key)
+            .await?;
+        let payload_size = meta.size.unwrap_or(plaintext.len() as i64);
+        let local_record = LocalObjectRecord {
+            id: record.id.clone(),
+            seen_generation: record.seen_generation,
+            event_seq: record.event_seq,
+            created_seq: record.created_seq,
+            created_at: encrypted.created_at.clone(),
+            source_device_id: encrypted.source_device_id.clone(),
+            data: LocalObjectData::Clipboard(local_clipboard_record_from_payload(
+                &meta.mime_type,
+                &plaintext,
+                payload_size,
+            )),
+        };
+        Ok(local_record)
+    }
+
+    async fn decrypt_stored_clipboard_payload(
+        &self,
+        record: &StoredObjectRecord,
+        encryption_key: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, LocalStoreError> {
+        let StoredObjectRecord::Present(record) = record else {
+            return Ok(None);
+        };
+        if record.kind != ObjectKind::Clipboard {
+            return Ok(None);
+        }
+        self.decrypt_present_clipboard_payload(record, encryption_key)
+            .await
+            .map(Some)
+    }
+
+    async fn decrypt_present_clipboard_payload(
+        &self,
+        record: &StoredPresentObjectRecord,
+        encryption_key: &[u8; 32],
+    ) -> Result<Vec<u8>, LocalStoreError> {
+        let encrypted = &record.encrypted;
+        let payload = single_payload(encrypted)?;
+        let Some(ciphertext) = self.stored_clipboard_payload_ciphertext(&record.id).await? else {
+            return Err(LocalStoreError::EncryptedCache(
+                "missing clipboard payload".into(),
+            ));
+        };
+        verify_payload_ciphertext(payload, &ciphertext)?;
+        let plaintext = decrypt_clipboard_payload(
+            &payload.nonce,
+            &ciphertext,
+            encryption_key,
+            &encrypted.envelope.body,
+            payload.id,
+        )
+        .map_err(|error| LocalStoreError::EncryptedCache(error.to_string()))?;
+        Ok(plaintext)
+    }
+
+    async fn write_memory_record(&self, record: LocalObjectRecord) -> Result<(), LocalStoreError> {
+        let mut memory = self.memory.lock().await;
         memory.records.insert(record.id.clone(), record);
         Ok(())
     }
@@ -686,7 +767,6 @@ impl LocalStore {
     async fn remove_memory_record(&self, object_id: &str) {
         let mut memory = self.memory.lock().await;
         memory.records.remove(object_id);
-        memory.clipboard_payloads.remove(object_id);
     }
 
     async fn all_memory_records(&self) -> Vec<LocalObjectRecord> {
@@ -782,7 +862,31 @@ impl LocalStore {
     ) -> Result<(), LocalStoreError> {
         ensure_private_dir(&self.object_dir()).await?;
         let bytes = serde_json::to_vec_pretty(record)?;
-        write_private_file_atomic(&self.object_record_path(&record.id), &bytes).await
+        write_private_file_atomic(&self.object_record_path(record.id()), &bytes).await
+    }
+
+    async fn write_stored_clipboard_payload(
+        &self,
+        object_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<(), LocalStoreError> {
+        ensure_private_dir(&self.clipboard_dir()).await?;
+        write_private_file_atomic(
+            &self.clipboard_payload_ciphertext_path(object_id),
+            ciphertext,
+        )
+        .await
+    }
+
+    async fn stored_clipboard_payload_ciphertext(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, LocalStoreError> {
+        match tokio::fs::read(self.clipboard_payload_ciphertext_path(object_id)).await {
+            Ok(ciphertext) => Ok(Some(ciphertext)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     async fn all_stored_object_records(&self) -> Result<Vec<StoredObjectRecord>, LocalStoreError> {
@@ -820,6 +924,7 @@ impl LocalStore {
         object_id: &str,
     ) -> Result<(), LocalStoreError> {
         if kind == ObjectKind::Clipboard {
+            _ = tokio::fs::remove_file(self.clipboard_payload_ciphertext_path(object_id)).await;
             _ = tokio::fs::remove_file(self.clipboard_dir().join(format!("{object_id}.payload")))
                 .await;
             _ = tokio::fs::remove_file(self.clipboard_dir().join(format!("{object_id}.txt"))).await;
@@ -831,14 +936,14 @@ impl LocalStore {
         &self,
         record: &StoredObjectRecord,
     ) -> Result<(), LocalStoreError> {
-        self.remove_payloads_for_object(record.kind, &record.id)
+        self.remove_payloads_for_object(record.kind(), record.id())
             .await?;
-        match tokio::fs::remove_file(self.object_record_path(&record.id)).await {
+        match tokio::fs::remove_file(self.object_record_path(record.id())).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
-        self.remove_memory_record(&record.id).await;
+        self.remove_memory_record(record.id()).await;
         Ok(())
     }
 
@@ -856,6 +961,11 @@ impl LocalStore {
 
     fn object_record_path(&self, object_id: &str) -> PathBuf {
         self.object_dir().join(format!("{object_id}.json"))
+    }
+
+    fn clipboard_payload_ciphertext_path(&self, object_id: &str) -> PathBuf {
+        self.clipboard_dir()
+            .join(format!("{object_id}.payload.ciphertext"))
     }
 
     fn device_identity_path(&self) -> PathBuf {
@@ -932,17 +1042,42 @@ impl LocalStore {
         let storage = browser_storage()?;
         let json = serde_json::to_string(record)?;
         storage
-            .set_item(&self.object_record_key(&record.id), &json)
+            .set_item(&self.object_record_key(record.id()), &json)
             .map_err(storage_error)?;
         let mut index = self.read_object_index(&storage)?;
-        index.retain(|id| id != &record.id);
-        index.push(record.id.clone());
+        index.retain(|id| id != record.id());
+        index.push(record.id().to_string());
         index.truncate(OBJECT_INDEX_LIMIT);
         let index_json = serde_json::to_string(&index)?;
         storage
             .set_item(&self.object_index_key(), &index_json)
             .map_err(storage_error)?;
         Ok(())
+    }
+
+    async fn write_stored_clipboard_payload(
+        &self,
+        object_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<(), LocalStoreError> {
+        let storage = browser_storage()?;
+        let json = serde_json::to_string(ciphertext)?;
+        storage
+            .set_item(&self.clipboard_payload_ciphertext_key(object_id), &json)
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    async fn stored_clipboard_payload_ciphertext(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, LocalStoreError> {
+        let storage = browser_storage()?;
+        let json = storage
+            .get_item(&self.clipboard_payload_ciphertext_key(object_id))
+            .map_err(storage_error)?;
+        json.map(|json| serde_json::from_str(&json).map_err(Into::into))
+            .transpose()
     }
 
     async fn all_stored_object_records(&self) -> Result<Vec<StoredObjectRecord>, LocalStoreError> {
@@ -968,6 +1103,9 @@ impl LocalStore {
         if kind == ObjectKind::Clipboard {
             let storage = browser_storage()?;
             storage
+                .remove_item(&self.clipboard_payload_ciphertext_key(object_id))
+                .map_err(storage_error)?;
+            storage
                 .remove_item(&self.legacy_clipboard_payload_key(object_id))
                 .map_err(storage_error)?;
         }
@@ -979,18 +1117,18 @@ impl LocalStore {
         record: &StoredObjectRecord,
     ) -> Result<(), LocalStoreError> {
         let storage = browser_storage()?;
-        self.remove_payloads_for_object(record.kind, &record.id)
+        self.remove_payloads_for_object(record.kind(), record.id())
             .await?;
         storage
-            .remove_item(&self.object_record_key(&record.id))
+            .remove_item(&self.object_record_key(record.id()))
             .map_err(storage_error)?;
         let mut index = self.read_object_index(&storage)?;
-        index.retain(|id| id != &record.id);
+        index.retain(|id| id != record.id());
         let index_json = serde_json::to_string(&index)?;
         storage
             .set_item(&self.object_index_key(), &index_json)
             .map_err(storage_error)?;
-        self.remove_memory_record(&record.id).await;
+        self.remove_memory_record(record.id()).await;
         Ok(())
     }
 
@@ -1033,6 +1171,13 @@ impl LocalStore {
         format!("{}.clipboard_payload.{item_id}", self.storage_prefix())
     }
 
+    fn clipboard_payload_ciphertext_key(&self, item_id: &str) -> String {
+        format!(
+            "{}.clipboard_payload_ciphertext.{item_id}",
+            self.storage_prefix()
+        )
+    }
+
     fn object_index_key(&self) -> String {
         format!("{}.objects.index", self.storage_prefix())
     }
@@ -1056,76 +1201,11 @@ struct DeviceIdentityRecord {
     signing_secret_key: Vec<u8>,
 }
 
-fn decrypt_stored_object_record(
-    record: &StoredObjectRecord,
-    encryption_key: &[u8; 32],
-) -> Result<Option<(LocalObjectRecord, Option<Vec<u8>>)>, LocalStoreError> {
-    if record.sync_state != LocalSyncState::Present {
-        return Ok(None);
-    }
-    let Some(encrypted) = record.encrypted.as_ref() else {
-        return Ok(None);
-    };
-
-    match record.kind {
-        ObjectKind::Clipboard => {
-            decrypt_clipboard_record(record, encrypted, encryption_key).map(Some)
-        }
-        ObjectKind::File => decrypt_file_record(record, encrypted, encryption_key).map(Some),
-    }
-}
-
-fn decrypt_clipboard_record(
-    record: &StoredObjectRecord,
-    encrypted: &EncryptedObject,
-    encryption_key: &[u8; 32],
-) -> Result<(LocalObjectRecord, Option<Vec<u8>>), LocalStoreError> {
-    let payload = single_payload(encrypted)?;
-    let ciphertext = record
-        .clipboard_payload_ciphertext
-        .as_deref()
-        .ok_or_else(|| LocalStoreError::EncryptedCache("missing clipboard payload".into()))?;
-    verify_payload_ciphertext(payload, ciphertext)?;
-    let meta = decrypt_clipboard_meta(
-        &encrypted.meta_nonce,
-        &encrypted.meta_ciphertext,
-        encryption_key,
-        &encrypted.envelope.body,
-    )
-    .map_err(|error| LocalStoreError::EncryptedCache(error.to_string()))?;
-    let plaintext = decrypt_clipboard_payload(
-        &payload.nonce,
-        ciphertext,
-        encryption_key,
-        &encrypted.envelope.body,
-        payload.id,
-    )
-    .map_err(|error| LocalStoreError::EncryptedCache(error.to_string()))?;
-    let payload_size = meta.size.unwrap_or(plaintext.len() as i64);
-    let local_record = LocalObjectRecord {
-        id: record.id.clone(),
-        kind: ObjectKind::Clipboard,
-        sync_state: LocalSyncState::Present,
-        seen_generation: record.seen_generation,
-        event_seq: record.event_seq,
-        created_seq: record.created_seq,
-        created_at: Some(encrypted.created_at.clone()),
-        source_device_id: Some(encrypted.source_device_id.clone()),
-        clipboard: Some(LocalClipboardRecord {
-            text: clipboard_display_text(&meta.mime_type, &plaintext),
-            mime_type: meta.mime_type,
-            payload_size,
-        }),
-        file: None,
-    };
-    Ok((local_record, Some(plaintext)))
-}
-
 fn decrypt_file_record(
-    record: &StoredObjectRecord,
-    encrypted: &EncryptedObject,
+    record: &StoredPresentObjectRecord,
     encryption_key: &[u8; 32],
-) -> Result<(LocalObjectRecord, Option<Vec<u8>>), LocalStoreError> {
+) -> Result<LocalObjectRecord, LocalStoreError> {
+    let encrypted = &record.encrypted;
     let meta = decrypt_file_meta_bytes(
         &encrypted.meta_nonce,
         &encrypted.meta_ciphertext,
@@ -1142,21 +1222,18 @@ fn decrypt_file_record(
     });
     let local_record = LocalObjectRecord {
         id: record.id.clone(),
-        kind: ObjectKind::File,
-        sync_state: LocalSyncState::Present,
         seen_generation: record.seen_generation,
         event_seq: record.event_seq,
         created_seq: record.created_seq,
-        created_at: Some(encrypted.created_at.clone()),
-        source_device_id: Some(encrypted.source_device_id.clone()),
-        clipboard: None,
-        file: Some(LocalFileRecord {
+        created_at: encrypted.created_at.clone(),
+        source_device_id: encrypted.source_device_id.clone(),
+        data: LocalObjectData::File(LocalFileRecord {
             filename: meta.filename,
             mime_type: meta.mime_type,
             blob_size,
         }),
     };
-    Ok((local_record, None))
+    Ok(local_record)
 }
 
 fn sort_records_desc(records: &mut [LocalObjectRecord]) {
@@ -1168,33 +1245,43 @@ fn sort_records_desc(records: &mut [LocalObjectRecord]) {
 }
 
 fn clipboard_item_from_record(record: &LocalObjectRecord) -> Option<DecryptedClipboardItem> {
-    if record.kind != ObjectKind::Clipboard || record.sync_state != LocalSyncState::Present {
+    let LocalObjectData::Clipboard(clipboard) = &record.data else {
         return None;
-    }
-    let clipboard = record.clipboard.as_ref()?;
+    };
     Some(DecryptedClipboardItem {
         id: record.id.clone(),
         text: clipboard.text.clone(),
         mime_type: clipboard.mime_type.clone(),
         payload_size: clipboard.payload_size,
-        created_at: record.created_at.clone()?,
-        source_device_id: record.source_device_id.clone()?,
+        created_at: record.created_at.clone(),
+        source_device_id: record.source_device_id.clone(),
     })
 }
 
 fn file_item_from_record(record: &LocalObjectRecord) -> Option<DecryptedFileItem> {
-    if record.kind != ObjectKind::File || record.sync_state != LocalSyncState::Present {
+    let LocalObjectData::File(file) = &record.data else {
         return None;
-    }
-    let file = record.file.as_ref()?;
+    };
     Some(DecryptedFileItem {
         id: record.id.clone(),
         filename: file.filename.clone(),
         mime_type: file.mime_type.clone(),
         blob_size: file.blob_size,
-        created_at: record.created_at.clone()?,
-        source_device_id: record.source_device_id.clone()?,
+        created_at: record.created_at.clone(),
+        source_device_id: record.source_device_id.clone(),
     })
+}
+
+fn local_clipboard_record_from_payload(
+    mime_type: &str,
+    data: &[u8],
+    payload_size: i64,
+) -> LocalClipboardRecord {
+    LocalClipboardRecord {
+        text: clipboard_display_text(mime_type, data),
+        mime_type: mime_type.to_string(),
+        payload_size,
+    }
 }
 
 fn single_payload(
@@ -1227,10 +1314,27 @@ fn verify_payload_ciphertext(
 
 fn clipboard_display_text(mime_type: &str, data: &[u8]) -> String {
     if is_text_mime_type(mime_type) {
-        String::from_utf8_lossy(data).to_string()
+        bounded_text_preview(&String::from_utf8_lossy(data))
     } else {
         format!("{mime_type} clipboard payload ({} bytes)", data.len())
     }
+}
+
+fn bounded_text_preview(text: &str) -> String {
+    let mut chars = text.chars();
+    let preview = chars
+        .by_ref()
+        .take(CLIPBOARD_TEXT_PREVIEW_MAX_CHARS)
+        .collect::<String>();
+    if chars.next().is_none() {
+        return preview;
+    }
+
+    let marker = "...";
+    let keep = CLIPBOARD_TEXT_PREVIEW_MAX_CHARS.saturating_sub(marker.len());
+    let mut preview = text.chars().take(keep).collect::<String>();
+    preview.push_str(marker);
+    preview
 }
 
 fn is_text_mime_type(mime_type: &str) -> bool {
@@ -1490,11 +1594,12 @@ mod tests {
         assert_eq!(visible.clipboard_items[0].text, "newer");
         assert_eq!(visible.clipboard_items[1].text, "older");
 
-        let text = store
-            .clipboard_text("22222222-2222-4222-8222-222222222222")
+        let payload = store
+            .clipboard_payload("22222222-2222-4222-8222-222222222222", &TEST_KEY)
             .await
-            .expect("text");
-        assert_eq!(text.as_deref(), Some("newer"));
+            .expect("payload")
+            .expect("payload bytes");
+        assert_eq!(payload, b"newer");
 
         let restored_store = LocalStore::new(tmp.path());
         restored_store.set_profile("profile-a".into());
@@ -1506,11 +1611,57 @@ mod tests {
         assert_eq!(restored.clipboard_items[0].text, "newer");
 
         let payload = restored_store
-            .clipboard_payload("22222222-2222-4222-8222-222222222222")
+            .clipboard_payload("22222222-2222-4222-8222-222222222222", &TEST_KEY)
             .await
             .expect("payload")
             .expect("payload bytes");
         assert_eq!(payload, b"newer");
+    }
+
+    #[tokio::test]
+    async fn derives_bounded_preview_without_trusting_caller_text() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+
+        let full_text = "x".repeat(CLIPBOARD_TEXT_PREVIEW_MAX_CHARS + 100);
+        let item = DecryptedClipboardItem {
+            id: "77777777-7777-4777-8777-777777777777".into(),
+            text: "caller supplied preview".into(),
+            mime_type: "text/plain".into(),
+            payload_size: full_text.len() as i64,
+            created_at: "2026-01-06T00:00:00+00:00".into(),
+            source_device_id: TEST_DEVICE_ID.into(),
+        };
+        let expected_preview = format!("{}...", "x".repeat(CLIPBOARD_TEXT_PREVIEW_MAX_CHARS - 3));
+
+        let visible = store
+            .persist_local_clipboard_present_encrypted(
+                &item,
+                full_text.as_bytes(),
+                &encrypted_clipboard(&item, full_text.as_bytes()),
+                6,
+                6,
+                10,
+            )
+            .await
+            .expect("persist");
+        assert_eq!(visible.clipboard_items[0].text, expected_preview);
+
+        let restored_store = LocalStore::new(tmp.path());
+        restored_store.set_profile("profile-a".into());
+        let restored = restored_store
+            .hydrate_ciphertext_cache(&TEST_KEY, 10)
+            .await
+            .expect("hydrate");
+        assert_eq!(restored.clipboard_items[0].text, expected_preview);
+
+        let payload = restored_store
+            .clipboard_payload("77777777-7777-4777-8777-777777777777", &TEST_KEY)
+            .await
+            .expect("payload")
+            .expect("payload bytes");
+        assert_eq!(payload, full_text.as_bytes());
     }
 
     #[tokio::test]
@@ -1547,7 +1698,7 @@ mod tests {
         );
 
         let payload = store
-            .clipboard_payload("33333333-3333-4333-8333-333333333333")
+            .clipboard_payload("33333333-3333-4333-8333-333333333333", &TEST_KEY)
             .await
             .expect("payload")
             .expect("payload bytes");
@@ -1589,6 +1740,15 @@ mod tests {
             & 0o777;
         assert_eq!(object_dir_mode, 0o700, "object dir should be 0700");
 
+        let clipboard_dir = store.clipboard_dir();
+        let clipboard_dir_mode = tokio::fs::metadata(&clipboard_dir)
+            .await
+            .expect("clipboard dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(clipboard_dir_mode, 0o700, "clipboard dir should be 0700");
+
         let record_path = object_dir.join("44444444-4444-4444-8444-444444444444.json");
         let record_metadata = tokio::fs::metadata(&record_path)
             .await
@@ -1602,6 +1762,26 @@ mod tests {
         let record_text = String::from_utf8_lossy(&record_bytes);
         assert!(!record_text.contains("super-secret"));
         assert!(!record_text.contains("\"text\""));
+        assert!(!record_text.contains("payload_ciphertext"));
+
+        let payload_path =
+            store.clipboard_payload_ciphertext_path("44444444-4444-4444-8444-444444444444");
+        let payload_metadata = tokio::fs::metadata(&payload_path)
+            .await
+            .expect("payload metadata");
+        assert_eq!(
+            payload_metadata.permissions().mode() & 0o777,
+            0o600,
+            "payload ciphertext file should be 0600"
+        );
+        let payload_bytes = tokio::fs::read(&payload_path)
+            .await
+            .expect("payload ciphertext");
+        assert!(
+            !payload_bytes
+                .windows(secret.text.len())
+                .any(|window| window == secret.text.as_bytes())
+        );
     }
 
     #[tokio::test]
@@ -1659,7 +1839,7 @@ mod tests {
         assert!(result.is_none());
 
         let payload = store
-            .clipboard_payload("55555555-5555-4555-8555-555555555555")
+            .clipboard_payload("55555555-5555-4555-8555-555555555555", &TEST_KEY)
             .await
             .expect("payload lookup");
         assert!(payload.is_none());

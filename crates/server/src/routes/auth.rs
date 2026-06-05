@@ -482,7 +482,7 @@ pub async fn logout(
 
     info!(device_id = %auth.device_id, "Logout");
 
-    Ok(Json(OkResponse { ok: true }))
+    Ok(Json(OkResponse {}))
 }
 
 fn access_key_hash(

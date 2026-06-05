@@ -18,11 +18,20 @@ export type FileItem = {
   source_device_id: string;
 };
 
+export type AuthenticatedSession = {
+  username: string;
+  device_id: string;
+  device_name: string;
+};
+
+export type SavedProfile = {
+  username: string;
+  device_name: string;
+};
+
 export type AppState = {
-  logged_in: boolean;
-  username?: string | null;
-  device_id?: string | null;
-  device_name?: string | null;
+  session?: AuthenticatedSession | null;
+  saved_profile?: SavedProfile | null;
   connection_status: ConnectionStatus;
   clipboard_items: ClipboardItem[];
   files: FileItem[];

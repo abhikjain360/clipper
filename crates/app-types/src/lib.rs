@@ -54,15 +54,41 @@ pub enum ConnectionStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AppState {
-    pub logged_in: bool,
     #[serde(default)]
-    pub username: Option<String>,
-    pub device_id: Option<String>,
-    pub device_name: Option<String>,
+    pub session: Option<AuthenticatedSession>,
+    #[serde(default)]
+    pub saved_profile: Option<SavedProfile>,
     pub connection_status: ConnectionStatus,
     pub clipboard_items: Vec<DecryptedClipboardItem>,
     pub files: Vec<DecryptedFileItem>,
     pub error: Option<String>,
+}
+
+impl AppState {
+    pub fn is_logged_in(&self) -> bool {
+        self.session.is_some()
+    }
+
+    pub fn device_id(&self) -> Option<&str> {
+        self.session
+            .as_ref()
+            .map(|session| session.device_id.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AuthenticatedSession {
+    pub username: String,
+    pub device_id: String,
+    pub device_name: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SavedProfile {
+    pub username: String,
+    pub device_name: String,
 }
 
 /// A decrypted clipboard payload fetched on demand.
