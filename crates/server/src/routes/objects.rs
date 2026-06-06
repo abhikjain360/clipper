@@ -1381,7 +1381,7 @@ pub async fn delete_object(
     })?;
 
     remove_paths(paths).await;
-    _ = state.ws_tx().send(WsBroadcast {
+    state.broadcast_ws_event(WsBroadcast {
         user_id: auth.user_id,
         source_device_id: auth.device_id,
         seq: inserted.seq,
@@ -1915,7 +1915,7 @@ fn broadcast_created(
     object_id: &str,
     now: &str,
 ) {
-    _ = state.ws_tx().send(WsBroadcast {
+    state.broadcast_ws_event(WsBroadcast {
         user_id,
         source_device_id,
         seq,
@@ -2342,7 +2342,7 @@ mod tests {
         let object_id = Uuid::now_v7().to_string();
         let payload_id = Uuid::now_v7().to_string();
         let ciphertext = b"encrypted clipboard payload";
-        let mut rx = state.ws_tx().subscribe();
+        let mut rx = state.subscribe_ws_broadcasts(user_id);
 
         let Postcard(resp) = init_object(
             State(state.clone()),
@@ -2641,7 +2641,7 @@ mod tests {
         .expect("idempotent init after upload");
         assert!(init_upload_urls(idempotent_uploaded_init).is_empty());
 
-        let mut rx = state.ws_tx().subscribe();
+        let mut rx = state.subscribe_ws_broadcasts(user_id);
         let Postcard(complete_resp) = complete_object(
             State(state.clone()),
             Extension(auth(user_id, device_id)),
@@ -2854,7 +2854,7 @@ mod tests {
         .await
         .expect("init");
 
-        let mut rx = state.ws_tx().subscribe();
+        let mut rx = state.subscribe_ws_broadcasts(user_id);
         let Postcard(delete_resp) = delete_object(
             State(state.clone()),
             Extension(auth(user_id, device_id)),

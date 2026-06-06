@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use clipper_core::crypto;
 use sea_orm::{Database, DatabaseConnection, EntityTrait, QueryOrder, QuerySelect};
 use sea_orm_migration::MigratorTrait;
-use tokio::sync::broadcast;
+use tokio::sync::broadcast::{self, Receiver};
 use uuid::Uuid;
 
 use crate::{
@@ -23,6 +23,7 @@ use crate::{
 
 const WS_TICKET_BYTES: usize = 32;
 const WS_TICKET_TTL_SECS: i64 = 60;
+const WS_BROADCAST_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -34,7 +35,7 @@ pub struct AppStateInner {
     pub data_dir: PathBuf,
     pub config: ServerConfig,
     pub secrets: Arc<ServerSecrets>,
-    pub ws_tx: broadcast::Sender<WsBroadcast>,
+    ws_channels: std::sync::Mutex<HashMap<Uuid, broadcast::Sender<WsBroadcast>>>,
     auth_challenges: std::sync::Mutex<HashMap<String, AuthChallenge>>,
     pending_registrations: std::sync::Mutex<HashMap<String, PendingRegistration>>,
     ws_tickets: std::sync::Mutex<HashMap<Vec<u8>, WsTicket>>,
@@ -132,7 +133,6 @@ impl AppState {
     }
 
     fn new(db: DatabaseConnection, config: ServerConfig, secrets: ServerSecrets) -> Self {
-        let (ws_tx, _) = broadcast::channel(256);
         let data_dir = config.server.data_dir.clone();
         Self {
             inner: Arc::new(AppStateInner {
@@ -140,7 +140,7 @@ impl AppState {
                 data_dir,
                 config,
                 secrets: Arc::new(secrets),
-                ws_tx,
+                ws_channels: std::sync::Mutex::new(HashMap::new()),
                 auth_challenges: std::sync::Mutex::new(HashMap::new()),
                 pending_registrations: std::sync::Mutex::new(HashMap::new()),
                 ws_tickets: std::sync::Mutex::new(HashMap::new()),
@@ -191,8 +191,41 @@ impl AppState {
         self.inner.data_dir.join("objects")
     }
 
-    pub fn ws_tx(&self) -> &broadcast::Sender<WsBroadcast> {
-        &self.inner.ws_tx
+    pub fn subscribe_ws_broadcasts(&self, user_id: Uuid) -> Receiver<WsBroadcast> {
+        let mut channels = self.inner.ws_channels.lock().expect("lock poisoned");
+        channels
+            .entry(user_id)
+            .or_insert_with(|| {
+                let (tx, _) = broadcast::channel(WS_BROADCAST_CAPACITY);
+                tx
+            })
+            .subscribe()
+    }
+
+    pub fn broadcast_ws_event(&self, event: WsBroadcast) {
+        let sender = {
+            let channels = self.inner.ws_channels.lock().expect("lock poisoned");
+            channels.get(&event.user_id).cloned()
+        };
+
+        if let Some(sender) = sender {
+            _ = sender.send(event);
+        }
+    }
+
+    pub fn prune_idle_ws_broadcast_channel(&self, user_id: Uuid) {
+        let mut channels = self.inner.ws_channels.lock().expect("lock poisoned");
+        if channels
+            .get(&user_id)
+            .is_some_and(|sender| sender.receiver_count() == 0)
+        {
+            channels.remove(&user_id);
+        }
+    }
+
+    #[cfg(test)]
+    fn ws_broadcast_channel_count(&self) -> usize {
+        self.inner.ws_channels.lock().expect("lock poisoned").len()
     }
 
     pub fn create_auth_challenge(
@@ -322,9 +355,23 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use clipper_core::models::{ObjectEventType, ObjectKind};
     use sea_orm::Database;
+    use tokio::sync::broadcast::error::TryRecvError;
 
     use super::*;
+
+    fn ws_broadcast(user_id: Uuid) -> WsBroadcast {
+        WsBroadcast {
+            user_id,
+            source_device_id: Uuid::now_v7(),
+            seq: 1,
+            event_type: ObjectEventType::Created,
+            object_kind: ObjectKind::File,
+            object_id: Uuid::now_v7().into(),
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
 
     async fn test_state() -> AppState {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -356,6 +403,64 @@ mod tests {
             assert!(next > prev, "seq must strictly increase: {next} !> {prev}");
             prev = next;
         }
+    }
+
+    #[tokio::test]
+    async fn ws_broadcasts_are_partitioned_by_user() {
+        let state = test_state().await;
+        let user_id = Uuid::now_v7();
+        let other_user_id = Uuid::now_v7();
+        let mut user_rx = state.subscribe_ws_broadcasts(user_id);
+        let mut other_user_rx = state.subscribe_ws_broadcasts(other_user_id);
+
+        state.broadcast_ws_event(ws_broadcast(user_id));
+
+        let event = user_rx.try_recv().expect("user broadcast");
+        assert_eq!(event.user_id, user_id);
+        assert!(matches!(other_user_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn one_users_burst_does_not_lag_another_users_receiver() {
+        let state = test_state().await;
+        let user_id = Uuid::now_v7();
+        let other_user_id = Uuid::now_v7();
+        let mut user_rx = state.subscribe_ws_broadcasts(user_id);
+        let mut other_user_rx = state.subscribe_ws_broadcasts(other_user_id);
+
+        for _ in 0..=WS_BROADCAST_CAPACITY {
+            state.broadcast_ws_event(ws_broadcast(user_id));
+        }
+        state.broadcast_ws_event(ws_broadcast(other_user_id));
+
+        assert!(matches!(user_rx.try_recv(), Err(TryRecvError::Lagged(_))));
+        let event = other_user_rx.try_recv().expect("other user broadcast");
+        assert_eq!(event.user_id, other_user_id);
+        assert!(matches!(other_user_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn idle_ws_broadcast_channels_are_pruned_after_last_receiver_drops() {
+        let state = test_state().await;
+        let user_id = Uuid::now_v7();
+        let other_user_id = Uuid::now_v7();
+        let user_rx = state.subscribe_ws_broadcasts(user_id);
+        let _other_user_rx = state.subscribe_ws_broadcasts(other_user_id);
+
+        assert_eq!(state.ws_broadcast_channel_count(), 2);
+        state.prune_idle_ws_broadcast_channel(user_id);
+        assert_eq!(state.ws_broadcast_channel_count(), 2);
+
+        drop(user_rx);
+        state.prune_idle_ws_broadcast_channel(user_id);
+        assert_eq!(state.ws_broadcast_channel_count(), 1);
+
+        let mut new_user_rx = state.subscribe_ws_broadcasts(user_id);
+        state.broadcast_ws_event(ws_broadcast(user_id));
+
+        let event = new_user_rx.try_recv().expect("user broadcast");
+        assert_eq!(event.user_id, user_id);
+        assert_eq!(state.ws_broadcast_channel_count(), 2);
     }
 
     #[tokio::test]

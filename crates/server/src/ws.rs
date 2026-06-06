@@ -103,7 +103,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
 
     // Subscribe before reading the high-water seq. HTTP snapshots own state
     // through stream_start_seq; this live stream owns events after it.
-    let mut rx = state.ws_tx().subscribe();
+    let mut rx = state.subscribe_ws_broadcasts(auth.user_id);
 
     let stream_start_seq = get_latest_seq(&state, auth.user_id).await.unwrap_or(0);
     let ack = WsServerMessage::HelloAck {
@@ -115,6 +115,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
         .await
         .is_err()
     {
+        drop(rx);
+        state.prune_idle_ws_broadcast_channel(auth.user_id);
         return;
     }
 
@@ -135,7 +137,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
                         if evt.seq <= stream_start_seq {
                             continue;
                         }
-                        if !should_forward_live_broadcast(&evt, auth.user_id, auth.device_id) {
+                        if !should_forward_live_broadcast(&evt, auth.device_id) {
                             continue;
                         }
                         let msg = WsServerMessage::Event {
@@ -188,6 +190,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
         }
     }
 
+    drop(rx);
+    state.prune_idle_ws_broadcast_channel(auth.user_id);
     info!(device_id = %device_id, "WebSocket disconnected");
 }
 
@@ -217,8 +221,8 @@ async fn get_latest_seq(state: &AppState, user_id: Uuid) -> Result<i64, sea_orm:
     Ok(row.unwrap_or(0))
 }
 
-fn should_forward_live_broadcast(evt: &WsBroadcast, user_id: Uuid, device_id: Uuid) -> bool {
-    evt.user_id == user_id && evt.source_device_id != device_id
+fn should_forward_live_broadcast(evt: &WsBroadcast, device_id: Uuid) -> bool {
+    evt.source_device_id != device_id
 }
 
 #[cfg(test)]
@@ -244,7 +248,6 @@ mod tests {
 
         assert!(!should_forward_live_broadcast(
             &broadcast(user_id, device_id),
-            user_id,
             device_id,
         ));
     }
@@ -257,21 +260,6 @@ mod tests {
 
         assert!(should_forward_live_broadcast(
             &broadcast(user_id, other_device_id),
-            user_id,
-            device_id,
-        ));
-    }
-
-    #[test]
-    fn live_broadcast_filter_skips_other_users() {
-        let user_id = Uuid::now_v7();
-        let other_user_id = Uuid::now_v7();
-        let device_id = Uuid::now_v7();
-        let other_device_id = Uuid::now_v7();
-
-        assert!(!should_forward_live_broadcast(
-            &broadcast(other_user_id, other_device_id),
-            user_id,
             device_id,
         ));
     }
