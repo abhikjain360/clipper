@@ -555,6 +555,7 @@ pub enum ApiErrorCode {
     Database,
     ServerSecret,
     Storage,
+    StorageQuotaExceeded,
     PayloadRead,
     PayloadWrite,
     Stream,
@@ -596,6 +597,7 @@ impl ApiErrorCode {
             Self::Database => "Database error",
             Self::ServerSecret => "Server secret error",
             Self::Storage => "Storage error",
+            Self::StorageQuotaExceeded => "Storage quota exceeded",
             Self::PayloadRead => "Payload read error",
             Self::PayloadWrite => "Payload write error",
             Self::Stream => "Stream error",
@@ -637,6 +639,7 @@ impl ApiErrorCode {
             429 => Self::RateLimited,
             500 => Self::Unknown,
             503 => Self::ServerNotInitialized,
+            507 => Self::StorageQuotaExceeded,
             _ => Self::Unknown,
         }
     }
@@ -662,6 +665,7 @@ impl ApiErrorCode {
             Self::PayloadTooLarge => 413,
             Self::UnsupportedMediaType => 415,
             Self::ServerNotInitialized => 503,
+            Self::StorageQuotaExceeded => 507,
             Self::ObjectPayloadNotFound => 404,
             Self::ObjectDeleteUnsupported
             | Self::DuplicateObjectPayloadId

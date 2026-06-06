@@ -32,6 +32,7 @@ use crate::{
     entity::{devices, event_log, object_payloads, objects},
     routes::{ApiError, Postcard, with_txn},
     state::AppState,
+    storage_quota::{self, UserStorageUsage},
     ws::WsBroadcast,
 };
 
@@ -172,6 +173,7 @@ pub async fn init_object(
         })
         .collect();
     let payload_count = req.payloads.len();
+    let object_storage_bytes = init_request_storage_bytes(&req)?;
     let payload_models: Vec<_> = req
         .payloads
         .iter()
@@ -249,6 +251,7 @@ pub async fn init_object(
                 "Database error",
             ));
         }
+        reserve_user_storage_quota(txn, state_ref, user_id, object_storage_bytes).await?;
 
         // Allocated here, after the object/payload inserts above have taken the
         // write lock, so seq order matches commit order.
@@ -1308,10 +1311,11 @@ pub async fn delete_object(
         ));
     }
 
-    let payload_paths: Vec<String> = object_payloads::Entity::find()
+    let payload_rows: Vec<(String, i64)> = object_payloads::Entity::find()
         .filter(object_payloads::Column::ObjectId.eq(object_uuid))
         .select_only()
         .column(object_payloads::Column::CiphertextPath)
+        .column(object_payloads::Column::CiphertextSize)
         .into_tuple()
         .all(state.db())
         .await
@@ -1323,9 +1327,24 @@ pub async fn delete_object(
             );
             ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
-    let paths: Vec<_> = payload_paths
+    let storage_bytes = payload_rows
         .iter()
-        .map(|payload_path| state.objects_dir().join(payload_path))
+        .try_fold(0_i64, |total, (_, size)| {
+            if *size < 0 {
+                return None;
+            }
+            total.checked_add(*size)
+        })
+        .ok_or_else(|| {
+            error!(
+                object_id = %object_uuid,
+                "Object payload sizes overflowed while deleting object",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+    let paths: Vec<_> = payload_rows
+        .iter()
+        .map(|(payload_path, _)| state.objects_dir().join(payload_path))
         .collect();
 
     let txn = state.db().begin().await.map_err(|e| {
@@ -1333,7 +1352,7 @@ pub async fn delete_object(
         ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
-    objects::Entity::delete_by_id(object_uuid)
+    let deleted = objects::Entity::delete_by_id(object_uuid)
         .exec(&txn)
         .await
         .map_err(|e| {
@@ -1344,6 +1363,36 @@ pub async fn delete_object(
             );
             ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
+    if deleted.rows_affected != 1 {
+        _ = txn.rollback().await;
+        warn!(
+            object_id = %object_uuid,
+            rows_affected = deleted.rows_affected,
+            "File delete affected an unexpected object row count",
+        );
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::Database,
+            "Database error",
+        ));
+    }
+    storage_quota::release_user_storage(
+        &txn,
+        UserStorageUsage {
+            user_id: auth.user_id,
+            object_count: 1,
+            storage_bytes,
+        },
+    )
+    .await
+    .map_err(|e| {
+        error!(
+            object_id = %object_uuid,
+            user_id = %auth.user_id,
+            error = %e,
+            "Failed to release user storage quota for deleted object",
+        );
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+    })?;
 
     let now = Utc::now().to_rfc3339();
     let event = event_log::ActiveModel {
@@ -1581,6 +1630,84 @@ async fn object_for_upload(
     }
 
     Ok(object)
+}
+
+fn init_request_storage_bytes(req: &ObjectInitRequest) -> Result<i64, ApiError> {
+    req.payloads.iter().try_fold(0_i64, |total, payload| {
+        if payload.ciphertext_size < 0 {
+            return Err(ApiError::from_code_with_message(
+                ApiErrorCode::InvalidPayloadSize,
+                "Invalid payload size",
+            ));
+        }
+        total.checked_add(payload.ciphertext_size).ok_or_else(|| {
+            ApiError::from_code_with_message(
+                ApiErrorCode::PayloadTooLarge,
+                "Object payload sizes exceed maximum size",
+            )
+        })
+    })
+}
+
+async fn reserve_user_storage_quota<C>(
+    db: &C,
+    state: &AppState,
+    user_id: Uuid,
+    storage_bytes: i64,
+) -> Result<(), ApiError>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let max_storage_bytes =
+        i64::try_from(state.config().limits.max_user_storage_bytes).map_err(|_| {
+            error!(
+                user_id = %user_id,
+                max_user_storage_bytes = state.config().limits.max_user_storage_bytes,
+                "Configured user storage quota does not fit database counter type",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+    let max_objects = i64::try_from(state.config().limits.max_user_objects).map_err(|_| {
+        error!(
+            user_id = %user_id,
+            max_user_objects = state.config().limits.max_user_objects,
+            "Configured user object quota does not fit database counter type",
+        );
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+    })?;
+
+    let reserved = storage_quota::try_reserve_user_storage(
+        db,
+        user_id,
+        storage_bytes,
+        max_storage_bytes,
+        max_objects,
+    )
+    .await
+    .map_err(|e| {
+        error!(
+            user_id = %user_id,
+            storage_bytes,
+            error = %e,
+            "Failed to reserve user storage quota",
+        );
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+    })?;
+    if !reserved {
+        debug!(
+            user_id = %user_id,
+            storage_bytes,
+            max_storage_bytes,
+            max_objects,
+            "Rejected object init that would exceed user storage quota",
+        );
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::StorageQuotaExceeded,
+            "User storage quota exceeded",
+        ));
+    }
+
+    Ok(())
 }
 
 async fn idempotent_init_response(
@@ -2094,7 +2221,7 @@ mod tests {
             ObjectEnvelopeV1, ObjectPayloadComplete, ObjectPayloadInit,
         },
     };
-    use sea_orm::{ConnectionTrait, Database};
+    use sea_orm::{ConnectionTrait, Database, PaginatorTrait};
     use tempfile::TempDir;
 
     use super::*;
@@ -2120,12 +2247,44 @@ mod tests {
         (state, data_dir)
     }
 
+    async fn test_state_with_user_quotas(
+        max_user_storage_bytes: u64,
+        max_user_objects: u64,
+    ) -> (AppState, TempDir) {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::connect("sqlite::memory:").await.expect("db");
+        let mut config = crate::config::ServerConfig::default();
+        config.server.data_dir = data_dir.path().to_path_buf();
+        config.limits.max_user_storage_bytes = max_user_storage_bytes;
+        config.limits.max_user_objects = max_user_objects;
+        let state = AppState::open_with_db_and_config(
+            db,
+            config,
+            crate::secret::ServerSecrets::test_fixture(),
+        )
+        .await
+        .expect("state");
+        (state, data_dir)
+    }
+
     fn auth(user_id: Uuid, device_id: Uuid) -> AuthInfo {
         AuthInfo {
             session_id: Uuid::now_v7(),
             user_id,
             device_id,
         }
+    }
+
+    async fn user_storage_usage(state: &AppState, user_id: Uuid) -> (i64, i64) {
+        users::Entity::find_by_id(user_id)
+            .select_only()
+            .column(users::Column::StorageBytes)
+            .column(users::Column::ObjectCount)
+            .into_tuple()
+            .one(state.db())
+            .await
+            .expect("query user usage")
+            .expect("user row")
     }
 
     fn postcard<T>(value: T) -> Postcard<T>
@@ -2172,6 +2331,8 @@ mod tests {
             access_key_hash: Set(access_key_hash),
             created_at: Set(now.clone()),
             updated_at: Set(now),
+            storage_bytes: Set(0),
+            object_count: Set(0),
         }
         .insert(state.db())
         .await
@@ -2711,6 +2872,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_object_rechecks_payload_metadata_and_uploaded_file() {
+        let (state, data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
+        let object_id = Uuid::now_v7().to_string();
+        let payload_id = Uuid::now_v7().to_string();
+        let ciphertext = b"encrypted file payload";
+
+        init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                object_id.clone(),
+                payload_id.clone(),
+                ObjectKind::File,
+                ciphertext,
+                false,
+                device_id,
+                &signing_secret_key,
+            )),
+        )
+        .await
+        .expect("init");
+        upload_payload(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path((object_id.clone(), payload_id.clone())),
+            Body::from(ciphertext.to_vec()),
+        )
+        .await
+        .expect("upload");
+
+        let metadata_err = complete_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path(object_id.clone()),
+            postcard(ObjectCompleteRequest {
+                payloads: vec![ObjectPayloadComplete {
+                    id: payload_id.parse().expect("payload id"),
+                    ciphertext_size: ciphertext.len() as i64 + 1,
+                    sha256_ciphertext: sha256(ciphertext).to_vec(),
+                }],
+            }),
+        )
+        .await
+        .expect_err("mismatched completion metadata should fail");
+        assert_eq!(metadata_err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            metadata_err.body().code,
+            ApiErrorCode::ObjectPayloadMetadataMismatch
+        );
+
+        let payload_path = data_dir
+            .path()
+            .join("objects")
+            .join(object_payload_filename(&object_id, &payload_id));
+        let mut tampered = ciphertext.to_vec();
+        tampered[0] ^= 0xff;
+        tokio::fs::write(payload_path, tampered)
+            .await
+            .expect("tamper uploaded payload");
+
+        let integrity_err = complete_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path(object_id),
+            postcard(ObjectCompleteRequest {
+                payloads: vec![ObjectPayloadComplete {
+                    id: payload_id.parse().expect("payload id"),
+                    ciphertext_size: ciphertext.len() as i64,
+                    sha256_ciphertext: sha256(ciphertext).to_vec(),
+                }],
+            }),
+        )
+        .await
+        .expect_err("tampered uploaded file should fail completion");
+        assert_eq!(integrity_err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            integrity_err.body().code,
+            ApiErrorCode::ObjectPayloadIntegrityMismatch
+        );
+        assert_eq!(
+            user_storage_usage(&state, user_id).await,
+            (ciphertext.len() as i64, 1),
+            "failed completion leaves reserved quota unchanged",
+        );
+    }
+
+    #[tokio::test]
     async fn complete_object_does_not_allocate_seq_before_first_write() {
         let (initial_state, data_dir) = test_state().await;
         let user_id = insert_user(&initial_state).await;
@@ -2853,6 +3104,11 @@ mod tests {
         )
         .await
         .expect("init");
+        assert_eq!(
+            user_storage_usage(&state, user_id).await,
+            (ciphertext.len() as i64, 1),
+            "file init reserves user storage quota",
+        );
 
         let mut rx = state.subscribe_ws_broadcasts(user_id);
         let Postcard(delete_resp) = delete_object(
@@ -2889,6 +3145,11 @@ mod tests {
             .await
             .expect("object lookup");
         assert!(object.is_none());
+        assert_eq!(
+            user_storage_usage(&state, user_id).await,
+            (0, 0),
+            "file delete releases user storage quota",
+        );
         assert!(
             !data_dir
                 .path()
@@ -2924,15 +3185,32 @@ mod tests {
         .await
         .expect("init");
 
-        let result = upload_payload(
-            State(state),
+        let too_long = upload_payload(
+            State(state.clone()),
             Extension(auth(user_id, device_id)),
             Path((object_id.clone(), payload_id.clone())),
             Body::from(b"too long".to_vec()),
         )
         .await;
 
-        assert_eq!(result.unwrap_err().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(too_long.unwrap_err().status(), StatusCode::BAD_REQUEST);
+        assert!(
+            !data_dir
+                .path()
+                .join("objects")
+                .join(object_payload_filename(&object_id, &payload_id))
+                .exists()
+        );
+
+        let too_short = upload_payload(
+            State(state),
+            Extension(auth(user_id, device_id)),
+            Path((object_id.clone(), payload_id.clone())),
+            Body::from(b"x".to_vec()),
+        )
+        .await;
+
+        assert_eq!(too_short.unwrap_err().status(), StatusCode::BAD_REQUEST);
         assert!(
             !data_dir
                 .path()
@@ -2989,6 +3267,137 @@ mod tests {
                 .join(object_payload_filename(&object_id, &payload_id))
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn init_rejects_user_storage_quota_and_rolls_back_inline_file() {
+        let (state, data_dir) = test_state_with_user_quotas(8, 100).await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
+
+        let first_object_id = Uuid::now_v7().to_string();
+        let first_payload_id = Uuid::now_v7().to_string();
+        init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                first_object_id,
+                first_payload_id,
+                ObjectKind::File,
+                b"12345678",
+                true,
+                device_id,
+                &signing_secret_key,
+            )),
+        )
+        .await
+        .expect("first init fits quota");
+        assert_eq!(user_storage_usage(&state, user_id).await, (8, 1));
+
+        let second_object_id = Uuid::now_v7().to_string();
+        let second_payload_id = Uuid::now_v7().to_string();
+        let result = init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                second_object_id.clone(),
+                second_payload_id.clone(),
+                ObjectKind::File,
+                b"x",
+                true,
+                device_id,
+                &signing_secret_key,
+            )),
+        )
+        .await;
+
+        let err = result.expect_err("second init should exceed byte quota");
+        assert_eq!(err.status(), StatusCode::INSUFFICIENT_STORAGE);
+        assert_eq!(err.body().code, ApiErrorCode::StorageQuotaExceeded);
+        assert_eq!(
+            user_storage_usage(&state, user_id).await,
+            (8, 1),
+            "failed quota reservation rolls back user counters",
+        );
+
+        let second_object =
+            objects::Entity::find_by_id(second_object_id.parse::<Uuid>().expect("object id"))
+                .one(state.db())
+                .await
+                .expect("object lookup");
+        assert!(second_object.is_none(), "quota failure rolls back row");
+        assert!(
+            !data_dir
+                .path()
+                .join("objects")
+                .join(object_payload_filename(
+                    &second_object_id,
+                    &second_payload_id
+                ))
+                .exists(),
+            "quota failure rolls back staged inline payload file",
+        );
+    }
+
+    #[tokio::test]
+    async fn init_rejects_user_object_count_quota() {
+        let (state, _data_dir) = test_state_with_user_quotas(1024, 1).await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
+
+        let first_object_id = Uuid::now_v7().to_string();
+        let first_payload_id = Uuid::now_v7().to_string();
+        init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                first_object_id,
+                first_payload_id,
+                ObjectKind::File,
+                b"first",
+                false,
+                device_id,
+                &signing_secret_key,
+            )),
+        )
+        .await
+        .expect("first init fits object quota");
+        assert_eq!(user_storage_usage(&state, user_id).await, (5, 1));
+
+        let second_object_id = Uuid::now_v7().to_string();
+        let second_payload_id = Uuid::now_v7().to_string();
+        let result = init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                second_object_id.clone(),
+                second_payload_id,
+                ObjectKind::File,
+                b"second",
+                false,
+                device_id,
+                &signing_secret_key,
+            )),
+        )
+        .await;
+
+        let err = result.expect_err("second init should exceed object quota");
+        assert_eq!(err.status(), StatusCode::INSUFFICIENT_STORAGE);
+        assert_eq!(err.body().code, ApiErrorCode::StorageQuotaExceeded);
+        assert_eq!(
+            user_storage_usage(&state, user_id).await,
+            (5, 1),
+            "failed object-count reservation leaves user counters unchanged",
+        );
+
+        let object_count = objects::Entity::find()
+            .filter(objects::Column::UserId.eq(user_id))
+            .count(state.db())
+            .await
+            .expect("object count");
+        assert_eq!(object_count, 1, "quota failure rolls back new object");
     }
 
     #[tokio::test]
@@ -3108,6 +3517,11 @@ mod tests {
         crate::cleanup::trim_user_clipboard(&state, user_id)
             .await
             .expect("trim");
+        assert_eq!(
+            user_storage_usage(&state, user_id).await,
+            (16, 2),
+            "clipboard trim releases user storage quota",
+        );
 
         let remaining = objects::Entity::find()
             .filter(objects::Column::UserId.eq(user_id))

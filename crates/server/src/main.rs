@@ -9,6 +9,7 @@ mod routes;
 mod secret;
 mod secret_storage;
 mod state;
+mod storage_quota;
 mod ws;
 
 use std::{

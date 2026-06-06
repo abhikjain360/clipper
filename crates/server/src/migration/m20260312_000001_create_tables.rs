@@ -75,6 +75,20 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(Users::CreatedAt).text().not_null())
                     .col(ColumnDef::new(Users::UpdatedAt).text().not_null())
+                    .col(
+                        ColumnDef::new(Users::StorageBytes)
+                            .big_integer()
+                            .not_null()
+                            .default(0)
+                            .check(Expr::col(Users::StorageBytes).gte(0)),
+                    )
+                    .col(
+                        ColumnDef::new(Users::ObjectCount)
+                            .big_integer()
+                            .not_null()
+                            .default(0)
+                            .check(Expr::col(Users::ObjectCount).gte(0)),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_users_access_key_hash")
@@ -464,6 +478,8 @@ enum Users {
     AccessKeyHash,
     CreatedAt,
     UpdatedAt,
+    StorageBytes,
+    ObjectCount,
 }
 
 #[derive(DeriveIden)]

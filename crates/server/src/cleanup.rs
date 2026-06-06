@@ -1,12 +1,15 @@
 use chrono::{Duration, Utc};
 use futures_util::{StreamExt, stream};
-use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{
+    ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+};
 use tracing::info;
 use uuid::Uuid;
 
 use crate::{
     entity::{event_log, object_payloads, objects, sessions},
     state::AppState,
+    storage_quota,
 };
 
 type CleanupResult<T> = Result<T, CleanupError>;
@@ -131,24 +134,7 @@ pub(crate) async fn trim_user_clipboard(
 }
 
 async fn delete_clipboard_objects(state: &AppState, ids: &[Uuid]) -> Result<usize, sea_orm::DbErr> {
-    if ids.is_empty() {
-        return Ok(0);
-    }
-
-    let payload_paths: Vec<String> = object_payloads::Entity::find()
-        .filter(object_payloads::Column::ObjectId.is_in(ids.to_vec()))
-        .select_only()
-        .column(object_payloads::Column::CiphertextPath)
-        .into_tuple()
-        .all(state.db())
-        .await?;
-    remove_payload_files(state, payload_paths).await;
-
-    let res = objects::Entity::delete_many()
-        .filter(objects::Column::Id.is_in(ids.to_vec()))
-        .exec(state.db())
-        .await?;
-    Ok(res.rows_affected as usize)
+    delete_objects_and_release_usage(state, ids).await
 }
 
 async fn cleanup_old_events(state: &AppState) -> CleanupResult<()> {
@@ -184,28 +170,59 @@ async fn cleanup_orphan_object_uploads(state: &AppState) -> CleanupResult<()> {
         .all(state.db())
         .await?;
 
-    let count = orphan_ids.len();
-    if !orphan_ids.is_empty() {
-        let payload_paths: Vec<String> = object_payloads::Entity::find()
-            .filter(object_payloads::Column::ObjectId.is_in(orphan_ids.clone()))
-            .select_only()
-            .column(object_payloads::Column::CiphertextPath)
-            .into_tuple()
-            .all(state.db())
-            .await?;
-        remove_payload_files(state, payload_paths).await;
-    }
-
+    let count = if orphan_ids.is_empty() {
+        0
+    } else {
+        delete_objects_and_release_usage(state, &orphan_ids).await?
+    };
     if count > 0 {
-        objects::Entity::delete_many()
-            .filter(objects::Column::Status.ne("complete"))
-            .filter(objects::Column::CreatedAt.lt(&cutoff))
-            .exec(state.db())
-            .await?;
         info!(count, "Cleaned up orphan object uploads");
     }
 
     Ok(())
+}
+
+async fn delete_objects_and_release_usage(
+    state: &AppState,
+    ids: &[Uuid],
+) -> Result<usize, sea_orm::DbErr> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let txn = state.db().begin().await?;
+    let payload_paths: Vec<String> = object_payloads::Entity::find()
+        .filter(object_payloads::Column::ObjectId.is_in(ids.to_vec()))
+        .select_only()
+        .column(object_payloads::Column::CiphertextPath)
+        .into_tuple()
+        .all(&txn)
+        .await?;
+    let usage = storage_quota::object_usage_by_user(&txn, ids).await?;
+    let expected_objects = usage.iter().try_fold(0_i64, |total, usage| {
+        total
+            .checked_add(usage.object_count)
+            .ok_or_else(|| sea_orm::DbErr::Custom("object cleanup count overflow".into()))
+    })?;
+
+    let res = objects::Entity::delete_many()
+        .filter(objects::Column::Id.is_in(ids.to_vec()))
+        .exec(&txn)
+        .await?;
+    if res.rows_affected as i64 != expected_objects {
+        return Err(sea_orm::DbErr::Custom(format!(
+            "object cleanup deleted {} rows but counted {}",
+            res.rows_affected, expected_objects,
+        )));
+    }
+
+    for usage in usage {
+        storage_quota::release_user_storage(&txn, usage).await?;
+    }
+    txn.commit().await?;
+
+    remove_payload_files(state, payload_paths).await;
+    Ok(res.rows_affected as usize)
 }
 
 async fn remove_payload_files(state: &AppState, payload_paths: Vec<String>) {

@@ -15,7 +15,7 @@ use clipper_core::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DerivePartialModel, EntityTrait, QueryFilter,
-    QuerySelect, Set, SqlErr, TransactionTrait,
+    Set, SqlErr, TransactionTrait,
 };
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -234,6 +234,8 @@ pub async fn register_finish(
         access_key_hash: Set(pending.access_key_hash.clone()),
         created_at: Set(now.clone()),
         updated_at: Set(now.clone()),
+        storage_bytes: Set(0),
+        object_count: Set(0),
     }
     .insert(&txn)
     .await;
@@ -826,7 +828,7 @@ mod tests {
         middleware,
         routing::post,
     };
-    use sea_orm::{ActiveModelTrait, Database, Set};
+    use sea_orm::{ActiveModelTrait, Database, QuerySelect, Set};
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -929,6 +931,8 @@ mod tests {
             access_key_hash: Set(access_key_hash),
             created_at: Set(now.clone()),
             updated_at: Set(now),
+            storage_bytes: Set(0),
+            object_count: Set(0),
         }
         .insert(state.db())
         .await
