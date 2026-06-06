@@ -5,8 +5,11 @@ use std::path::Path;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "macos")]
 const SERVICE: &str = "com.clipper.daemon";
+#[cfg(target_os = "macos")]
 const ACCOUNT: &str = "credentials";
+#[cfg(target_os = "macos")]
 const IPC_SECRET_ACCOUNT: &str = "ipc-secret-v1";
 const IPC_SECRET_BYTES: usize = 32;
 #[cfg(target_os = "macos")]
@@ -37,8 +40,10 @@ pub enum KeychainError {
     Decode(#[source] serde_json::Error),
     #[error("keychain entry is not valid UTF-8: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
+    #[cfg(target_os = "macos")]
     #[error("keychain store failed: {0}")]
     Store(String),
+    #[cfg(target_os = "macos")]
     #[error("keychain read failed: {0}")]
     Read(String),
     #[cfg(target_os = "linux")]
