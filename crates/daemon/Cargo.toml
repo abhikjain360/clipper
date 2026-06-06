@@ -16,6 +16,7 @@ clipper-core.workspace = true
 clipper-daemon-types.workspace = true
 dirs.workspace = true
 hmac.workspace = true
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rand.workspace = true

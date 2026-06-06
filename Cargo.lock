@@ -920,6 +920,7 @@ dependencies = [
  "clipper-daemon-types",
  "dirs",
  "hmac",
+ "libc",
  "rand 0.10.1",
  "security-framework",
  "serde",

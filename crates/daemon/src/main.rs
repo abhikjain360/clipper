@@ -23,6 +23,8 @@ mod protocol;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::{
+    io,
+    os::fd::AsRawFd,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::Arc,
@@ -33,7 +35,7 @@ use clipper_client::engine::SyncEngine;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use clipper_daemon_types::ipc_path;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-use tokio::net::UnixListener;
+use tokio::net::{UnixListener, UnixStream};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use tracing::{error, info, warn};
 
@@ -103,6 +105,69 @@ fn parse_args() -> String {
         }
     }
     server_url
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn current_euid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() as u32 }
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
+    let mut credentials_len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: credentials points to writable memory, credentials_len is the
+    // correct buffer size, and stream.as_raw_fd() is a live Unix socket fd.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            &mut credentials_len,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if credentials_len < std::mem::size_of::<libc::ucred>() as libc::socklen_t {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "short SO_PEERCRED response",
+        ));
+    }
+
+    // SAFETY: getsockopt succeeded and reported a full ucred structure.
+    let credentials = unsafe { credentials.assume_init() };
+    Ok(credentials.uid)
+}
+
+#[cfg(target_os = "macos")]
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    let mut uid = 0 as libc::uid_t;
+    let mut gid = 0 as libc::gid_t;
+    // SAFETY: getpeereid writes the peer uid/gid for a live connected Unix
+    // stream socket and does not retain the pointers.
+    let result = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn peer_uid_matches_current_user(stream: &UnixStream) -> io::Result<bool> {
+    let peer_uid = peer_uid(stream)?;
+    let expected_uid = current_euid();
+    if peer_uid != expected_uid {
+        warn!(
+            peer_uid,
+            expected_uid, "Rejected IPC client with unexpected uid"
+        );
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -231,6 +296,14 @@ async fn run() -> DaemonResult<()> {
             loop {
                 match listener.accept().await {
                     Ok((stream, _addr)) => {
+                        match peer_uid_matches_current_user(&stream) {
+                            Ok(true) => {}
+                            Ok(false) => continue,
+                            Err(error) => {
+                                warn!(%error, "Rejected IPC client with unavailable peer uid");
+                                continue;
+                            }
+                        }
                         let engine = Arc::clone(&engine);
                         let client_mgr = Arc::clone(&client_mgr);
                         let data_dir = data_dir.clone();
