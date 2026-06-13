@@ -10,7 +10,7 @@ clipper-app-types.workspace = true
 base64.workspace = true
 chrono.workspace = true
 postcard.workspace = true
-reqwest = { version = "0.13.4", features = ["json"] }
+reqwest = { version = "0.13.4", features = ["json", "stream"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -25,6 +25,9 @@ zeroize.workspace = true
 rand.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 gloo-timers = { version = "0.4.0", features = ["futures"] }

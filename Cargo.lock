@@ -871,6 +871,7 @@ dependencies = [
  "getrandom 0.4.2",
  "gloo-timers",
  "js-sys",
+ "libc",
  "objc2-app-kit",
  "objc2-foundation",
  "postcard",
@@ -931,6 +932,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wl-clipboard-rs",
+ "zeroize",
 ]
 
 [[package]]
@@ -944,6 +946,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strum 0.28.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -961,6 +964,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -978,10 +982,12 @@ version = "0.1.0"
 dependencies = [
  "clipper-app-types",
  "clipper-client",
+ "dirs",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "uniffi",
+ "zeroize",
 ]
 
 [[package]]
@@ -1032,6 +1038,7 @@ dependencies = [
  "serde-wasm-bindgen",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "zeroize",
 ]
 
 [[package]]

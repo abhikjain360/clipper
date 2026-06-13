@@ -1487,9 +1487,34 @@ fn device_signing_secret_key_from_vec(
 #[cfg(not(target_family = "wasm"))]
 async fn ensure_private_dir(path: &Path) -> Result<(), LocalStoreError> {
     tokio::fs::create_dir_all(path).await?;
+    // Inspect without following symlinks: a pre-positioned symlink here could
+    // redirect plaintext cache or signing-key writes to an attacker-chosen
+    // location.
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    if !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a directory", path.display()),
+        )
+        .into());
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let euid = unsafe { libc::geteuid() } as u32;
+        if metadata.uid() != euid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is owned by uid {}, expected uid {euid}",
+                    path.display(),
+                    metadata.uid(),
+                ),
+            )
+            .into());
+        }
         tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
     }
     Ok(())

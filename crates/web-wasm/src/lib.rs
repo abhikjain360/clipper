@@ -4,6 +4,7 @@ use clipper_client::engine::{ClipboardPayload, SyncEngine, TEXT_CLIPBOARD_MIME_T
 use js_sys::{Object, Promise, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
+use zeroize::Zeroizing;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_DEVICE_NAME: &str = "Web";
@@ -40,6 +41,7 @@ pub fn login(
     server_url: String,
 ) -> Promise {
     ok_promise(async move {
+        let passphrase = Zeroizing::new(passphrase);
         let engine = engine();
         ensure_requested_base_url(&engine, &server_url).await?;
         engine
@@ -64,6 +66,8 @@ pub fn register(
     server_url: String,
 ) -> Promise {
     ok_promise(async move {
+        let access_key = Zeroizing::new(access_key);
+        let passphrase = Zeroizing::new(passphrase);
         let engine = engine();
         ensure_requested_base_url(&engine, &server_url).await?;
         let username = engine

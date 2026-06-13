@@ -791,7 +791,7 @@ impl SyncEngine {
             }
             let payload = single_payload(&file_item)?.clone();
             let blob = api
-                .download_object_payload(file_id, &payload.id.to_string())
+                .download_object_payload(file_id, &payload.id.to_string(), payload.ciphertext_size)
                 .await?;
             verify_payload_hash(&payload, &blob)?;
             (file_item, payload, blob)
@@ -1015,6 +1015,9 @@ impl SyncEngine {
     ) -> Result<(), ClientError> {
         let api = &self.api;
         let encryption_key = self.current_encryption_key().await?;
+        // Capture a shared borrow so the per-item `async move` blocks copy the
+        // reference, not the key material.
+        let encryption_key = &encryption_key;
         let mut after = None;
         loop {
             let page = api
@@ -1029,7 +1032,7 @@ impl SyncEngine {
                 .map(|item| async move {
                     let created_seq = item.created_seq;
                     match self
-                        .decrypt_clipboard_object_item_with_api(api, &item, &encryption_key)
+                        .decrypt_clipboard_object_item_with_api(api, &item, encryption_key)
                         .await
                     {
                         Ok(object) => Some((object, created_seq)),
@@ -1114,11 +1117,14 @@ impl SyncEngine {
         Ok(())
     }
 
-    async fn current_encryption_key(&self) -> Result<[u8; 32], ClientError> {
+    /// Returns the key inside a zeroizing wrapper so per-call copies are wiped
+    /// on drop; callers borrow `&[u8; 32]` from it via deref.
+    async fn current_encryption_key(&self) -> Result<Zeroizing<[u8; 32]>, ClientError> {
         let encryption_key = self.encryption_key.read().await;
-        Ok(**encryption_key
+        Ok(encryption_key
             .as_ref()
-            .ok_or(ClientError::NotAuthenticated)?)
+            .ok_or(ClientError::NotAuthenticated)?
+            .clone())
     }
 
     async fn decrypt_clipboard_object_item_with_api(
@@ -1142,7 +1148,11 @@ impl SyncEngine {
         let payload = single_payload(item)?;
         let payload_size = meta.size.unwrap_or(payload.ciphertext_size);
         let encrypted_payload = api
-            .download_object_payload(&item.id.to_string(), &payload.id.to_string())
+            .download_object_payload(
+                &item.id.to_string(),
+                &payload.id.to_string(),
+                payload.ciphertext_size,
+            )
             .await?;
         verify_payload_hash(payload, &encrypted_payload)?;
         let plaintext = decrypt_clipboard_payload(

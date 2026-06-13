@@ -86,6 +86,7 @@ pub async fn challenge(
         Some(user) => {
             let password_file = secret_storage::unwrap_opaque_password_file(
                 state.secrets(),
+                user.id,
                 &user.opaque_password_file,
             )
             .map_err(|e| {
@@ -135,12 +136,6 @@ pub async fn register_start(
     Postcard(req): Postcard<RegisterStartRequest>,
 ) -> Result<Postcard<RegisterStartResponse>, ApiError> {
     let db_config = load_server_config(&state).await?;
-    let access_key_hash =
-        verify_unused_registration_access_key(&state, &db_config, &req.access_key).await?;
-
-    // Username uniqueness is enforced at register_finish by the users.username
-    // unique constraint. Keeping register_start response-shaped for taken and
-    // available names avoids a username-existence oracle.
     let opaque_server_setup = unwrap_global_opaque_server_setup(&state, &db_config)?;
     let user_id = Uuid::now_v7();
     // id_U = "clipper:user:{username}:passphrase:v1".
@@ -154,6 +149,12 @@ pub async fn register_start(
         warn!(error = %e, "OPAQUE register start rejected client request");
         error_response(StatusCode::UNAUTHORIZED, "Invalid registration request")
     })?;
+    let access_key_hash =
+        verify_unused_registration_access_key(&state, &db_config, &req.access_key).await?;
+
+    // Username uniqueness is enforced at register_finish by the users.username
+    // unique constraint. Keeping register_start response-shaped for taken and
+    // available names avoids a username-existence oracle.
 
     // OPAQUE round 1 is stateless server-side, but THIS server must remember the
     // freshly minted user_id (and the access-key hash to consume) until finish.
@@ -216,20 +217,24 @@ pub async fn register_finish(
         ));
     }
 
-    let wrapped_opaque_password_file =
-        secret_storage::wrap_opaque_password_file(state.secrets(), &opaque_password_file).map_err(
+    let wrapped_opaque_password_file = secret_storage::wrap_opaque_password_file(
+        state.secrets(),
+        pending.user_id,
+        &opaque_password_file,
+    )
+    .map_err(|e| {
+        error!(error = %e, "Failed to wrap opaque_password_file");
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
+    })?;
+    // Legacy non-null column. New clients derive object-encryption keys from
+    // OPAQUE's export_key, so the server no longer generates or returns a salt.
+    let wrapped_encryption_salt =
+        secret_storage::wrap_encryption_salt(state.secrets(), pending.user_id, &[]).map_err(
             |e| {
-                error!(error = %e, "Failed to wrap opaque_password_file");
+                error!(error = %e, "Failed to wrap legacy encryption_salt placeholder");
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
             },
         )?;
-    // Legacy non-null column. New clients derive object-encryption keys from
-    // OPAQUE's export_key, so the server no longer generates or returns a salt.
-    let wrapped_encryption_salt = secret_storage::wrap_encryption_salt(state.secrets(), &[])
-        .map_err(|e| {
-            error!(error = %e, "Failed to wrap legacy encryption_salt placeholder");
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
-        })?;
 
     consume_registration_access_key(&txn, &pending.access_key_hash, &now, pending.user_id).await?;
 
@@ -923,11 +928,14 @@ mod tests {
         .await
         .expect("insert access key");
 
-        let wrapped_opaque_password_file =
-            secret_storage::wrap_opaque_password_file(state.secrets(), &opaque_password_file)
-                .expect("wrap opaque_password_file");
+        let wrapped_opaque_password_file = secret_storage::wrap_opaque_password_file(
+            state.secrets(),
+            user_id,
+            &opaque_password_file,
+        )
+        .expect("wrap opaque_password_file");
         let wrapped_encryption_salt =
-            secret_storage::wrap_encryption_salt(state.secrets(), &encryption_salt)
+            secret_storage::wrap_encryption_salt(state.secrets(), user_id, &encryption_salt)
                 .expect("wrap encryption_salt");
 
         users::ActiveModel {
@@ -1781,9 +1789,12 @@ mod tests {
 
         // The legacy salt column is still wrapped, but it unwraps to an
         // empty placeholder and is no longer returned to clients.
-        let recovered =
-            secret_storage::unwrap_encryption_salt(state.secrets(), &stored.encryption_salt)
-                .expect("unwrap encryption_salt");
+        let recovered = secret_storage::unwrap_encryption_salt(
+            state.secrets(),
+            user_id,
+            &stored.encryption_salt,
+        )
+        .expect("unwrap encryption_salt");
         assert!(recovered.is_empty());
 
         // The per-user OPAQUE blob must not survive in cleartext and must
@@ -1792,9 +1803,27 @@ mod tests {
         assert!(
             secret_storage::unwrap_opaque_password_file(
                 state.secrets(),
+                user_id,
                 &stored.opaque_password_file,
             )
             .is_ok()
+        );
+        let other_user_id = Uuid::now_v7();
+        assert!(
+            secret_storage::unwrap_opaque_password_file(
+                state.secrets(),
+                other_user_id,
+                &stored.opaque_password_file,
+            )
+            .is_err()
+        );
+        assert!(
+            secret_storage::unwrap_encryption_salt(
+                state.secrets(),
+                other_user_id,
+                &stored.encryption_salt,
+            )
+            .is_err()
         );
     }
 
@@ -1812,10 +1841,17 @@ mod tests {
 
         let attacker = crate::secret::ServerSecrets::from_root(&[0x99_u8; 32]);
         assert!(
-            secret_storage::unwrap_opaque_password_file(&attacker, &user.opaque_password_file)
+            secret_storage::unwrap_opaque_password_file(
+                &attacker,
+                user.id,
+                &user.opaque_password_file
+            )
+            .is_err()
+        );
+        assert!(
+            secret_storage::unwrap_encryption_salt(&attacker, user.id, &user.encryption_salt)
                 .is_err()
         );
-        assert!(secret_storage::unwrap_encryption_salt(&attacker, &user.encryption_salt).is_err());
 
         let server_config = server_config::Entity::find_by_id(1)
             .one(state.db())

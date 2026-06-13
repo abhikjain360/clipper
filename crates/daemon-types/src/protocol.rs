@@ -9,21 +9,28 @@
 use clipper_api_types::{ApiErrorCode, ErrorResponse};
 use clipper_app_types::AppState;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 pub const IPC_AUTH_VERSION: u32 = 1;
 pub const IPC_AUTH_NONCE_BYTES: usize = 32;
 pub const IPC_AUTH_TAG_BYTES: usize = 32;
 
-const IPC_AUTH_CONTEXT: &[u8] = b"clipper-ipc-auth-v1";
+const IPC_CLIENT_AUTH_CONTEXT: &[u8] = b"clipper-ipc-client-auth-v1";
+const IPC_DAEMON_AUTH_CONTEXT: &[u8] = b"clipper-ipc-daemon-auth-v1";
 
-pub fn ipc_auth_message(daemon_nonce: &[u8], client_nonce: &[u8]) -> Vec<u8> {
+pub fn ipc_client_auth_message(daemon_nonce: &[u8], client_nonce: &[u8]) -> Vec<u8> {
+    ipc_auth_message(IPC_CLIENT_AUTH_CONTEXT, daemon_nonce, client_nonce)
+}
+
+pub fn ipc_daemon_auth_message(daemon_nonce: &[u8], client_nonce: &[u8]) -> Vec<u8> {
+    ipc_auth_message(IPC_DAEMON_AUTH_CONTEXT, daemon_nonce, client_nonce)
+}
+
+fn ipc_auth_message(context: &[u8], daemon_nonce: &[u8], client_nonce: &[u8]) -> Vec<u8> {
     let mut message = Vec::with_capacity(
-        IPC_AUTH_CONTEXT.len()
-            + std::mem::size_of::<u32>() * 3
-            + daemon_nonce.len()
-            + client_nonce.len(),
+        context.len() + std::mem::size_of::<u32>() * 3 + daemon_nonce.len() + client_nonce.len(),
     );
-    message.extend_from_slice(IPC_AUTH_CONTEXT);
+    message.extend_from_slice(context);
     message.extend_from_slice(&IPC_AUTH_VERSION.to_be_bytes());
     message.extend_from_slice(&(daemon_nonce.len() as u32).to_be_bytes());
     message.extend_from_slice(daemon_nonce);
@@ -72,8 +79,14 @@ pub struct AuthenticateParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthenticateResult {
+    pub protocol_version: u32,
+    pub tag: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginParams {
-    pub passphrase: String,
+    pub passphrase: Zeroizing<String>,
     pub username: String,
     pub device_name: Option<String>,
     pub server_url: Option<String>,
@@ -81,9 +94,9 @@ pub struct LoginParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterParams {
-    pub access_key: String,
+    pub access_key: Zeroizing<String>,
     pub username: String,
-    pub passphrase: String,
+    pub passphrase: Zeroizing<String>,
     pub device_name: Option<String>,
     pub server_url: Option<String>,
 }
@@ -251,6 +264,17 @@ mod tests {
             }
             DaemonResponse::Success { .. } => panic!("expected error response"),
         }
+    }
+
+    #[test]
+    fn ipc_auth_messages_are_directional() {
+        let daemon_nonce = [1_u8; IPC_AUTH_NONCE_BYTES];
+        let client_nonce = [2_u8; IPC_AUTH_NONCE_BYTES];
+
+        assert_ne!(
+            ipc_client_auth_message(&daemon_nonce, &client_nonce),
+            ipc_daemon_auth_message(&daemon_nonce, &client_nonce),
+        );
     }
 
     /// Verify that the shared line union can parse both responses and events

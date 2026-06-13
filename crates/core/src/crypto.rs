@@ -48,7 +48,7 @@ pub struct OpaqueRegistrationFinish {
 
 pub struct OpaqueLoginFinish {
     pub credential_finalization: Vec<u8>,
-    pub session_key: Vec<u8>,
+    pub session_key: Zeroizing<Vec<u8>>,
     pub export_key: Zeroizing<Vec<u8>>,
 }
 
@@ -510,7 +510,7 @@ pub fn opaque_client_login_finish(
 
     Ok(OpaqueLoginFinish {
         credential_finalization: finish.message.serialize().to_vec(),
-        session_key: finish.session_key.to_vec(),
+        session_key: Zeroizing::new(finish.session_key.to_vec()),
         export_key: Zeroizing::new(finish.export_key.to_vec()),
     })
 }
@@ -579,7 +579,7 @@ pub fn opaque_server_login_start(
 pub fn opaque_server_login_finish(
     server_state: &[u8],
     credential_finalization: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     let server_login =
         opaque_ke::ServerLogin::<ClipperOpaqueCipherSuite>::deserialize(server_state)
             .map_err(opaque_error)?;
@@ -591,7 +591,7 @@ pub fn opaque_server_login_finish(
         .finish(finalization, opaque_ke::ServerLoginParameters::default())
         .map_err(opaque_error)?;
 
-    Ok(finish.session_key.to_vec())
+    Ok(Zeroizing::new(finish.session_key.to_vec()))
 }
 
 fn opaque_error(error: impl std::fmt::Display) -> CryptoError {
@@ -884,7 +884,7 @@ mod tests {
         let server_session_key =
             opaque_server_login_finish(&server_state, &finish.credential_finalization).unwrap();
 
-        assert_eq!(finish.session_key, server_session_key);
+        assert_eq!(*finish.session_key, *server_session_key);
     }
 
     #[test]

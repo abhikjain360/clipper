@@ -18,14 +18,16 @@ use tokio::{
     sync::Mutex,
 };
 use tracing::{debug, warn};
+use zeroize::Zeroize;
 
 use crate::{
     clients::ClientManager,
     keychain::{self, Credentials},
     protocol::{
-        AuthChallenge, ClipboardPayloadResult, CopyToLocalResult, DaemonCommand, DaemonEvent,
-        DaemonRequest, DaemonResponse, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION,
-        LoginParams, RegisterParams, RegisterResult, UploadFileResult, ipc_auth_message,
+        AuthChallenge, AuthenticateResult, ClipboardPayloadResult, CopyToLocalResult,
+        DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, IPC_AUTH_NONCE_BYTES,
+        IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams, RegisterParams, RegisterResult,
+        UploadFileResult, ipc_client_auth_message, ipc_daemon_auth_message,
     },
 };
 
@@ -71,7 +73,7 @@ pub async fn handle_connection(
             loop {
                 match read_limited_line(&mut reader, &mut line).await {
                     Ok(None) => break,
-                    Ok(Some(trimmed)) => {
+                    Ok(Some(mut trimmed)) => {
                         if trimmed.is_empty() {
                             continue;
                         }
@@ -82,6 +84,7 @@ pub async fn handle_connection(
                                 format!("Invalid request: {}", e),
                             ),
                         };
+                        trimmed.zeroize();
                         if let Ok(json) = serde_json::to_string(&response) {
                             let mut w = writer.lock().await;
                             let resp_line = format!("{}\n", json);
@@ -168,7 +171,7 @@ async fn authenticate_connection(
 
     let mut line = Vec::new();
     loop {
-        let trimmed = match read_limited_line(reader, &mut line).await {
+        let mut trimmed = match read_limited_line(reader, &mut line).await {
             Ok(Some(trimmed)) => trimmed,
             Ok(None) => return false,
             Err(RequestLineError::TooLong) => {
@@ -194,9 +197,32 @@ async fn authenticate_connection(
             continue;
         }
 
-        match verify_auth_request(&trimmed, &secret, &daemon_nonce) {
-            Ok(id) => {
-                let response = DaemonResponse::success(id, None);
+        let auth_result = verify_auth_request(&trimmed, &secret, &daemon_nonce);
+        trimmed.zeroize();
+        match auth_result {
+            Ok(verified) => {
+                let daemon_tag = match ipc_hmac_tag(
+                    &secret,
+                    &ipc_daemon_auth_message(&daemon_nonce, &verified.client_nonce),
+                ) {
+                    Ok(tag) => tag,
+                    Err(message) => {
+                        let response = DaemonResponse::error_message(verified.id, message);
+                        _ = write_response(writer, response).await;
+                        return false;
+                    }
+                };
+                let result = AuthenticateResult {
+                    protocol_version: IPC_AUTH_VERSION,
+                    tag: daemon_tag,
+                };
+                let response = match serde_json::to_value(result) {
+                    Ok(result) => DaemonResponse::success(verified.id, Some(result)),
+                    Err(e) => DaemonResponse::error_message(
+                        verified.id,
+                        format!("IPC authentication response failed: {e}"),
+                    ),
+                };
                 return write_response(writer, response).await;
             }
             Err(AuthRequestError { id, message }) => {
@@ -213,11 +239,16 @@ struct AuthRequestError {
     message: String,
 }
 
+struct VerifiedAuthRequest {
+    id: String,
+    client_nonce: Vec<u8>,
+}
+
 fn verify_auth_request(
     line: &str,
     secret: &[u8],
     daemon_nonce: &[u8],
-) -> Result<String, AuthRequestError> {
+) -> Result<VerifiedAuthRequest, AuthRequestError> {
     let req = serde_json::from_str::<DaemonRequest>(line).map_err(|e| AuthRequestError {
         id: None,
         message: format!("Invalid auth request: {}", e),
@@ -254,14 +285,17 @@ fn verify_auth_request(
         id: Some(id.clone()),
         message: "Invalid IPC secret".into(),
     })?;
-    mac.update(&ipc_auth_message(daemon_nonce, &params.client_nonce));
+    mac.update(&ipc_client_auth_message(daemon_nonce, &params.client_nonce));
     mac.verify_slice(&params.tag)
         .map_err(|_| AuthRequestError {
             id: Some(id.clone()),
             message: "IPC authentication failed".into(),
         })?;
 
-    Ok(id)
+    Ok(VerifiedAuthRequest {
+        id,
+        client_nonce: params.client_nonce,
+    })
 }
 
 async fn write_response(writer: &Arc<Mutex<OwnedWriteHalf>>, response: DaemonResponse) -> bool {
@@ -271,6 +305,13 @@ async fn write_response(writer: &Arc<Mutex<OwnedWriteHalf>>, response: DaemonRes
     let mut w = writer.lock().await;
     let line = format!("{}\n", json);
     w.write_all(line.as_bytes()).await.is_ok()
+}
+
+fn ipc_hmac_tag(secret: &[u8], message: &[u8]) -> Result<Vec<u8>, String> {
+    let mut mac =
+        HmacSha256::new_from_slice(secret).map_err(|_| "Invalid IPC secret".to_string())?;
+    mac.update(message);
+    Ok(mac.finalize().into_bytes().to_vec())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -290,6 +331,7 @@ async fn read_limited_line<R>(
 where
     R: AsyncBufRead + Unpin,
 {
+    line.zeroize();
     line.clear();
 
     loop {
@@ -306,6 +348,7 @@ where
             .position(|byte| *byte == b'\n')
             .map_or(available.len(), |pos| pos + 1);
         if line.len() + take > MAX_IPC_REQUEST_LINE_BYTES {
+            line.zeroize();
             return Err(RequestLineError::TooLong);
         }
         line.extend_from_slice(&available[..take]);
@@ -316,8 +359,16 @@ where
         }
     }
 
-    let text = std::str::from_utf8(line).map_err(|_| RequestLineError::Utf8)?;
-    Ok(Some(text.trim().to_string()))
+    let text = match std::str::from_utf8(line) {
+        Ok(text) => text,
+        Err(_) => {
+            line.zeroize();
+            return Err(RequestLineError::Utf8);
+        }
+    };
+    let trimmed = text.trim().to_string();
+    line.zeroize();
+    Ok(Some(trimmed))
 }
 
 async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> DaemonResponse {
@@ -383,24 +434,22 @@ fn normalize_server_url(url: &str) -> &str {
 }
 
 async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) -> DaemonResponse {
-    let device_name = params
-        .device_name
-        .as_deref()
-        .unwrap_or(default_device_name());
+    let LoginParams {
+        passphrase,
+        username,
+        device_name,
+        server_url,
+    } = params;
+    let device_name = device_name.as_deref().unwrap_or(default_device_name());
 
-    if let Some(url) = params.server_url.as_deref()
+    if let Some(url) = server_url.as_deref()
         && let Err(error) = ensure_requested_base_url(engine, url).await
     {
         return client_error(id, error);
     }
 
     match engine
-        .login_with_platform(
-            &params.passphrase,
-            &params.username,
-            device_name,
-            platform_name(),
-        )
+        .login_with_platform(&passphrase, &username, device_name, platform_name())
         .await
     {
         Ok(()) => {
@@ -413,7 +462,7 @@ async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) ->
                 username: state
                     .session
                     .map(|session| session.username)
-                    .unwrap_or(params.username),
+                    .unwrap_or(username),
             };
             if let Err(e) = keychain::store_credentials(&creds) {
                 warn!("Failed to store server profile: {}", e);
@@ -429,12 +478,16 @@ async fn cmd_register(
     params: RegisterParams,
     engine: &Arc<SyncEngine>,
 ) -> DaemonResponse {
-    let device_name = params
-        .device_name
-        .as_deref()
-        .unwrap_or(default_device_name());
+    let RegisterParams {
+        access_key,
+        username,
+        passphrase,
+        device_name,
+        server_url,
+    } = params;
+    let device_name = device_name.as_deref().unwrap_or(default_device_name());
 
-    if let Some(url) = params.server_url.as_deref()
+    if let Some(url) = server_url.as_deref()
         && let Err(error) = ensure_requested_base_url(engine, url).await
     {
         return client_error(id, error);
@@ -442,9 +495,9 @@ async fn cmd_register(
 
     match engine
         .register_with_platform(
-            &params.access_key,
-            &params.username,
-            &params.passphrase,
+            &access_key,
+            &username,
+            &passphrase,
             device_name,
             platform_name(),
         )

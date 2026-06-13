@@ -13,6 +13,7 @@ mod storage_quota;
 mod ws;
 
 use std::{
+    io::Read,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -30,6 +31,7 @@ use tower_http::{
 };
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
+use zeroize::Zeroizing;
 
 use crate::{
     auth::hash_access_key,
@@ -64,6 +66,8 @@ enum Command {
         data_dir: Option<PathBuf>,
         #[arg(long, value_name = "KEY")]
         access_key: Option<String>,
+        #[arg(long)]
+        access_key_stdin: bool,
         #[arg(long, value_name = "RFC3339")]
         expires_at: Option<String>,
     },
@@ -106,13 +110,14 @@ async fn run() -> ServerResult<()> {
         Command::AddAccessKey {
             data_dir,
             access_key,
+            access_key_stdin,
             expires_at,
         } => {
             let mut overrides = ConfigOverrides::default();
             overrides.server.data_dir = data_dir;
             let config = load_config(cli.config.as_deref(), overrides)?;
             let secrets = ServerSecrets::load_from_env()?;
-            let access_key = read_access_key(access_key)?;
+            let access_key = Zeroizing::new(read_access_key(access_key, access_key_stdin)?);
             add_access_key(config, secrets, &access_key, expires_at).await?;
         }
         Command::GenerateSecret => {
@@ -194,10 +199,20 @@ async fn init_server(config: ServerConfig, secrets: ServerSecrets) -> ServerResu
     Ok(())
 }
 
-fn read_access_key(access_key: Option<String>) -> ServerResult<String> {
-    let access_key = match access_key {
-        Some(access_key) => access_key,
-        None => rpassword::prompt_password("Access key: ")?,
+fn read_access_key(access_key: Option<String>, access_key_stdin: bool) -> ServerResult<String> {
+    let access_key = match (access_key, access_key_stdin) {
+        (Some(_), true) => {
+            return Err(ServerError::Config(
+                "--access-key and --access-key-stdin are mutually exclusive".into(),
+            ));
+        }
+        (Some(access_key), false) => access_key,
+        (None, true) => {
+            let mut access_key = String::new();
+            std::io::stdin().read_to_string(&mut access_key)?;
+            access_key.trim_end_matches(['\r', '\n']).to_string()
+        }
+        (None, false) => rpassword::prompt_password("Access key: ")?,
     };
     if access_key.is_empty() {
         return Err(ServerError::Config("access key must not be empty".into()));

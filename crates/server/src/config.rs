@@ -227,7 +227,7 @@ pub struct AuthConfig {
     /// Maximum in-memory OPAQUE challenges and pending registrations.
     #[garde(range(min = 1))]
     pub max_pending_challenges: usize,
-    /// Maximum in-memory WebSocket tickets awaiting connection.
+    /// Maximum in-memory WebSocket tickets awaiting connection per user.
     #[garde(range(min = 1))]
     pub max_pending_ws_tickets: usize,
 }
@@ -454,7 +454,7 @@ pub struct AuthConfigOverrides {
     /// Maximum in-memory OPAQUE challenges and pending registrations.
     #[arg(long = "auth-max-pending-challenges")]
     pub max_pending_challenges: Option<usize>,
-    /// Maximum in-memory WebSocket tickets awaiting connection.
+    /// Maximum in-memory WebSocket tickets awaiting connection per user.
     #[arg(long = "auth-max-pending-ws-tickets")]
     pub max_pending_ws_tickets: Option<usize>,
 }

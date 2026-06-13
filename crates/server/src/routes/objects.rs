@@ -81,7 +81,10 @@ pub async fn init_object(
         )
     })?;
 
+    // Scoped by user so a cross-user UUID collision cannot act as an existence
+    // oracle; foreign ids fall through to the insert's uniqueness constraint.
     if let Some(existing) = objects::Entity::find_by_id(object_id)
+        .filter(objects::Column::UserId.eq(auth.user_id))
         .one(state.db())
         .await
         .map_err(|e| {

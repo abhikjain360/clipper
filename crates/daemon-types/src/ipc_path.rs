@@ -70,6 +70,45 @@ pub fn ensure_private_socket_dir(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn validate_socket_file(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_socket() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a Unix socket", path.display()),
+        ));
+    }
+
+    let current_uid = current_euid();
+    if metadata.uid() != current_uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is owned by uid {}, expected {}",
+                path.display(),
+                metadata.uid(),
+                current_uid,
+            ),
+        ));
+    }
+
+    let mode = metadata.mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} has insecure mode {:03o}", path.display(), mode),
+        ));
+    }
+
+    if let Some(parent) = path.parent() {
+        validate_socket_dir(parent)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn xdg_runtime_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR")
@@ -77,8 +116,18 @@ fn xdg_runtime_dir() -> Option<PathBuf> {
         .filter(|path| path.is_absolute())
 }
 
+#[cfg(target_os = "linux")]
 fn fallback_socket_dir() -> PathBuf {
-    PathBuf::from("/tmp").join(format!("clipper-{}", current_euid()))
+    PathBuf::from("/run/user")
+        .join(current_euid().to_string())
+        .join("clipper")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn fallback_socket_dir() -> PathBuf {
+    PathBuf::from("/run/user")
+        .join(current_euid().to_string())
+        .join("clipper")
 }
 
 fn env_socket_path() -> Option<PathBuf> {
@@ -120,6 +169,41 @@ fn macos_default_container_socket_dir() -> Option<PathBuf> {
 fn current_euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() as u32 }
+}
+
+fn validate_socket_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a directory", path.display()),
+        ));
+    }
+
+    let current_uid = current_euid();
+    if metadata.uid() != current_uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is owned by uid {}, expected {}",
+                path.display(),
+                metadata.uid(),
+                current_uid,
+            ),
+        ));
+    }
+
+    let mode = metadata.mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} has insecure mode {:03o}", path.display(), mode),
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -10,9 +10,11 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 clipper-app-types = { workspace = true, features = ["uniffi"] }
 clipper-client.workspace = true
+dirs.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 uniffi.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

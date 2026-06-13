@@ -1,125 +1,79 @@
-[[PackageOverrides]]
-name = "rsa"
-version = "0.9.10"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Pulled into Cargo.lock through sea-orm-migration's scanner-visible sea-orm-cli/sqlx-mysql metadata path; the server uses SQLite migrations only, and OSV reports no fixed rsa version."
+# Suppressions are per advisory ID so a new advisory on any of these pinned
+# packages fails the scan and needs an explicit entry here to be accepted.
 
-[[PackageOverrides]]
-name = "atk"
-version = "0.18.2"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed atk release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0071"
+reason = "Marvin timing attack in rsa, pulled into Cargo.lock through sea-orm-migration's scanner-visible sea-orm-cli/sqlx-mysql metadata path; the server uses SQLite migrations only, and OSV reports no fixed rsa version."
 
-[[PackageOverrides]]
-name = "atk-sys"
-version = "0.18.2"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed atk-sys release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0411"
+reason = "gdkwayland-sys: unmaintained gtk-rs GTK3 bindings, transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk. Revisit when Tauri/Wry moves to a maintained GTK binding line."
 
-[[PackageOverrides]]
-name = "gdk"
-version = "0.18.2"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gdk release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0412"
+reason = "gdk: unmaintained gtk-rs GTK3 bindings, transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk. Revisit when Tauri/Wry moves to a maintained GTK binding line."
 
-[[PackageOverrides]]
-name = "gdk-sys"
-version = "0.18.2"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gdk-sys release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0413"
+reason = "atk: unmaintained gtk-rs GTK3 bindings, transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk. Revisit when Tauri/Wry moves to a maintained GTK binding line."
 
-[[PackageOverrides]]
-name = "gdkwayland-sys"
-version = "0.18.2"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gdkwayland-sys release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0414"
+reason = "gdkx11-sys: unmaintained gtk-rs GTK3 bindings, transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk. Revisit when Tauri/Wry moves to a maintained GTK binding line."
 
-[[PackageOverrides]]
-name = "gdkx11"
-version = "0.18.2"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gdkx11 release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0415"
+reason = "gtk: unmaintained gtk-rs GTK3 bindings, transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk. Revisit when Tauri/Wry moves to a maintained GTK binding line."
 
-[[PackageOverrides]]
-name = "gdkx11-sys"
-version = "0.18.2"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gdkx11-sys release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0416"
+reason = "atk-sys: unmaintained gtk-rs GTK3 bindings, transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk. Revisit when Tauri/Wry moves to a maintained GTK binding line."
 
-[[PackageOverrides]]
-name = "glib"
-version = "0.18.5"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk. glib 0.20 cannot be forced independently because gtk 0.18 depends on the 0.18 binding line; revisit when Tauri/Wry upgrades the GTK stack."
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0417"
+reason = "gdkx11: unmaintained gtk-rs GTK3 bindings, transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk. Revisit when Tauri/Wry moves to a maintained GTK binding line."
 
-[[PackageOverrides]]
-name = "gtk"
-version = "0.18.2"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gtk release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0418"
+reason = "gdk-sys: unmaintained gtk-rs GTK3 bindings, transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk. Revisit when Tauri/Wry moves to a maintained GTK binding line."
 
-[[PackageOverrides]]
-name = "gtk-sys"
-version = "0.18.2"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk; no fixed gtk-sys release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0419"
+reason = "gtk3-macros: unmaintained gtk-rs GTK3 bindings, transitive Linux Tauri/Wry GTK 0.18 stack via gtk. Revisit when Tauri/Wry moves to a maintained GTK binding line."
 
-[[PackageOverrides]]
-name = "gtk3-macros"
-version = "0.18.2"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive Linux Tauri/Wry GTK 0.18 stack via gtk; no fixed gtk3-macros release is available. Revisit when Tauri/Wry moves to a maintained GTK binding line."
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0420"
+reason = "gtk-sys: unmaintained gtk-rs GTK3 bindings, transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk. Revisit when Tauri/Wry moves to a maintained GTK binding line."
 
-[[PackageOverrides]]
-name = "proc-macro-error"
-version = "1.0.4"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive through glib-macros/gtk3-macros in Tauri's Linux GTK stack; no direct manifest upgrade removes it while Tauri/Wry stays on gtk-rs 0.18."
+# Alias of RUSTSEC-2024-0429; the scanner groups the pair under this id.
+[[IgnoredVulns]]
+id = "GHSA-wrw7-89jp-8q8g"
+reason = "glib 0.18 VariantStrIter unsoundness. glib 0.20 cannot be forced independently because gtk 0.18 depends on the 0.18 binding line; revisit when Tauri/Wry upgrades the GTK stack."
 
-[[PackageOverrides]]
-name = "unic-char-property"
-version = "0.9.0"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive through Tauri's urlpattern 0.3.0 dependency; no fixed unic/urlpattern upgrade is available from current Tauri manifests."
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+reason = "proc-macro-error is unmaintained; transitive through glib-macros/gtk3-macros in Tauri's Linux GTK stack. No direct manifest upgrade removes it while Tauri/Wry stays on gtk-rs 0.18."
 
-[[PackageOverrides]]
-name = "unic-char-range"
-version = "0.9.0"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive through Tauri's urlpattern 0.3.0 dependency; no fixed unic/urlpattern upgrade is available from current Tauri manifests."
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0173"
+reason = "proc-macro-error2 is unmaintained; build-time proc-macro pulled in through sea-orm-macros' sea-bae dependency. No fixed version exists; revisit when sea-orm drops sea-bae."
 
-[[PackageOverrides]]
-name = "unic-common"
-version = "0.9.0"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive through Tauri's urlpattern 0.3.0 dependency; no fixed unic/urlpattern upgrade is available from current Tauri manifests."
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0075"
+reason = "unic-char-range is unmaintained; transitive through Tauri's urlpattern 0.3.0 dependency. No fixed unic/urlpattern upgrade is available from current Tauri manifests."
 
-[[PackageOverrides]]
-name = "unic-ucd-ident"
-version = "0.9.0"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive through Tauri's urlpattern 0.3.0 dependency; no fixed unic/urlpattern upgrade is available from current Tauri manifests."
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0080"
+reason = "unic-common is unmaintained; transitive through Tauri's urlpattern 0.3.0 dependency. No fixed unic/urlpattern upgrade is available from current Tauri manifests."
 
-[[PackageOverrides]]
-name = "unic-ucd-version"
-version = "0.9.0"
-ecosystem = "crates.io"
-vulnerability.ignore = true
-reason = "Transitive through Tauri's urlpattern 0.3.0 dependency; no fixed unic/urlpattern upgrade is available from current Tauri manifests."
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0081"
+reason = "unic-char-property is unmaintained; transitive through Tauri's urlpattern 0.3.0 dependency. No fixed unic/urlpattern upgrade is available from current Tauri manifests."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0098"
+reason = "unic-ucd-version is unmaintained; transitive through Tauri's urlpattern 0.3.0 dependency. No fixed unic/urlpattern upgrade is available from current Tauri manifests."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0100"
+reason = "unic-ucd-ident is unmaintained; transitive through Tauri's urlpattern 0.3.0 dependency. No fixed unic/urlpattern upgrade is available from current Tauri manifests."

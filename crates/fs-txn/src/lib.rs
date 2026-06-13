@@ -26,6 +26,9 @@ use std::{io, path::PathBuf};
 use tokio::io::AsyncWriteExt;
 use tracing::warn;
 
+#[cfg(unix)]
+const PRIVATE_FILE_MODE: u32 = 0o600;
+
 /// A set of files created as a unit. Dropping it without calling
 /// [`commit`](Self::commit) removes every file it created, on a best-effort
 /// basis.
@@ -55,8 +58,14 @@ impl FsTransaction {
             .create_new(true)
             .open(&path)
             .await?;
-        // Own it from here: record before writing so a partial write rolls back.
+        // Own it from here: record before chmod/write so any partial setup rolls back.
         self.paths.push(path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+                .await?;
+        }
         file.write_all(data).await?;
         file.flush().await
     }
@@ -129,5 +138,20 @@ mod tests {
         drop(txn);
         assert!(path.exists());
         assert_eq!(std::fs::read(&path).unwrap(), b"pre-existing");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_new_sets_private_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.bin");
+
+        let mut txn = FsTransaction::new();
+        txn.write_new(&path, b"hello").await.unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, PRIVATE_FILE_MODE);
     }
 }

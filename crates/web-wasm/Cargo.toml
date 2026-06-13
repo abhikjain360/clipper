@@ -15,3 +15,4 @@ wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 console_error_panic_hook = "0.1.7"
 js-sys = "0.3.99"
+zeroize.workspace = true

@@ -1,6 +1,7 @@
 export type Env = Readonly<Record<string, string>>;
 
 const textDecoder = new TextDecoder();
+const textEncoder = new TextEncoder();
 
 export function nonEmpty(value: string | undefined): string | undefined {
   return value === undefined || value.length === 0 ? undefined : value;
@@ -140,16 +141,25 @@ export async function runCommand(
   options: {
     readonly cwd?: string;
     readonly env?: Record<string, string>;
+    readonly stdin?: string;
   } = {},
 ): Promise<void> {
-  const status = await new Deno.Command(command, {
+  const child = new Deno.Command(command, {
     args: [...args],
     cwd: options.cwd,
     env: options.env,
-    stdin: "inherit",
+    stdin: options.stdin === undefined ? "inherit" : "piped",
     stdout: "inherit",
     stderr: "inherit",
-  }).spawn().status;
+  }).spawn();
+
+  if (options.stdin !== undefined) {
+    const writer = child.stdin.getWriter();
+    await writer.write(textEncoder.encode(options.stdin));
+    await writer.close();
+  }
+
+  const status = await child.status;
 
   if (!status.success) {
     throw new Error(`${command} failed with exit code ${status.code}`);

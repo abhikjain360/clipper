@@ -26,6 +26,11 @@ use crate::{
 
 const WS_TICKET_PROTOCOL: &str = "clipper-ticket";
 
+/// Clients only ever send a small JSON hello and control frames, so cap
+/// inbound messages well below the transport default to bound per-connection
+/// memory.
+const WS_MAX_MESSAGE_BYTES: usize = 64 * 1024;
+
 /// A broadcast message sent to all connected WebSocket clients.
 #[derive(Clone, Debug)]
 pub struct WsBroadcast {
@@ -43,7 +48,9 @@ pub async fn ws_handler(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, auth))
+    ws.max_message_size(WS_MAX_MESSAGE_BYTES)
+        .max_frame_size(WS_MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_socket(socket, state, auth))
 }
 
 pub async fn mint_ws_ticket(
@@ -92,6 +99,8 @@ pub async fn ws_ticket_handler(
     })?;
     Ok(ws
         .protocols([WS_TICKET_PROTOCOL])
+        .max_message_size(WS_MAX_MESSAGE_BYTES)
+        .max_frame_size(WS_MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| handle_socket(socket, state, auth)))
 }
 

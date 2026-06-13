@@ -213,6 +213,7 @@ async fn run() -> DaemonResult<()> {
 
     // Check for existing daemon
     if sock_path.exists() {
+        ipc_path::validate_socket_file(&sock_path)?;
         match tokio::net::UnixStream::connect(&sock_path).await {
             Ok(_) => {
                 info!("Daemon already running (socket at {})", sock_path.display());

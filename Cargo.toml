@@ -61,4 +61,4 @@ uuid = "1.23.2"
 wasm-bindgen = "0.2.122"
 wasm-bindgen-futures = "0.4.72"
 wl-clipboard-rs = "0.9.3"
-zeroize = { version = "1.8.2", features = ["derive"] }
+zeroize = { version = "1.8.2", features = ["derive", "serde"] }

@@ -325,12 +325,19 @@ impl AppState {
         let mut tickets = self.inner.ws_tickets.lock().expect("lock poisoned");
         tickets.retain(|_, ticket| ticket.expires_at > now);
 
+        let user_id = auth.user_id;
         // All tickets share a fixed TTL, so the smallest `expires_at` is the
-        // oldest ticket. Evict oldest-first so a burst of new tickets does not
-        // displace ones that are about to be consumed.
-        while tickets.len() >= self.config().auth.max_pending_ws_tickets {
+        // oldest ticket. Evict oldest-first within this user so a burst from
+        // one account does not displace another user's ticket.
+        while tickets
+            .values()
+            .filter(|ticket| ticket.auth.user_id == user_id)
+            .count()
+            >= self.config().auth.max_pending_ws_tickets
+        {
             let Some(oldest) = tickets
                 .iter()
+                .filter(|(_, ticket)| ticket.auth.user_id == user_id)
                 .min_by_key(|(_, ticket)| ticket.expires_at)
                 .map(|(hash, _)| hash.clone())
             else {
@@ -490,9 +497,10 @@ mod tests {
     #[tokio::test]
     async fn ws_tickets_evict_oldest_first_at_capacity() {
         let state = test_state_with_ws_ticket_cap(2).await;
+        let user_id = Uuid::now_v7();
         let auth = || AuthInfo {
             session_id: Uuid::now_v7(),
-            user_id: Uuid::now_v7(),
+            user_id,
             device_id: Uuid::now_v7(),
         };
 
@@ -509,5 +517,25 @@ mod tests {
         assert!(state.consume_ws_ticket(&first.ticket).is_none());
         assert!(state.consume_ws_ticket(&second.ticket).is_some());
         assert!(state.consume_ws_ticket(&third.ticket).is_some());
+    }
+
+    #[tokio::test]
+    async fn ws_ticket_capacity_is_per_user() {
+        let state = test_state_with_ws_ticket_cap(1).await;
+        let user_id = Uuid::now_v7();
+        let other_user_id = Uuid::now_v7();
+        let auth = |user_id| AuthInfo {
+            session_id: Uuid::now_v7(),
+            user_id,
+            device_id: Uuid::now_v7(),
+        };
+
+        let first = state.create_ws_ticket(auth(user_id));
+        let other = state.create_ws_ticket(auth(other_user_id));
+        let second = state.create_ws_ticket(auth(user_id));
+
+        assert!(state.consume_ws_ticket(&first.ticket).is_none());
+        assert!(state.consume_ws_ticket(&other.ticket).is_some());
+        assert!(state.consume_ws_ticket(&second.ticket).is_some());
     }
 }

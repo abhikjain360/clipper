@@ -84,13 +84,14 @@ impl ServerSecrets {
 }
 
 fn load_root_from_env() -> Result<Zeroizing<[u8; SERVER_SECRET_BYTES]>, SecretLoadError> {
-    let env_value = std::env::var(ENV_SECRET).ok();
+    let env_value = std::env::var(ENV_SECRET).ok().map(Zeroizing::new);
     let file_path = std::env::var(ENV_SECRET_FILE).ok().map(PathBuf::from);
 
     let raw = match (env_value, file_path) {
         (Some(_), Some(_)) => return Err(SecretLoadError::BothEnvAndFileSet),
         (Some(v), None) => v,
         (None, Some(path)) => std::fs::read_to_string(&path)
+            .map(Zeroizing::new)
             .map_err(|source| SecretLoadError::FileRead { path, source })?,
         (None, None) => return Err(SecretLoadError::NotSet),
     };

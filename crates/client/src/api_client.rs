@@ -3,6 +3,7 @@
 use std::sync::RwLock;
 
 use clipper_core::{crypto, models::*};
+use futures_util::StreamExt;
 use reqwest::{Client, header};
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::{debug, warn};
@@ -10,6 +11,8 @@ use url::Url;
 use zeroize::Zeroizing;
 
 const POSTCARD_ERROR_PREVIEW_BYTES: usize = 64;
+const MAX_POSTCARD_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ERROR_RESPONSE_BYTES: usize = 256 * 1024;
 
 /// Clipper API client.
 pub struct ApiClient {
@@ -54,7 +57,7 @@ impl ApiClient {
 
     pub fn try_new(base_url: &str) -> Result<Self, ClientError> {
         Ok(Self {
-            http: Client::new(),
+            http: build_http_client()?,
             base_url: parse_server_url(base_url)?,
             token: RwLock::new(None),
         })
@@ -149,7 +152,7 @@ impl ApiClient {
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let bytes = resp.bytes().await?;
+        let bytes = read_response_body_limited(resp, MAX_POSTCARD_RESPONSE_BYTES).await?;
 
         if !is_postcard_content_type(content_type.as_deref()) {
             return Err(ClientError::UnexpectedResponse(format!(
@@ -508,7 +511,9 @@ impl ApiClient {
         &self,
         object_id: &str,
         payload_id: &str,
+        expected_ciphertext_size: i64,
     ) -> Result<Vec<u8>, ClientError> {
+        let expected_ciphertext_size = expected_body_size(expected_ciphertext_size)?;
         let url = self.api_url(&["objects", object_id, "payloads", payload_id])?;
         let resp = self
             .http
@@ -517,7 +522,18 @@ impl ApiClient {
             .send()
             .await?;
 
-        Ok(Self::checked_response(resp).await?.bytes().await?.to_vec())
+        let resp = Self::checked_response(resp).await?;
+        let url = resp.url().clone();
+        let bytes = read_response_body_limited(resp, expected_ciphertext_size).await?;
+        if bytes.len() != expected_ciphertext_size {
+            return Err(ClientError::UnexpectedResponse(format!(
+                "payload response from {} had {} bytes, expected {}",
+                url,
+                bytes.len(),
+                expected_ciphertext_size,
+            )));
+        }
+        Ok(bytes)
     }
 
     pub async fn delete_object(
@@ -534,6 +550,27 @@ impl ApiClient {
 
         Self::postcard_response(resp).await
     }
+}
+
+/// Native builds get explicit transport limits: a hostile or wedged server
+/// must not be able to hold a request open forever, and redirects are
+/// disabled so API requests only ever go to the configured host. The wasm
+/// builder does not expose these knobs; the browser enforces its own
+/// fetch/redirect policy there.
+#[cfg(not(target_family = "wasm"))]
+fn build_http_client() -> Result<Client, ClientError> {
+    Ok(Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // Per-read-chunk timeout rather than a whole-request deadline, so
+        // large payload downloads stay viable on slow links.
+        .read_timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?)
+}
+
+#[cfg(target_family = "wasm")]
+fn build_http_client() -> Result<Client, ClientError> {
+    Ok(Client::new())
 }
 
 fn parse_server_url(base_url: &str) -> Result<Url, ClientError> {
@@ -612,7 +649,9 @@ async fn api_error_from_response(resp: reqwest::Response) -> ClientError {
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let bytes = resp.bytes().await.unwrap_or_default();
+    let bytes = read_response_body_limited(resp, MAX_ERROR_RESPONSE_BYTES)
+        .await
+        .unwrap_or_default();
     let error = if is_json_content_type(content_type.as_deref()) {
         serde_json::from_slice::<ErrorResponse>(&bytes).unwrap_or_else(|_| {
             ErrorResponse::new(
@@ -628,6 +667,41 @@ async fn api_error_from_response(resp: reqwest::Response) -> ClientError {
     };
 
     ClientError::Api { status, error }
+}
+
+async fn read_response_body_limited(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ClientError> {
+    let url = resp.url().clone();
+    if let Some(content_length) = resp.content_length()
+        && content_length > max_bytes as u64
+    {
+        return Err(ClientError::UnexpectedResponse(format!(
+            "response from {} declared {} bytes, limit is {}",
+            url, content_length, max_bytes,
+        )));
+    }
+
+    let mut body = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(ClientError::UnexpectedResponse(format!(
+                "response from {} exceeded {} bytes",
+                url, max_bytes,
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn expected_body_size(value: i64) -> Result<usize, ClientError> {
+    usize::try_from(value).map_err(|_| {
+        ClientError::UnexpectedResponse(format!("invalid expected payload size: {value}"))
+    })
 }
 
 fn is_json_content_type(value: Option<&str>) -> bool {

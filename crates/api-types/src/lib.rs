@@ -20,6 +20,10 @@ pub const DEVICE_LOGIN_PROOF_CHALLENGE_BYTES: usize = 32;
 pub const DEVICE_LOGIN_PROOF_SIGNATURE_BYTES: usize = 64;
 pub const DEVICE_LOGIN_PROOF_VERSION: u64 = 1;
 pub const OBJECT_ENVELOPE_SIGNATURE_BYTES: usize = 64;
+/// Maximum payload entries one object may declare. Clients currently send
+/// exactly one; the cap bounds the batched insert a single init request can
+/// force under the server's write lock.
+pub const MAX_OBJECT_PAYLOAD_ENTRIES: usize = 16;
 
 // OWASP's practical Argon2id floor is 19 MiB, 2 iterations, 1 lane. The
 // ceilings keep server-side configurable hashing from becoming an OOM footgun.
@@ -353,7 +357,11 @@ pub struct ObjectEnvelopeBodyV1 {
     pub meta_nonce: Vec<u8>,
     #[garde(length(equal = SHA256_BYTES))]
     pub sha256_meta_ciphertext: Vec<u8>,
-    #[garde(dive, length(min = 1), custom(validate_unique_envelope_payload_ids))]
+    #[garde(
+        dive,
+        length(min = 1, max = MAX_OBJECT_PAYLOAD_ENTRIES),
+        custom(validate_unique_envelope_payload_ids)
+    )]
     pub payloads: Vec<ObjectEnvelopePayloadV1>,
 }
 
@@ -392,7 +400,11 @@ pub struct ObjectInitRequest {
     pub meta_nonce: Vec<u8>,
     #[garde(skip)]
     pub meta_ciphertext: Vec<u8>,
-    #[garde(dive, length(min = 1), custom(validate_unique_init_payload_ids))]
+    #[garde(
+        dive,
+        length(min = 1, max = MAX_OBJECT_PAYLOAD_ENTRIES),
+        custom(validate_unique_init_payload_ids)
+    )]
     pub payloads: Vec<ObjectPayloadInit>,
     #[garde(dive)]
     pub envelope: ObjectEnvelopeV1,
@@ -427,7 +439,11 @@ pub struct ObjectPayloadComplete {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct ObjectCompleteRequest {
-    #[garde(dive, length(min = 1), custom(validate_unique_complete_payload_ids))]
+    #[garde(
+        dive,
+        length(min = 1, max = MAX_OBJECT_PAYLOAD_ENTRIES),
+        custom(validate_unique_complete_payload_ids)
+    )]
     pub payloads: Vec<ObjectPayloadComplete>,
 }
 

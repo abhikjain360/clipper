@@ -6,6 +6,7 @@ use clipper_client::{
     engine::{SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
 };
 use tokio::runtime::{Builder, Runtime};
+use zeroize::Zeroizing;
 
 uniffi::setup_scaffolding!();
 clipper_app_types::uniffi_reexport_scaffolding!();
@@ -24,6 +25,8 @@ pub enum MobileError {
     },
     #[error("runtime error: {0}")]
     Runtime(String),
+    #[error("mobile data directory is unavailable")]
+    DataDirUnavailable,
 }
 
 impl From<ClientError> for MobileError {
@@ -55,13 +58,13 @@ impl MobileClipperClient {
             .build()
             .map_err(|error| MobileError::Runtime(error.to_string()))?;
         let base_url = non_empty_or_default(&base_url, DEFAULT_BASE_URL).to_string();
-        let data_dir = non_empty_or_default(&data_dir, "clipper-mobile").to_string();
+        let data_dir = resolve_data_dir(non_empty_or_default(&data_dir, "clipper-mobile"))?;
         let default_device_name =
             non_empty_or_default(&default_device_name, "Mobile-Clipper").to_string();
         let platform = non_empty_or_default(&platform, "mobile").to_string();
 
         Ok(Arc::new(Self {
-            engine: SyncEngine::try_new_with_data_dir(&base_url, PathBuf::from(data_dir))?,
+            engine: SyncEngine::try_new_with_data_dir(&base_url, data_dir)?,
             runtime,
             default_device_name,
             platform,
@@ -91,6 +94,7 @@ impl MobileClipperClient {
         device_name: String,
         server_url: String,
     ) -> Result<(), MobileError> {
+        let passphrase = Zeroizing::new(passphrase);
         self.ensure_requested_base_url(&server_url)?;
         let device_name = self.device_name(device_name);
         self.block_on({
@@ -112,6 +116,8 @@ impl MobileClipperClient {
         device_name: String,
         server_url: String,
     ) -> Result<String, MobileError> {
+        let access_key = Zeroizing::new(access_key);
+        let passphrase = Zeroizing::new(passphrase);
         self.ensure_requested_base_url(&server_url)?;
         let device_name = self.device_name(device_name);
         self.block_on({
@@ -249,6 +255,16 @@ fn non_empty_or_default<'a>(value: &'a str, default: &'a str) -> &'a str {
     }
 }
 
+fn resolve_data_dir(value: &str) -> Result<PathBuf, MobileError> {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        return Ok(path);
+    }
+
+    let base = dirs::data_dir().ok_or(MobileError::DataDirUnavailable)?;
+    Ok(base.join(path))
+}
+
 fn normalize_server_url(url: &str) -> &str {
     url.trim().trim_end_matches('/')
 }
@@ -288,6 +304,13 @@ mod tests {
 
         assert_eq!(client.default_device_name, "Mobile-Clipper");
         assert_eq!(client.platform, "mobile");
+    }
+
+    #[test]
+    fn relative_data_dir_resolves_under_platform_data_dir() {
+        let path = resolve_data_dir("clipper-mobile").unwrap();
+        assert!(path.is_absolute());
+        assert!(path.ends_with("clipper-mobile"));
     }
 
     #[test]

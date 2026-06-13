@@ -10,6 +10,7 @@ use tauri::{Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tracing_subscriber::EnvFilter;
+use zeroize::Zeroizing;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 
@@ -151,6 +152,7 @@ async fn login(
     device_name: String,
     server_url: String,
 ) -> CommandResult<()> {
+    let passphrase = Zeroizing::new(passphrase);
     let engine = engine(&backend);
     ensure_requested_base_url(&engine, &server_url)?;
     engine
@@ -173,6 +175,8 @@ async fn register(
     device_name: String,
     server_url: String,
 ) -> CommandResult<String> {
+    let access_key = Zeroizing::new(access_key);
+    let passphrase = Zeroizing::new(passphrase);
     let engine = engine(&backend);
     ensure_requested_base_url(&engine, &server_url)?;
     Ok(engine

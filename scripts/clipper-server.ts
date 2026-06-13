@@ -90,10 +90,9 @@ async function main(): Promise<void> {
       "add-access-key",
       "--data-dir",
       dataDir,
-      "--access-key",
-      accessKey,
+      "--access-key-stdin",
     ],
-    { cwd: repoRoot, env },
+    { cwd: repoRoot, env, stdin: `${accessKey}\n` },
   );
 
   console.log(`\nAccess key:\n${accessKey}\n`);
