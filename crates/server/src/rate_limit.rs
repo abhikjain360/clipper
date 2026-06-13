@@ -1,5 +1,5 @@
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     num::NonZeroU32,
     sync::Arc,
 };
@@ -10,57 +10,162 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use clipper_core::models::ApiErrorCode;
+use clipper_core::{crypto::sha256, models::ApiErrorCode};
 use governor::{DefaultDirectRateLimiter, DefaultKeyedRateLimiter, Quota, RateLimiter as Governor};
 use ipnet::IpNet;
+use uuid::Uuid;
 
 const X_FORWARDED_FOR: &str = "x-forwarded-for";
 const X_REAL_IP: &str = "x-real-ip";
 
+/// A /64 is the smallest IPv6 allocation a client realistically controls;
+/// keying buckets any finer hands an attacker unlimited fresh keys.
+const IPV6_CLIENT_PREFIX_MASK: u128 = !0 << 64;
+
 use crate::{
+    auth::AuthInfo,
     config::RateLimitConfig,
     routes::{ApiError, error_response},
+    state::AppState,
 };
 
 pub struct RateLimiter {
-    auth_by_ip: DefaultKeyedRateLimiter<IpAddr>,
+    auth_by_client: DefaultKeyedRateLimiter<IpAddr>,
+    auth_by_username: DefaultKeyedRateLimiter<[u8; 16]>,
     auth_global: DefaultDirectRateLimiter,
+    api_by_client: DefaultKeyedRateLimiter<IpAddr>,
+    api_by_user: DefaultKeyedRateLimiter<Uuid>,
+    ws_tickets_by_user: DefaultKeyedRateLimiter<Uuid>,
 }
 
 impl RateLimiter {
     pub fn new(config: &RateLimitConfig) -> Self {
         Self {
-            auth_by_ip: Governor::keyed(per_minute_quota(config.auth_per_client_per_minute)),
+            auth_by_client: Governor::keyed(per_minute_quota(config.auth_per_client_per_minute)),
+            auth_by_username: Governor::keyed(per_minute_quota(
+                config.auth_per_username_per_minute,
+            )),
             auth_global: Governor::direct(per_minute_quota(config.auth_global_per_minute)),
+            api_by_client: Governor::keyed(per_minute_quota(config.api_per_client_per_minute)),
+            api_by_user: Governor::keyed(per_minute_quota(config.api_per_user_per_minute)),
+            ws_tickets_by_user: Governor::keyed(per_minute_quota(
+                config.ws_tickets_per_user_per_minute,
+            )),
         }
     }
 
     /// Returns true if the auth request is allowed, false if rate-limited.
-    pub fn check(&self, ip: IpAddr) -> bool {
-        self.auth_by_ip.check_key(&ip).is_ok() && self.auth_global.check().is_ok()
+    /// The per-client check runs first so blocked clients cannot drain the
+    /// global bucket, which is a capacity ceiling rather than the primary
+    /// limit.
+    pub fn check_auth(&self, ip: IpAddr) -> bool {
+        self.auth_by_client.check_key(&client_key(ip)).is_ok() && self.auth_global.check().is_ok()
     }
 
-    /// Prune stale per-client limiter state. Call periodically.
+    /// Returns true if an OPAQUE challenge for this username is allowed.
+    /// Backstops distributed password guessing that rotates client addresses,
+    /// which the per-client bucket cannot see.
+    pub fn check_auth_username(&self, username: &str) -> bool {
+        self.auth_by_username
+            .check_key(&username_key(username))
+            .is_ok()
+    }
+
+    /// Returns true if a request to the authenticated API surface is allowed
+    /// for this client address. Runs before token validation, so it bounds
+    /// the database cost of invalid-token floods.
+    pub fn check_api(&self, ip: IpAddr) -> bool {
+        self.api_by_client.check_key(&client_key(ip)).is_ok()
+    }
+
+    /// Returns true if an authenticated request is allowed for this user.
+    pub fn check_api_user(&self, user_id: Uuid) -> bool {
+        self.api_by_user.check_key(&user_id).is_ok()
+    }
+
+    /// Returns true if this user may mint another WebSocket ticket.
+    pub fn check_ws_ticket_user(&self, user_id: Uuid) -> bool {
+        self.ws_tickets_by_user.check_key(&user_id).is_ok()
+    }
+
+    /// Prune stale per-key limiter state. Call periodically.
     pub fn prune(&self) {
-        self.auth_by_ip.retain_recent();
-        self.auth_by_ip.shrink_to_fit();
+        self.auth_by_client.retain_recent();
+        self.auth_by_client.shrink_to_fit();
+        self.auth_by_username.retain_recent();
+        self.auth_by_username.shrink_to_fit();
+        self.api_by_client.retain_recent();
+        self.api_by_client.shrink_to_fit();
+        self.api_by_user.retain_recent();
+        self.api_by_user.shrink_to_fit();
+        self.ws_tickets_by_user.retain_recent();
+        self.ws_tickets_by_user.shrink_to_fit();
     }
 }
 
+pub(crate) fn rate_limited_error() -> ApiError {
+    ApiError::from_code_with_message(ApiErrorCode::RateLimited, "Too many requests")
+}
+
+fn client_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & IPV6_CLIENT_PREFIX_MASK)),
+    }
+}
+
+/// Usernames are attacker-controlled input; hashing them bounds key size and
+/// keeps submitted usernames out of long-lived limiter state.
+fn username_key(username: &str) -> [u8; 16] {
+    let digest = sha256(username.as_bytes());
+    let mut key = [0u8; 16];
+    key.copy_from_slice(&digest[..16]);
+    key
+}
+
 pub async fn auth_rate_limit_middleware(
-    State(limiter): State<Arc<RateLimiter>>,
+    State(state): State<AppState>,
     ClientIp(ip): ClientIp,
     mut req: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    if !limiter.check(ip) {
-        return Err(ApiError::from_code_with_message(
-            ApiErrorCode::RateLimited,
-            "Too many requests",
-        ));
+    if !state.rate_limiter().check_auth(ip) {
+        return Err(rate_limited_error());
     }
 
     req.extensions_mut().insert(ClientIp(ip));
+    Ok(next.run(req).await)
+}
+
+pub async fn api_rate_limit_middleware(
+    State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
+    mut req: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    if !state.rate_limiter().check_api(ip) {
+        return Err(rate_limited_error());
+    }
+
+    req.extensions_mut().insert(ClientIp(ip));
+    Ok(next.run(req).await)
+}
+
+/// Per-user limit for the authenticated API surface. Must be layered inside
+/// `auth_middleware` so `AuthInfo` is already in the request extensions.
+pub async fn user_rate_limit_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let auth = req
+        .extensions()
+        .get::<AuthInfo>()
+        .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server error"))?;
+    if !state.rate_limiter().check_api_user(auth.user_id) {
+        return Err(rate_limited_error());
+    }
+
     Ok(next.run(req).await)
 }
 
@@ -258,10 +363,81 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
         for _ in 0..config.rate_limit.auth_per_client_per_minute {
-            assert!(limiter.check(ip));
+            assert!(limiter.check_auth(ip));
         }
 
-        assert!(!limiter.check(ip));
+        assert!(!limiter.check_auth(ip));
+    }
+
+    #[test]
+    fn ipv6_clients_share_one_auth_bucket_per_64_prefix() {
+        let config = ServerConfig::default();
+        let limiter = RateLimiter::new(&config.rate_limit);
+        let first: IpAddr = "2001:db8:1:1::1".parse().expect("ipv6");
+        let same_prefix: IpAddr = "2001:db8:1:1:ffff::2".parse().expect("ipv6");
+        let other_prefix: IpAddr = "2001:db8:1:2::1".parse().expect("ipv6");
+
+        for _ in 0..config.rate_limit.auth_per_client_per_minute {
+            assert!(limiter.check_auth(first));
+        }
+
+        assert!(!limiter.check_auth(same_prefix));
+        assert!(limiter.check_auth(other_prefix));
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_shares_the_ipv4_bucket() {
+        let config = ServerConfig::default();
+        let limiter = RateLimiter::new(&config.rate_limit);
+        let v4 = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let mapped: IpAddr = "::ffff:127.0.0.1".parse().expect("mapped ipv6");
+
+        for _ in 0..config.rate_limit.auth_per_client_per_minute {
+            assert!(limiter.check_auth(v4));
+        }
+
+        assert!(!limiter.check_auth(mapped));
+    }
+
+    #[test]
+    fn username_limiter_is_keyed_by_username() {
+        let config = ServerConfig::default();
+        let limiter = RateLimiter::new(&config.rate_limit);
+
+        for _ in 0..config.rate_limit.auth_per_username_per_minute {
+            assert!(limiter.check_auth_username("alice"));
+        }
+
+        assert!(!limiter.check_auth_username("alice"));
+        assert!(limiter.check_auth_username("bob"));
+    }
+
+    #[test]
+    fn api_user_limiter_is_keyed_by_user_id() {
+        let config = ServerConfig::default();
+        let limiter = RateLimiter::new(&config.rate_limit);
+        let user = uuid::Uuid::now_v7();
+        let other_user = uuid::Uuid::now_v7();
+
+        for _ in 0..config.rate_limit.api_per_user_per_minute {
+            assert!(limiter.check_api_user(user));
+        }
+
+        assert!(!limiter.check_api_user(user));
+        assert!(limiter.check_api_user(other_user));
+    }
+
+    #[test]
+    fn ws_ticket_limiter_blocks_after_per_user_quota() {
+        let config = ServerConfig::default();
+        let limiter = RateLimiter::new(&config.rate_limit);
+        let user = uuid::Uuid::now_v7();
+
+        for _ in 0..config.rate_limit.ws_tickets_per_user_per_minute {
+            assert!(limiter.check_ws_ticket_user(user));
+        }
+
+        assert!(!limiter.check_ws_ticket_user(user));
     }
 
     #[test]

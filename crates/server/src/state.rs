@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::AuthInfo, config::ServerConfig, entity::event_log, error::ServerResult, migration,
-    secret::ServerSecrets, ws::WsBroadcast,
+    rate_limit::RateLimiter, secret::ServerSecrets, ws::WsBroadcast,
 };
 
 const WS_TICKET_BYTES: usize = 32;
@@ -35,6 +35,7 @@ pub struct AppStateInner {
     pub data_dir: PathBuf,
     pub config: ServerConfig,
     pub secrets: Arc<ServerSecrets>,
+    rate_limiter: RateLimiter,
     ws_channels: std::sync::Mutex<HashMap<Uuid, broadcast::Sender<WsBroadcast>>>,
     auth_challenges: std::sync::Mutex<HashMap<String, AuthChallenge>>,
     pending_registrations: std::sync::Mutex<HashMap<String, PendingRegistration>>,
@@ -134,12 +135,14 @@ impl AppState {
 
     fn new(db: DatabaseConnection, config: ServerConfig, secrets: ServerSecrets) -> Self {
         let data_dir = config.server.data_dir.clone();
+        let rate_limiter = RateLimiter::new(&config.rate_limit);
         Self {
             inner: Arc::new(AppStateInner {
                 db,
                 data_dir,
                 config,
                 secrets: Arc::new(secrets),
+                rate_limiter,
                 ws_channels: std::sync::Mutex::new(HashMap::new()),
                 auth_challenges: std::sync::Mutex::new(HashMap::new()),
                 pending_registrations: std::sync::Mutex::new(HashMap::new()),
@@ -185,6 +188,10 @@ impl AppState {
 
     pub fn secrets(&self) -> &ServerSecrets {
         &self.inner.secrets
+    }
+
+    pub fn rate_limiter(&self) -> &RateLimiter {
+        &self.inner.rate_limiter
     }
 
     pub fn objects_dir(&self) -> PathBuf {

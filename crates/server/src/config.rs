@@ -23,7 +23,11 @@ const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
     },
     rate_limit: RateLimitConfig {
         auth_per_client_per_minute: 10,
-        auth_global_per_minute: 600,
+        auth_per_username_per_minute: 30,
+        auth_global_per_minute: 3000,
+        api_per_client_per_minute: 2400,
+        api_per_user_per_minute: 1200,
+        ws_tickets_per_user_per_minute: 30,
         prune_interval_secs: 60,
     },
     auth: AuthConfig {
@@ -178,10 +182,22 @@ impl ServerSection {
 
 #[derive(Debug, Clone, Validate)]
 pub struct RateLimitConfig {
+    /// Per client key: an IPv4 address or an IPv6 /64 prefix.
     #[garde(range(min = 1))]
     pub auth_per_client_per_minute: u32,
+    /// Per submitted username on the OPAQUE challenge route.
+    #[garde(range(min = 1))]
+    pub auth_per_username_per_minute: u32,
+    /// Capacity ceiling sized to sustainable OPAQUE/Argon2 work, not the
+    /// primary limit; the per-client and per-username buckets are.
     #[garde(range(min = 1))]
     pub auth_global_per_minute: u32,
+    #[garde(range(min = 1))]
+    pub api_per_client_per_minute: u32,
+    #[garde(range(min = 1))]
+    pub api_per_user_per_minute: u32,
+    #[garde(range(min = 1))]
+    pub ws_tickets_per_user_per_minute: u32,
     #[garde(range(min = 1))]
     pub prune_interval_secs: u64,
 }
@@ -193,7 +209,11 @@ impl RateLimitConfig {
             overrides,
             [
                 auth_per_client_per_minute,
+                auth_per_username_per_minute,
                 auth_global_per_minute,
+                api_per_client_per_minute,
+                api_per_user_per_minute,
+                ws_tickets_per_user_per_minute,
                 prune_interval_secs
             ]
         );
@@ -402,13 +422,25 @@ pub struct ServerSectionOverrides {
 #[derive(Args, Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RateLimitConfigOverrides {
-    /// Auth requests allowed per resolved client IP per minute.
+    /// Auth requests allowed per resolved client (IPv4 address or IPv6 /64) per minute.
     #[arg(long = "auth-rate-limit-per-client-per-minute")]
     pub auth_per_client_per_minute: Option<u32>,
-    /// Auth requests allowed globally per minute.
+    /// OPAQUE challenges allowed per submitted username per minute.
+    #[arg(long = "auth-rate-limit-per-username-per-minute")]
+    pub auth_per_username_per_minute: Option<u32>,
+    /// Auth requests allowed globally per minute; a capacity ceiling above the per-client limits.
     #[arg(long = "auth-rate-limit-global-per-minute")]
     pub auth_global_per_minute: Option<u32>,
-    /// How often stale per-client auth limiter state is pruned.
+    /// Authenticated API requests allowed per resolved client per minute, checked before token validation.
+    #[arg(long = "api-rate-limit-per-client-per-minute")]
+    pub api_per_client_per_minute: Option<u32>,
+    /// Authenticated API requests allowed per user per minute.
+    #[arg(long = "api-rate-limit-per-user-per-minute")]
+    pub api_per_user_per_minute: Option<u32>,
+    /// WebSocket tickets allowed per user per minute.
+    #[arg(long = "ws-ticket-rate-limit-per-user-per-minute")]
+    pub ws_tickets_per_user_per_minute: Option<u32>,
+    /// How often stale per-key limiter state is pruned.
     #[arg(long = "rate-limit-prune-interval-secs")]
     pub prune_interval_secs: Option<u64>,
 }
@@ -628,7 +660,11 @@ mod tests {
 
                 [rate_limit]
                 auth_per_client_per_minute = 20
+                auth_per_username_per_minute = 40
                 auth_global_per_minute = 900
+                api_per_client_per_minute = 800
+                api_per_user_per_minute = 400
+                ws_tickets_per_user_per_minute = 15
                 prune_interval_secs = 30
 
                 [auth]
@@ -673,7 +709,11 @@ mod tests {
         assert_eq!(config.server.addr, "0.0.0.0:8787");
         assert_eq!(config.server.trusted_proxies.len(), 2);
         assert_eq!(config.rate_limit.auth_per_client_per_minute, 20);
+        assert_eq!(config.rate_limit.auth_per_username_per_minute, 40);
         assert_eq!(config.rate_limit.auth_global_per_minute, 900);
+        assert_eq!(config.rate_limit.api_per_client_per_minute, 800);
+        assert_eq!(config.rate_limit.api_per_user_per_minute, 400);
+        assert_eq!(config.rate_limit.ws_tickets_per_user_per_minute, 15);
         assert_eq!(config.rate_limit.prune_interval_secs, 30);
         assert_eq!(config.auth.challenge_ttl_secs, 120);
         assert_eq!(config.auth.max_pending_challenges, 128);
@@ -701,7 +741,14 @@ mod tests {
     fn validation_rejects_zero_rate_limit() {
         let mut config = ServerConfig::default();
         config.rate_limit.auth_per_client_per_minute = 0;
+        assert!(config.validate_config().is_err());
 
+        let mut config = ServerConfig::default();
+        config.rate_limit.auth_per_username_per_minute = 0;
+        assert!(config.validate_config().is_err());
+
+        let mut config = ServerConfig::default();
+        config.rate_limit.api_per_user_per_minute = 0;
         assert!(config.validate_config().is_err());
     }
 

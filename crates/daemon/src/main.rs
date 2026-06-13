@@ -25,7 +25,7 @@ mod protocol;
 use std::{
     io,
     os::fd::AsRawFd,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -48,6 +48,8 @@ use crate::{
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const PRIVATE_DIR_MODE: u32 = 0o700;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const PRIVATE_FILE_MODE: u32 = 0o600;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn app_data_dir() -> DaemonResult<PathBuf> {
     dirs::data_dir()
@@ -184,12 +186,14 @@ async fn run() -> DaemonResult<()> {
     let default_server_url = parse_args();
 
     let log_dir = log_dir();
-    std::fs::create_dir_all(&log_dir).ok();
+    ensure_private_dir(&log_dir)?;
 
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(PRIVATE_FILE_MODE)
         .open(log_dir.join("daemon.log"))?;
+    log_file.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
 
     tracing_subscriber::fmt()
         .with_env_filter(

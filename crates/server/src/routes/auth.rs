@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::{
     auth::{self as server_auth, AuthInfo},
     entity::{access_keys, devices, server_config, sessions, users},
-    rate_limit::ClientIp,
+    rate_limit::{ClientIp, rate_limited_error},
     routes::{ApiError, Postcard, error_response},
     secret_storage,
     state::AppState,
@@ -57,6 +57,13 @@ pub async fn challenge(
     State(state): State<AppState>,
     Postcard(req): Postcard<LoginChallengeRequest>,
 ) -> Result<Postcard<LoginChallengeResponse>, ApiError> {
+    // The per-client middleware cannot see the username, so the per-username
+    // budget — the backstop against distributed guessing that rotates source
+    // addresses — is enforced here, once the body is parsed.
+    if !state.rate_limiter().check_auth_username(&req.username) {
+        return Err(rate_limited_error());
+    }
+
     let db_config = load_server_config(&state).await?;
     let opaque_server_setup = unwrap_global_opaque_server_setup(&state, &db_config)?;
 
@@ -835,7 +842,7 @@ mod tests {
     use super::*;
     use crate::{
         entity::{access_keys, server_config},
-        rate_limit::{RateLimiter, auth_rate_limit_middleware},
+        rate_limit::auth_rate_limit_middleware,
     };
 
     async fn empty_state() -> (AppState, TempDir) {
@@ -945,26 +952,28 @@ mod tests {
         ClientIp(IpAddr::V4(Ipv4Addr::LOCALHOST))
     }
 
-    fn limiter() -> std::sync::Arc<RateLimiter> {
-        std::sync::Arc::new(RateLimiter::new(
-            &crate::config::ServerConfig::default().rate_limit,
-        ))
-    }
-
-    fn auth_route_app(state: AppState, limiter: std::sync::Arc<RateLimiter>) -> Router {
+    fn auth_route_app(state: AppState) -> Router {
         Router::new()
             .route("/api/auth/register/start", post(register_start))
             .route("/api/auth/register/finish", post(register_finish))
             .route("/api/auth/challenge", post(challenge))
             .route("/api/auth/login", post(login))
             .route_layer(middleware::from_fn_with_state(
-                limiter,
+                state.clone(),
                 auth_rate_limit_middleware,
             ))
             .with_state(state)
     }
 
     fn postcard_request<T: serde::Serialize>(path: &str, value: &T) -> Request<Body> {
+        postcard_request_from(path, value, IpAddr::V4(Ipv4Addr::LOCALHOST))
+    }
+
+    fn postcard_request_from<T: serde::Serialize>(
+        path: &str,
+        value: &T,
+        ip: IpAddr,
+    ) -> Request<Body> {
         let mut request = Request::post(path)
             .header(
                 header::CONTENT_TYPE,
@@ -974,10 +983,9 @@ mod tests {
                 postcard::to_allocvec(value).expect("serialize request"),
             ))
             .expect("request");
-        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            12345,
-        )));
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(ip, 12345)));
         request
     }
 
@@ -1214,7 +1222,7 @@ mod tests {
         let access_key = "invite-key-with-entropy";
         let passphrase = b"user private passphrase";
         insert_access_key(&state, access_key).await;
-        let app = auth_route_app(state, limiter());
+        let app = auth_route_app(state);
 
         let (start_req, client_state) = registration_start_request(access_key, "alice", passphrase);
         let start_response = app
@@ -1607,7 +1615,7 @@ mod tests {
     async fn login_rate_limits_by_client_ip() {
         let passphrase = b"correct horse battery staple";
         let (state, _data_dir) = test_state(passphrase).await;
-        let app = auth_route_app(state, limiter());
+        let app = auth_route_app(state);
 
         for i in 0..crate::config::ServerConfig::default()
             .rate_limit
@@ -1658,7 +1666,7 @@ mod tests {
     async fn challenge_rate_limits_opaque_password_attempts_by_client_ip() {
         let passphrase = b"correct horse battery staple";
         let (state, _data_dir) = test_state(passphrase).await;
-        let app = auth_route_app(state, limiter());
+        let app = auth_route_app(state);
 
         for _ in 0..crate::config::ServerConfig::default()
             .rate_limit
@@ -1684,6 +1692,59 @@ mod tests {
             response.expect("response").status(),
             StatusCode::TOO_MANY_REQUESTS
         );
+    }
+
+    // Distributed guessing that rotates source addresses stays under every
+    // per-client bucket; the per-username budget must still cap it.
+    #[tokio::test]
+    async fn challenge_rate_limits_by_username_across_client_ips() {
+        let passphrase = b"correct horse battery staple";
+        let (state, _data_dir) = test_state(passphrase).await;
+        let app = auth_route_app(state);
+        let quota = crate::config::ServerConfig::default()
+            .rate_limit
+            .auth_per_username_per_minute;
+
+        for i in 0..quota {
+            let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, (i + 1) as u8));
+            let (challenge_req, _client_state) =
+                challenge_request("alice", b"candidate passphrase");
+            let response = app
+                .clone()
+                .oneshot(postcard_request_from(
+                    "/api/auth/challenge",
+                    &challenge_req,
+                    ip,
+                ))
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let (challenge_req, _client_state) = challenge_request("alice", b"candidate passphrase");
+        let response = app
+            .clone()
+            .oneshot(postcard_request_from(
+                "/api/auth/challenge",
+                &challenge_req,
+                IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // A different username from a clean address is unaffected.
+        let (challenge_req, _client_state) = challenge_request("bob", b"candidate passphrase");
+        let response = app
+            .oneshot(postcard_request_from(
+                "/api/auth/challenge",
+                &challenge_req,
+                IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     // We test that registration persists wrapped — not plaintext — OPAQUE

@@ -15,7 +15,6 @@ mod ws;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use axum::{
@@ -37,7 +36,7 @@ use crate::{
     config::{ConfigOverrides, ServerConfig},
     entity::access_keys,
     error::{ServerError, ServerResult},
-    rate_limit::{RateLimiter, TrustedProxies},
+    rate_limit::TrustedProxies,
     secret::{ServerSecrets, generate_root_base64},
     state::AppState,
 };
@@ -257,7 +256,6 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
     // pepper before accepting traffic.
     _ = load_access_key_hash_salt(&state).await?;
 
-    let limiter = Arc::new(RateLimiter::new(&state.config().rate_limit));
     if !trusted_proxies.is_empty() {
         info!(
             trusted_proxy_count = trusted_proxies.len(),
@@ -294,9 +292,20 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
         )
         .route("/api/objects", get(routes::objects::list_objects))
         .route("/api/ws", get(ws::ws_handler))
+        // Layer order (outermost first): per-client limit before token
+        // validation bounds invalid-token database churn; the per-user limit
+        // needs the AuthInfo extension, so it sits inside auth.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::user_rate_limit_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::api_rate_limit_middleware,
         ));
 
     // public auth routes share the same limiter at the router layer.
@@ -312,7 +321,7 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
         .route("/api/auth/challenge", post(routes::auth::challenge))
         .route("/api/auth/login", post(routes::auth::login))
         .route_layer(middleware::from_fn_with_state(
-            limiter.clone(),
+            state.clone(),
             rate_limit::auth_rate_limit_middleware,
         ));
 
@@ -332,14 +341,14 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
 
     // rate limiter pruning
     tokio::spawn({
-        let limiter = limiter.clone();
+        let state = state.clone();
         async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(
                 rate_limit_prune_interval_secs,
             ));
             loop {
                 interval.tick().await;
-                limiter.prune();
+                state.rate_limiter().prune();
             }
         }
     });

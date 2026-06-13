@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::{
     auth::AuthInfo,
     entity::event_log,
+    rate_limit::rate_limited_error,
     routes::{Postcard, RouteResult, error_response},
     state::AppState,
 };
@@ -48,12 +49,18 @@ pub async fn ws_handler(
 pub async fn mint_ws_ticket(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
-) -> Postcard<WsTicketResponse> {
+) -> RouteResult<Postcard<WsTicketResponse>> {
+    // Tickets live in one map shared by all users, so unlimited minting would
+    // let one account evict other users' unconsumed tickets.
+    if !state.rate_limiter().check_ws_ticket_user(auth.user_id) {
+        return Err(rate_limited_error());
+    }
+
     let issued = state.create_ws_ticket(auth);
-    Postcard(WsTicketResponse {
+    Ok(Postcard(WsTicketResponse {
         ticket: issued.ticket,
         expires_at: issued.expires_at.to_rfc3339(),
-    })
+    }))
 }
 
 pub async fn ws_ticket_handler(
@@ -262,5 +269,42 @@ mod tests {
             &broadcast(user_id, other_device_id),
             device_id,
         ));
+    }
+
+    #[tokio::test]
+    async fn ws_ticket_minting_is_rate_limited_per_user() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .expect("db");
+        let state = AppState::open_with_db(db, dir.path().to_path_buf())
+            .await
+            .expect("state");
+        let auth = AuthInfo {
+            session_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            device_id: Uuid::now_v7(),
+        };
+
+        for _ in 0..state.config().rate_limit.ws_tickets_per_user_per_minute {
+            mint_ws_ticket(State(state.clone()), axum::Extension(auth.clone()))
+                .await
+                .expect("mint ticket");
+        }
+
+        let err = mint_ws_ticket(State(state.clone()), axum::Extension(auth.clone()))
+            .await
+            .expect_err("over-quota mint must be rejected");
+        assert_eq!(err.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Another user's budget is unaffected.
+        let other_auth = AuthInfo {
+            session_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            device_id: Uuid::now_v7(),
+        };
+        mint_ws_ticket(State(state), axum::Extension(other_auth))
+            .await
+            .expect("other user mints fine");
     }
 }

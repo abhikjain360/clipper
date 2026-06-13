@@ -5,7 +5,7 @@ use axum::{
     response::Response,
 };
 use base64::Engine;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use clipper_core::crypto::{self, sha256};
 use sea_orm::{ColumnTrait, DerivePartialModel, EntityTrait, QueryFilter};
 use tracing::{debug, error};
@@ -18,6 +18,10 @@ use crate::{
 };
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+/// Refresh `sessions.last_seen_at` at most this often; updating it on every
+/// request would turn each authenticated call into a SQLite write.
+const LAST_SEEN_REFRESH_SECS: i64 = 60;
 
 pub fn hash_access_key(
     access_key: &str,
@@ -40,6 +44,7 @@ struct SessionAuthRow {
     user_id: Uuid,
     device_id: Uuid,
     expires_at: String,
+    last_seen_at: String,
 }
 
 /// Extract bearer token from Authorization header.
@@ -66,7 +71,8 @@ pub async fn auth_middleware(
         })?;
 
     let token_hash = sha256(&token_bytes);
-    let now = Utc::now().to_rfc3339();
+    let now = Utc::now();
+    let now_str = now.to_rfc3339();
 
     let sess = sessions::Entity::find()
         .filter(sessions::Column::TokenHash.eq(token_hash.to_vec()))
@@ -80,19 +86,21 @@ pub async fn auth_middleware(
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unauthorized"))?;
 
     // Check expiry
-    if sess.expires_at < now {
+    if sess.expires_at < now_str {
         return Err(error_response(StatusCode::UNAUTHORIZED, "Unauthorized"));
     }
 
-    // Update last_seen_at
-    _ = sessions::Entity::update_many()
-        .col_expr(
-            sessions::Column::LastSeenAt,
-            sea_orm::sea_query::Expr::value(now),
-        )
-        .filter(sessions::Column::Id.eq(sess.id))
-        .exec(state.db())
-        .await;
+    let refresh_threshold = (now - Duration::seconds(LAST_SEEN_REFRESH_SECS)).to_rfc3339();
+    if sess.last_seen_at < refresh_threshold {
+        _ = sessions::Entity::update_many()
+            .col_expr(
+                sessions::Column::LastSeenAt,
+                sea_orm::sea_query::Expr::value(now_str),
+            )
+            .filter(sessions::Column::Id.eq(sess.id))
+            .exec(state.db())
+            .await;
+    }
 
     // Inject device_id and session_id into request extensions
     req.extensions_mut().insert(AuthInfo {
