@@ -1,9 +1,7 @@
 use chrono::{Duration, Utc};
 use futures_util::{StreamExt, stream};
-use sea_orm::{
-    ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
-};
-use tracing::info;
+use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QuerySelect, TransactionTrait};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::{
@@ -112,16 +110,36 @@ pub(crate) async fn trim_user_clipboard(
     state: &AppState,
     user_id: Uuid,
 ) -> Result<usize, sea_orm::DbErr> {
+    let now = Utc::now().to_rfc3339();
     let max_items = state.config().clipboard.max_items;
-    let excess_ids: Vec<Uuid> = objects::Entity::find()
+    // The set the read paths treat as live: non-expired clipboard objects, newest
+    // `max_items` by created_seq. Anything else that is non-expired is genuine
+    // excess and is trimmed. Ranking the keep-set over the SAME (non-expired)
+    // predicate the reads use is what fixes the eviction bug: an expired-but-
+    // unreaped item can no longer occupy a keep slot and push a still-valid item
+    // out. Expired items are left to `cleanup_expired_clipboard_objects` so this
+    // inline trim does not race the periodic expiry sweep over the same rows.
+    let retained = crate::routes::objects::retained_clipboard_object_ids_raw(
+        state.db(),
+        user_id,
+        max_items,
+        &now,
+    )
+    .await?;
+
+    let mut victim_query = objects::Entity::find()
         .filter(objects::Column::Kind.eq("clipboard"))
         .filter(objects::Column::UserId.eq(user_id))
         .filter(objects::Column::CreatedSeq.is_not_null())
-        .order_by(objects::Column::CreatedSeq, Order::Desc)
-        .order_by(objects::Column::Id, Order::Desc)
-        .offset(max_items)
-        // SQLite rejects OFFSET without LIMIT, so bound generously to "all remaining rows".
-        .limit(i64::MAX as u64)
+        .filter(
+            Condition::any()
+                .add(objects::Column::ExpiresAt.is_null())
+                .add(objects::Column::ExpiresAt.gt(&now)),
+        );
+    if !retained.is_empty() {
+        victim_query = victim_query.filter(objects::Column::Id.is_not_in(retained));
+    }
+    let excess_ids: Vec<Uuid> = victim_query
         .select_only()
         .column(objects::Column::Id)
         .into_tuple()
@@ -161,22 +179,70 @@ async fn cleanup_orphan_object_uploads(state: &AppState) -> CleanupResult<()> {
         - Duration::seconds(state.config().cleanup.orphan_upload_ttl_secs as i64))
     .to_rfc3339();
 
+    let txn = state.db().begin().await?;
+
+    // Select the orphan set inside the transaction with the SAME predicate the
+    // delete uses. An object that races to `complete` between selection and the
+    // delete is excluded by the status filter on the delete itself, so a
+    // just-completed object (and its payload files) can never be destroyed here.
     let orphan_ids: Vec<Uuid> = objects::Entity::find()
         .filter(objects::Column::Status.ne("complete"))
         .filter(objects::Column::CreatedAt.lt(&cutoff))
         .select_only()
         .column(objects::Column::Id)
         .into_tuple()
-        .all(state.db())
+        .all(&txn)
         .await?;
+    if orphan_ids.is_empty() {
+        _ = txn.rollback().await;
+        return Ok(());
+    }
 
-    let count = if orphan_ids.is_empty() {
-        0
-    } else {
-        delete_objects_and_release_usage(state, &orphan_ids).await?
-    };
-    if count > 0 {
-        info!(count, "Cleaned up orphan object uploads");
+    let payload_paths: Vec<String> = object_payloads::Entity::find()
+        .filter(object_payloads::Column::ObjectId.is_in(orphan_ids.clone()))
+        .select_only()
+        .column(object_payloads::Column::CiphertextPath)
+        .into_tuple()
+        .all(&txn)
+        .await?;
+    let usage = storage_quota::object_usage_by_user(&txn, &orphan_ids).await?;
+    let expected_objects = usage.iter().try_fold(0_i64, |total, usage| {
+        total
+            .checked_add(usage.object_count)
+            .ok_or_else(|| sea_orm::DbErr::Custom("orphan cleanup count overflow".into()))
+    })?;
+
+    let res = objects::Entity::delete_many()
+        .filter(objects::Column::Id.is_in(orphan_ids))
+        .filter(objects::Column::Status.ne("complete"))
+        .filter(objects::Column::CreatedAt.lt(&cutoff))
+        .exec(&txn)
+        .await?;
+    if res.rows_affected as i64 != expected_objects {
+        // A pending upload completed concurrently, so the usage we counted no
+        // longer matches the rows the status-filtered delete actually removed.
+        // Roll back and retry on the next sweep rather than mis-accounting a
+        // user's storage quota (the just-completed object is preserved either way).
+        _ = txn.rollback().await;
+        debug!(
+            deleted = res.rows_affected,
+            expected = expected_objects,
+            "Orphan cleanup raced a completion; retrying on the next sweep",
+        );
+        return Ok(());
+    }
+
+    for usage in usage {
+        storage_quota::release_user_storage(&txn, usage).await?;
+    }
+    txn.commit().await?;
+
+    remove_payload_files(state, payload_paths).await;
+    if res.rows_affected > 0 {
+        info!(
+            count = res.rows_affected,
+            "Cleaned up orphan object uploads"
+        );
     }
 
     Ok(())

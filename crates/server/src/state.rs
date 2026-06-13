@@ -42,6 +42,10 @@ pub struct AppStateInner {
     ws_tickets: std::sync::Mutex<HashMap<Vec<u8>, WsTicket>>,
     /// High-water mark for the application-assigned `event_log.seq` clock.
     event_seq: AtomicI64,
+    /// Bounds concurrent memory-hard Argon2 access-key hashing. Each hash holds
+    /// ~19 MiB, so an unbounded burst of registration attempts could exhaust
+    /// memory; this caps the peak regardless of how many requests arrive.
+    argon2_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 pub struct AuthChallenge {
@@ -73,9 +77,32 @@ pub struct IssuedWsTicket {
 impl AppState {
     pub(crate) async fn open(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<Self> {
         let data_dir = config.server.data_dir.clone();
-        tokio::fs::create_dir_all(&data_dir).await?;
+        Self::ensure_private_dir(&data_dir).await?;
         let db = Self::connect_db(&data_dir).await?;
         Self::open_with_db_and_config(db, config, secrets).await
+    }
+
+    /// Create a directory owner-only (0700 on Unix). The server data dir and its
+    /// objects subdir hold the SQLite database and all ciphertext payloads, so
+    /// they must not be group/world readable.
+    async fn ensure_private_dir(path: &Path) -> ServerResult<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path)
+                .await?;
+            // Tighten a directory that predates this enforcement (DirBuilder only
+            // sets the mode on dirs it creates).
+            tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::fs::create_dir_all(path).await?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -120,6 +147,19 @@ impl AppState {
         let db_path = data_dir.as_ref().join("clipper.db");
         let url = format!("sqlite:{}?mode=rwc", db_path.display());
         let db = Database::connect(&url).await?;
+        // The database file (and any WAL/SHM sidecars) hold every user's wrapped
+        // auth blobs and object metadata; keep them owner-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for suffix in ["", "-wal", "-shm"] {
+                let path = data_dir.as_ref().join(format!("clipper.db{suffix}"));
+                if tokio::fs::metadata(&path).await.is_ok() {
+                    _ = tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                        .await;
+                }
+            }
+        }
         Ok(db)
     }
 
@@ -129,13 +169,18 @@ impl AppState {
     }
 
     async fn ensure_storage_dirs(&self) -> ServerResult<()> {
-        tokio::fs::create_dir_all(self.objects_dir()).await?;
+        Self::ensure_private_dir(&self.objects_dir()).await?;
         Ok(())
     }
 
     fn new(db: DatabaseConnection, config: ServerConfig, secrets: ServerSecrets) -> Self {
         let data_dir = config.server.data_dir.clone();
         let rate_limiter = RateLimiter::new(&config.rate_limit);
+        // Argon2 is CPU-bound, so allowing more than the core count to run at
+        // once only inflates peak memory without improving throughput.
+        let argon2_permits = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         Self {
             inner: Arc::new(AppStateInner {
                 db,
@@ -148,6 +193,7 @@ impl AppState {
                 pending_registrations: std::sync::Mutex::new(HashMap::new()),
                 ws_tickets: std::sync::Mutex::new(HashMap::new()),
                 event_seq: AtomicI64::new(0),
+                argon2_semaphore: Arc::new(tokio::sync::Semaphore::new(argon2_permits)),
             }),
         }
     }
@@ -194,6 +240,12 @@ impl AppState {
         &self.inner.rate_limiter
     }
 
+    /// Permits for concurrent Argon2 access-key hashing; acquire one before
+    /// running the hash so a registration burst cannot exhaust memory.
+    pub fn argon2_semaphore(&self) -> Arc<tokio::sync::Semaphore> {
+        self.inner.argon2_semaphore.clone()
+    }
+
     pub fn objects_dir(&self) -> PathBuf {
         self.inner.data_dir.join("objects")
     }
@@ -209,6 +261,15 @@ impl AppState {
             .subscribe()
     }
 
+    /// Fan a live event out to the user's WebSocket subscribers.
+    ///
+    /// Delivery order is NOT guaranteed to match `seq`/commit order: each handler
+    /// broadcasts after its own commit, across an await boundary, so two
+    /// concurrent mutations can be sent in either order. Every consumer must
+    /// treat each event as an independent per-`object_id` signal and reconcile by
+    /// object id with last-writer-wins by `seq` (as the client's local store
+    /// does), never as a strictly increasing cursor. The connect-time
+    /// `stream_start_seq` boundary is a fixed snapshot watermark and is safe.
     pub fn broadcast_ws_event(&self, event: WsBroadcast) {
         let sender = {
             let channels = self.inner.ws_channels.lock().expect("lock poisoned");
@@ -245,12 +306,18 @@ impl AppState {
         let mut challenges = self.inner.auth_challenges.lock().expect("lock poisoned");
         challenges.retain(|_, challenge| challenge.expires_at > now);
 
+        // Evict oldest-first (smallest expires_at; all challenges share one TTL)
+        // rather than an arbitrary HashMap entry, so a flood at the cap displaces
+        // its own stale challenges before a victim's in-flight login.
         while challenges.len() >= self.config().auth.max_pending_challenges {
-            if let Some(id) = challenges.keys().next().cloned() {
-                challenges.remove(&id);
-            } else {
+            let Some(oldest) = challenges
+                .iter()
+                .min_by_key(|(_, challenge)| challenge.expires_at)
+                .map(|(id, _)| id.clone())
+            else {
                 break;
-            }
+            };
+            challenges.remove(&oldest);
         }
 
         let challenge_id = uuid::Uuid::now_v7().to_string();
@@ -287,12 +354,17 @@ impl AppState {
             .expect("lock poisoned");
         registrations.retain(|_, registration| registration.expires_at > now);
 
+        // Oldest-first eviction (see create_auth_challenge) so a registration
+        // flood cannot displace a victim's in-flight pending registration.
         while registrations.len() >= self.config().auth.max_pending_challenges {
-            if let Some(id) = registrations.keys().next().cloned() {
-                registrations.remove(&id);
-            } else {
+            let Some(oldest) = registrations
+                .iter()
+                .min_by_key(|(_, registration)| registration.expires_at)
+                .map(|(id, _)| id.clone())
+            else {
                 break;
-            }
+            };
+            registrations.remove(&oldest);
         }
 
         let registration_id = uuid::Uuid::now_v7().to_string();
@@ -359,11 +431,14 @@ impl AppState {
 
     pub fn consume_ws_ticket(&self, ticket: &str) -> Option<AuthInfo> {
         let now = Instant::now();
+        let key = crypto::sha256(ticket.as_bytes()).to_vec();
         let mut tickets = self.inner.ws_tickets.lock().expect("lock poisoned");
-        tickets.retain(|_, ticket| ticket.expires_at > now);
-        tickets
-            .remove(&crypto::sha256(ticket.as_bytes()).to_vec())
-            .map(|ticket| ticket.auth)
+        // Check only this ticket's expiry instead of sweeping the whole map: this
+        // path is unauthenticated (the ticket is the credential), so it must not
+        // run an O(n) scan over every user's tickets under the global lock on each
+        // connect. Stale tickets are reaped at mint time and capped per user.
+        let entry = tickets.remove(&key)?;
+        (entry.expires_at > now).then_some(entry.auth)
     }
 }
 

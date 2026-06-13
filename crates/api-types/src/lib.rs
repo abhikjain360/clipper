@@ -217,9 +217,9 @@ pub struct LoginRequest {
     pub device_signing_public_key: Vec<u8>,
     #[garde(custom(validate_optional_device_login_proof_signature))]
     pub device_login_proof_signature: Option<Vec<u8>>,
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = 256))]
     pub device_name: Option<String>,
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = 64))]
     pub platform: Option<String>,
 }
 
@@ -263,9 +263,9 @@ pub struct RegisterFinishRequest {
     pub device_id: Option<DeviceId>,
     #[garde(length(equal = DEVICE_SIGNING_PUBLIC_KEY_BYTES))]
     pub device_signing_public_key: Vec<u8>,
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = 256))]
     pub device_name: Option<String>,
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = 64))]
     pub platform: Option<String>,
 }
 

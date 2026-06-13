@@ -20,6 +20,7 @@ use std::{
 
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     http::{Method, header},
     middleware,
     routing::{get, post},
@@ -338,12 +339,24 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit::auth_rate_limit_middleware,
-        ));
+        ))
+        // Auth bodies are small (OPAQUE messages, an access key, short device
+        // strings); cap them well under the 2 MB transport default so an
+        // unauthenticated client cannot make the server buffer a large body.
+        .route_layer(DefaultBodyLimit::max(64 * 1024));
 
     // public routes
     let app = Router::new()
         .route("/api/health", get(routes::health::health))
-        .route("/api/ws-ticket/connect", get(ws::ws_ticket_handler))
+        // Unauthenticated (the ticket is the credential), so throttle per client
+        // IP — otherwise it is the one request surface with no rate limit at all.
+        .route(
+            "/api/ws-ticket/connect",
+            get(ws::ws_ticket_handler).route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                rate_limit::api_rate_limit_middleware,
+            )),
+        )
         .merge(public_auth)
         .merge(authed)
         .layer(axum::Extension(trusted_proxies))

@@ -278,7 +278,7 @@ impl LimitsConfig {
 
 #[derive(Debug, Clone, Validate)]
 pub struct ClipboardConfig {
-    #[garde(range(min = 1))]
+    #[garde(range(min = 1), custom(validate_chrono_days))]
     pub ttl_days: i64,
     #[garde(range(min = 1))]
     pub max_items: u64,
@@ -308,7 +308,7 @@ impl ListConfig {
 pub struct CleanupConfig {
     #[garde(range(min = 1))]
     pub interval_secs: u64,
-    #[garde(range(min = 1))]
+    #[garde(range(min = 1), custom(validate_chrono_days))]
     pub event_log_retention_days: i64,
     #[garde(range(min = 1), custom(validate_chrono_seconds))]
     pub orphan_upload_ttl_secs: u64,
@@ -601,6 +601,18 @@ fn validate_chrono_seconds(value: &u64, _: &()) -> garde::Result {
     if *value > i64::MAX as u64 {
         return Err(garde::Error::new(
             "must fit in a signed 64-bit integer for chrono duration conversion",
+        ));
+    }
+    Ok(())
+}
+
+/// A day count is later turned into a `chrono::Duration` (clipboard TTL,
+/// event-log retention). `Duration::days` panics on overflow, so reject any
+/// value that would not convert here, at config-validation time.
+fn validate_chrono_days(value: &i64, _: &()) -> garde::Result {
+    if chrono::Duration::try_days(*value).is_none() {
+        return Err(garde::Error::new(
+            "must fit in a chrono duration (too many days)",
         ));
     }
     Ok(())

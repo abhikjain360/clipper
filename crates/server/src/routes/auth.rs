@@ -236,8 +236,10 @@ pub async fn register_finish(
             },
         )?;
 
-    consume_registration_access_key(&txn, &pending.access_key_hash, &now, pending.user_id).await?;
-
+    // Insert the user BEFORE consuming the invite, so a duplicate-username (or a
+    // concurrent double-spend) fails here and rolls back without ever marking the
+    // one-time access key used. The users.access_key_hash unique constraint is
+    // what makes the invite single-use across concurrent finishes.
     let user_insert = users::ActiveModel {
         id: Set(pending.user_id),
         username: Set(pending.username.clone()),
@@ -254,18 +256,14 @@ pub async fn register_finish(
     if let Err(e) = user_insert {
         return match e.sql_err() {
             Some(SqlErr::UniqueConstraintViolation(_)) => {
+                // Roll back WITHOUT committing so the invite stays unconsumed for
+                // its legitimate holder — returning Err drops the transaction,
+                // which rolls it back.
                 warn!(
                     user_id = %pending.user_id,
                     username = %pending.username,
-                    "Registration failed after consuming access key because username or access key is already bound",
+                    "Registration conflict; rolling back so the access key is not consumed",
                 );
-                txn.commit().await.map_err(|e| {
-                    error!(
-                        error = %e,
-                        "Failed to commit consumed access key after registration conflict",
-                    );
-                    error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
-                })?;
                 Err(error_response(
                     StatusCode::CONFLICT,
                     "Registration conflict",
@@ -281,6 +279,10 @@ pub async fn register_finish(
         };
     }
 
+    // The username was free and the user row now exists, so spend the invite
+    // exactly once. Consuming only after a successful insert is what prevents a
+    // duplicate-username attempt from burning someone else's access key.
+    consume_registration_access_key(&txn, &pending.access_key_hash, &now, pending.user_id).await?;
     bind_consumed_registration_access_key_to_user(&txn, &pending.access_key_hash, pending.user_id)
         .await?;
 
@@ -514,29 +516,40 @@ async fn verify_unused_registration_access_key(
         error!(error = %e, "Failed to unwrap access_key_hash_salt");
         error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server secret error")
     })?;
-    // Argon2id is memory-hard and blocks for tens of milliseconds, so run it on
-    // the blocking pool instead of stalling an async worker for every (even
-    // invalid) registration attempt.
+    // Argon2id is memory-hard (~19 MiB) and blocks for tens of milliseconds, so
+    // run it on the blocking pool instead of stalling an async worker for every
+    // (even invalid) registration attempt — and gate it behind a semaphore so a
+    // burst of attempts cannot run hundreds of hashes at once and exhaust memory.
     let access_key_attempt = access_key_attempt.to_owned();
     let access_key_pepper = state.secrets().access_key_pepper;
     let access_key_hash_params = state.config().crypto.access_key_hash_params;
-    let access_key_hash = tokio::task::spawn_blocking(move || {
-        access_key_hash(
-            &access_key_attempt,
-            &access_key_hash_salt,
-            &access_key_pepper,
-            &access_key_hash_params,
-        )
-    })
-    .await
-    .map_err(|e| {
-        error!(error = %e, "Access key hash task failed to join");
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error")
-    })?
-    .map_err(|e| {
-        error!(error = %e, "Failed to hash access key");
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error")
-    })?;
+    let access_key_hash = {
+        let _permit = state
+            .argon2_semaphore()
+            .acquire_owned()
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Argon2 semaphore unexpectedly closed");
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error")
+            })?;
+        tokio::task::spawn_blocking(move || {
+            access_key_hash(
+                &access_key_attempt,
+                &access_key_hash_salt,
+                &access_key_pepper,
+                &access_key_hash_params,
+            )
+        })
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Access key hash task failed to join");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error")
+        })?
+        .map_err(|e| {
+            error!(error = %e, "Failed to hash access key");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Access key hash error")
+        })?
+    };
     let access_key = access_keys::Entity::find_by_id(access_key_hash.clone())
         .one(state.db())
         .await
@@ -1207,21 +1220,44 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.status(), StatusCode::CONFLICT);
 
-        let used_key =
+        // The one-time invite must NOT be burned by a duplicate-username finish:
+        // the legitimate holder keeps it (used_at stays NULL, unbound).
+        let key_after_conflict =
             access_keys::Entity::find_by_id(access_key_hash_for_state(&state, access_key).await)
                 .one(state.db())
                 .await
                 .expect("query access key")
                 .expect("access key");
-        assert!(used_key.used_at.is_some());
-        assert_eq!(used_key.used_by_user_id, None);
+        assert!(key_after_conflict.used_at.is_none());
+        assert_eq!(key_after_conflict.used_by_user_id, None);
 
-        let (retry_req, _retry_client_state) =
+        // ...and the invite is still usable for a fresh username.
+        let (retry_start, retry_client_state) =
             registration_start_request(access_key, "bob", new_passphrase);
-        let retry_err = register_start(State(state), validated(retry_req))
+        let Postcard(retry_resp) = register_start(State(state.clone()), validated(retry_start))
             .await
-            .unwrap_err();
-        assert_eq!(retry_err.status(), StatusCode::UNAUTHORIZED);
+            .expect("retry register start succeeds with the unburned invite");
+        let retry_finish =
+            registration_finish_request(retry_resp, &retry_client_state, new_passphrase);
+        let Postcard(finish_ok) = register_finish(
+            State(state.clone()),
+            client_ip(),
+            HeaderMap::new(),
+            validated(retry_finish),
+        )
+        .await
+        .expect("retry register finish succeeds");
+        assert_eq!(finish_ok.username, "bob");
+
+        // Only now is the invite spent and bound to the user that used it.
+        let key_after_success =
+            access_keys::Entity::find_by_id(access_key_hash_for_state(&state, access_key).await)
+                .one(state.db())
+                .await
+                .expect("query access key")
+                .expect("access key");
+        assert!(key_after_success.used_at.is_some());
+        assert!(key_after_success.used_by_user_id.is_some());
     }
 
     #[tokio::test]

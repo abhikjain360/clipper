@@ -154,10 +154,19 @@ pub async fn init_object(
     let updated_at = Utc::now().to_rfc3339();
     let expires_at = match req.kind {
         ObjectKind::Clipboard => {
-            let created = chrono::DateTime::parse_from_rfc3339(&created_at).ok();
-            created.map(|created| {
-                (created + Duration::days(state.config().clipboard.ttl_days)).to_rfc3339()
-            })
+            // Derive the TTL boundary in UTC — the client's created_at may carry
+            // any timezone offset, but every comparison against expires_at uses a
+            // UTC instant (Utc::now().to_rfc3339()), so a non-UTC offset here would
+            // skew expiry. Use a checked add so a far-future client created_at
+            // cannot overflow chrono and panic the handler.
+            chrono::DateTime::parse_from_rfc3339(&created_at)
+                .ok()
+                .and_then(|created| {
+                    created
+                        .with_timezone(&Utc)
+                        .checked_add_signed(Duration::days(state.config().clipboard.ttl_days))
+                })
+                .map(|expires| expires.to_rfc3339())
         }
         ObjectKind::File => None,
     };
@@ -852,17 +861,34 @@ pub async fn list_objects(
         .filter(objects::Column::Status.eq("complete"))
         .filter(objects::Column::CreatedSeq.is_not_null());
 
-    if let Some(kind) = kind {
-        q = q.filter(objects::Column::Kind.eq(kind.as_ref()));
-        if kind == ObjectKind::Clipboard {
-            let retained_ids = retained_clipboard_object_ids(&state, auth.user_id).await?;
-            if retained_ids.is_empty() {
-                return Ok(Postcard(ObjectListResponse {
-                    items: Vec::new(),
-                    next_after: None,
-                }));
+    match kind {
+        Some(kind) => {
+            q = q.filter(objects::Column::Kind.eq(kind.as_ref()));
+            if kind == ObjectKind::Clipboard {
+                let retained_ids = retained_clipboard_object_ids(&state, auth.user_id).await?;
+                if retained_ids.is_empty() {
+                    return Ok(Postcard(ObjectListResponse {
+                        items: Vec::new(),
+                        next_after: None,
+                    }));
+                }
+                q = q.filter(objects::Column::Id.is_in(retained_ids));
             }
-            q = q.filter(objects::Column::Id.is_in(retained_ids));
+        }
+        None => {
+            // All-kinds listing must still bound clipboard rows by the retention
+            // window (expiry + max_items), exactly as a kind=clipboard listing and
+            // the targeted get/download paths do; non-clipboard rows pass through.
+            // Without this, expired-but-unreaped clipboard items leak here while
+            // get/download return 404 for the same ids.
+            let retained_ids = retained_clipboard_object_ids(&state, auth.user_id).await?;
+            let mut clipboard_or_retained =
+                Condition::any().add(objects::Column::Kind.ne(ObjectKind::Clipboard.as_ref()));
+            if !retained_ids.is_empty() {
+                clipboard_or_retained =
+                    clipboard_or_retained.add(objects::Column::Id.is_in(retained_ids));
+            }
+            q = q.filter(clipboard_or_retained);
         }
     }
 
@@ -988,11 +1014,21 @@ pub async fn get_object(
     Ok(Postcard(item))
 }
 
-async fn retained_clipboard_object_ids(
-    state: &AppState,
+/// The clipboard objects a user can still read: not expired, newest
+/// `max_items` by `created_seq`. This is the single definition of "retained"
+/// shared by the read paths (`list`/`get`/`download`) and the background trim,
+/// so all three agree on which items are live. Background cleanup
+/// (`trim_user_clipboard`) calls this directly; the read paths use the
+/// `ApiError` wrapper below.
+pub(crate) async fn retained_clipboard_object_ids_raw<C>(
+    db: &C,
     user_id: Uuid,
-) -> Result<Vec<Uuid>, ApiError> {
-    let now = Utc::now().to_rfc3339();
+    max_items: u64,
+    now: &str,
+) -> Result<Vec<Uuid>, sea_orm::DbErr>
+where
+    C: sea_orm::ConnectionTrait,
+{
     objects::Entity::find()
         .filter(objects::Column::UserId.eq(user_id))
         .filter(objects::Column::Kind.eq(ObjectKind::Clipboard.as_ref()))
@@ -1005,20 +1041,34 @@ async fn retained_clipboard_object_ids(
         )
         .order_by(objects::Column::CreatedSeq, Order::Desc)
         .order_by(objects::Column::Id, Order::Desc)
-        .limit(state.config().clipboard.max_items)
+        .limit(max_items)
         .select_only()
         .column(objects::Column::Id)
         .into_tuple()
-        .all(state.db())
+        .all(db)
         .await
-        .map_err(|e| {
-            error!(
-                user_id = %user_id,
-                error = %e,
-                "Failed to load retained clipboard object ids",
-            );
-            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-        })
+}
+
+async fn retained_clipboard_object_ids(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<Vec<Uuid>, ApiError> {
+    let now = Utc::now().to_rfc3339();
+    retained_clipboard_object_ids_raw(
+        state.db(),
+        user_id,
+        state.config().clipboard.max_items,
+        &now,
+    )
+    .await
+    .map_err(|e| {
+        error!(
+            user_id = %user_id,
+            error = %e,
+            "Failed to load retained clipboard object ids",
+        );
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+    })
 }
 
 async fn ensure_object_read_retained(
@@ -2075,19 +2125,20 @@ async fn stream_body_to_payload_file(
     expected_size: u64,
     tmp_path: &std::path::Path,
 ) -> Result<(), ApiError> {
-    let mut out_file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(tmp_path)
-        .await
-        .map_err(|e| {
-            error!(
-                path = %tmp_path.display(),
-                error = %e,
-                "Failed to create tmp payload file",
-            );
-            ApiError::from_code_with_message(ApiErrorCode::Storage, "Object payload storage error")
-        })?;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // Create the streamed payload owner-only, matching the inline
+    // FsTransaction::write_new path; the later rename preserves the mode.
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut out_file = options.open(tmp_path).await.map_err(|e| {
+        error!(
+            path = %tmp_path.display(),
+            error = %e,
+            "Failed to create tmp payload file",
+        );
+        ApiError::from_code_with_message(ApiErrorCode::Storage, "Object payload storage error")
+    })?;
 
     use futures_util::StreamExt;
     let mut stream = body.into_data_stream();
@@ -3561,5 +3612,54 @@ mod tests {
                 "retained payload file still on disk",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn snapshot_high_water_survives_event_log_pruning() {
+        let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
+
+        let resp = init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                Uuid::now_v7().to_string(),
+                Uuid::now_v7().to_string(),
+                ObjectKind::Clipboard,
+                b"clip ciphertext",
+                true,
+                device_id,
+                &signing_secret_key,
+            )),
+        )
+        .await
+        .expect("init");
+        let created_seq = init_created_seq(resp.0);
+
+        assert_eq!(
+            crate::ws::get_latest_seq(&state, user_id)
+                .await
+                .expect("seq"),
+            created_seq,
+        );
+
+        // Simulate cleanup pruning the whole event log for an inactive user.
+        crate::entity::event_log::Entity::delete_many()
+            .exec(state.db())
+            .await
+            .expect("prune events");
+
+        // The snapshot boundary must still cover the existing object via
+        // objects.created_seq, not collapse to 0 — otherwise a fresh device would
+        // take 0 as its boundary and never reconcile the existing object.
+        assert_eq!(
+            crate::ws::get_latest_seq(&state, user_id)
+                .await
+                .expect("seq after prune"),
+            created_seq,
+            "high-water must survive event_log pruning",
+        );
     }
 }

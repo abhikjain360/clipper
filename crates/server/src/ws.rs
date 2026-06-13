@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::AuthInfo,
-    entity::event_log,
+    entity::{event_log, objects},
     rate_limit::rate_limited_error,
     routes::{Postcard, RouteResult, error_response},
     state::AppState,
@@ -150,6 +150,11 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
             broadcast = rx.recv() => {
                 match broadcast {
                     Ok(evt) => {
+                        // Fixed snapshot boundary: events at or below the
+                        // connect-time high-water are already covered by the HTTP
+                        // snapshot. This must stay a constant for the connection's
+                        // lifetime, not an advancing per-event cursor (live
+                        // delivery is not seq-ordered; see broadcast_ws_event).
                         if evt.seq <= stream_start_seq {
                             continue;
                         }
@@ -225,8 +230,19 @@ async fn close_with_error(mut socket: WebSocket, error: WsError) {
     _ = socket.send(Message::Close(None)).await;
 }
 
-async fn get_latest_seq(state: &AppState, user_id: Uuid) -> Result<i64, sea_orm::DbErr> {
-    let row = event_log::Entity::find()
+/// Snapshot high-water mark for a user: the boundary between what the HTTP
+/// snapshot owns and what the live stream owns.
+///
+/// It must cover every object the snapshot can return, so it is the max of the
+/// newest `event_log.seq` AND the newest `objects.created_seq`. Deriving it from
+/// `event_log` alone is wrong: `cleanup_old_events` prunes the log after a
+/// retention window, so an inactive user's events can age out entirely and
+/// report 0 — even though never-expiring File objects still exist. A fresh
+/// device would then take 0 as the boundary and live deltas would not reconcile
+/// against the snapshot. `objects.created_seq` is durable for as long as the
+/// object exists, so it is the correct floor.
+pub(crate) async fn get_latest_seq(state: &AppState, user_id: Uuid) -> Result<i64, sea_orm::DbErr> {
+    let latest_event_seq: Option<i64> = event_log::Entity::find()
         .filter(event_log::Column::UserId.eq(user_id))
         .order_by(event_log::Column::Seq, Order::Desc)
         .select_only()
@@ -234,7 +250,20 @@ async fn get_latest_seq(state: &AppState, user_id: Uuid) -> Result<i64, sea_orm:
         .into_tuple::<i64>()
         .one(state.db())
         .await?;
-    Ok(row.unwrap_or(0))
+    let latest_object_seq: Option<i64> = objects::Entity::find()
+        .filter(objects::Column::UserId.eq(user_id))
+        .filter(objects::Column::Status.eq("complete"))
+        .filter(objects::Column::CreatedSeq.is_not_null())
+        .order_by(objects::Column::CreatedSeq, Order::Desc)
+        .select_only()
+        .column(objects::Column::CreatedSeq)
+        .into_tuple::<Option<i64>>()
+        .one(state.db())
+        .await?
+        .flatten();
+    Ok(latest_event_seq
+        .unwrap_or(0)
+        .max(latest_object_seq.unwrap_or(0)))
 }
 
 fn should_forward_live_broadcast(evt: &WsBroadcast, device_id: Uuid) -> bool {
