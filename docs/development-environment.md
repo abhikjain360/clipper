@@ -12,19 +12,23 @@ flake tools automatically; do not wrap routine commands in `nix develop`.
 
 Nix provides the CLI, dependency, and build tools: Rust via
 [fenix](https://github.com/nix-community/fenix), rust-analyzer, Node 24, pnpm,
-wasm-pack, Tauri desktop build dependencies, React Native/UniFFI codegen
-helpers, cargo-edit, cargo-udeps, SeaORM CLI, SQLite, CMake, Ninja, OpenSSL,
-libclang, pkg-config, nixfmt, and osv-scanner.
+Deno (used to drive the `nix run` task scripts), wasm-pack, cargo-ndk, Tauri
+desktop build dependencies, React Native/UniFFI codegen helpers, cargo-edit,
+cargo-udeps, SeaORM CLI, SQLite, CMake, Ninja, OpenSSL, libclang, pkg-config,
+nixfmt, and osv-scanner.
 
 Rust toolchains come from fenix as proper Nix derivations - no `~/.rustup`, no
 first-run downloads. The stable channel is the default `cargo`/`rustc` on
 `$PATH` and bundles `rustfmt`, `clippy`, `rust-src`, `rust-analyzer`, the
 `wasm32-unknown-unknown` `rust-std` target, and Android `rust-std` targets used
 by the UniFFI mobile bridge. A pinned nightly is exposed at
-`$CLIPPER_RUST_NIGHTLY_BIN` for unstable rustfmt options; the flake wrappers
-(`nix run .#fmt`, `.#rustfmt`, `.#web-build`, `.#tauri-build`, mobile wrappers)
-use the right stable or nightly toolchain automatically. Both channels are
-pinned by date and manifest hash in `flake.nix` (`rustStableDate`,
+`$CLIPPER_RUST_NIGHTLY_BIN` for unstable rustfmt options. Each flake wrapper
+selects its toolchain explicitly: the stable channel backs the build, check,
+serve, audit, and entity wrappers (`.#web-build`, `.#web-serve`, `.#web-check`,
+`.#tauri-dev`, `.#tauri-build`, the mobile wrappers, `.#audit`, `.#wasm-check`,
+and `.#server-entities`), while the pinned nightly backs only the formatting and
+unused-dependency wrappers (`.#fmt`, `.#rustfmt`, and `.#udeps`). Both channels
+are pinned by date and manifest hash in `flake.nix` (`rustStableDate`,
 `rustNightlyDate`); to bump either one, set the new date and run
 `nix-prefetch-url --type sha256
 https://static.rust-lang.org/dist/<date>/channel-rust-<channel>.toml` to get
@@ -38,11 +42,16 @@ nix run .#audit
 nix run .#udeps
 cargo test --workspace
 nix run .#wasm-check
+nix run .#js-check
 nix run .#web-check
 nix run .#mobile-check
 cargo check -p clipper-desktop
 nix run .#tauri-build -- --no-bundle
 ```
+
+`nix run .#js-check` lints and type checks every TypeScript and JavaScript
+source in the workspace; `nix run .#web-check` and `nix run .#mobile-check`
+focus on the web and React Native packages respectively.
 
 Build or serve the browser and Tauri clients:
 

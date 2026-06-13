@@ -12,6 +12,56 @@ The sync model has two jobs:
 The client does not treat a server watermark as already-applied local state. A
 change is only locally applied after the corresponding local write succeeds.
 
+## Implementation Status
+
+The generation/snapshot sync flow described in this document is implemented
+today. The file is named `ws-sync-roadmap.md` for historical reasons; it now
+documents shipped behavior, not a future plan. The only forward-looking items
+are called out explicitly under "Future Work" below.
+
+Implemented and in use today:
+
+- Per-user server-side live broadcast: each user gets its own in-memory
+  `tokio::sync::broadcast` channel, created on first WebSocket subscribe and
+  pruned when its last receiver drops
+  (`AppState::subscribe_ws_broadcasts` / `broadcast_ws_event` /
+  `prune_idle_ws_broadcast_channel`). One user's burst can only lag that user's
+  own receivers.
+- Generation + create-sequence reconciliation: every connection/reconnect
+  starts a new client generation; objects carry a server-assigned
+  `created_seq`; snapshots, sweeps, and live events are gated on the current
+  generation (`SyncEngine`/`LocalStore`).
+- Committed-sequence mutation responses: object init, complete, and delete all
+  return the committed sequence to the originating device
+  (`ObjectInitResponse::Complete { created_seq }`,
+  `ObjectCompleteResponse { created_seq }`,
+  `ObjectDeleteResponse { deleted_seq }`), so the device can write the object
+  locally as present without waiting for its own event to echo back.
+- Live WebSocket events after a watermark, with no historical replay on the
+  socket: the server sends a `hello_ack` carrying `stream_start_seq` and then
+  forwards only newer live events; HTTP snapshots own everything at or before
+  the watermark.
+- Web (browser/wasm) WebSocket support via a one-time ticket exchanged over the
+  `clipper-ticket` subprotocol; native clients connect with a Bearer token.
+- 64 KiB inbound WebSocket message/frame cap on both upgrade paths
+  (`WS_MAX_MESSAGE_BYTES`).
+- Per-user WebSocket ticket limits: a per-user-per-minute mint rate limit plus a
+  per-user cap on simultaneously outstanding unconsumed tickets, evicted
+  oldest-first within that user.
+
+See "Transport And Server Mechanics (Current)" for the wire/infra details these
+guarantees rest on.
+
+### Future Work
+
+- Clipboard delete events. Today clipboard items leave sync only through
+  retention (TTL / max-item trimming), never through a live delete event; only
+  file objects support delete. The delete-marker machinery already exists on
+  the client, so if clipboard delete events are added later they can reuse the
+  same flow.
+- Local-store peer-to-peer sync is tracked separately in
+  `local-store-p2p-roadmap.md` and is out of scope here.
+
 ## Object Semantics
 
 Clipboard history is retention-bounded. A clipboard item may disappear from sync
@@ -29,18 +79,29 @@ snapshot sweeps depend on it.
 ## Connection Start
 
 1. The client opens a WebSocket after login or reconnect.
-2. The server starts listening for live events for that user.
+2. The server starts listening for live events for that user. It subscribes to
+   the user's broadcast channel *before* reading the high-water sequence, so no
+   live event can slip between the snapshot watermark and the live
+   subscription.
 3. The server chooses a stream watermark representing all events committed up to
-   that moment.
-4. The server sends the watermark to the client.
+   that moment (`stream_start_seq`, the largest committed `event_log.seq` for
+   the user).
+4. The server sends the watermark to the client in a `hello_ack` message.
 5. The client starts a new reconciliation generation.
 6. HTTP snapshots are responsible for objects created at or before the
    watermark.
 7. WebSocket live processing is responsible for events after the watermark.
 
 The server does not replay old events on the WebSocket. The WebSocket only
-delivers live events after the watermark. This avoids gaps between replay and
-live subscription.
+delivers live events after the watermark, and additionally drops any buffered
+event whose `seq` is at or below the watermark. This avoids gaps between replay
+and live subscription, and avoids double-applying an event that snapshots
+already cover.
+
+The server also does not echo a device's own changes back to that same device:
+live broadcasts are filtered by source device id, so a connection never
+receives the events it originated. The originating device instead learns the
+committed sequence from the mutation's HTTP response.
 
 ## Reconciliation Generation
 
@@ -72,6 +133,13 @@ The client tracks each known object in one of three states.
 3. Deleted means a delete event was seen in the current generation and older
    snapshot or fetch results must not resurrect the object.
 
+Persisted local object records hold only encrypted object material (metadata
+ciphertext, payload descriptors, the signed envelope, and for clipboard the
+payload ciphertext). The device signing key is stored wrapped, and on
+non-wasm platforms the cache directory is created private (0700, owner-checked)
+with records written 0600. Decrypted display state lives only in memory and is
+rebuilt by decrypting the cached ciphertext on load.
+
 Visible lists are derived only from present objects:
 
 1. Clipboard shows present clipboard objects sorted newest first by create
@@ -88,7 +156,7 @@ When this device creates an object:
 
 1. The client chooses the object id before sending the create.
 2. The server commits the object and assigns the create sequence.
-3. The mutation response returns that sequence.
+3. The mutation response returns that sequence (`created_seq`).
 4. The client writes the object locally as present only after it knows the
    sequence.
 5. The server does not need to echo the event back to the same device.
@@ -138,13 +206,17 @@ If materialization fails:
 
 ## Live Delete Events
 
-When the client receives a live file delete:
+Live delete events currently exist for file objects only. When the client
+receives a live file delete:
 
 1. Write a delete marker with the delete sequence.
 2. Remove the local file metadata from visible state.
 3. Remove any cached local blob for that file.
 4. Ignore later snapshot or fetch results for that object if they are older than
    the delete marker.
+
+A delete event for any non-file object kind is logged and ignored by the client,
+because the server only emits delete events for files.
 
 Clipboard currently disappears through retention rather than live delete events.
 If clipboard delete events are added later, they follow the same delete-marker
@@ -156,7 +228,7 @@ After receiving the connection watermark, the client builds a file snapshot for
 all files created at or before that watermark.
 
 1. The client asks the server for file metadata pages in create-sequence order,
-   bounded by the watermark.
+   bounded by the watermark (`created_seq_lte = stream_start_seq`).
 2. For each returned file, the client skips it if a newer delete marker exists.
 3. Otherwise the client verifies and decrypts file metadata.
 4. The client writes the file as present and marks it seen in the current
@@ -178,7 +250,8 @@ for the server's retained clipboard view through that watermark.
 1. The client asks the server for retained clipboard pages bounded by the
    watermark.
 2. The server returns only clipboard items that are still inside the current
-   retention window.
+   retention window (within the TTL and within the most-recent
+   `clipboard.max_items`).
 3. For each returned item, the client skips it if a newer delete marker exists.
 4. Otherwise the client verifies and decrypts metadata and payload.
 5. The client writes the item as present and marks it seen in the current
@@ -208,12 +281,17 @@ Manual refresh uses the same flow as reconnect.
 5. File and clipboard snapshots rebuild against the new watermark.
 6. Sweeps happen only after their matching snapshots succeed.
 
-Manual refresh does not use a separate sync path.
+Manual refresh does not use a separate sync path. Internally it signals the
+running WebSocket loop to drop the current connection and reconnect; the
+reconnect path does the rest.
 
 ## Invalidation And Lag
 
 If the live WebSocket stream is no longer reliable, the server invalidates the
-connection and closes it.
+connection and closes it. This happens when a connection falls behind the
+per-user broadcast buffer (a `Lagged` receive): the server sends an
+`invalidate` message and then closes the socket cleanly (close code `AWAY`,
+reason `lagged`) so the client reconnects without treating it as an error.
 
 On invalidation:
 
@@ -223,6 +301,9 @@ On invalidation:
 4. The client starts a new generation.
 5. New snapshots and live processing take over.
 6. In-flight work from the old generation is ignored at local write time.
+
+The `invalidate` message carries a `target` field. The client currently treats
+any invalidation as a full reconnect regardless of `target`.
 
 ## Ordering And Duplicates
 
@@ -239,3 +320,72 @@ For each object:
 
 This keeps sync correct across retries, reconnects, invalidations, and delayed
 HTTP materialization.
+
+## Transport And Server Mechanics (Current)
+
+This section records the concrete wire and server-side mechanics the flow above
+relies on. All of it is implemented.
+
+### Connecting
+
+There are two WebSocket entry points:
+
+- Native clients connect to `GET /api/ws` behind the normal authenticated
+  routes. They authenticate with an `Authorization: Bearer <token>` header (the
+  same session token used for HTTP), so this path reuses the standard auth and
+  rate-limit middleware.
+- Browser/wasm clients cannot set request headers on a WebSocket, so they first
+  `POST /api/ws-ticket` (authenticated) to mint a short-lived single-use ticket,
+  then connect to the public `GET /api/ws-ticket/connect` advertising two
+  subprotocols: the literal marker `clipper-ticket` and the ticket value. The
+  server consumes the ticket, recovers the authenticated identity, and upgrades.
+
+In both cases the upgrade caps inbound messages and frames at 64 KiB. Clients
+only ever send a small JSON `hello` plus control frames, so this bound keeps
+per-connection memory small.
+
+### Hello handshake
+
+After upgrade the client sends `{"type":"hello"}`. The server replies with
+`hello_ack` carrying `server_time` and `stream_start_seq`. A first frame that is
+not a valid hello is answered with a typed `error` (`expected_hello` or
+`invalid_hello`) followed by a clean close. The client must see `hello_ack`
+before it starts a generation and reconciliation.
+
+### Live broadcast fan-out
+
+Each user has its own in-memory broadcast channel (capacity 256). Object
+mutations call `broadcast_ws_event` with a `WsBroadcast` that includes the
+`user_id`, the `source_device_id`, the committed `seq`, and the object's kind /
+id / created-at. A connected socket:
+
+- drops events whose `seq <= stream_start_seq` (snapshots own those),
+- drops events whose `source_device_id` equals its own device (no self-echo),
+- otherwise forwards an `event` message.
+
+Because channels are partitioned by user, a flood from one account can only lag
+that account's own receivers, not other users'. Idle channels are removed once
+their last receiver drops.
+
+### Ticket limits
+
+WebSocket tickets are minted per user and bounded two ways:
+
+- A per-user-per-minute mint rate limit (`ws_tickets_per_user_per_minute`,
+  default 30). Over-quota minting returns HTTP 429.
+- A cap on simultaneously outstanding unconsumed tickets per user
+  (`auth.max_pending_ws_tickets`). At capacity, the oldest unconsumed ticket for
+  that user is evicted first, so a burst from one account cannot displace
+  another account's about-to-be-used ticket. Tickets are single-use and expire
+  after 60 seconds.
+
+These per-user partitions exist specifically so one account cannot evict or
+starve another account's tickets or live stream.
+
+### Connection close cases
+
+- Client close / transport end: the socket loop exits and the server prunes the
+  idle channel.
+- Lagged receiver: `invalidate` then close with code `AWAY`, reason `lagged`.
+- Server channel closed (shutdown): close with code `AWAY`, reason
+  `server shutting down`.
