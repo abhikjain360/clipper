@@ -4,6 +4,7 @@ use std::path::Path;
 
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(target_os = "macos")]
 const SERVICE: &str = "com.clipper.daemon";
@@ -91,11 +92,12 @@ pub fn clear_credentials() -> KeychainResult<()> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn load_or_create_ipc_secret(_data_dir: &Path) -> KeychainResult<Vec<u8>> {
+pub fn load_or_create_ipc_secret(_data_dir: &Path) -> KeychainResult<Zeroizing<Vec<u8>>> {
     match security_framework::passwords::get_generic_password(SERVICE, IPC_SECRET_ACCOUNT) {
-        Ok(secret) if secret.len() == IPC_SECRET_BYTES => Ok(secret),
-        Ok(secret) => {
+        Ok(secret) if secret.len() == IPC_SECRET_BYTES => Ok(Zeroizing::new(secret)),
+        Ok(mut secret) => {
             let actual = secret.len();
+            secret.zeroize();
             let secret = new_ipc_secret();
             _ = security_framework::passwords::delete_generic_password(SERVICE, IPC_SECRET_ACCOUNT);
             security_framework::passwords::set_generic_password(
@@ -159,14 +161,15 @@ pub fn clear_credentials() -> KeychainResult<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn load_or_create_ipc_secret(data_dir: &Path) -> KeychainResult<Vec<u8>> {
+pub fn load_or_create_ipc_secret(data_dir: &Path) -> KeychainResult<Zeroizing<Vec<u8>>> {
     ensure_private_dir(data_dir)?;
     let path = data_dir.join(IPC_SECRET_FILE);
 
-    match read_optional_file(&path)? {
+    match read_optional_file(&path)?.map(Zeroizing::new) {
         Some(secret) if secret.len() == IPC_SECRET_BYTES => Ok(secret),
         Some(secret) => {
             let actual = secret.len();
+            drop(secret);
             let secret = new_ipc_secret();
             write_private_file(&path, &secret)?;
             if actual != 0 {
@@ -197,9 +200,22 @@ fn credentials_path() -> KeychainResult<std::path::PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
-    std::fs::create_dir_all(path)?;
+    // Create the leaf with restrictive permissions at creation time so there is
+    // no group/other-traversable window between mkdir and the chmod below.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::DirBuilder::new()
+        .mode(PRIVATE_DIR_MODE)
+        .create(path)
+    {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_dir() {
         return Err(std::io::Error::new(
@@ -207,8 +223,32 @@ fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
             format!("{} is not a directory", path.display()),
         ));
     }
+
+    // Fail closed if the directory is owned by another user: a foreign-owned
+    // directory must never be adopted to hold the IPC secret or credentials,
+    // since chmod changes the mode but not the owner. Mirrors
+    // ipc_path::ensure_private_socket_dir.
+    let current_uid = current_euid();
+    if metadata.uid() != current_uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is owned by uid {}, expected {}",
+                path.display(),
+                metadata.uid(),
+                current_uid
+            ),
+        ));
+    }
+
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))?;
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn current_euid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() as u32 }
 }
 
 #[cfg(target_os = "linux")]
@@ -260,8 +300,11 @@ fn reject_non_regular_existing_file(path: &Path) -> std::io::Result<()> {
     }
 }
 
-fn new_ipc_secret() -> Vec<u8> {
-    random_bytes::<IPC_SECRET_BYTES>().to_vec()
+fn new_ipc_secret() -> Zeroizing<Vec<u8>> {
+    let mut bytes = random_bytes::<IPC_SECRET_BYTES>();
+    let secret = Zeroizing::new(bytes.to_vec());
+    bytes.zeroize();
+    secret
 }
 
 fn random_bytes<const N: usize>() -> [u8; N] {

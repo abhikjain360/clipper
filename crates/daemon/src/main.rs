@@ -64,7 +64,22 @@ fn data_dir() -> DaemonResult<PathBuf> {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(path)?;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+    // Create the leaf with restrictive permissions at creation time so there is
+    // no group/other-traversable window between mkdir and the chmod below.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::DirBuilder::new()
+        .mode(PRIVATE_DIR_MODE)
+        .create(path)
+    {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_dir() {
         return Err(std::io::Error::new(
@@ -72,6 +87,23 @@ fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
             format!("{} is not a directory", path.display()),
         ));
     }
+
+    // Fail closed if the directory is owned by another user so the daemon never
+    // adopts a foreign-owned directory for its private state (chmod changes the
+    // mode but not the owner). Mirrors ipc_path::ensure_private_socket_dir.
+    let current_uid = current_euid();
+    if metadata.uid() != current_uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is owned by uid {}, expected {}",
+                path.display(),
+                metadata.uid(),
+                current_uid
+            ),
+        ));
+    }
+
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))?;
     Ok(())
 }

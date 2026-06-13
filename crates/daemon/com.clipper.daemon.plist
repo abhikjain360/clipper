@@ -16,10 +16,6 @@
         <key>SuccessfulExit</key>
         <false/>
     </dict>
-    <key>StandardOutPath</key>
-    <string>/tmp/clipper-daemon.stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/clipper-daemon.stderr.log</string>
     <key>ProcessType</key>
     <string>Background</string>
 </dict>
