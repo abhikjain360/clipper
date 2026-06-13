@@ -81,7 +81,7 @@ function mapClipboardItem(item: DecryptedClipboardItem): ClipboardItem {
     created_at: item.createdAt,
     id: item.id,
     mime_type: item.mimeType,
-    payload_size: numberFromBigInt(item.payloadSize, "clipboard payload size"),
+    payload_size: numberFromBigInt(item.payloadSize),
     source_device_id: item.sourceDeviceId,
     text: item.text,
   };
@@ -89,7 +89,7 @@ function mapClipboardItem(item: DecryptedClipboardItem): ClipboardItem {
 
 function mapFileItem(item: DecryptedFileItem): FileItem {
   return {
-    blob_size: numberFromBigInt(item.blobSize, "file blob size"),
+    blob_size: numberFromBigInt(item.blobSize),
     created_at: item.createdAt,
     filename: item.filename,
     id: item.id,
@@ -119,10 +119,17 @@ function mapConnectionStatus(status: NativeConnectionStatus): ConnectionStatus {
   }
 }
 
-function numberFromBigInt(value: bigint, label: string): number {
+function numberFromBigInt(value: bigint): number {
+  // Defensive: a non-conformant or buggy same-user device could encode an
+  // absurd (>= 2^53) or negative size in AEAD-authenticated metadata. Clamp
+  // per item instead of throwing so a single malformed item cannot poison the
+  // whole getState() mapping and brick the UI.
   const numberValue = Number(value);
-  if (!Number.isSafeInteger(numberValue)) {
-    throw new Error(`${label} exceeds JavaScript's safe integer range`);
+  if (!Number.isFinite(numberValue) || numberValue < 0) {
+    return 0;
+  }
+  if (numberValue > Number.MAX_SAFE_INTEGER) {
+    return Number.MAX_SAFE_INTEGER;
   }
   return numberValue;
 }
