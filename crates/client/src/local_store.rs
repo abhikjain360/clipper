@@ -306,6 +306,8 @@ impl LocalStore {
         encryption_key: &[u8; 32],
         visible_clipboard_limit: usize,
     ) -> Result<LocalVisibleState, LocalStoreError> {
+        #[cfg(not(target_family = "wasm"))]
+        self.sweep_orphaned_temp_files().await;
         let mut memory = MemoryState::default();
         for record in self.all_stored_object_records().await? {
             match self
@@ -815,14 +817,8 @@ impl LocalStore {
         wrapping_key: &[u8; 32],
     ) -> Result<DeviceSigningIdentity, LocalStoreError> {
         if let Some(record) = self.read_device_identity_record().await? {
-            let migrate_plaintext = matches!(&record, StoredDeviceIdentityRecord::Plaintext(_));
             match device_identity_from_record(record, wrapping_key) {
-                Ok(identity) => {
-                    if migrate_plaintext {
-                        self.write_device_identity(&identity, wrapping_key).await?;
-                    }
-                    return Ok(identity);
-                }
+                Ok(identity) => return Ok(identity),
                 Err(
                     error @ (LocalStoreError::DeviceIdentityDecrypt(_)
                     | LocalStoreError::UnsupportedDeviceIdentityVersion(_)),
@@ -848,7 +844,7 @@ impl LocalStore {
 
     async fn read_device_identity_record(
         &self,
-    ) -> Result<Option<StoredDeviceIdentityRecord>, LocalStoreError> {
+    ) -> Result<Option<DeviceIdentityEncryptedRecord>, LocalStoreError> {
         let path = self.device_identity_path();
         match tokio::fs::read(&path).await {
             Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
@@ -866,6 +862,15 @@ impl LocalStore {
         let record = encrypted_device_identity_record(identity, wrapping_key)?;
         let bytes = serde_json::to_vec_pretty(&record)?;
         write_private_file_atomic(&self.device_identity_path(), &bytes).await
+    }
+
+    /// Best-effort removal of orphaned atomic-write temp files across every
+    /// directory `write_private_file_atomic` targets, so a crash/IO error
+    /// mid-write cannot leak ciphertext temps that accumulate unboundedly.
+    async fn sweep_orphaned_temp_files(&self) {
+        sweep_orphaned_temp_files(&self.base_dir).await;
+        sweep_orphaned_temp_files(&self.object_dir()).await;
+        sweep_orphaned_temp_files(&self.clipboard_dir()).await;
     }
 
     async fn stored_object_record(
@@ -1008,16 +1013,10 @@ impl LocalStore {
             .get_item(&self.device_identity_key())
             .map_err(storage_error)?
         {
-            let record = serde_json::from_str::<StoredDeviceIdentityRecord>(&json)
+            let record = serde_json::from_str::<DeviceIdentityEncryptedRecord>(&json)
                 .map_err(LocalStoreError::from)?;
-            let migrate_plaintext = matches!(&record, StoredDeviceIdentityRecord::Plaintext(_));
             match device_identity_from_record(record, wrapping_key) {
-                Ok(identity) => {
-                    if migrate_plaintext {
-                        self.write_browser_device_identity(&storage, &identity, wrapping_key)?;
-                    }
-                    return Ok(identity);
-                }
+                Ok(identity) => return Ok(identity),
                 Err(
                     error @ (LocalStoreError::DeviceIdentityDecrypt(_)
                     | LocalStoreError::UnsupportedDeviceIdentityVersion(_)),
@@ -1227,26 +1226,18 @@ impl LocalStore {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-enum StoredDeviceIdentityRecord {
-    Encrypted(DeviceIdentityEncryptedRecord),
-    Plaintext(DeviceIdentityPlaintextRecord),
-}
-
+/// The on-disk/local-storage device-identity record. Only the AEAD-wrapped
+/// shape is accepted: an attacker who can write this storage slot but does not
+/// hold the wrapping key (derived from the in-memory OPAQUE export key) cannot
+/// forge a valid record, since a non-wrapped/forged record fails to
+/// deserialize (required `version` + `wrapped_signing_secret_key`) and is
+/// rejected fail-closed rather than silently adopted.
 #[derive(Debug, Serialize, Deserialize)]
 struct DeviceIdentityEncryptedRecord {
     version: u64,
     #[serde(default)]
     device_id: Option<String>,
     wrapped_signing_secret_key: Vec<u8>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct DeviceIdentityPlaintextRecord {
-    #[serde(default)]
-    device_id: Option<String>,
-    signing_secret_key: Vec<u8>,
 }
 
 fn decrypt_file_record(
@@ -1430,46 +1421,25 @@ fn encrypted_device_identity_record(
 }
 
 fn device_identity_from_record(
-    record: StoredDeviceIdentityRecord,
+    record: DeviceIdentityEncryptedRecord,
     wrapping_key: &[u8; 32],
 ) -> Result<DeviceSigningIdentity, LocalStoreError> {
-    match record {
-        StoredDeviceIdentityRecord::Encrypted(record) => {
-            if record.version != DEVICE_IDENTITY_RECORD_VERSION_V2 {
-                return Err(LocalStoreError::UnsupportedDeviceIdentityVersion(
-                    record.version,
-                ));
-            }
-            let device_id = record
-                .device_id
-                .map(|id| validate_device_id(&id))
-                .transpose()?;
-            let plaintext = crypto::unwrap_with_key(
-                wrapping_key,
-                &record.wrapped_signing_secret_key,
-                crypto::AAD_WRAP_DEVICE_SIGNING_SECRET_V1,
-            )
-            .map_err(|error| LocalStoreError::DeviceIdentityDecrypt(error.to_string()))?;
-            let signing_secret_key = device_signing_secret_key_from_vec(plaintext)?;
-            Ok(DeviceSigningIdentity {
-                device_id,
-                signing_secret_key: Zeroizing::new(signing_secret_key),
-            })
-        }
-        StoredDeviceIdentityRecord::Plaintext(record) => {
-            device_identity_from_plaintext_record(record)
-        }
+    if record.version != DEVICE_IDENTITY_RECORD_VERSION_V2 {
+        return Err(LocalStoreError::UnsupportedDeviceIdentityVersion(
+            record.version,
+        ));
     }
-}
-
-fn device_identity_from_plaintext_record(
-    record: DeviceIdentityPlaintextRecord,
-) -> Result<DeviceSigningIdentity, LocalStoreError> {
     let device_id = record
         .device_id
         .map(|id| validate_device_id(&id))
         .transpose()?;
-    let signing_secret_key = device_signing_secret_key_from_vec(record.signing_secret_key)?;
+    let plaintext = crypto::unwrap_with_key(
+        wrapping_key,
+        &record.wrapped_signing_secret_key,
+        crypto::AAD_WRAP_DEVICE_SIGNING_SECRET_V1,
+    )
+    .map_err(|error| LocalStoreError::DeviceIdentityDecrypt(error.to_string()))?;
+    let signing_secret_key = device_signing_secret_key_from_vec(plaintext)?;
     Ok(DeviceSigningIdentity {
         device_id,
         signing_secret_key: Zeroizing::new(signing_secret_key),
@@ -1529,22 +1499,74 @@ async fn write_private_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), Loca
             .unwrap_or("file"),
         uuid::Uuid::now_v7()
     ));
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp_path)
-        .await?;
+    // Create the temp file restricted from the start (mode 0600 at open time,
+    // matching the keychain pattern) so the ciphertext is never briefly
+    // world-readable in the create-then-chmod gap.
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .await?;
+    options.mode(0o600);
+    let mut file = options.open(&tmp_path).await?;
+    // If any step fails the uniquely-named temp would otherwise be orphaned
+    // forever (no committed record is ever named `*.tmp`, and the dir scans
+    // skip non-canonical names), so unlink it on error before propagating.
+    if let Err(error) = write_and_commit_temp_file(&mut file, &tmp_path, path, bytes).await {
+        drop(file);
+        _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(error);
     }
+    Ok(())
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn write_and_commit_temp_file(
+    file: &mut tokio::fs::File,
+    tmp_path: &Path,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), LocalStoreError> {
     file.write_all(bytes).await?;
     file.flush().await?;
-    drop(file);
-    tokio::fs::rename(&tmp_path, path).await?;
+    file.sync_all().await?;
+    tokio::fs::rename(tmp_path, path).await?;
     Ok(())
+}
+
+/// Remove stale atomic-write temp files (`*.tmp`) left behind by a crash or an
+/// I/O error mid-write. A `*.tmp` by definition was never promoted to a
+/// committed record, so deleting it is always safe; without this they
+/// accumulate forever because every directory scan filters to canonical names.
+#[cfg(not(target_family = "wasm"))]
+async fn sweep_orphaned_temp_files(dir: &Path) {
+    let mut read_dir = match tokio::fs::read_dir(dir).await {
+        Ok(read_dir) => read_dir,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(dir = %dir.display(), "Failed to sweep temp files: {}", error);
+            return;
+        }
+    };
+    loop {
+        match read_dir.next_entry().await {
+            Ok(Some(entry)) => {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) == Some("tmp") {
+                    if let Err(error) = tokio::fs::remove_file(&path).await {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "Failed to remove stale temp file: {}",
+                            error
+                        );
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(dir = %dir.display(), "Failed to enumerate temp files: {}", error);
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(target_family = "wasm")]
@@ -1733,41 +1755,103 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
-    async fn migrates_plaintext_device_identity_to_encrypted_record() {
+    async fn rejects_plaintext_device_identity_record() {
+        // A record without the AEAD-wrapped key (e.g. a forged plaintext record
+        // written by an attacker who cannot derive the wrapping key) must be
+        // rejected fail-closed, never adopted as a valid signing identity.
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = LocalStore::new(tmp.path());
         let wrapping_key = [5_u8; 32];
-        let legacy = DeviceIdentityPlaintextRecord {
-            device_id: Some(TEST_DEVICE_ID.into()),
-            signing_secret_key: vec![6_u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
-        };
-        let legacy_bytes = serde_json::to_vec_pretty(&legacy).expect("legacy json");
+        let forged = serde_json::json!({
+            "device_id": TEST_DEVICE_ID,
+            "signing_secret_key": vec![6_u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
+        });
+        let forged_bytes = serde_json::to_vec_pretty(&forged).expect("forged json");
 
         ensure_private_dir(tmp.path()).await.expect("private dir");
-        write_private_file_atomic(&store.device_identity_path(), &legacy_bytes)
+        write_private_file_atomic(&store.device_identity_path(), &forged_bytes)
             .await
-            .expect("write legacy identity");
+            .expect("write forged identity");
 
-        let loaded = store
+        let result = store
             .load_or_create_device_signing_identity(&wrapping_key)
-            .await
-            .expect("load legacy identity");
-        assert_eq!(loaded.device_id.as_deref(), Some(TEST_DEVICE_ID));
-        assert_eq!(
-            *loaded.signing_secret_key,
-            [6_u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]
+            .await;
+        assert!(
+            result.is_err(),
+            "plaintext device-identity record must not be accepted"
         );
 
+        // The forged record is not silently re-wrapped into a valid identity.
         let bytes = tokio::fs::read(store.device_identity_path())
             .await
-            .expect("migrated identity bytes");
-        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("migrated json");
-        assert_eq!(
-            json.get("version").and_then(serde_json::Value::as_u64),
-            Some(DEVICE_IDENTITY_RECORD_VERSION_V2)
+            .expect("identity bytes");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("identity json");
+        assert!(
+            json.get("wrapped_signing_secret_key").is_none(),
+            "forged plaintext record must not be promoted to a wrapped record"
         );
-        assert!(json.get("wrapped_signing_secret_key").is_some());
-        assert!(json.get("signing_secret_key").is_none());
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn hydrate_sweeps_orphaned_temp_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+
+        // Persist one item so the object/clipboard dirs exist, then drop a
+        // leftover atomic-write temp file (the shape `write_private_file_atomic`
+        // leaves behind on a crash) into each private dir.
+        let only = item(
+            "33333333-3333-4333-8333-333333333333",
+            "only",
+            "2026-01-01T00:00:00+00:00",
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &only,
+                only.text.as_bytes(),
+                &encrypted_clipboard(&only, only.text.as_bytes()),
+                1,
+                1,
+                10,
+            )
+            .await
+            .expect("persist");
+
+        let object_tmp = store.object_dir().join(format!(
+            "44444444-4444-4444-8444-444444444444.json.{}.tmp",
+            uuid::Uuid::now_v7()
+        ));
+        let clipboard_tmp = store.clipboard_dir().join(format!(
+            "55555555.payload.ciphertext.{}.tmp",
+            uuid::Uuid::now_v7()
+        ));
+        let base_tmp = tmp
+            .path()
+            .join(format!("device_identity.json.{}.tmp", uuid::Uuid::now_v7()));
+        for path in [&object_tmp, &clipboard_tmp, &base_tmp] {
+            tokio::fs::write(path, b"orphaned ciphertext")
+                .await
+                .expect("write temp file");
+        }
+
+        let restored_store = LocalStore::new(tmp.path());
+        restored_store.set_profile("profile-a".into());
+        let restored = restored_store
+            .hydrate_ciphertext_cache(&TEST_KEY, 10)
+            .await
+            .expect("hydrate");
+
+        // The committed record survives; the orphaned temps are reclaimed.
+        assert_eq!(restored.clipboard_items.len(), 1);
+        for path in [&object_tmp, &clipboard_tmp, &base_tmp] {
+            assert!(
+                !tokio::fs::try_exists(path).await.expect("exists check"),
+                "stale temp file {} should have been swept",
+                path.display()
+            );
+        }
     }
 
     #[tokio::test]

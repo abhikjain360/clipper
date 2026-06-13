@@ -33,6 +33,23 @@ const RECENT_CLIPBOARD_LIMIT: usize = 100;
 /// MIME type used for plain-text clipboard entries.
 pub const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
 const CLIPBOARD_HYDRATION_CONCURRENCY: usize = 8;
+/// Largest clipboard payload (plaintext) the client will capture, upload, or
+/// accept on download. The server is untrusted for content, so the client must
+/// bound payload sizes independently of any server-supplied/server-signed
+/// `ciphertext_size`: reconciliation downloads run automatically on connect, so
+/// an unbounded size would let a hostile server force the client to buffer
+/// arbitrarily many bytes (per-download, with hydration concurrency) and OOM.
+pub const MAX_CLIPBOARD_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+/// Absolute ceiling on a clipboard payload's ciphertext that the client will
+/// buffer on download, independent of the server-signed `ciphertext_size`.
+/// XChaCha20-Poly1305 adds only a fixed tag, so this stays just above the
+/// plaintext cap to never reject the client's own uploads.
+const MAX_CLIPBOARD_PAYLOAD_CIPHERTEXT_BYTES: i64 = (MAX_CLIPBOARD_PAYLOAD_BYTES + 4096) as i64;
+/// Absolute ceiling on a file blob's ciphertext that the client will buffer on
+/// download, independent of the server-signed `ciphertext_size`. Matches the
+/// server's default `max_file_blob_bytes` so a hostile server cannot advertise
+/// a multi-GiB size and OOM the client during a download.
+const MAX_FILE_PAYLOAD_CIPHERTEXT_BYTES: i64 = 512 * 1024 * 1024;
 const OBJECT_ENVELOPE_VERSION_V1: u64 = 1;
 #[cfg(target_family = "wasm")]
 const WS_TICKET_PROTOCOL: &str = "clipper-ticket";
@@ -344,6 +361,17 @@ impl SyncEngine {
         if !is_supported_clipboard_mime_type(mime_type) {
             return Err(ClientError::UnsupportedMimeType {
                 mime_type: mime_type.to_string(),
+            });
+        }
+        // Authoritative, platform-independent ceiling: never buffer + encrypt an
+        // oversized clipboard payload. The clipboard is a shared same-user
+        // resource any local app can fill, so an unbounded capture would let a
+        // local process (or a buggy/legitimate huge copy) double the bytes in
+        // memory (plaintext + ciphertext) before the server ever rejects them.
+        if data.len() > MAX_CLIPBOARD_PAYLOAD_BYTES {
+            return Err(ClientError::PayloadTooLarge {
+                size: data.len() as i64,
+                limit: MAX_CLIPBOARD_PAYLOAD_BYTES as i64,
             });
         }
 
@@ -790,6 +818,7 @@ impl SyncEngine {
                 });
             }
             let payload = single_payload(&file_item)?.clone();
+            check_payload_ciphertext_size(&payload, MAX_FILE_PAYLOAD_CIPHERTEXT_BYTES)?;
             let blob = api
                 .download_object_payload(file_id, &payload.id.to_string(), payload.ciphertext_size)
                 .await?;
@@ -1146,6 +1175,7 @@ impl SyncEngine {
             });
         }
         let payload = single_payload(item)?;
+        check_payload_ciphertext_size(payload, MAX_CLIPBOARD_PAYLOAD_CIPHERTEXT_BYTES)?;
         let payload_size = meta.size.unwrap_or(payload.ciphertext_size);
         let encrypted_payload = api
             .download_object_payload(
@@ -1776,6 +1806,25 @@ fn inline_ciphertext(ciphertext: &[u8]) -> Option<Vec<u8>> {
     (ciphertext.len() <= INLINE_OBJECT_PAYLOAD_MAX_BYTES).then(|| ciphertext.to_vec())
 }
 
+/// Reject a server-declared payload ciphertext size that exceeds the client's
+/// independent ceiling *before* any bytes are downloaded/buffered. The server
+/// is untrusted for content and fully controls `ciphertext_size` (it supplies
+/// the signing key the envelope is verified against), so this bound must not
+/// rely on the envelope. Defends against download-side OOM (finding: malicious
+/// server can OOM the client via unbounded payload download).
+fn check_payload_ciphertext_size(
+    payload: &ObjectPayloadDescriptor,
+    limit: i64,
+) -> Result<(), ClientError> {
+    if payload.ciphertext_size > limit {
+        return Err(ClientError::PayloadTooLarge {
+            size: payload.ciphertext_size,
+            limit,
+        });
+    }
+    Ok(())
+}
+
 fn single_payload(item: &ObjectListItem) -> Result<&ObjectPayloadDescriptor, ClientError> {
     if item.payloads.len() != 1 {
         return Err(ClientError::UnexpectedResponse(format!(
@@ -1890,6 +1939,18 @@ fn create_object_envelope_body(
 
 fn verify_object_list_item_envelope(item: &ObjectListItem) -> Result<(), ClientError> {
     let body = &item.envelope.body;
+    // Reject an over-count payload list up front, before the per-payload
+    // matching loop below: the server is untrusted and never runs the
+    // api-types `length(max = MAX_OBJECT_PAYLOAD_ENTRIES)` validator on its
+    // responses, so without this an attacker-supplied item with a huge matched
+    // payload set would cost O(n^2) UUID comparisons (and a wasted signature
+    // verify) before `single_payload` rejects it. Clients only ever produce a
+    // single payload, so 16 is already far more than this client uses.
+    if item.payloads.len() > MAX_OBJECT_PAYLOAD_ENTRIES
+        || body.payloads.len() > MAX_OBJECT_PAYLOAD_ENTRIES
+    {
+        return Err(object_envelope_error("object has too many payload entries"));
+    }
     let meta_hash = crypto::sha256(&item.meta_ciphertext);
     if body.object_id != item.id
         || body.object_type != item.kind
@@ -2054,4 +2115,92 @@ fn hex_string(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor(id: ObjectPayloadId) -> ObjectPayloadDescriptor {
+        ObjectPayloadDescriptor {
+            id,
+            nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
+            ciphertext_size: 0,
+            sha256_ciphertext: vec![0_u8; crypto::SHA256_BYTES],
+        }
+    }
+
+    fn envelope_payload(id: ObjectPayloadId) -> ObjectEnvelopePayloadV1 {
+        ObjectEnvelopePayloadV1 {
+            id,
+            nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
+            ciphertext_size: 0,
+            sha256_ciphertext: vec![0_u8; crypto::SHA256_BYTES],
+        }
+    }
+
+    /// Build a properly self-signed object list item whose envelope/item
+    /// payload sets both have `count` entries. The signature is valid, so a
+    /// rejection can only come from the over-count guard, and a legitimately
+    /// sized list verifies cleanly.
+    fn signed_item_with_payload_count(count: usize) -> ObjectListItem {
+        let object_id: ObjectId = uuid::Uuid::now_v7().into();
+        let device_id: DeviceId = uuid::Uuid::now_v7().into();
+        let signing_key = crypto::generate_device_signing_secret_key();
+        let public_key = crypto::device_signing_public_key(&signing_key);
+        let payload_ids: Vec<ObjectPayloadId> =
+            (0..count).map(|_| uuid::Uuid::now_v7().into()).collect();
+        let body = ObjectEnvelopeBodyV1 {
+            object_id,
+            object_type: ObjectKind::Clipboard,
+            object_version: OBJECT_ENVELOPE_VERSION_V1,
+            source_device_id: device_id,
+            created_at: "2026-06-13T00:00:00Z".into(),
+            operation: ObjectEnvelopeOperation::Create,
+            meta_nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
+            sha256_meta_ciphertext: crypto::sha256(&[]).to_vec(),
+            payloads: payload_ids.iter().copied().map(envelope_payload).collect(),
+        };
+        let signature = crypto::sign_object_envelope_body(&signing_key, &body).expect("sign");
+        ObjectListItem {
+            id: object_id,
+            kind: ObjectKind::Clipboard,
+            created_seq: 1,
+            meta_nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
+            meta_ciphertext: Vec::new(),
+            payloads: payload_ids.iter().copied().map(descriptor).collect(),
+            created_at: "2026-06-13T00:00:00Z".into(),
+            source_device_id: device_id,
+            source_device_signing_public_key: public_key.to_vec(),
+            envelope: ObjectEnvelopeV1 { body, signature },
+        }
+    }
+
+    #[test]
+    fn envelope_verification_rejects_over_count_payload_list_before_quadratic_work() {
+        // A malicious server can pack a huge matched payload set into one item;
+        // verifying it without an early cap is O(n^2). The cap must reject it up
+        // front. The item is validly signed, so the rejection can ONLY be the
+        // over-count guard firing ahead of the per-payload loop / Ed25519 verify.
+        let item = signed_item_with_payload_count(MAX_OBJECT_PAYLOAD_ENTRIES + 1);
+        let error = verify_object_list_item_envelope(&item).expect_err("must be rejected");
+        match error {
+            ClientError::Crypto(crypto::CryptoError::Signature(message)) => {
+                assert!(
+                    message.contains("too many payload entries"),
+                    "expected over-count rejection, got: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn envelope_verification_allows_max_payload_count_past_the_cap() {
+        // At the cap the over-count guard must NOT fire: a legitimately sized,
+        // validly signed list must still verify cleanly, proving the guard is a
+        // ceiling and not an off-by-one that rejects valid lists.
+        let item = signed_item_with_payload_count(MAX_OBJECT_PAYLOAD_ENTRIES);
+        verify_object_list_item_envelope(&item).expect("payload count at the cap must verify");
+    }
 }

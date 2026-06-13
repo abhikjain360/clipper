@@ -15,7 +15,10 @@ use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString};
 use objc2_foundation::NSString;
 use tracing::{debug, info, warn};
 
-use crate::{clipboard_privacy, engine::SyncEngine};
+use crate::{
+    clipboard_privacy,
+    engine::{MAX_CLIPBOARD_PAYLOAD_BYTES, SyncEngine},
+};
 
 static WATCHER_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -102,15 +105,56 @@ fn read_clipboard(last_change_count: &mut isize) -> Option<ClipboardRead> {
         return None;
     }
 
+    let candidate = read_clipboard_candidate(&pasteboard)?;
+
+    // Re-validate after reading the payload: the marker check and the payload
+    // read are separate, non-atomic ObjC calls, so a concealed write that lands
+    // in the gap could otherwise have its content captured even though the
+    // pasteboard is now marked private. If the marker is now present, or the
+    // pasteboard changed under us, drop this capture and let the next tick
+    // re-read the settled pasteboard.
+    let final_count = pasteboard.changeCount();
+    if final_count != current_count {
+        *last_change_count = final_count;
+        debug!("Discarding macOS clipboard payload that changed mid-read");
+        return None;
+    }
+    if pasteboard_has_private_marker(&pasteboard) {
+        debug!("Discarding macOS clipboard payload concealed after read");
+        return None;
+    }
+
+    Some(candidate)
+}
+
+/// Read the first supported payload (PNG image, then text) from the pasteboard,
+/// dropping anything over the size ceiling.
+fn read_clipboard_candidate(pasteboard: &NSPasteboard) -> Option<ClipboardRead> {
     let png_type = unsafe { NSPasteboardTypePNG };
     if let Some(data) = pasteboard.dataForType(png_type) {
+        // Check the length before `to_vec` so an oversized image is dropped
+        // without the extra full-size copy (and before the engine encrypts it).
+        if data.len() > MAX_CLIPBOARD_PAYLOAD_BYTES {
+            warn!(
+                limit = MAX_CLIPBOARD_PAYLOAD_BYTES,
+                "Ignoring oversized macOS clipboard image"
+            );
+            return None;
+        }
         return Some(ClipboardRead {
             mime_type: "image/png",
             bytes: data.to_vec(),
         });
     }
 
-    if let Some(content) = read_pasteboard_text(&pasteboard) {
+    if let Some(content) = read_pasteboard_text(pasteboard) {
+        if content.len() > MAX_CLIPBOARD_PAYLOAD_BYTES {
+            warn!(
+                limit = MAX_CLIPBOARD_PAYLOAD_BYTES,
+                "Ignoring oversized macOS clipboard text"
+            );
+            return None;
+        }
         return Some(ClipboardRead {
             mime_type: "text/plain",
             bytes: content.into_bytes(),

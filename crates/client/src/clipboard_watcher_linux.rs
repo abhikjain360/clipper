@@ -5,20 +5,29 @@
 
 use std::{
     io::Read,
+    os::fd::AsRawFd,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use clipper_core::crypto;
 use tracing::{debug, warn};
 use wl_clipboard_rs::paste::{self, ClipboardType, Error as PasteError, MimeType, Seat};
 
-use crate::{clipboard_privacy, engine::SyncEngine};
+use crate::{
+    clipboard_privacy,
+    engine::{MAX_CLIPBOARD_PAYLOAD_BYTES, SyncEngine},
+};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Abort a clipboard pipe read that makes no progress for this long. The
+/// deadline resets on every chunk, so a large but steadily-streamed payload
+/// still completes; only a source that stalls (accepts the receive fd but never
+/// writes/closes it) is cut off, so it cannot wedge the watcher thread forever.
+const READ_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 static WATCHER_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -38,6 +47,103 @@ enum ClipboardWatcherError {
     Paste(#[from] PasteError),
     #[error("clipboard payload read failed: {0}")]
     Read(#[from] std::io::Error),
+}
+
+/// Result of a bounded, timeout-guarded clipboard pipe read.
+enum ReadOutcome {
+    /// The source finished writing within the no-progress deadline. The buffer
+    /// holds up to `max_bytes + 1` bytes (one byte past the cap is read so an
+    /// over-cap payload is detectable).
+    Complete(Vec<u8>),
+    /// The source stalled (no bytes for `READ_STALL_TIMEOUT`); the read was
+    /// abandoned so it cannot wedge the watcher thread.
+    TimedOut,
+}
+
+/// Read from a clipboard pipe with both a size cap and a no-progress timeout.
+///
+/// The write end is held by an untrusted local clipboard owner: it can accept
+/// the receive fd and then never write or close it, which would block a plain
+/// `read_to_end` forever and silently kill all future clipboard capture. We
+/// drive the read over `poll(2)` with a deadline that resets on every chunk of
+/// progress, so legitimate large/slow transfers still complete while a stalled
+/// source is cut off. The total is bounded to `max_bytes + 1` so a hostile or
+/// buggy huge selection cannot balloon daemon memory.
+fn read_pipe_bounded<R: Read + AsRawFd>(
+    pipe: &mut R,
+    max_bytes: usize,
+    stall_timeout: Duration,
+) -> std::io::Result<ReadOutcome> {
+    let raw_fd = pipe.as_raw_fd();
+    set_nonblocking(raw_fd)?;
+
+    let limit = max_bytes.saturating_add(1);
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 64 * 1024];
+    let mut deadline = Instant::now() + stall_timeout;
+
+    loop {
+        if bytes.len() >= limit {
+            return Ok(ReadOutcome::Complete(bytes));
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(ReadOutcome::TimedOut);
+        }
+        let remaining = deadline - now;
+        let timeout_ms = i32::try_from(remaining.as_millis())
+            .unwrap_or(i32::MAX)
+            .max(1);
+
+        let mut poll_fd = libc::pollfd {
+            fd: raw_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `poll_fd` points to one valid `pollfd` for the duration of the
+        // call and `raw_fd` is owned by `pipe`, which outlives this call.
+        let rc = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        if rc == 0 {
+            return Ok(ReadOutcome::TimedOut);
+        }
+
+        match pipe.read(&mut chunk) {
+            Ok(0) => return Ok(ReadOutcome::Complete(bytes)),
+            Ok(n) => {
+                let take = n.min(limit - bytes.len());
+                bytes.extend_from_slice(&chunk[..take]);
+                deadline = Instant::now() + stall_timeout;
+            }
+            Err(err)
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    // SAFETY: `fcntl` with these commands takes/returns an int and has no
+    // memory-safety preconditions; `fd` is a valid open descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Start watching the Wayland clipboard in a background thread.
@@ -135,10 +241,28 @@ fn read_clipboard(
         Err(error) => return Err(error.into()),
     };
 
-    let mut bytes = Vec::new();
-    pipe.read_to_end(&mut bytes)?;
+    // Read with both a size cap and a no-progress timeout: the Wayland source
+    // app fully controls this pipe, so it could stream gigabytes (memory) or
+    // accept the fd and never write/close it (wedge the watcher thread forever).
+    let bytes = match read_pipe_bounded(&mut pipe, MAX_CLIPBOARD_PAYLOAD_BYTES, READ_STALL_TIMEOUT)?
+    {
+        ReadOutcome::Complete(bytes) => bytes,
+        ReadOutcome::TimedOut => {
+            *last_digest = None;
+            warn!("Wayland clipboard read stalled; skipping payload");
+            return Ok(None);
+        }
+    };
     if bytes.is_empty() {
         *last_digest = None;
+        return Ok(None);
+    }
+    if bytes.len() > MAX_CLIPBOARD_PAYLOAD_BYTES {
+        *last_digest = None;
+        warn!(
+            limit = MAX_CLIPBOARD_PAYLOAD_BYTES,
+            "Ignoring oversized Wayland clipboard payload"
+        );
         return Ok(None);
     }
 
@@ -188,8 +312,19 @@ fn clipboard_has_password_manager_marker(
         Err(error) => return Err(error.into()),
     };
 
-    let mut bytes = Vec::new();
-    pipe.read_to_end(&mut bytes)?;
+    // Bound this read too: the hint payload is also supplied by the clipboard
+    // owner, so a hostile source must not be able to balloon memory or wedge the
+    // watcher here (this read happens before MIME selection, so it is the
+    // easiest place to stall the thread). A stalled/over-cap hint is treated as
+    // "no marker present" so the read cannot block the loop.
+    let bytes = match read_pipe_bounded(&mut pipe, MAX_CLIPBOARD_PAYLOAD_BYTES, READ_STALL_TIMEOUT)?
+    {
+        ReadOutcome::Complete(bytes) => bytes,
+        ReadOutcome::TimedOut => {
+            warn!("Wayland clipboard privacy-marker read stalled; ignoring");
+            return Ok(false);
+        }
+    };
     Ok(clipboard_privacy::is_linux_password_manager_secret_hint(
         &bytes,
     ))

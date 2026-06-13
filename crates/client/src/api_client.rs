@@ -837,6 +837,11 @@ pub enum ClientError {
     /// A clipboard or object MIME type the client does not know how to handle.
     #[error("Unsupported MIME type: {mime_type}")]
     UnsupportedMimeType { mime_type: String },
+    /// A payload exceeds the client's independent size ceiling. The server is
+    /// untrusted for content, so the client bounds payload sizes itself rather
+    /// than trusting the server-supplied/server-signed size.
+    #[error("Payload too large: {size} bytes exceeds the {limit}-byte limit")]
+    PayloadTooLarge { size: i64, limit: i64 },
     /// A clipboard or file item is not present in the local state.
     #[error("Item not found: {id}")]
     ItemNotFound { id: String },
@@ -954,6 +959,9 @@ impl ClientError {
             }
             Self::UnsupportedMimeType { .. } => {
                 ErrorResponse::new(ApiErrorCode::UnsupportedMediaType, self.to_string())
+            }
+            Self::PayloadTooLarge { .. } => {
+                ErrorResponse::new(ApiErrorCode::PayloadTooLarge, self.to_string())
             }
             Self::ItemNotFound { .. } | Self::PayloadNotFound { .. } => {
                 ErrorResponse::new(ApiErrorCode::NotFound, self.to_string())
