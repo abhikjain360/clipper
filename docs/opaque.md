@@ -82,17 +82,18 @@ there is no `409` on a duplicate username at this step.
 Consequences worth understanding before reading the steps below:
 
 - The access key is **verified** (not consumed) in `register_start`, and
-  **consumed** (`used_at` set) in `register_finish`. Consumption happens before
-  the `users` row insert, so it runs *before* the username uniqueness check.
-- Because consumption precedes the insert, a `register_finish` against an
-  already-taken username burns the one-time access key and then returns
-  `409 CONFLICT ("Registration conflict")`. The consumed key is committed but
-  left **unbound** to any user (`used_by_user_id = NULL`); it cannot be reused.
-  See `register_start_does_not_reveal_existing_username` in the auth tests.
+  **consumed** (`used_at` set) in `register_finish` — but only *after* the
+  `users` row inserts successfully. A `register_finish` against an already-taken
+  username hits the `users.username` unique constraint first and rolls the
+  transaction back, so the one-time access key is **not** burned and stays usable
+  for its holder. See `register_start_does_not_reveal_existing_username` in the
+  auth tests.
 - So while `register/start` is non-revealing, the full two-step flow still lets a
-  caller who holds a valid unused access key learn — at `register/finish`, and
-  only by spending that key — whether a chosen username exists. This is flagged
-  in `docs/security-review-2026-06-04.md` rather than blessed here.
+  caller who holds a valid unused access key learn — at `register/finish` — whether
+  a chosen username exists (200 then `409`), now without spending the key. This
+  residual oracle is recorded in
+  [`docs/security-review-2026-06-14.md`](security-review-2026-06-14.md) rather
+  than blessed here.
 
 ### Round 1 — client (`opaque_client_register_start(pw)`)
 
@@ -397,16 +398,19 @@ Access keys are one-time registration invites. They are stored only as hashes
   wrapped and Argon2 mixes in the pepper, a DB-only attacker cannot verify
   candidate access keys offline.
 - Argon2id is memory-hard and blocks for tens of milliseconds, so
-  `register_start` runs it on the blocking pool (`spawn_blocking`) rather than
-  stalling an async worker.
+  `register_start` runs it on the blocking pool (`spawn_blocking`) and gates it
+  behind a semaphore (sized to the core count) so a burst of registration
+  attempts cannot run many ~19 MiB hashes at once and exhaust memory.
 
 Lifecycle: `register_start` rejects (401 "Invalid access key") if the key is
 unknown, already used (`used_at` set), or expired (`expires_at <= now`).
-`register_finish` re-checks the same conditions and then consumes the key with a
-guarded `UPDATE … SET used_at WHERE used_at IS NULL` (the `rows_affected != 1`
-race guard rejects with 409). After the user row inserts successfully, a second
-guarded update binds `used_by_user_id` to the new user. As noted above, a
-duplicate-username `register_finish` consumes the key but leaves it unbound.
+`register_finish` re-checks the same conditions and then inserts the `users`
+row; only after a successful insert does it consume the key with a guarded
+`UPDATE … SET used_at WHERE used_at IS NULL` (the `rows_affected != 1` race
+guard rejects) and bind `used_by_user_id` to the new user. Because consumption
+follows the insert, a duplicate-username `register_finish` rolls back and leaves
+the key **unconsumed and reusable**; the `users.access_key_hash` unique
+constraint is what enforces single-use across concurrent finishes.
 
 ## Rate limiting around the OPAQUE endpoints
 
