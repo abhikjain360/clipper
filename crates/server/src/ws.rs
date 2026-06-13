@@ -31,6 +31,11 @@ const WS_TICKET_PROTOCOL: &str = "clipper-ticket";
 /// memory.
 const WS_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
+/// How long a freshly upgraded socket may stay silent before sending its hello.
+/// Bounds the cheapest exhaustion variant: open a connection, send nothing, and
+/// hold a task + file descriptor open indefinitely.
+const WS_HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A broadcast message sent to all connected WebSocket clients.
 #[derive(Clone, Debug)]
 pub struct WsBroadcast {
@@ -108,8 +113,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
     let device_id = auth.device_id.to_string();
     info!(device_id = %device_id, "WebSocket connected");
 
-    // Wait for hello message.
-    match socket.recv().await {
+    // Wait for the hello message, but bound how long a silent client can hold
+    // the connection (and its task + file descriptor) before sending anything.
+    let hello = match tokio::time::timeout(WS_HELLO_TIMEOUT, socket.recv()).await {
+        Ok(hello) => hello,
+        Err(_) => return close_with_error(socket, WsError::ExpectedHello).await,
+    };
+    match hello {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<WsClientMessage>(&text) {
             Ok(WsClientMessage::Hello) => {}
             Err(_) => return close_with_error(socket, WsError::InvalidHello).await,
