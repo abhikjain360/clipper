@@ -10,10 +10,10 @@ pub struct Model {
     pub user_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub kind: String,
-    #[sea_orm(column_type = "Blob")]
-    pub meta_ciphertext: Vec<u8>,
-    #[sea_orm(column_type = "Blob")]
-    pub meta_nonce: Vec<u8>,
+    #[sea_orm(column_type = "Blob", nullable)]
+    pub meta_ciphertext: Option<Vec<u8>>,
+    #[sea_orm(column_type = "Blob", nullable)]
+    pub meta_nonce: Option<Vec<u8>>,
     #[sea_orm(column_type = "Text")]
     pub created_at: String,
     #[sea_orm(column_type = "Text")]
@@ -21,15 +21,24 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub expires_at: Option<String>,
     pub source_device_id: Option<Uuid>,
-    #[sea_orm(column_type = "Blob")]
-    pub envelope: Vec<u8>,
+    #[sea_orm(column_type = "Blob", nullable)]
+    pub envelope: Option<Vec<u8>>,
     #[sea_orm(column_type = "Text")]
     pub status: String,
     pub created_seq: Option<i64>,
+    pub collab_doc_id: Option<Uuid>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
+    #[sea_orm(
+        belongs_to = "super::collab_docs::Entity",
+        from = "Column::CollabDocId",
+        to = "super::collab_docs::Column::Id",
+        on_update = "Cascade",
+        on_delete = "Cascade"
+    )]
+    CollabDocs,
     #[sea_orm(
         belongs_to = "super::devices::Entity",
         from = "Column::SourceDeviceId",
@@ -48,6 +57,12 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     Users,
+}
+
+impl Related<super::collab_docs::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::CollabDocs.def()
+    }
 }
 
 impl Related<super::devices::Entity> for Entity {

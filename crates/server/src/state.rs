@@ -614,15 +614,18 @@ mod tests {
             id: Set(Uuid::now_v7()),
             user_id: Set(Uuid::now_v7()),
             kind: Set("file".to_string()),
-            meta_ciphertext: Set(Vec::new()),
-            meta_nonce: Set(Vec::new()),
+            // A file object: empty-but-present ciphertext columns satisfy the
+            // objects XOR check (collab_doc_id stays null).
+            meta_ciphertext: Set(Some(Vec::new())),
+            meta_nonce: Set(Some(Vec::new())),
             created_at: Set(now.clone()),
             updated_at: Set(now.clone()),
             expires_at: Set(None),
             source_device_id: Set(None),
-            envelope: Set(Vec::new()),
+            envelope: Set(Some(Vec::new())),
             status: Set("complete".to_string()),
             created_seq: Set(Some(future_seq)),
+            collab_doc_id: Set(None),
         }
         .insert(state.db())
         .await

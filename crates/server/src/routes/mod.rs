@@ -12,6 +12,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use tracing::{debug, error, trace, warn};
 
 pub mod auth;
+pub mod collab;
 pub mod health;
 pub mod objects;
 

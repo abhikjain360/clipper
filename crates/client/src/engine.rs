@@ -1358,6 +1358,16 @@ impl SyncEngine {
         object_id: ObjectId,
         event_seq: i64,
     ) -> Result<(), ClientError> {
+        // Collab objects are server-visible documents, not end-to-end-encrypted
+        // objects: they are never returned by the encrypted-object endpoints and
+        // are not materialized into the local object store. Wiring collab into
+        // the sync engine / app state is Phase 2 UI work tracked separately; here
+        // we just skip them so the match stays total.
+        if kind == ObjectKind::Collab {
+            debug!(object_id = %object_id, event_seq, "Skipping materialize for collab object");
+            return Ok(());
+        }
+
         let api = &self.api;
         let object_id_text = object_id.to_string();
         let item = match api.get_object(&object_id_text).await {
@@ -1403,6 +1413,9 @@ impl SyncEngine {
                 )
                 .await?;
             }
+            // Skipped above before any network call; an explicit arm keeps the
+            // match total without re-handling it.
+            ObjectKind::Collab => {}
         }
         Ok(())
     }

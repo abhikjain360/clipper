@@ -195,7 +195,10 @@ pub async fn init_object(
                 .checked_add_signed(Duration::days(state.config().clipboard.ttl_days))
                 .map(|expires| expires.to_rfc3339())
         }
-        ObjectKind::File => None,
+        // Collab objects are created via `POST /api/collab-docs`, never this
+        // encrypted-object init path (they carry no signed envelope), so this
+        // arm is unreachable in practice; like files they would have no TTL.
+        ObjectKind::File | ObjectKind::Collab => None,
     };
     // Response data derived from the request, computed before the request is
     // moved into the transaction closure.
@@ -245,15 +248,18 @@ pub async fn init_object(
             id: Set(object_id),
             user_id: Set(user_id),
             kind: Set(kind.to_string()),
-            meta_ciphertext: Set(req.meta_ciphertext),
-            meta_nonce: Set(req.meta_nonce),
+            // Clipboard/file objects are end-to-end encrypted: ciphertext columns
+            // set, collab_doc_id null. The objects XOR check enforces this split.
+            meta_ciphertext: Set(Some(req.meta_ciphertext)),
+            meta_nonce: Set(Some(req.meta_nonce)),
             created_at: Set(created_at_str.to_owned()),
             updated_at: Set(updated_at_str.to_owned()),
             expires_at: Set(expires_at),
             source_device_id: Set(Some(device_id)),
-            envelope: Set(envelope_bytes),
+            envelope: Set(Some(envelope_bytes)),
             status: Set("pending".into()),
             created_seq: Set(None),
+            collab_doc_id: Set(None),
         };
         object.insert(txn).await.map_err(|e| match e.sql_err() {
             Some(SqlErr::UniqueConstraintViolation(constraint)) => {
@@ -906,10 +912,17 @@ pub async fn list_objects(
         .transpose()?;
     let after = query.after;
 
+    // These generic object endpoints return the end-to-end-encrypted object
+    // shape (`ObjectListItem`: meta ciphertext + envelope). Collab objects carry
+    // none of that — their content lives server-side in `collab_docs` and is
+    // fetched via `GET /api/collab-docs/:id/meta` — so exclude them here. This
+    // also keeps the `Vec<u8>` columns of `ListedObjectRow` from ever decoding a
+    // NULL ciphertext.
     let mut q = objects::Entity::find()
         .filter(objects::Column::UserId.eq(auth.user_id))
         .filter(objects::Column::Status.eq("complete"))
-        .filter(objects::Column::CreatedSeq.is_not_null());
+        .filter(objects::Column::CreatedSeq.is_not_null())
+        .filter(objects::Column::CollabDocId.is_null());
 
     match kind {
         Some(kind) => {
@@ -1031,6 +1044,9 @@ pub async fn get_object(
         .filter(objects::Column::UserId.eq(auth.user_id))
         .filter(objects::Column::Status.eq("complete"))
         .filter(objects::Column::CreatedSeq.is_not_null())
+        // Collab objects are served by the dedicated collab-docs endpoints, not
+        // this encrypted-object getter (see `list_objects`).
+        .filter(objects::Column::CollabDocId.is_null())
         .into_partial_model::<ListedObjectRow>()
         .one(state.db())
         .await
@@ -1296,6 +1312,8 @@ pub async fn download_payload(
         .filter(objects::Column::UserId.eq(auth.user_id))
         .filter(objects::Column::Status.eq("complete"))
         .filter(objects::Column::CreatedSeq.is_not_null())
+        // Collab objects have no encrypted payloads to download.
+        .filter(objects::Column::CollabDocId.is_null())
         .select_only()
         .column(objects::Column::Id)
         .column(objects::Column::Kind)
@@ -1835,12 +1853,17 @@ async fn idempotent_init_response(
     existing: objects::Model,
 ) -> Result<ObjectInitResponse, ApiError> {
     let object_id = req.id.into_uuid();
+    // This idempotency path only ever sees encrypted objects: collab objects are
+    // created through `POST /api/collab-docs`, never `/api/objects/init`, so the
+    // nullable ciphertext columns are always populated here. Compare via
+    // `as_deref` so a (theoretically impossible) collab row simply mismatches
+    // rather than panicking.
     if existing.user_id != user_id
         || existing.source_device_id != Some(device_id)
         || existing.kind != req.kind.to_string()
-        || existing.meta_nonce != req.meta_nonce
-        || existing.meta_ciphertext != req.meta_ciphertext
-        || existing.envelope.as_slice() != envelope_bytes
+        || existing.meta_nonce.as_deref() != Some(req.meta_nonce.as_slice())
+        || existing.meta_ciphertext.as_deref() != Some(req.meta_ciphertext.as_slice())
+        || existing.envelope.as_deref() != Some(envelope_bytes)
     {
         warn!(
             object_id = %object_id,

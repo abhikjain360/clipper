@@ -306,6 +306,7 @@ pub struct ClipboardMeta {
 pub enum ObjectKind {
     Clipboard,
     File,
+    Collab,
 }
 
 #[derive(
@@ -492,6 +493,31 @@ pub struct ObjectListCursor {
 pub struct ObjectListResponse {
     pub items: Vec<ObjectListItem>,
     pub next_after: Option<ObjectListCursor>,
+}
+
+// -- Collab docs --
+
+/// `POST /api/collab-docs` request. Empty for now: a collab doc has no required
+/// fields at creation time. Its title lives inside the Y.Doc state (Phase 3),
+/// not in a column, so there is nothing to send.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCollabDocRequest {}
+
+/// `POST /api/collab-docs` response: the new collab object's id plus the random
+/// `share_token` that grants "anyone with the link" access in Phase 3.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCollabDocResponse {
+    pub object_id: ObjectId,
+    pub share_token: String,
+}
+
+/// `GET /api/collab-docs/:id/meta` response. Excludes `yjs_state`, which flows
+/// over the Y-sync WebSocket in Phase 3 rather than this metadata endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabDocMeta {
+    pub object_id: ObjectId,
+    pub share_token: String,
+    pub updated_at: String,
 }
 
 // -- Devices --

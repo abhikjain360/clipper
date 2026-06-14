@@ -312,6 +312,18 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
             get(routes::objects::get_object).delete(routes::objects::delete_object),
         )
         .route("/api/objects", get(routes::objects::list_objects))
+        .route(
+            "/api/collab-docs",
+            post(routes::collab::create_collab_doc),
+        )
+        .route(
+            "/api/collab-docs/{id}/meta",
+            get(routes::collab::get_collab_doc_meta),
+        )
+        .route(
+            "/api/collab-docs/{id}",
+            delete(routes::collab::delete_collab_doc),
+        )
         .route("/api/ws", get(ws::ws_handler))
         // Layer order (outermost first): per-client limit before token
         // validation bounds invalid-token database churn; the per-user limit

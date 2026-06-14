@@ -703,6 +703,9 @@ impl LocalStore {
                 .await
                 .map(Some),
             ObjectKind::File => decrypt_file_record(record, encryption_key).map(Some),
+            // Collab objects are server-visible documents with no encrypted
+            // payload to decrypt; they are not stored as local object records.
+            ObjectKind::Collab => Ok(None),
         }
     }
 
