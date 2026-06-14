@@ -17,19 +17,7 @@ choice) and a recommendation.
 
 ### Medium
 
-1. **Shared on-disk device-identity record locks out all but the first account
-   on a host.** `crates/client/src/local_store.rs:813-839,1222-1227` · The record
-   is keyed by `base_dir` (per OS account / per browser profile) but AEAD-wrapped
-   with a *per-user* key, so a second user on the same machine/browser fails to
-   unwrap the first user's record and their login aborts with an opaque
-   `DeviceIdentityDecrypt`. No attacker needed; a co-tenant can also weaponize it.
-   *Decision:* key the device identity per-profile (requires threading the pre-auth
-   profile id into the identity load/persist and reordering login vs `set_profile`)
-   vs. mint-fresh-on-decrypt-failure vs. clear-on-logout — each has a tradeoff
-   (the mint-fresh path silently re-registers and hides genuine corruption).
-   *Recommend:* per-profile keying + a clearer error; add a two-wrapping-keys test.
-
-2. **Unbounded, never-reclaimed device rows.** `crates/server/src/routes/auth.rs`
+1. **Unbounded, never-reclaimed device rows.** `crates/server/src/routes/auth.rs`
    (`issue_session`) · The length caps are now in place, but a credentialed user
    can still create unbounded device rows via repeated new-device logins; nothing
    reclaims them and they are outside `max_user_objects`/storage quota. *Decision:*
@@ -38,7 +26,7 @@ choice) and a recommendation.
    `ON DELETE RESTRICT` FK and sync state). *Recommend:* cap in `issue_session` +
    a cleanup pass; both are policy choices.
 
-3. **WebSocket lifecycle is under-bounded.** `crates/server/src/ws.rs` · The
+2. **WebSocket lifecycle is under-bounded.** `crates/server/src/ws.rs` · The
    cheapest silent-handshake variant is now mitigated (10s pre-hello timeout).
    Still open: no idle/keepalive deadline, no per-user/global cap on concurrent
    live connections, and no post-upgrade re-validation of `session.expires_at` (a
@@ -48,7 +36,7 @@ choice) and a recommendation.
    user-visible protocol choices. *Recommend:* per-user connection cap (Semaphore in
    `handle_socket`) + server Ping/idle close + periodic expiry re-check.
 
-4. **Mobile UniFFI bridge blocks the JS thread → ANR.**
+3. **Mobile UniFFI bridge blocks the JS thread → ANR.**
    `crates/mobile-uniffi/src/lib.rs` (+ `packages/mobile-bridge/src/adapter.ts`) ·
    Every networked method runs `block_on` inline on the React Native JS thread, and
    there is no overall HTTP deadline, so a slow/hostile server (within the trust
@@ -65,7 +53,7 @@ choice) and a recommendation.
 
 ### Low
 
-5. **Native client has no cap on stored object records.**
+4. **Native client has no cap on stored object records.**
    `crates/client/src/local_store.rs` · A malicious server can stream unlimited
    `Created` events; each writes a marker file, filling disk/inodes (bounded to one
    connection; reconnect reaps old-generation markers). *Decision:* a cap +
@@ -74,7 +62,7 @@ choice) and a recommendation.
    the existing wasm `OBJECT_INDEX_LIMIT` only truncates the in-memory index and
    leaks the evicted item's stored payload; fix that in the same change.
 
-6. **Linux Tauri "Add Current Clipboard" fails open + reads a different backend
+5. **Linux Tauri "Add Current Clipboard" fails open + reads a different backend
    than it probes.** `web/src-tauri/src/lib.rs:262-271` · On GNOME/non-wlroots
    Wayland the wlr privacy-marker probe returns `MissingProtocol` → treated as "no
    marker", and the text is then read via arboard's X11/XWayland fallback and
@@ -83,7 +71,7 @@ choice) and a recommendation.
    payload through the *same* backend (arboard, matching the macOS path). *Recommend:*
    same-backend read; interim fail-closed + a clear notice.
 
-7. **Mobile app is hard-pinned to `http://127.0.0.1:8787`.**
+6. **Mobile app is hard-pinned to `http://127.0.0.1:8787`.**
    `crates/mobile-uniffi/src/lib.rs` · As shipped this is loopback-only (no wire
    exposure) but the editable "Server URL" field rejects every non-default value,
    and a developer pointing it at a real host would send the 30-day bearer token in
@@ -94,37 +82,37 @@ choice) and a recommendation.
 
 ### Info
 
-8. **Web CSP `connect-src` is broad** (`https:` / `wss:`). `web/index.html` · No
+7. **Web CSP `connect-src` is broad** (`https:` / `wss:`). `web/index.html` · No
    `*`/`data:`/`blob:`/plaintext-`http:` wildcard is present, but allowing any
    https/wss host is inherent to the user-configurable-server model. *Decision:*
    accept-and-document vs. a per-deployment / build-time allowlist of the
    configured backend origin.
 
-9. **Dead config knob `max_file_meta_ciphertext_bytes`.** `config.rs` /
+8. **Dead config knob `max_file_meta_ciphertext_bytes`.** `config.rs` /
     `routes/objects.rs` · Parsed, validated, documented, and plumbed through
     overrides, but never enforced (`max_object_meta_ciphertext_bytes` already
     bounds File metadata). An operator changing it gets no effect. *Decision:*
     remove the knob, or enforce a distinct File-metadata cap. *Recommend:* remove
     it unless a separate file-meta ceiling is wanted.
 
-10. **Residual username-existence oracle at `register_finish`.** The invite-burn
+9. **Residual username-existence oracle at `register_finish`.** The invite-burn
     is fixed, but a holder of a valid *unused* invite can still distinguish
     existing usernames (200 at start, 409 at finish) — now without cost to the
     invite. *Decision:* accept (probing needs a valid invite) vs. return a
     non-distinguishable finish result.
 
-11. **Clipboard privacy markers are desktop-only.** Browser (`navigator.clipboard`)
+10. **Clipboard privacy markers are desktop-only.** Browser (`navigator.clipboard`)
     and Expo (`getStringAsync`) do not expose the macOS/KDE sensitivity markers, so
     web/mobile manual "Add Current Clipboard" cannot honor them. *Decision:*
     document the desktop-only scope and/or show a one-time notice on web/mobile.
 
-12. **Path-based file IPC is a confused-deputy** (same-user, post-HMAC). Accepted
+11. **Path-based file IPC is a confused-deputy** (same-user, post-HMAC). Accepted
     by design and documented in `local-ipc-security.md`; the unsandboxed daemon
     will read/write any caller-named path. *Decision:* keep accepted, or migrate to
     byte/chunk-oriented IPC (the engine already exposes `upload_file_bytes` /
     `download_file_bytes`) so filesystem access stays in the sandboxed UI.
 
-13. **`opaque-ke` is a pre-release dependency** (`4.1.0-pre.2`). No advisory, exact-
+12. **`opaque-ke` is a pre-release dependency** (`4.1.0-pre.2`). No advisory, exact-
     pinned, usage verified correct. *Decision:* accept-and-track vs. block release
     until a stable/audited version; re-pin and re-run `nix run .#audit` before
     deployment.

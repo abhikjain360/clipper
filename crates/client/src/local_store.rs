@@ -27,7 +27,7 @@ use crate::api_client::{
 const DEFAULT_PROFILE: &str = "default";
 const CLIPBOARD_TEXT_PREVIEW_MAX_CHARS: usize = 512;
 #[cfg(not(target_family = "wasm"))]
-const DEVICE_IDENTITY_FILE: &str = "device-identity-v1.json";
+const DEVICE_IDENTITY_FILE_PREFIX: &str = "device-identity-v1";
 const DEVICE_IDENTITY_RECORD_VERSION_V2: u64 = 2;
 #[cfg(target_family = "wasm")]
 const OBJECT_INDEX_LIMIT: usize = 1_000;
@@ -431,21 +431,23 @@ impl LocalStore {
 
     pub async fn load_or_create_device_signing_identity(
         &self,
+        profile_id: &str,
         wrapping_key: &[u8; 32],
     ) -> Result<DeviceSigningIdentity, LocalStoreError> {
-        self.load_or_create_device_signing_identity_inner(wrapping_key)
+        self.load_or_create_device_signing_identity_inner(profile_id, wrapping_key)
             .await
     }
 
     pub async fn persist_device_signing_identity(
         &self,
+        profile_id: &str,
         identity: &DeviceSigningIdentity,
         wrapping_key: &[u8; 32],
     ) -> Result<(), LocalStoreError> {
         if let Some(device_id) = identity.device_id.as_deref() {
             validate_device_id(device_id)?;
         }
-        self.persist_device_signing_identity_inner(identity, wrapping_key)
+        self.persist_device_signing_identity_inner(profile_id, identity, wrapping_key)
             .await
     }
 
@@ -814,9 +816,10 @@ impl LocalStore {
 impl LocalStore {
     async fn load_or_create_device_signing_identity_inner(
         &self,
+        profile_id: &str,
         wrapping_key: &[u8; 32],
     ) -> Result<DeviceSigningIdentity, LocalStoreError> {
-        if let Some(record) = self.read_device_identity_record().await? {
+        if let Some(record) = self.read_device_identity_record(profile_id).await? {
             match device_identity_from_record(record, wrapping_key) {
                 Ok(identity) => return Ok(identity),
                 Err(
@@ -830,22 +833,26 @@ impl LocalStore {
         }
 
         let identity = new_device_signing_identity(None);
-        self.write_device_identity(&identity, wrapping_key).await?;
+        self.write_device_identity(profile_id, &identity, wrapping_key)
+            .await?;
         Ok(identity)
     }
 
     async fn persist_device_signing_identity_inner(
         &self,
+        profile_id: &str,
         identity: &DeviceSigningIdentity,
         wrapping_key: &[u8; 32],
     ) -> Result<(), LocalStoreError> {
-        self.write_device_identity(identity, wrapping_key).await
+        self.write_device_identity(profile_id, identity, wrapping_key)
+            .await
     }
 
     async fn read_device_identity_record(
         &self,
+        profile_id: &str,
     ) -> Result<Option<DeviceIdentityEncryptedRecord>, LocalStoreError> {
-        let path = self.device_identity_path();
+        let path = self.device_identity_path(profile_id);
         match tokio::fs::read(&path).await {
             Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -855,13 +862,14 @@ impl LocalStore {
 
     async fn write_device_identity(
         &self,
+        profile_id: &str,
         identity: &DeviceSigningIdentity,
         wrapping_key: &[u8; 32],
     ) -> Result<(), LocalStoreError> {
         ensure_private_dir(&self.base_dir).await?;
         let record = encrypted_device_identity_record(identity, wrapping_key)?;
         let bytes = serde_json::to_vec_pretty(&record)?;
-        write_private_file_atomic(&self.device_identity_path(), &bytes).await
+        write_private_file_atomic(&self.device_identity_path(profile_id), &bytes).await
     }
 
     /// Best-effort removal of orphaned atomic-write temp files across every
@@ -997,8 +1005,13 @@ impl LocalStore {
             .join(format!("{object_id}.payload.ciphertext"))
     }
 
-    fn device_identity_path(&self) -> PathBuf {
-        self.base_dir.join(DEVICE_IDENTITY_FILE)
+    /// The device signing identity is AEAD-wrapped with a per-user key, so its
+    /// on-disk slot must also be keyed per-profile: otherwise a second user on
+    /// the same OS account reads the first user's record, fails to unwrap it,
+    /// and is locked out. See the matching `storage_prefix` profile scoping.
+    fn device_identity_path(&self, profile_id: &str) -> PathBuf {
+        self.base_dir
+            .join(format!("{DEVICE_IDENTITY_FILE_PREFIX}.{profile_id}.json"))
     }
 }
 
@@ -1006,11 +1019,12 @@ impl LocalStore {
 impl LocalStore {
     async fn load_or_create_device_signing_identity_inner(
         &self,
+        profile_id: &str,
         wrapping_key: &[u8; 32],
     ) -> Result<DeviceSigningIdentity, LocalStoreError> {
         let storage = browser_storage()?;
         if let Some(json) = storage
-            .get_item(&self.device_identity_key())
+            .get_item(&self.device_identity_key(profile_id))
             .map_err(storage_error)?
         {
             let record = serde_json::from_str::<DeviceIdentityEncryptedRecord>(&json)
@@ -1028,29 +1042,31 @@ impl LocalStore {
         }
 
         let identity = new_device_signing_identity(None);
-        self.write_browser_device_identity(&storage, &identity, wrapping_key)?;
+        self.write_browser_device_identity(&storage, profile_id, &identity, wrapping_key)?;
         Ok(identity)
     }
 
     async fn persist_device_signing_identity_inner(
         &self,
+        profile_id: &str,
         identity: &DeviceSigningIdentity,
         wrapping_key: &[u8; 32],
     ) -> Result<(), LocalStoreError> {
         let storage = browser_storage()?;
-        self.write_browser_device_identity(&storage, identity, wrapping_key)
+        self.write_browser_device_identity(&storage, profile_id, identity, wrapping_key)
     }
 
     fn write_browser_device_identity(
         &self,
         storage: &web_sys::Storage,
+        profile_id: &str,
         identity: &DeviceSigningIdentity,
         wrapping_key: &[u8; 32],
     ) -> Result<(), LocalStoreError> {
         let record = encrypted_device_identity_record(identity, wrapping_key)?;
         let json = serde_json::to_string(&record)?;
         storage
-            .set_item(&self.device_identity_key(), &json)
+            .set_item(&self.device_identity_key(profile_id), &json)
             .map_err(storage_error)?;
         Ok(())
     }
@@ -1218,9 +1234,12 @@ impl LocalStore {
         format!("{}.objects.{object_id}", self.storage_prefix())
     }
 
-    fn device_identity_key(&self) -> String {
+    /// Keyed per-profile for the same reason as `device_identity_path`: the
+    /// record is AEAD-wrapped with a per-user key, so a second profile in the
+    /// same browser must not read (and fail to unwrap) the first's record.
+    fn device_identity_key(&self, profile_id: &str) -> String {
         format!(
-            "clipper.client.v1.{}.device_identity_v1",
+            "clipper.client.v1.{}.{profile_id}.device_identity_v1",
             self.base_dir.display()
         )
     }
@@ -1710,6 +1729,7 @@ mod tests {
     async fn encrypts_device_identity_at_rest() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = LocalStore::new(tmp.path());
+        let profile = "profile-a";
         let wrapping_key = [3_u8; 32];
         let identity = DeviceSigningIdentity {
             device_id: Some(TEST_DEVICE_ID.into()),
@@ -1717,11 +1737,11 @@ mod tests {
         };
 
         store
-            .persist_device_signing_identity(&identity, &wrapping_key)
+            .persist_device_signing_identity(profile, &identity, &wrapping_key)
             .await
             .expect("persist identity");
 
-        let bytes = tokio::fs::read(store.device_identity_path())
+        let bytes = tokio::fs::read(store.device_identity_path(profile))
             .await
             .expect("identity bytes");
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("identity json");
@@ -1736,7 +1756,7 @@ mod tests {
         assert!(!text.contains("\"signing_secret_key\""));
 
         let loaded = store
-            .load_or_create_device_signing_identity(&wrapping_key)
+            .load_or_create_device_signing_identity(profile, &wrapping_key)
             .await
             .expect("load identity");
         assert_eq!(loaded.device_id.as_deref(), Some(TEST_DEVICE_ID));
@@ -1747,7 +1767,7 @@ mod tests {
 
         let wrong_key = [4_u8; 32];
         let err = store
-            .load_or_create_device_signing_identity(&wrong_key)
+            .load_or_create_device_signing_identity(profile, &wrong_key)
             .await
             .expect_err("wrong wrapping key should fail");
         assert!(matches!(err, LocalStoreError::DeviceIdentityDecrypt(_)));
@@ -1761,6 +1781,7 @@ mod tests {
         // rejected fail-closed, never adopted as a valid signing identity.
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = LocalStore::new(tmp.path());
+        let profile = "profile-a";
         let wrapping_key = [5_u8; 32];
         let forged = serde_json::json!({
             "device_id": TEST_DEVICE_ID,
@@ -1769,12 +1790,12 @@ mod tests {
         let forged_bytes = serde_json::to_vec_pretty(&forged).expect("forged json");
 
         ensure_private_dir(tmp.path()).await.expect("private dir");
-        write_private_file_atomic(&store.device_identity_path(), &forged_bytes)
+        write_private_file_atomic(&store.device_identity_path(profile), &forged_bytes)
             .await
             .expect("write forged identity");
 
         let result = store
-            .load_or_create_device_signing_identity(&wrapping_key)
+            .load_or_create_device_signing_identity(profile, &wrapping_key)
             .await;
         assert!(
             result.is_err(),
@@ -1782,13 +1803,67 @@ mod tests {
         );
 
         // The forged record is not silently re-wrapped into a valid identity.
-        let bytes = tokio::fs::read(store.device_identity_path())
+        let bytes = tokio::fs::read(store.device_identity_path(profile))
             .await
             .expect("identity bytes");
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("identity json");
         assert!(
             json.get("wrapped_signing_secret_key").is_none(),
             "forged plaintext record must not be promoted to a wrapped record"
+        );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn two_profiles_share_base_dir_without_locking_each_other_out() {
+        // Two users on the same OS account (same `base_dir`) each wrap their
+        // device identity with their own per-user key. Keying the on-disk slot
+        // per-profile must let the second user mint and load their own identity
+        // instead of reading the first user's record and failing to unwrap it.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+
+        let key_a = [3_u8; 32];
+        let key_b = [4_u8; 32];
+
+        // User A registers first.
+        let identity_a = store
+            .load_or_create_device_signing_identity("profile-a", &key_a)
+            .await
+            .expect("mint identity for profile a");
+
+        // User B logging in second must not be locked out by A's record.
+        let identity_b = store
+            .load_or_create_device_signing_identity("profile-b", &key_b)
+            .await
+            .expect("profile b must not be locked out by profile a");
+
+        // The two profiles get distinct slots and distinct identities.
+        assert_ne!(
+            store.device_identity_path("profile-a"),
+            store.device_identity_path("profile-b")
+        );
+        assert_ne!(
+            *identity_a.signing_secret_key,
+            *identity_b.signing_secret_key
+        );
+
+        // Each profile reloads its own identity stably with its own key.
+        let reloaded_a = store
+            .load_or_create_device_signing_identity("profile-a", &key_a)
+            .await
+            .expect("reload profile a");
+        let reloaded_b = store
+            .load_or_create_device_signing_identity("profile-b", &key_b)
+            .await
+            .expect("reload profile b");
+        assert_eq!(
+            *reloaded_a.signing_secret_key,
+            *identity_a.signing_secret_key
+        );
+        assert_eq!(
+            *reloaded_b.signing_secret_key,
+            *identity_b.signing_secret_key
         );
     }
 

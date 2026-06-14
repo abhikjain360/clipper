@@ -153,9 +153,16 @@ impl SyncEngine {
         platform: &str,
     ) -> Result<(), ClientError> {
         let prepared = self.api.login_prepare(passphrase, username).await?;
+        // The encryption key from `prepare` is the same value `finish_auth`
+        // later hashes into the profile id, so the device identity is keyed to
+        // the same profile that owns the rest of this user's local storage.
+        let profile_id = profile_id_from_encryption_key(&prepared.encryption_key);
         let mut signing_identity = self
             .local_store
-            .load_or_create_device_signing_identity(&prepared.device_identity_wrapping_key)
+            .load_or_create_device_signing_identity(
+                &profile_id,
+                &prepared.device_identity_wrapping_key,
+            )
             .await?;
         let requested_device_id = optional_device_id(signing_identity.device_id.as_deref())?;
         let auth = self
@@ -178,7 +185,11 @@ impl SyncEngine {
         } = auth;
         signing_identity.device_id = Some(login_resp.device_id.clone());
         self.local_store
-            .persist_device_signing_identity(&signing_identity, &device_identity_wrapping_key)
+            .persist_device_signing_identity(
+                &profile_id,
+                &signing_identity,
+                &device_identity_wrapping_key,
+            )
             .await?;
 
         self.finish_auth(
@@ -206,9 +217,13 @@ impl SyncEngine {
             .api
             .register_prepare(access_key, username, passphrase)
             .await?;
+        let profile_id = profile_id_from_encryption_key(&prepared.encryption_key);
         let mut signing_identity = self
             .local_store
-            .load_or_create_device_signing_identity(&prepared.device_identity_wrapping_key)
+            .load_or_create_device_signing_identity(
+                &profile_id,
+                &prepared.device_identity_wrapping_key,
+            )
             .await?;
         let requested_device_id = optional_device_id(signing_identity.device_id.as_deref())?;
         let auth = self
@@ -230,7 +245,11 @@ impl SyncEngine {
         } = auth;
         signing_identity.device_id = Some(register_resp.device_id.clone());
         self.local_store
-            .persist_device_signing_identity(&signing_identity, &device_identity_wrapping_key)
+            .persist_device_signing_identity(
+                &profile_id,
+                &signing_identity,
+                &device_identity_wrapping_key,
+            )
             .await?;
 
         self.finish_auth(
