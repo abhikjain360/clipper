@@ -8,7 +8,7 @@ pub const SOCKET_PATH_ENV: &str = "CLIPPER_DAEMON_SOCKET_PATH";
 
 const SOCKET_FILE_NAME: &str = "daemon.sock";
 #[cfg(target_os = "macos")]
-const MACOS_APP_CONTAINER_ID: &str = "com.clipper.clipperApp";
+const MACOS_APP_CONTAINER_ID: &str = "com.clipper.desktop";
 
 pub fn socket_path() -> PathBuf {
     if let Some(path) = env_socket_path() {

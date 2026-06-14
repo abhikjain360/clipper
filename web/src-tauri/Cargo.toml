@@ -14,12 +14,21 @@ tauri-build.workspace = true
 [dependencies]
 clipper-app-types.workspace = true
 clipper-client.workspace = true
+clipper-daemon-types.workspace = true
+dirs.workspace = true
+hmac.workspace = true
+rand.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tauri.workspace = true
 tauri-plugin-clipboard-manager.workspace = true
 tauri-plugin-dialog.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "net", "io-util", "time", "fs"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 zeroize.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework.workspace = true

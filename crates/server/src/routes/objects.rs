@@ -980,7 +980,7 @@ pub async fn list_objects(
             .order_by(objects::Column::Id, Order::Desc)
     };
 
-    let objects = q
+    let mut objects = q
         .limit(limit + 1)
         .into_partial_model::<ListedObjectRow>()
         .all(state.db())
@@ -995,7 +995,9 @@ pub async fn list_objects(
         })?;
 
     let has_more = objects.len() as u64 > limit;
-    let objects: Vec<ListedObjectRow> = objects.into_iter().take(limit as usize).collect();
+    objects.truncate(limit as usize);
+    let objects = objects;
+
     let items = object_list_items(&state, auth.user_id, &objects).await?;
     let next_after = if has_more && uses_forward_cursor {
         let last = objects.last().ok_or_else(|| {

@@ -140,11 +140,7 @@ pub async fn ws_ticket_handler(
 /// Send a frame with a bounded deadline. Returns `false` if the socket errors
 /// or the deadline elapses (a peer that has stopped reading), so callers drop
 /// the connection instead of blocking the task forever on an unbounded `.await`.
-async fn send_bounded(
-    socket: &mut WebSocket,
-    msg: Message,
-    timeout: std::time::Duration,
-) -> bool {
+async fn send_bounded(socket: &mut WebSocket, msg: Message, timeout: std::time::Duration) -> bool {
     matches!(
         tokio::time::timeout(timeout, socket.send(msg)).await,
         Ok(Ok(()))

@@ -1,4 +1,5 @@
 import {
+  directoryExists,
   findRepoRoot,
   joinPath,
   moduleDir,
@@ -227,6 +228,69 @@ async function runMobileTask(
   await runPackagePnpmScript(repoRoot, env, "mobile", script, args);
 }
 
+async function buildDaemon(
+  repoRoot: string,
+  env: Env,
+  release: boolean,
+): Promise<void> {
+  const cargo = await command("cargo", env);
+  const extraArgs = release ? ["--release"] : [];
+  await runCommand(cargo, ["build", ...extraArgs, "-p", "clipper-daemon"], {
+    cwd: repoRoot,
+    env,
+  });
+}
+
+async function runTauriDev(
+  { env: initialEnv, repoRoot }: TaskContext,
+  args: readonly string[],
+): Promise<void> {
+  requireEnv(initialEnv, "CLIPPER_WASM_TARGET");
+  const env = useStableToolchain(initialEnv);
+
+  // Build the daemon in debug mode so it lands next to the debug app binary
+  // at target/debug/clipper-daemon where find_daemon_binary() will pick it up.
+  await buildDaemon(repoRoot, env, false);
+
+  await runPackagePnpmScript(repoRoot, env, "web", "tauri:dev", args);
+}
+
+async function runTauriBuild(
+  { env: initialEnv, repoRoot }: TaskContext,
+  args: readonly string[],
+): Promise<void> {
+  requireEnv(initialEnv, "CLIPPER_WASM_TARGET");
+  const env = useStableToolchain(initialEnv);
+
+  // Build the daemon in release so we can inject it into the app bundle.
+  await buildDaemon(repoRoot, env, true);
+
+  await runPackagePnpmScript(repoRoot, env, "web", "tauri:build", args);
+
+  // Inject the daemon binary into the macOS .app bundle so that
+  // find_daemon_binary() finds it as {exe_dir}/clipper-daemon at runtime.
+  // The DMG Tauri already created won't include it; repackage if needed for
+  // distribution (hdiutil create -srcfolder Clipper.app ...).
+  if (Deno.build.os === "darwin") {
+    const tauriConf = JSON.parse(
+      await Deno.readTextFile(
+        joinPath(repoRoot, "web/src-tauri/tauri.conf.json"),
+      ),
+    ) as { productName: string };
+    const macOSBin = joinPath(
+      repoRoot,
+      `target/release/bundle/macos/${tauriConf.productName}.app/Contents/MacOS`,
+    );
+    if (await directoryExists(macOSBin)) {
+      const src = joinPath(repoRoot, "target/release/clipper-daemon");
+      const dest = joinPath(macOSBin, "clipper-daemon");
+      await Deno.copyFile(src, dest);
+      await Deno.chmod(dest, 0o755);
+      console.log(`Bundled daemon → ${dest}`);
+    }
+  }
+}
+
 async function runMobileUniffiAndroid(
   { env: initialEnv, repoRoot }: TaskContext,
   args: readonly string[],
@@ -259,8 +323,8 @@ const taskHandlers: Readonly<Record<string, TaskHandler>> = {
   "web-check": runWebCheck,
   "web-build": (context, args) => runWebTask("web-build", context, args),
   "web-serve": (context, args) => runWebTask("web-serve", context, args),
-  "tauri-dev": (context, args) => runWebTask("tauri-dev", context, args),
-  "tauri-build": (context, args) => runWebTask("tauri-build", context, args),
+  "tauri-dev": runTauriDev,
+  "tauri-build": runTauriBuild,
   "mobile-check": runMobileCheck,
   "mobile-start": (context, args) => runMobileTask("mobile-start", context, args),
   "mobile-android": (context, args) => runMobileTask("mobile-android", context, args),
