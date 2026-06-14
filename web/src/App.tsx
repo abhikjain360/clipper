@@ -2,6 +2,7 @@ import {
     Clipboard,
     Copy,
     Download,
+    Eye,
     FileUp,
     Files,
     Folder,
@@ -9,6 +10,7 @@ import {
     RefreshCw,
     Smartphone,
     Trash2,
+    X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Route, Switch, useLocation } from "wouter";
@@ -35,6 +37,9 @@ import {
     writeClipboardText,
 } from "./backend";
 import type { AppState, ClipboardItem, DeviceInfo, FileItem } from "@clipper/shared";
+import { CodeEditor } from "./CodeEditor";
+
+const VIM_MODE_STORAGE_KEY = "clipper_vim_mode";
 
 export default function App() {
     const [state, setState] = useState<AppState | null>(null);
@@ -463,6 +468,9 @@ function FilesPanel({
 }) {
     const fileInputRef = useRef<HTMLInputElement | null>(null);
     const [busy, setBusy] = useState(false);
+    const [viewerFile, setViewerFile] = useState<{ filename: string; content: string } | null>(
+        null,
+    );
     const nativeRuntime = isTauriRuntime();
 
     async function uploadFile(file: File) {
@@ -521,6 +529,18 @@ function FilesPanel({
         }
     }
 
+    async function openViewer(file: FileItem) {
+        onError(null);
+        try {
+            const backend = await clipperBackend();
+            const bytes = await backend.downloadFileBytes(file.id);
+            const content = new TextDecoder().decode(bytes);
+            setViewerFile({ filename: file.filename, content });
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        }
+    }
+
     async function deleteFile(file: FileItem) {
         onError(null);
         try {
@@ -533,67 +553,162 @@ function FilesPanel({
     }
 
     return (
-        <YStack gap="$3" flex={1}>
-            <input
-                ref={fileInputRef}
-                type="file"
-                aria-hidden="true"
-                tabIndex={-1}
-                style={{ display: "none" }}
-                onChange={(event) => {
-                    const file = event.currentTarget.files?.item(0);
-                    if (file) void uploadFile(file);
-                }}
-            />
-
-            <XStack justify="space-between" items="center" gap="$2" flexWrap="wrap">
-                <H2 size="$6">Files</H2>
-                <Button
-                    icon={busy ? <Spinner /> : <FileUp size={16} />}
-                    onPress={pickUploadFile}
-                    disabled={busy}
-                >
-                    Upload File
-                </Button>
-            </XStack>
-
-            {files.length === 0 ? (
-                <EmptyState icon={<Folder size={28} />} title="No files yet" />
-            ) : (
-                <ScrollView>
-                    <YStack gap="$2" pb="$4">
-                        {files.map((file) => (
-                            <ListCard key={file.id}>
-                                <XStack items="center" justify="space-between" gap="$3">
-                                    <XStack items="center" gap="$3" flex={1}>
-                                        <Files size={22} color="#6fb4ff" />
-                                        <YStack flex={1} gap="$1">
-                                            <Text numberOfLines={1}>{file.filename}</Text>
-                                            <Paragraph size="$2" color="#9aa4ad">
-                                                {formatByteSize(file.blob_size)} -{" "}
-                                                {formatRelativeTime(file.created_at)}
-                                            </Paragraph>
-                                        </YStack>
-                                    </XStack>
-                                    <XStack gap="$1">
-                                        <Button
-                                            size="$3"
-                                            icon={<Download size={16} />}
-                                            onPress={() => void downloadFile(file)}
-                                        />
-                                        <Button
-                                            size="$3"
-                                            icon={<Trash2 size={16} color="#ff6b6b" />}
-                                            onPress={() => void deleteFile(file)}
-                                        />
-                                    </XStack>
-                                </XStack>
-                            </ListCard>
-                        ))}
-                    </YStack>
-                </ScrollView>
+        <>
+            {viewerFile && (
+                <FileViewerOverlay
+                    filename={viewerFile.filename}
+                    content={viewerFile.content}
+                    onClose={() => setViewerFile(null)}
+                />
             )}
-        </YStack>
+            <YStack gap="$3" flex={1}>
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    aria-hidden="true"
+                    tabIndex={-1}
+                    style={{ display: "none" }}
+                    onChange={(event) => {
+                        const file = event.currentTarget.files?.item(0);
+                        if (file) void uploadFile(file);
+                    }}
+                />
+
+                <XStack justify="space-between" items="center" gap="$2" flexWrap="wrap">
+                    <H2 size="$6">Files</H2>
+                    <Button
+                        icon={busy ? <Spinner /> : <FileUp size={16} />}
+                        onPress={pickUploadFile}
+                        disabled={busy}
+                    >
+                        Upload File
+                    </Button>
+                </XStack>
+
+                {files.length === 0 ? (
+                    <EmptyState icon={<Folder size={28} />} title="No files yet" />
+                ) : (
+                    <ScrollView>
+                        <YStack gap="$2" pb="$4">
+                            {files.map((file) => (
+                                <ListCard key={file.id}>
+                                    <XStack items="center" justify="space-between" gap="$3">
+                                        <XStack items="center" gap="$3" flex={1}>
+                                            <Files size={22} color="#6fb4ff" />
+                                            <YStack flex={1} gap="$1">
+                                                <Text numberOfLines={1}>{file.filename}</Text>
+                                                <Paragraph size="$2" color="#9aa4ad">
+                                                    {formatByteSize(file.blob_size)} -{" "}
+                                                    {formatRelativeTime(file.created_at)}
+                                                </Paragraph>
+                                            </YStack>
+                                        </XStack>
+                                        <XStack gap="$1">
+                                            {isTextMimeType(file.mime_type) && (
+                                                <Button
+                                                    size="$3"
+                                                    icon={<Eye size={16} />}
+                                                    onPress={() => void openViewer(file)}
+                                                />
+                                            )}
+                                            <Button
+                                                size="$3"
+                                                icon={<Download size={16} />}
+                                                onPress={() => void downloadFile(file)}
+                                            />
+                                            <Button
+                                                size="$3"
+                                                icon={<Trash2 size={16} color="#ff6b6b" />}
+                                                onPress={() => void deleteFile(file)}
+                                            />
+                                        </XStack>
+                                    </XStack>
+                                </ListCard>
+                            ))}
+                        </YStack>
+                    </ScrollView>
+                )}
+            </YStack>
+        </>
+    );
+}
+
+function FileViewerOverlay({
+    filename,
+    content,
+    onClose,
+}: {
+    filename: string;
+    content: string;
+    onClose: () => void;
+}) {
+    const [vimMode, setVimMode] = useState(
+        () => globalThis.localStorage?.getItem(VIM_MODE_STORAGE_KEY) === "true",
+    );
+
+    useEffect(() => {
+        function onKeyDown(event: KeyboardEvent) {
+            if (event.key === "Escape") onClose();
+        }
+
+        // Capture phase so Escape closes the overlay even while the CodeMirror
+        // editor (with vim bindings) has focus and would otherwise swallow it.
+        globalThis.addEventListener("keydown", onKeyDown, true);
+        return () => globalThis.removeEventListener("keydown", onKeyDown, true);
+    }, [onClose]);
+
+    function toggleVimMode() {
+        setVimMode((previous) => {
+            const next = !previous;
+            globalThis.localStorage?.setItem(VIM_MODE_STORAGE_KEY, String(next));
+            return next;
+        });
+    }
+
+    return (
+        <div
+            style={{
+                position: "fixed",
+                inset: 0,
+                zIndex: 1000,
+                display: "flex",
+                flexDirection: "column",
+                background: "#101214",
+            }}
+        >
+            <div
+                style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 12,
+                    padding: "10px 16px",
+                    background: "#171a1d",
+                    borderBottom: "1px solid #252b31",
+                }}
+            >
+                <span
+                    style={{
+                        color: "#e6e9ec",
+                        fontWeight: 600,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                    }}
+                >
+                    {filename}
+                </span>
+                <XStack items="center" gap="$2">
+                    <Button size="$3" theme={vimMode ? "blue" : undefined} onPress={toggleVimMode}>
+                        Vim
+                    </Button>
+                    <Button size="$3" icon={<X size={16} />} onPress={onClose} />
+                </XStack>
+            </div>
+            <div style={{ flex: 1, minHeight: 0 }}>
+                <CodeEditor content={content} lang={filename} vimMode={vimMode} />
+            </div>
+        </div>
     );
 }
 
@@ -780,7 +895,9 @@ function formatByteSize(rawBytes: number): string {
     // into this typed field, so a buggy same-user peer (meta.size) or the
     // untrusted server (ciphertext_size fallback) could drive a negative / NaN /
     // absurd value here. The mobile bridge already clamps its i64 size fields.
-    const bytes = Number.isFinite(rawBytes) ? Math.max(0, Math.min(rawBytes, Number.MAX_SAFE_INTEGER)) : 0;
+    const bytes = Number.isFinite(rawBytes)
+        ? Math.max(0, Math.min(rawBytes, Number.MAX_SAFE_INTEGER))
+        : 0;
     if (bytes < 1024) return `${bytes} B`;
     const units = ["KiB", "MiB", "GiB"];
     let value = bytes / 1024;
