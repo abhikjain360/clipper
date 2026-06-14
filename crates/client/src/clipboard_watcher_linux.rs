@@ -277,21 +277,85 @@ fn read_clipboard(
     Ok(Some(ClipboardRead { mime_type, bytes }))
 }
 
-pub fn current_clipboard_has_password_manager_marker() -> Result<bool, String> {
+/// Read the current clipboard text for a manual "Add Current Clipboard" action,
+/// honoring password-manager privacy markers.
+///
+/// The marker check and the text read both go through the *same* Wayland
+/// data-control backend (mirroring the macOS NSPasteboard path), so a concealed
+/// payload can never slip through a second, marker-blind reader. We deliberately
+/// do **not** fall back to arboard's X11/XWayland read: that fallback is exactly
+/// what let a marked payload sync on compositors where the data-control probe
+/// came up empty. If this compositor exposes no data-control protocol the
+/// clipboard cannot be read here at all; that is surfaced as an error so the
+/// caller fails closed (and can show a notice) instead of syncing an unverified
+/// payload.
+///
+/// Returns `Ok(None)` when the clipboard is empty, concealed by a marker, or
+/// holds no text payload; `Err` when the Wayland backend could not be read.
+pub fn read_current_unconcealed_clipboard_text() -> Result<Option<String>, String> {
     let mime_types = match paste::get_mime_types_ordered(ClipboardType::Regular, Seat::Unspecified)
     {
         Ok(mime_types) => mime_types,
-        Err(error) if is_empty_clipboard_error(&error) => return Ok(false),
-        Err(error) => {
-            debug!(
-                "Wayland clipboard privacy marker check unavailable: {}",
-                error
-            );
-            return Ok(false);
-        }
+        Err(error) if is_empty_clipboard_error(&error) => return Ok(None),
+        Err(error) => return Err(unreadable_clipboard_message(&error)),
     };
 
-    clipboard_has_password_manager_marker(&mime_types).map_err(|error| error.to_string())
+    if clipboard_has_password_manager_marker(&mime_types).map_err(|error| error.to_string())? {
+        debug!("Ignoring Wayland clipboard text with password-manager marker");
+        return Ok(None);
+    }
+
+    let Some(request_mime_type) = select_text_mime_type(&mime_types) else {
+        return Ok(None);
+    };
+
+    let (mut pipe, _) = match paste::get_contents(
+        ClipboardType::Regular,
+        Seat::Unspecified,
+        MimeType::Specific(request_mime_type),
+    ) {
+        Ok(result) => result,
+        Err(error) if is_empty_clipboard_error(&error) => return Ok(None),
+        Err(error) => return Err(unreadable_clipboard_message(&error)),
+    };
+
+    // Bound this like the watcher's read: the source app owns the pipe and could
+    // stream gigabytes or stall the fd open forever.
+    let bytes = match read_pipe_bounded(&mut pipe, MAX_CLIPBOARD_PAYLOAD_BYTES, READ_STALL_TIMEOUT)
+        .map_err(|error| error.to_string())?
+    {
+        ReadOutcome::Complete(bytes) => bytes,
+        ReadOutcome::TimedOut => {
+            return Err("clipboard read stalled before the source finished writing".to_string());
+        }
+    };
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    if bytes.len() > MAX_CLIPBOARD_PAYLOAD_BYTES {
+        return Err(format!(
+            "clipboard text exceeds the {MAX_CLIPBOARD_PAYLOAD_BYTES}-byte limit"
+        ));
+    }
+
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| "clipboard text was not valid UTF-8".to_string())
+}
+
+/// Turn a non-empty-clipboard read failure into a user-facing notice. The
+/// `MissingProtocol` case is the one the security fix turns on: a compositor
+/// with no data-control protocol (e.g. stock GNOME Wayland) cannot be read
+/// without bypassing privacy markers, so we say so plainly rather than silently
+/// failing closed.
+fn unreadable_clipboard_message(error: &PasteError) -> String {
+    match error {
+        PasteError::MissingProtocol { .. } => "this Wayland compositor does not expose a \
+             clipboard data-control protocol, so Clipper cannot read the clipboard without \
+             bypassing password-manager privacy markers; nothing was added"
+            .to_string(),
+        other => format!("could not read the Wayland clipboard: {other}"),
+    }
 }
 
 fn clipboard_has_password_manager_marker(
@@ -330,15 +394,17 @@ fn clipboard_has_password_manager_marker(
     ))
 }
 
+/// Text MIME types accepted from a Wayland clipboard, most-preferred first.
+const TEXT_PRIORITY: &[&str] = &[
+    "text/plain;charset=utf-8",
+    "text/plain",
+    "utf8_string",
+    "text",
+    "string",
+];
+
 fn select_mime_type(mime_types: &[String]) -> Option<SelectedMimeType> {
     const IMAGE_PRIORITY: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
-    const TEXT_PRIORITY: &[&str] = &[
-        "text/plain;charset=utf-8",
-        "text/plain",
-        "utf8_string",
-        "text",
-        "string",
-    ];
 
     for wanted in IMAGE_PRIORITY {
         if let Some(mime_type) = find_mime_type(mime_types, wanted) {
@@ -359,6 +425,22 @@ fn select_mime_type(mime_types: &[String]) -> Option<SelectedMimeType> {
             normalized.starts_with("image/") || normalized.starts_with("text/")
         })
         .and_then(|mime_type| selected_mime_type(mime_type))
+}
+
+/// Pick the request MIME type for the best text payload on the clipboard, or
+/// `None` if it carries no text. Used by the manual "Add Current Clipboard"
+/// read, which only syncs text.
+fn select_text_mime_type(mime_types: &[String]) -> Option<&str> {
+    for wanted in TEXT_PRIORITY {
+        if let Some(mime_type) = find_mime_type(mime_types, wanted) {
+            return Some(mime_type);
+        }
+    }
+
+    mime_types
+        .iter()
+        .find(|mime_type| normalized_mime_type(mime_type).starts_with("text/"))
+        .map(String::as_str)
 }
 
 fn find_mime_type<'a>(mime_types: &'a [String], wanted: &str) -> Option<&'a str> {

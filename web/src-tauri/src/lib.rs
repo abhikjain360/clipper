@@ -261,15 +261,14 @@ fn read_current_clipboard_text(_window: &tauri::Window) -> CommandResult<Option<
     Ok(clipper_client::clipboard_watcher::read_current_unconcealed_clipboard_text())
 }
 
+// Linux is Wayland-only: read the privacy marker and the text through the same
+// data-control backend (matching the macOS path) instead of probing the marker
+// on Wayland and then reading the payload via arboard's X11/XWayland fallback,
+// which let a marked payload sync on compositors where the probe came up empty.
 #[cfg(target_os = "linux")]
-fn read_current_clipboard_text(window: &tauri::Window) -> CommandResult<Option<String>> {
-    if clipper_client::clipboard_watcher::current_clipboard_has_password_manager_marker()
-        .map_err(CommandError::NativeClipboard)?
-    {
-        return Ok(None);
-    }
-
-    read_tauri_current_clipboard_text(window)
+fn read_current_clipboard_text(_window: &tauri::Window) -> CommandResult<Option<String>> {
+    clipper_client::clipboard_watcher::read_current_unconcealed_clipboard_text()
+        .map_err(CommandError::NativeClipboard)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -277,7 +276,7 @@ fn read_current_clipboard_text(window: &tauri::Window) -> CommandResult<Option<S
     read_tauri_current_clipboard_text(window)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn read_tauri_current_clipboard_text(window: &tauri::Window) -> CommandResult<Option<String>> {
     Ok(Some(window.clipboard().read_text().map_err(|error| {
         CommandError::NativeClipboard(error.to_string())
