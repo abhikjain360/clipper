@@ -84,7 +84,7 @@ The keychain item on macOS is created with `security_framework`'s
 `set_generic_password`, which uses the **default keychain access control list**.
 No tightened ACL (for example, a restricted accessibility class or an
 application-bound access control) is applied. This is a known gap, tracked as an
-Info finding in `docs/security-review-2026-06-04.md`: the secret's confidentiality
+Info finding in `docs/security-review.md`: the secret's confidentiality
 relies on the login keychain and the same-user OS boundary rather than on a
 per-application keychain ACL.
 

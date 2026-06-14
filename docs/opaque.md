@@ -92,8 +92,7 @@ Consequences worth understanding before reading the steps below:
   caller who holds a valid unused access key learn — at `register/finish` — whether
   a chosen username exists (200 then `409`), now without spending the key. This
   residual oracle is recorded in
-  [`docs/security-review-2026-06-14.md`](security-review-2026-06-14.md) rather
-  than blessed here.
+  [`docs/security-review.md`](security-review.md) rather than blessed here.
 
 ### Round 1 — client (`opaque_client_register_start(pw)`)
 
