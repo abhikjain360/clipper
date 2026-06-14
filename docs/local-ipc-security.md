@@ -42,7 +42,7 @@ and it is directional so neither side's proof can be replayed as the other's.
 1. The daemon sends an `auth_challenge` event carrying the protocol version
    (`IPC_AUTH_VERSION = 1`) and a fresh 32-byte `daemon_nonce`.
 2. The client replies with an `authenticate` command carrying its own fresh
-   32-byte `client_nonce` and an HMAC-SHA256 tag over the *client* binding
+   32-byte `client_nonce` and an HMAC-SHA256 tag over the _client_ binding
    message (domain-separated with the context string
    `clipper-ipc-client-auth-v1`, plus the protocol version and both nonces).
 3. The daemon verifies the client tag with a constant-time comparison
@@ -50,7 +50,7 @@ and it is directional so neither side's proof can be replayed as the other's.
    connection. The protocol version, nonce length, and tag length are all
    validated first.
 4. On success the daemon returns an `authenticate` success result containing its
-   own HMAC-SHA256 tag over the *daemon* binding message (domain-separated with
+   own HMAC-SHA256 tag over the _daemon_ binding message (domain-separated with
    the context string `clipper-ipc-daemon-auth-v1`, over the same nonces). The
    client is expected to verify this tag so it can detect a daemon that does not
    hold the secret.

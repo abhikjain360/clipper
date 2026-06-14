@@ -82,7 +82,7 @@ there is no `409` on a duplicate username at this step.
 Consequences worth understanding before reading the steps below:
 
 - The access key is **verified** (not consumed) in `register_start`, and
-  **consumed** (`used_at` set) in `register_finish` — but only *after* the
+  **consumed** (`used_at` set) in `register_finish` — but only _after_ the
   `users` row inserts successfully. A `register_finish` against an already-taken
   username hits the `users.username` unique constraint first and rolls the
   transaction back, so the one-time access key is **not** burned and stays usable
@@ -111,7 +111,7 @@ N   = k_U · M
 send (N, pk_S)                        ⟶ RegistrationResponse
 ```
 
-Server keeps no per-flow *crypto* state — the response is deterministic in
+Server keeps no per-flow _crypto_ state — the response is deterministic in
 `(opaque_server_setup, M, id_U)`. THIS server does, however, stash a
 `PendingRegistration { user_id, username, access_key_hash }` in memory (keyed by
 a `registration_id`) so `register_finish` can recover the freshly minted
@@ -219,7 +219,7 @@ wrong passphrase against a real account would. Tests:
 `challenge_for_unknown_user_is_indistinguishable`,
 `login_rejects_fabricated_challenge`.
 
-Caveat (not a documented guarantee): the response *shape* is indistinguishable,
+Caveat (not a documented guarantee): the response _shape_ is indistinguishable,
 but the real path performs one extra AEAD unwrap of the stored
 `opaque_password_file` that the fake path skips, so the two paths are not
 guaranteed to be wall-clock identical. The anti-enumeration property the tests
@@ -376,6 +376,7 @@ or its session is deleted (logout, or cascade on device/user delete).
 
   The server never receives either key and no longer returns a separate
   encryption salt / KDF parameter set.
+
 - Access keys are an invite-gate that lives entirely outside OPAQUE.
 
 ## Access keys
@@ -384,7 +385,7 @@ Access keys are one-time registration invites. They are stored only as hashes
 (`access_keys.key_hash`, the table primary key), never in cleartext.
 
 - `key_hash = Argon2id(access_key, salt = access_key_hash_salt,
-  secret = access_key_pepper, params = config.crypto.access_key_hash_params)`,
+secret = access_key_pepper, params = config.crypto.access_key_hash_params)`,
   base64-encoded (`server_auth::hash_access_key` →
   `crypto::access_key_hash_with_params`). Default params are
   `m_cost = 19 MiB, t_cost = 2, p_cost = 1`, output 32 bytes.

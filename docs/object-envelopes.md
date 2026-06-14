@@ -247,8 +247,7 @@ keys out of band; that is not implemented today.
 
 The device signing secret `sk_D` is generated locally
 (`generate_device_signing_secret_key`) and persisted wrapped, not in the clear.
-The on-disk / browser-storage record (`DeviceIdentityEncryptedRecord`, version
-2) stores `wrap_with_key(wrap_key, sk_D, "clipper:wrap:device-signing-secret:v1")`,
+The on-disk / browser-storage record (`DeviceIdentityEncryptedRecord`, version 2) stores `wrap_with_key(wrap_key, sk_D, "clipper:wrap:device-signing-secret:v1")`,
 where `wrap_key` is the export-key-derived wrapping key above and the wrap is
 XChaCha20-Poly1305 (`nonce_24 || ciphertext_with_tag`). On native targets the
 record file and its parent directory are created `0600`/`0700`, ownership-checked

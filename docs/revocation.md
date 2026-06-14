@@ -9,7 +9,7 @@
 
 In the intended release model the operator hands out access keys to friends, so
 access keys and bearer tokens are the circulating secret. End-to-end encryption
-protects *content* but does nothing for a leaked token or key: whoever holds a
+protects _content_ but does nothing for a leaked token or key: whoever holds a
 valid bearer token reads that account's sync stream until it expires. Revocation
 is the missing control.
 
@@ -68,7 +68,7 @@ registration paths.
 **Object semantics on device revoke:** objects already signed by a revoked
 device stay valid and decryptable — the envelope signature is server-checked
 provenance, not the load-bearing authenticity mechanism (that is AEAD+AAD under
-`K`; see [`object-envelopes.md`](object-envelopes.md)). Revocation stops *future*
+`K`; see [`object-envelopes.md`](object-envelopes.md)). Revocation stops _future_
 use of the device id; it does not retroactively invalidate history. Document this
 so the guarantee is not over-claimed. If a revoke also **deletes** the device row
 (rather than just flagging it), the `ON DELETE SET NULL` foreign key nulls each

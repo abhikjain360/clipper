@@ -3,7 +3,7 @@
 Clipper is end-to-end encrypted: clipboard and file payloads are encrypted on
 the client before they reach the server, and the server only ever stores
 ciphertext (see `docs/object-envelopes.md`, `docs/opaque.md`). This document
-covers the *client* side of at-rest protection: what the local cache and the
+covers the _client_ side of at-rest protection: what the local cache and the
 local device identity contain on disk (or in browser `localStorage`), which keys
 protect them, where those keys come from, and the filesystem-level safeguards
 (ownership checks, `0700`/`0600` modes, atomic writes).
@@ -29,10 +29,10 @@ logins, and it never leaves the client. From it the client derives two
 independent 32-byte keys with HKDF-SHA256, using distinct domain-separation
 labels (`crates/core/src/crypto.rs`):
 
-| Key | Derivation | Label | Purpose |
-| --- | --- | --- | --- |
-| **Data key** | `derive_data_key_from_opaque_export_key` | `clipper:opaque-export:data-key:v1` | Encrypts/decrypts all object material (clipboard meta, clipboard payloads, file meta, file blobs). This is the E2EE key shared with the server-stored ciphertext. |
-| **Device-identity wrapping key** | `derive_device_identity_wrapping_key_from_opaque_export_key` | `clipper:opaque-export:device-identity-wrap-key:v1` | Wraps the persisted device signing secret at rest. |
+| Key                              | Derivation                                                   | Label                                               | Purpose                                                                                                                                                           |
+| -------------------------------- | ------------------------------------------------------------ | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Data key**                     | `derive_data_key_from_opaque_export_key`                     | `clipper:opaque-export:data-key:v1`                 | Encrypts/decrypts all object material (clipboard meta, clipboard payloads, file meta, file blobs). This is the E2EE key shared with the server-stored ciphertext. |
+| **Device-identity wrapping key** | `derive_device_identity_wrapping_key_from_opaque_export_key` | `clipper:opaque-export:device-identity-wrap-key:v1` | Wraps the persisted device signing secret at rest.                                                                                                                |
 
 Crucially, **neither key is persisted anywhere** — not on disk, not in the OS
 keychain, not in `localStorage`. Both are re-derived from the OPAQUE export key
@@ -44,7 +44,7 @@ are wiped on drop.
 
 This means a cold attacker who reads the on-disk cache (or `localStorage`) but
 does not know the passphrase cannot decrypt anything: the only persisted secret
-is the *wrapped* device signing key, and unwrapping it requires the
+is the _wrapped_ device signing key, and unwrapping it requires the
 OPAQUE-derived wrapping key, which is gone once the process exits.
 
 ### What the OS keychain stores (and does not)
@@ -98,14 +98,14 @@ is logged and removed rather than surfaced. Before a cached clipboard payload is
 decrypted, `verify_payload_ciphertext` re-checks its length and SHA-256 against
 the descriptor, so a tampered or truncated ciphertext file is rejected.
 
-#### Plaintext that is *not* persisted
+#### Plaintext that is _not_ persisted
 
 Decrypted display state is kept only in memory (`MemoryState`). The only
 plaintext-derived value retained is a **bounded clipboard preview**
 (`CLIPBOARD_TEXT_PREVIEW_MAX_CHARS = 512` characters for text MIME types, or a
 `"<mime> clipboard payload (N bytes)"` label for non-text). The preview is
 recomputed from decrypted bytes on hydration — it is never written to the
-on-disk record, and the caller-supplied preview text is *not* trusted (the
+on-disk record, and the caller-supplied preview text is _not_ trusted (the
 `derives_bounded_preview_without_trusting_caller_text` test asserts this). Full
 payload bytes are only ever decrypted transiently for the operation that needs
 them (e.g. `clipboard_payload`, copy-to-clipboard, file download).
@@ -177,7 +177,7 @@ device-identity file:
 2. Write, flush, and `sync_all`.
 3. `rename` the temp file over the final path.
 
-The `rename` makes the *replacement* of an existing record atomic — a reader sees
+The `rename` makes the _replacement_ of an existing record atomic — a reader sees
 either the old or the new file, never a partial write. The same test asserts the
 object record and the payload-ciphertext file are both `0600`, and that the
 on-disk record contains neither the plaintext (`"super-secret"`), nor a `"text"`
@@ -192,7 +192,7 @@ unlink the record and any payload sidecar files (including legacy `.payload` /
 On `wasm`, there is no filesystem: records, payload ciphertexts, and the device
 identity are JSON-serialized into `window.localStorage`. The encryption scheme is
 identical (same wrapped device identity, same object ciphertext) — only the
-*storage medium* differs. Important differences from the native path:
+_storage medium_ differs. Important differences from the native path:
 
 - There are **no file modes or ownership checks**; confidentiality relies
   entirely on the browser's same-origin policy and on the fact that the only
@@ -211,10 +211,10 @@ for atomic writes, and it is worth not conflating the two:
 
 - `FsTransaction` writes files to their **final paths immediately** and tracks
   them so that, unless `commit()` is called, `Drop` removes them. Its own doc
-  comment is explicit that this is *rollback/cleanup, not isolation*: a
+  comment is explicit that this is _rollback/cleanup, not isolation_: a
   concurrent reader can observe a half-written file, because there is no
   temp-file-then-rename step.
-- `local_store::write_private_file_atomic`, by contrast, *does* use the
+- `local_store::write_private_file_atomic`, by contrast, _does_ use the
   temp-then-rename pattern and so provides atomic replacement, but it does **not**
   provide rollback across multiple files.
 

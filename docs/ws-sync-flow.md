@@ -79,7 +79,7 @@ snapshot sweeps depend on it.
 
 1. The client opens a WebSocket after login or reconnect.
 2. The server starts listening for live events for that user. It subscribes to
-   the user's broadcast channel *before* reading the high-water sequence, so no
+   the user's broadcast channel _before_ reading the high-water sequence, so no
    live event can slip between the snapshot watermark and the live
    subscription.
 3. The server chooses a stream watermark representing all events committed up to

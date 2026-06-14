@@ -20,12 +20,12 @@ its own HKDF subkey **and** its own AAD string, so a ciphertext cannot be
 moved between columns even though every subkey descends from the same
 root:
 
-| Column | Subkey / AAD | Scope |
-| --- | --- | --- |
-| `server_config.opaque_server_setup` | `…opaque-server-setup:v1` | server-wide |
-| `server_config.access_key_hash_salt` | `…access-key-hash-salt:v1` | server-wide |
-| `users.opaque_password_file` | `…opaque-password-file:v1` | per-user |
-| `users.encryption_salt` | `…encryption-salt:v1` | per-user (legacy placeholder) |
+| Column                               | Subkey / AAD               | Scope                         |
+| ------------------------------------ | -------------------------- | ----------------------------- |
+| `server_config.opaque_server_setup`  | `…opaque-server-setup:v1`  | server-wide                   |
+| `server_config.access_key_hash_salt` | `…access-key-hash-salt:v1` | server-wide                   |
+| `users.opaque_password_file`         | `…opaque-password-file:v1` | per-user                      |
+| `users.encryption_salt`              | `…encryption-salt:v1`      | per-user (legacy placeholder) |
 
 The two per-user columns additionally bind the authenticated `user_id`
 into the AAD (`<column-aad> ‖ ":user_id:" ‖ <16 raw UUID bytes>`, see
@@ -39,7 +39,7 @@ not match. The two server-wide columns live in the single
 `users.encryption_salt` is a **legacy non-null column**. Client
 object-encryption keys now derive from OPAQUE's `export_key`, so the
 server no longer generates or returns a salt. At registration the column
-is filled with a wrapped *empty* plaintext (`wrap_encryption_salt(…, &[])`
+is filled with a wrapped _empty_ plaintext (`wrap_encryption_salt(…, &[])`
 in `crates/server/src/routes/auth.rs`) — i.e. a real AEAD blob whose
 payload is zero bytes, not a plaintext zero and not NULL. The wrapper and
 subkey are retained only until the column itself is removed from the
@@ -100,7 +100,7 @@ wrong pepper surfaces as a clear "server secret cannot decrypt existing
 server configuration" error rather than a cryptic auth failure later.
 `serve` performs this unwrap **before** binding the TCP listener, so a
 wrong or missing pepper fails at startup instead of on the first auth
-request. (`init` on a *fresh*, uninitialized database writes the wrapped
+request. (`init` on a _fresh_, uninitialized database writes the wrapped
 config rather than verifying it; the verify path only runs when a config
 row already exists.)
 

@@ -23,14 +23,14 @@ rejected check does not consume a cell.
 
 The `RateLimiter` holds six independent buckets:
 
-| Bucket | Key | Default `/min` | Config field |
-| --- | --- | --- | --- |
-| `auth_by_client` | resolved client IP (see keying below) | 10 | `rate_limit.auth_per_client_per_minute` |
-| `auth_by_username` | SHA-256 of the submitted username, truncated to 16 bytes | 30 | `rate_limit.auth_per_username_per_minute` |
-| `auth_global` | none (one direct bucket for the whole server) | 3000 | `rate_limit.auth_global_per_minute` |
-| `api_by_client` | resolved client IP | 2400 | `rate_limit.api_per_client_per_minute` |
-| `api_by_user` | authenticated `user_id` (UUID) | 1200 | `rate_limit.api_per_user_per_minute` |
-| `ws_tickets_by_user` | authenticated `user_id` (UUID) | 30 | `rate_limit.ws_tickets_per_user_per_minute` |
+| Bucket               | Key                                                      | Default `/min` | Config field                                |
+| -------------------- | -------------------------------------------------------- | -------------- | ------------------------------------------- |
+| `auth_by_client`     | resolved client IP (see keying below)                    | 10             | `rate_limit.auth_per_client_per_minute`     |
+| `auth_by_username`   | SHA-256 of the submitted username, truncated to 16 bytes | 30             | `rate_limit.auth_per_username_per_minute`   |
+| `auth_global`        | none (one direct bucket for the whole server)            | 3000           | `rate_limit.auth_global_per_minute`         |
+| `api_by_client`      | resolved client IP                                       | 2400           | `rate_limit.api_per_client_per_minute`      |
+| `api_by_user`        | authenticated `user_id` (UUID)                           | 1200           | `rate_limit.api_per_user_per_minute`        |
+| `ws_tickets_by_user` | authenticated `user_id` (UUID)                           | 30             | `rate_limit.ws_tickets_per_user_per_minute` |
 
 `garde` rejects any of these set to `0`. There is no separate burst knob.
 
@@ -162,10 +162,10 @@ cleanup (`crates/server/src/cleanup.rs`).
 
 ### Limits
 
-| Limit | Default | Config field |
-| --- | --- | --- |
+| Limit                           | Default                | Config field                    |
+| ------------------------------- | ---------------------- | ------------------------------- |
 | Aggregate stored bytes per user | 10 GiB (`10 * 1024^3`) | `limits.max_user_storage_bytes` |
-| Object rows per user | 10,000 | `limits.max_user_objects` |
+| Object rows per user            | 10,000                 | `limits.max_user_objects`       |
 
 Both are validated to be non-zero and to fit in a signed 64-bit integer (they
 are stored and compared as `i64` database counters).
@@ -338,7 +338,7 @@ transitively (registered users × this per-user cap).
 Minted-but-unconsumed tickets live in a single in-memory `HashMap` shared by all
 users (`AppStateInner::ws_tickets`). `create_ws_ticket` enforces a **per-user**
 cap of `auth.max_pending_ws_tickets` (default 4096): while a user already holds
-that many tickets, the oldest ticket *for that same user* (smallest
+that many tickets, the oldest ticket _for that same user_ (smallest
 `expires_at`, since all tickets share a fixed 60-second TTL) is evicted before
 the new one is inserted. Eviction is scoped to the minting user, so one
 account's burst cannot displace another user's pending ticket. Expired tickets

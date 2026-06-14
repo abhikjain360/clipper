@@ -179,7 +179,7 @@ is unique; `objects.created_seq` must be non-null whenever `status = complete`;
 > **Not yet implemented (still a suggestion).** The composite, cross-user
 > foreign keys below are **not** in the migration. The device foreign keys
 > reference only `devices(id)`, so the database does **not** stop an object or
-> session from pointing at a device owned by *another* user. That invariant
+> session from pointing at a device owned by _another_ user. That invariant
 > currently rests entirely on application code (`object_for_upload`'s
 > `source_device_id` check and `issue_session`'s device-ownership check). Adding
 > these would make the guarantee structural:

@@ -37,7 +37,7 @@ What the local store keeps today:
   sign object envelopes, persisted wrapped (see "Signing And Provenance").
 
 In memory, the store keeps only bounded display state: a decrypted clipboard
-*preview* (text bounded to `CLIPBOARD_TEXT_PREVIEW_MAX_CHARS = 512` characters,
+_preview_ (text bounded to `CLIPBOARD_TEXT_PREVIEW_MAX_CHARS = 512` characters,
 or a `"<mime> clipboard payload (<n> bytes)"` label for non-text), plus decrypted
 file metadata. Full clipboard payload bytes are never kept resident; they are
 decrypted from the local ciphertext record only for the one operation that needs
@@ -97,7 +97,7 @@ The local cache is **encrypted at rest**, and the directory tree is locked down:
 - Object metadata and clipboard payloads are stored only as ciphertext. The
   records never contain plaintext clipboard text; `restricts_cache_permissions_and_does_not_store_plaintext`
   asserts the stored record and payload file do not contain the plaintext.
-- The decrypted preview is *re-derived from the ciphertext* on hydrate, not
+- The decrypted preview is _re-derived from the ciphertext_ on hydrate, not
   trusted from any caller-supplied field, so a tampered record cannot inject a
   misleading preview (`derives_bounded_preview_without_trusting_caller_text`).
 - Cached payload integrity is checked before decryption:
@@ -167,7 +167,7 @@ Behavior (current):
 - retained clipboard payloads are stored locally as ciphertext, alongside an
   encrypted metadata record;
 - clipboard text is encrypted (XChaCha20-Poly1305) before it is sent to the
-  server, and the *same* ciphertext is what the local cache retains, so there is
+  server, and the _same_ ciphertext is what the local cache retains, so there is
   no second plaintext copy on disk;
 - the UI sees bounded recent metadata plus a bounded preview; the full payload
   is decrypted only when selected/copied;
@@ -254,6 +254,7 @@ What ships now (`crates/core/src/crypto.rs`, `crates/api-types`):
   ```
 
   The signature itself lives on `ObjectEnvelopeV1.signature`.
+
 - on read, the client calls `verify_object_list_item_envelope`: it checks the
   envelope body matches the listed object fields and per-payload metadata, then
   verifies the Ed25519 signature against the item's
@@ -330,7 +331,7 @@ path.
 - No server trust requirement for object contents.
 - No in-app reader requirement for locally cached files.
 - No duplicate encrypted local blob storage by default (the local clipboard
-  ciphertext *is* the network ciphertext, not a second copy).
+  ciphertext _is_ the network ciphertext, not a second copy).
 
 > Note: an earlier revision listed "no local-at-rest encryption in the first
 > local-store version" as a non-goal and described keeping plaintext locally by
