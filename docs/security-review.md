@@ -15,26 +15,9 @@ an authenticated account, or the already-assumed partially-untrusted server.
 Ordered by severity. Each notes *why* it needs a call (the tradeoff or policy
 choice) and a recommendation.
 
-### Medium
-
-1. **Mobile UniFFI bridge blocks the JS thread → ANR.**
-   `crates/mobile-uniffi/src/lib.rs` (+ `packages/mobile-bridge/src/adapter.ts`) ·
-   Every networked method runs `block_on` inline on the React Native JS thread, and
-   there is no overall HTTP deadline, so a slow/hostile server (within the trust
-   model) — or even normal login latency — freezes the UI. The `adapter.ts`
-   `async () =>` wrappers and the 250 ms `waitForStateChange` busy-poll do *not*
-   yield the JS thread. *Decision (primary):* making the FFI non-blocking (async
-   UniFFI mapped to JS Promises, or off-thread dispatch) changes the bridge
-   contract — and intersects the deliberate long-poll design. *Decision
-   (secondary):* a reqwest overall `.timeout()` is close to mechanical but the
-   bound trades off slow-link large-file transfers, so it needs a chosen value
-   (ideally per-request: short for auth/metadata, generous/none for file
-   transfers). *Recommend:* add per-request timeouts now; schedule the async-FFI
-   redesign deliberately.
-
 ### Low
 
-2. **Native client has no cap on stored object records.**
+1. **Native client has no cap on stored object records.**
    `crates/client/src/local_store.rs` · A malicious server can stream unlimited
    `Created` events; each writes a marker file, filling disk/inodes (bounded to one
    connection; reconnect reaps old-generation markers). *Decision:* a cap +
@@ -43,7 +26,7 @@ choice) and a recommendation.
    the existing wasm `OBJECT_INDEX_LIMIT` only truncates the in-memory index and
    leaks the evicted item's stored payload; fix that in the same change.
 
-3. **Linux Tauri "Add Current Clipboard" fails open + reads a different backend
+2. **Linux Tauri "Add Current Clipboard" fails open + reads a different backend
    than it probes.** `web/src-tauri/src/lib.rs:262-271` · On GNOME/non-wlroots
    Wayland the wlr privacy-marker probe returns `MissingProtocol` → treated as "no
    marker", and the text is then read via arboard's X11/XWayland fallback and
@@ -52,7 +35,7 @@ choice) and a recommendation.
    payload through the *same* backend (arboard, matching the macOS path). *Recommend:*
    same-backend read; interim fail-closed + a clear notice.
 
-4. **Mobile app is hard-pinned to `http://127.0.0.1:8787`.**
+3. **Mobile app is hard-pinned to `http://127.0.0.1:8787`.**
    `crates/mobile-uniffi/src/lib.rs` · As shipped this is loopback-only (no wire
    exposure) but the editable "Server URL" field rejects every non-default value,
    and a developer pointing it at a real host would send the 30-day bearer token in
@@ -63,37 +46,37 @@ choice) and a recommendation.
 
 ### Info
 
-5. **Web CSP `connect-src` is broad** (`https:` / `wss:`). `web/index.html` · No
+4. **Web CSP `connect-src` is broad** (`https:` / `wss:`). `web/index.html` · No
    `*`/`data:`/`blob:`/plaintext-`http:` wildcard is present, but allowing any
    https/wss host is inherent to the user-configurable-server model. *Decision:*
    accept-and-document vs. a per-deployment / build-time allowlist of the
    configured backend origin.
 
-6. **Dead config knob `max_file_meta_ciphertext_bytes`.** `config.rs` /
+5. **Dead config knob `max_file_meta_ciphertext_bytes`.** `config.rs` /
     `routes/objects.rs` · Parsed, validated, documented, and plumbed through
     overrides, but never enforced (`max_object_meta_ciphertext_bytes` already
     bounds File metadata). An operator changing it gets no effect. *Decision:*
     remove the knob, or enforce a distinct File-metadata cap. *Recommend:* remove
     it unless a separate file-meta ceiling is wanted.
 
-7. **Residual username-existence oracle at `register_finish`.** The invite-burn
+6. **Residual username-existence oracle at `register_finish`.** The invite-burn
     is fixed, but a holder of a valid *unused* invite can still distinguish
     existing usernames (200 at start, 409 at finish) — now without cost to the
     invite. *Decision:* accept (probing needs a valid invite) vs. return a
     non-distinguishable finish result.
 
-8. **Clipboard privacy markers are desktop-only.** Browser (`navigator.clipboard`)
+7. **Clipboard privacy markers are desktop-only.** Browser (`navigator.clipboard`)
     and Expo (`getStringAsync`) do not expose the macOS/KDE sensitivity markers, so
     web/mobile manual "Add Current Clipboard" cannot honor them. *Decision:*
     document the desktop-only scope and/or show a one-time notice on web/mobile.
 
-9. **Path-based file IPC is a confused-deputy** (same-user, post-HMAC). Accepted
+8. **Path-based file IPC is a confused-deputy** (same-user, post-HMAC). Accepted
     by design and documented in `local-ipc-security.md`; the unsandboxed daemon
     will read/write any caller-named path. *Decision:* keep accepted, or migrate to
     byte/chunk-oriented IPC (the engine already exposes `upload_file_bytes` /
     `download_file_bytes`) so filesystem access stays in the sandboxed UI.
 
-10. **`opaque-ke` is a pre-release dependency** (`4.1.0-pre.2`). No advisory, exact-
+9. **`opaque-ke` is a pre-release dependency** (`4.1.0-pre.2`). No advisory, exact-
     pinned, usage verified correct. *Decision:* accept-and-track vs. block release
     until a stable/audited version; re-pin and re-run `nix run .#audit` before
     deployment.
@@ -128,6 +111,16 @@ Known and acknowledged; not currently being fixed.
   global Semaphore in `handle_socket`.
 - **No SPKI/certificate pinning** on the HTTP transport (TLS verification is on;
   native builds disable redirects).
+- **No whole-request HTTP deadline on the native client.**
+  `crates/client/src/api_client.rs` sets a 10s `connect_timeout` and a 30s
+  per-read-chunk `read_timeout` (deliberately chosen over a whole-request
+  `.timeout()` so large downloads stay viable on slow links), but no overall
+  deadline. A server that trickles one byte just inside each read window can keep
+  an auth/metadata request pending indefinitely. The mobile UniFFI boundary is now
+  async (Promise-mapped, `AbortSignal`-cancellable), so this stalls the in-flight
+  operation rather than freezing the React Native UI. *Fix if it matters:* a short
+  per-request `.timeout()` for auth/metadata, leaving large transfers on the chunk
+  timeout.
 - **macOS keychain IPC secret uses the default ACL** — another same-user process
   can read it once the login keychain is unlocked.
 - **Login challenge has a residual username-existence *timing* oracle** — the

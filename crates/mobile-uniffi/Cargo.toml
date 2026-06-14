@@ -12,9 +12,12 @@ clipper-app-types = { workspace = true, features = ["uniffi"] }
 clipper-client.workspace = true
 dirs.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
-uniffi.workspace = true
+# The `tokio` feature drives the exported async methods on uniffi's
+# process-global Tokio runtime (via `async-compat`); the crate no longer owns a
+# runtime of its own.
+uniffi = { workspace = true, features = ["tokio"] }
 zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }

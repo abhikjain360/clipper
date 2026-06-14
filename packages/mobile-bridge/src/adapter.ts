@@ -25,14 +25,18 @@ import type {
 export function createMobileBackend(
   client: MobileClipperClientLike = MobileClipperClient.newWithDefaultServer(),
 ): ClipperBackend {
+  // Every networked method on the native client is now an async UniFFI export
+  // mapped to a JS Promise, so awaiting it yields the React Native JS thread for
+  // the whole call instead of blocking it (the former busy-poll/`block_on`
+  // shape caused ANRs on slow/hostile servers).
   return {
-    clipboardPayload: async (id) => mapClipboardPayload(client.clipboardPayload(id)),
+    clipboardPayload: async (id) => mapClipboardPayload(await client.clipboardPayload(id)),
     connect: async () => client.connect(),
     defaultServerUrl: () => client.defaultServerUrl(),
     deleteFile: async (fileId) => client.deleteFile(fileId),
-    downloadFileBytes: async (fileId) => new Uint8Array(client.downloadFileBytes(fileId)),
-    getState: async () => mapAppState(client.getState()),
-    listDevices: async () => client.listDevices().map(mapDeviceInfo),
+    downloadFileBytes: async (fileId) => new Uint8Array(await client.downloadFileBytes(fileId)),
+    getState: async () => mapAppState(await client.getState()),
+    listDevices: async () => (await client.listDevices()).map(mapDeviceInfo),
     login: async (passphrase, username, deviceName, serverUrl) =>
       client.login(passphrase, username, deviceName, serverUrl),
     logout: async () => client.logout(),
@@ -46,13 +50,9 @@ export function createMobileBackend(
     stateVersion: () => client.stateVersion(),
     uploadFileBytes: async (filename, mimeType, bytes) =>
       client.uploadFileBytes(filename, mimeType, arrayBufferFrom(bytes)),
-    waitForStateChange: async (seenVersion) => {
-      for (;;) {
-        const version = client.stateVersion();
-        if (version !== seenVersion) return version;
-        await delay(250);
-      }
-    },
+    // Suspends on the engine's state `watch` channel native-side until the
+    // version actually advances — no 250 ms polling loop.
+    waitForStateChange: async (seenVersion) => client.waitForStateChange(seenVersion),
   };
 }
 
@@ -153,8 +153,4 @@ function arrayBufferFrom(bytes: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return copy.buffer;
-}
-
-async function delay(milliseconds: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
