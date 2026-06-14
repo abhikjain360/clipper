@@ -58,6 +58,7 @@ function ClipperApp() {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
 
     async function run() {
       try {
@@ -67,7 +68,7 @@ function ClipperApp() {
         setState(await backend.getState());
 
         while (!cancelled) {
-          seenVersion = await backend.waitForStateChange(seenVersion);
+          seenVersion = await backend.waitForStateChange(seenVersion, controller.signal);
           if (!cancelled) setState(await backend.getState());
         }
       } catch (caught) {
@@ -79,6 +80,8 @@ function ClipperApp() {
 
     return () => {
       cancelled = true;
+      // Cancel the in-flight waitForStateChange UniFFI future on unmount.
+      controller.abort();
     };
   }, []);
 
@@ -233,6 +236,13 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
     setError(null);
     try {
       await backend.logout();
+    } catch (caught) {
+      // logout tears down local state best-effort even when the server call
+      // fails; surface the error but still refresh below so the UI leaves the
+      // authenticated screen rather than stranding the user with keys cleared.
+      setError(formatBackendError(caught));
+    }
+    try {
       onState(await backend.getState());
     } catch (caught) {
       setError(formatBackendError(caught));

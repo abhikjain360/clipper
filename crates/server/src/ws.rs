@@ -50,6 +50,20 @@ const WS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30)
 /// instead of lingering until TCP eventually notices.
 const WS_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
 
+/// Bound every server-to-client send. A peer that stops reading (advertises a
+/// zero TCP receive window) fills the OS send buffer and makes `socket.send`
+/// block indefinitely. Because the ping/idle/expiry backstops are sibling
+/// `select!` branches, an in-progress unbounded send wedges the whole task —
+/// none of those backstops can run, and the connection pins its per-user slot,
+/// FD, task, and broadcast receiver until TCP keepalive eventually reaps it
+/// (hours). Bounding each send turns a stalled write into a prompt disconnect.
+const WS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A freshly upgraded socket should accept the hello ack promptly; bound it
+/// tighter than steady-state sends so a client that completes the hello and then
+/// stops reading cannot wedge the ack before the liveness loop is even entered.
+const WS_HELLO_ACK_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A broadcast message sent to all connected WebSocket clients.
 #[derive(Clone, Debug)]
 pub struct WsBroadcast {
@@ -123,6 +137,20 @@ pub async fn ws_ticket_handler(
         .on_upgrade(move |socket| handle_socket(socket, state, auth)))
 }
 
+/// Send a frame with a bounded deadline. Returns `false` if the socket errors
+/// or the deadline elapses (a peer that has stopped reading), so callers drop
+/// the connection instead of blocking the task forever on an unbounded `.await`.
+async fn send_bounded(
+    socket: &mut WebSocket,
+    msg: Message,
+    timeout: std::time::Duration,
+) -> bool {
+    matches!(
+        tokio::time::timeout(timeout, socket.send(msg)).await,
+        Ok(Ok(()))
+    )
+}
+
 async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
     let device_id = auth.device_id.to_string();
     info!(device_id = %device_id, "WebSocket connected");
@@ -154,15 +182,39 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
     // through stream_start_seq; this live stream owns events after it.
     let mut rx = state.subscribe_ws_broadcasts(auth.user_id);
 
-    let stream_start_seq = get_latest_seq(&state, auth.user_id).await.unwrap_or(0);
+    // `get_latest_seq` returns `Ok(0)` for a genuinely empty user, so reserve a
+    // zero watermark for that case only. On a transient DB error do NOT send a
+    // HelloAck with `stream_start_seq = 0`: a fresh / cache-cleared device would
+    // take 0 as its snapshot boundary and suppress the entire HTTP snapshot until
+    // the next reconnect. Close cleanly instead so the client retries.
+    let stream_start_seq = match get_latest_seq(&state, auth.user_id).await {
+        Ok(seq) => seq,
+        Err(error) => {
+            debug!(device_id = %device_id, %error, "WebSocket snapshot watermark query failed; closing so the client retries");
+            drop(rx);
+            state.prune_idle_ws_broadcast_channel(auth.user_id);
+            _ = send_bounded(
+                &mut socket,
+                Message::Close(Some(CloseFrame {
+                    code: close_code::AWAY,
+                    reason: "try again".into(),
+                })),
+                WS_SEND_TIMEOUT,
+            )
+            .await;
+            return;
+        }
+    };
     let ack = WsServerMessage::HelloAck {
         server_time: Utc::now().to_rfc3339(),
         stream_start_seq,
     };
-    if socket
-        .send(Message::Text(serde_json::to_string(&ack).unwrap().into()))
-        .await
-        .is_err()
+    if !send_bounded(
+        &mut socket,
+        Message::Text(serde_json::to_string(&ack).unwrap().into()),
+        WS_HELLO_ACK_SEND_TIMEOUT,
+    )
+    .await
     {
         drop(rx);
         state.prune_idle_ws_broadcast_channel(auth.user_id);
@@ -185,7 +237,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(data))) => {
                         last_activity = Instant::now();
-                        _ = socket.send(Message::Pong(data)).await;
+                        if !send_bounded(&mut socket, Message::Pong(data), WS_SEND_TIMEOUT).await {
+                            break;
+                        }
                     }
                     // Any other inbound frame (Pong, Text, Binary) still proves
                     // the peer is alive and resets the idle clock.
@@ -200,12 +254,15 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
             _ = ping_interval.tick() => {
                 if last_activity.elapsed() > WS_IDLE_TIMEOUT {
                     debug!(device_id = %device_id, "WebSocket idle past deadline; closing");
-                    _ = socket
-                        .send(Message::Close(Some(CloseFrame {
+                    _ = send_bounded(
+                        &mut socket,
+                        Message::Close(Some(CloseFrame {
                             code: close_code::AWAY,
                             reason: "idle timeout".into(),
-                        })))
-                        .await;
+                        })),
+                        WS_SEND_TIMEOUT,
+                    )
+                    .await;
                     break;
                 }
                 // A bearer token lives ~30 days; re-check that the backing session
@@ -214,15 +271,20 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
                 // this is the long-connection backstop.
                 if !session_still_valid(&state, auth.session_id).await {
                     debug!(device_id = %device_id, "WebSocket session no longer valid; closing");
-                    _ = socket
-                        .send(Message::Close(Some(CloseFrame {
+                    _ = send_bounded(
+                        &mut socket,
+                        Message::Close(Some(CloseFrame {
                             code: close_code::AWAY,
                             reason: "session expired".into(),
-                        })))
-                        .await;
+                        })),
+                        WS_SEND_TIMEOUT,
+                    )
+                    .await;
                     break;
                 }
-                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                if !send_bounded(&mut socket, Message::Ping(Vec::new().into()), WS_SEND_TIMEOUT)
+                    .await
+                {
                     break;
                 }
             }
@@ -247,10 +309,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
                             object_id: evt.object_id,
                             created_at: evt.created_at,
                         };
-                        if socket
-                            .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
-                            .await
-                            .is_err()
+                        if !send_bounded(
+                            &mut socket,
+                            Message::Text(serde_json::to_string(&msg).unwrap().into()),
+                            WS_SEND_TIMEOUT,
+                        )
+                        .await
                         {
                             break;
                         }
@@ -263,26 +327,35 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
                         let inv = WsServerMessage::Invalidate {
                             target: "all".to_string(),
                         };
-                        _ = socket
-                            .send(Message::Text(serde_json::to_string(&inv).unwrap().into()))
-                            .await;
-                        _ = socket
-                            .send(Message::Close(Some(CloseFrame {
+                        _ = send_bounded(
+                            &mut socket,
+                            Message::Text(serde_json::to_string(&inv).unwrap().into()),
+                            WS_SEND_TIMEOUT,
+                        )
+                        .await;
+                        _ = send_bounded(
+                            &mut socket,
+                            Message::Close(Some(CloseFrame {
                                 code: close_code::AWAY,
                                 reason: "lagged".into(),
-                            })))
-                            .await;
+                            })),
+                            WS_SEND_TIMEOUT,
+                        )
+                        .await;
                         break;
                     }
                     // Broadcast channel closed: the server is going away. Close
                     // cleanly so the client treats it as a normal disconnect.
                     Err(RecvError::Closed) => {
-                        _ = socket
-                            .send(Message::Close(Some(CloseFrame {
+                        _ = send_bounded(
+                            &mut socket,
+                            Message::Close(Some(CloseFrame {
                                 code: close_code::AWAY,
                                 reason: "server shutting down".into(),
-                            })))
-                            .await;
+                            })),
+                            WS_SEND_TIMEOUT,
+                        )
+                        .await;
                         break;
                     }
                 }
@@ -304,9 +377,9 @@ async fn close_with_error(mut socket: WebSocket, error: WsError) {
     debug!(%error, "Closing WebSocket after client protocol error");
     let msg = WsServerMessage::Error { error };
     if let Ok(text) = serde_json::to_string(&msg) {
-        _ = socket.send(Message::Text(text.into())).await;
+        _ = send_bounded(&mut socket, Message::Text(text.into()), WS_SEND_TIMEOUT).await;
     }
-    _ = socket.send(Message::Close(None)).await;
+    _ = send_bounded(&mut socket, Message::Close(None), WS_SEND_TIMEOUT).await;
 }
 
 /// Snapshot high-water mark for a user: the boundary between what the HTTP

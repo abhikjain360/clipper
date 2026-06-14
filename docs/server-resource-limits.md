@@ -187,8 +187,9 @@ A user at the cap frees a slot by reclaiming a device. The
 `objects.source_device_id` foreign key is `ON DELETE SET NULL`, so deleting a
 device detaches the objects it created (their provenance pointer becomes NULL)
 rather than blocking the delete or cascading into the objects; the authoritative
-source device id still lives, signed, inside each object envelope. (A
-user-facing device-removal endpoint is not yet wired up — see
+source device id still lives, signed, inside each object envelope. (The
+user-facing device-removal endpoint is shipped: `DELETE /api/auth/devices/{id}`,
+user-scoped, with the device's sessions cascade-deleted — see
 `docs/revocation.md`.)
 
 ### What counts toward the quota
@@ -397,20 +398,34 @@ configurable.
 These are factual gaps in the current controls, called out so they are not
 mistaken for safeguards that exist:
 
-- **No HTTP request body size limit.** The router has no `DefaultBodyLimit` /
-  request-body-limit layer. `Postcard::from_request` (`routes/mod.rs`) reads the
-  entire request body into memory with `Bytes::from_request` before any
-  size-specific check runs. For `init_object`, that means the full postcard body
-  — including all inline payload ciphertext and the metadata ciphertext — is
-  buffered in memory before `max_object_meta_ciphertext_bytes` and the
-  per-payload `max_file_blob_bytes` checks are evaluated. The only thing
-  bounding that allocation is the `api_by_client` / `api_by_user` request-rate
-  buckets, not a byte cap. (Streamed payload uploads via `PUT .../payloads/...`
-  are the exception: they are bounded incrementally against the declared size.)
+- **The authed router has no explicit request body size limit (`init_object`
+  buffers before its size checks).** The public-auth router carries a 64 KiB
+  `DefaultBodyLimit`, but the authed router has no explicit limit and inherits
+  axum's implicit 2 MiB `DefaultBodyLimit`. `Postcard::from_request`
+  (`routes/mod.rs`) reads the entire request body into memory with
+  `Bytes::from_request` before any size-specific check runs, so for `init_object`
+  the full postcard body — inline payload ciphertext plus metadata ciphertext —
+  is buffered (capped at the implicit 2 MiB) before
+  `max_object_meta_ciphertext_bytes` and the per-payload `max_file_blob_bytes`
+  checks run. Consequence: an inline payload above ~2 MiB is rejected with a
+  generic 400 rather than `PayloadTooLarge`, and raising
+  `max_object_meta_ciphertext_bytes` above 2 MiB silently has no effect.
+  (Streamed payload uploads via `PUT .../payloads/...` are the exception: they
+  are bounded incrementally against the declared size.)
 
-- **`/api/health` and `/api/ws-ticket/connect` are unthrottled.** Neither is
-  behind a per-client or global rate-limit layer. `ws-ticket/connect` is
-  unauthenticated and performs a hash + map lookup per request.
+- **`/api/health` is unthrottled.** It is not behind a per-client or global
+  rate-limit layer. (`/api/ws-ticket/connect` is now covered by the
+  `api_rate_limit_middleware`.)
+
+- **No HTTP header-read timeout, whole-request timeout, or connection/concurrency
+  cap.** The server runs a bare `axum::serve`; hyper applies no header-read or
+  whole-request deadline by default and Tokio caps no accepted connections, and
+  the rate limiters run only *after* hyper has parsed the request line + headers.
+  A peer that trickles headers one byte at a time is therefore never counted
+  against any bucket — an unauthenticated slow-loris that also pins a task + FD
+  per connection. The streaming upload path has no per-chunk read timeout either.
+  Partly mitigated in the documented reverse-proxy deployment (proxies usually
+  apply their own header/idle timeouts); enforce in-process or require the proxy.
 
 - **Metadata and envelope bytes are not charged to the storage quota.** Only
   payload ciphertext counts toward `storage_bytes`. The number of metadata-only

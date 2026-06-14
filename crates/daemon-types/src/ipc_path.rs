@@ -125,9 +125,10 @@ fn fallback_socket_dir() -> PathBuf {
 
 #[cfg(not(target_os = "linux"))]
 fn fallback_socket_dir() -> PathBuf {
-    PathBuf::from("/run/user")
-        .join(current_euid().to_string())
-        .join("clipper")
+    // Last resort, only when the platform container resolvers return None (e.g.
+    // home_dir() is unavailable). The Linux /run/user path is not writable here,
+    // so fall back to the OS temp dir, which is writable for the current user.
+    std::env::temp_dir().join("clipper")
 }
 
 fn env_socket_path() -> Option<PathBuf> {

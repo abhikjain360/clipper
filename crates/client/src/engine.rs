@@ -357,7 +357,12 @@ impl SyncEngine {
     }
 
     pub async fn logout(&self) -> Result<(), ClientError> {
-        self.api.logout().await?;
+        // Best-effort server-side revocation: an offline or failed call must not
+        // leave key material resident, so tear down local state unconditionally.
+        if let Err(error) = self.api.logout().await {
+            warn!(%error, "Server-side logout failed; clearing local session anyway");
+        }
+        self.api.clear_token();
         *self.encryption_key.write().await = None;
         *self.device_signing_key.write().await = None;
         self.local_store.clear_memory().await;
@@ -399,15 +404,25 @@ impl SyncEngine {
     /// `logout` does and let the UI return to the login screen.
     pub async fn remove_device(&self, device_id: &str) -> Result<(), ClientError> {
         let current_device_id = self.current_device_id().await?;
-        self.api.remove_device(device_id).await?;
-        if device_id == current_device_id {
+        let is_current = device_id == current_device_id;
+        let result = self.api.remove_device(device_id).await;
+        if is_current {
+            // Removing the current device revokes this session server-side, so
+            // tear down local auth state regardless of whether the server call
+            // succeeded — a failed/offline call must not leave keys resident.
+            if let Err(error) = &result {
+                warn!(%error, "Removing current device failed server-side; clearing local session anyway");
+            }
             self.api.clear_token();
             *self.encryption_key.write().await = None;
             *self.device_signing_key.write().await = None;
             self.local_store.clear_memory().await;
             *self.state.write().await = AppState::default();
+            self.bump_version();
             info!("Removed the current device; local session cleared");
+            return Ok(());
         }
+        result?;
         self.bump_version();
         Ok(())
     }

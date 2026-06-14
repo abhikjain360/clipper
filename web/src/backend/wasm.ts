@@ -11,7 +11,12 @@ type WasmModule = ClipperBackend & {
 let modulePromise: Promise<WasmModule> | undefined;
 
 export function clipperWasm(): Promise<WasmModule> {
-    modulePromise ??= loadModule();
+    modulePromise ??= loadModule().catch((error) => {
+        // Allow a retry after a transient wasm fetch/instantiate failure rather
+        // than caching the rejection for the whole session.
+        modulePromise = undefined;
+        throw error;
+    });
     return modulePromise;
 }
 

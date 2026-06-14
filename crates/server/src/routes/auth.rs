@@ -439,8 +439,16 @@ pub async fn login(
             error_response(StatusCode::UNAUTHORIZED, "Invalid challenge")
         })?;
 
+    // Mint the device + session atomically. `issue_session` inserts a new device
+    // row and then the session row; on a pooled (auto-commit) connection a failed
+    // session insert would leave an orphan device permanently consuming a per-user
+    // device-cap slot. A transaction rolls both back together (as register_finish).
+    let txn = state.db().begin().await.map_err(|e| {
+        error!(error = %e, "Failed to begin login transaction");
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+    })?;
     let session = issue_session(
-        state.db(),
+        &txn,
         user.id,
         SessionOptions {
             requested_device_id: req.device_id,
@@ -463,6 +471,11 @@ pub async fn login(
         },
     )
     .await?;
+
+    txn.commit().await.map_err(|e| {
+        error!(error = %e, "Failed to commit login transaction");
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+    })?;
 
     info!(user_id = %user.id, device_id = %session.device_id, "Login successful");
 

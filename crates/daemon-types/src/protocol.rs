@@ -86,7 +86,11 @@ pub struct AuthenticateResult {
     pub tag: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// No derived `Debug`: `Zeroizing`'s derived `Debug` forwards to the inner
+// `String`, so a derived `Debug` here (and on the `DaemonCommand`/`DaemonRequest`
+// that flatten these) would print the passphrase / access key in cleartext if any
+// caller ever debug-formats them. Redact the secret fields by hand.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LoginParams {
     pub passphrase: Zeroizing<String>,
     pub username: String,
@@ -94,13 +98,36 @@ pub struct LoginParams {
     pub server_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl std::fmt::Debug for LoginParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginParams")
+            .field("passphrase", &"<redacted>")
+            .field("username", &self.username)
+            .field("device_name", &self.device_name)
+            .field("server_url", &self.server_url)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RegisterParams {
     pub access_key: Zeroizing<String>,
     pub username: String,
     pub passphrase: Zeroizing<String>,
     pub device_name: Option<String>,
     pub server_url: Option<String>,
+}
+
+impl std::fmt::Debug for RegisterParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisterParams")
+            .field("access_key", &"<redacted>")
+            .field("username", &self.username)
+            .field("passphrase", &"<redacted>")
+            .field("device_name", &self.device_name)
+            .field("server_url", &self.server_url)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

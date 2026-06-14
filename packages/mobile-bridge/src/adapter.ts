@@ -51,8 +51,11 @@ export function createMobileBackend(
     uploadFileBytes: async (filename, mimeType, bytes) =>
       client.uploadFileBytes(filename, mimeType, arrayBufferFrom(bytes)),
     // Suspends on the engine's state `watch` channel native-side until the
-    // version actually advances — no 250 ms polling loop.
-    waitForStateChange: async (seenVersion) => client.waitForStateChange(seenVersion),
+    // version actually advances — no 250 ms polling loop. Forward the optional
+    // AbortSignal so a teardown can cancel the in-flight UniFFI future instead
+    // of leaking it past unmount.
+    waitForStateChange: async (seenVersion, signal) =>
+      client.waitForStateChange(seenVersion, signal ? { signal } : undefined),
   };
 }
 

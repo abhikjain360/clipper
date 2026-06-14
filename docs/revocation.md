@@ -1,9 +1,11 @@
 # Session & Device Revocation
 
-> Status: **PROPOSAL / NOT IMPLEMENTED.** Today users can self-logout, but there
-> is no flow to list or revoke other sessions or individual devices. A stolen
-> 30-day bearer token cannot be invalidated without editing the database. This
-> doc is the plan to close that. (Tracked as a finding in the security review.)
+> Status: **PARTIALLY IMPLEMENTED.** Device list/remove is shipped
+> (`GET /api/auth/devices`, `DELETE /api/auth/devices/{id}`, user-scoped, with the
+> device's sessions cascade-deleted), so a stolen 30-day bearer token can be
+> revoked by removing its device — no database surgery. What remains proposed:
+> per-session list/revoke ("log out everywhere else") and admin/cross-user
+> revocation. This doc is the plan for the rest. (Tracked in the security review.)
 
 ## Why
 
@@ -25,10 +27,13 @@ is the missing control.
   most once per minute.
 - Devices live in `devices`, keyed by `(id, user_id)`, holding the Ed25519
   signing public key plus `last_seen_at`. Existing-device login requires
-  proof-of-possession. The number of devices per user is now capped
+  proof-of-possession. The number of devices per user is capped
   (`limits.max_user_devices`, enforced in `issue_session`; see
-  [`server-resource-limits.md`](server-resource-limits.md)), but there is still
-  no user-facing flow to retire a device — that is the gap this doc plans to
+  [`server-resource-limits.md`](server-resource-limits.md)). A user-facing device
+  retirement flow is now shipped: `GET /api/auth/devices` lists the user's devices
+  and `DELETE /api/auth/devices/{id}` removes one (both scoped to `user_id`);
+  `sessions.device_id` is `ON DELETE CASCADE`, so removing a device revokes its
+  bearer tokens. Per-session and admin revocation remain the gap this doc plans to
   close.
 - The schema is already prepared for device retirement:
   `objects.source_device_id` is nullable with an `ON DELETE SET NULL` foreign
@@ -56,14 +61,17 @@ Use the existing `sessions.last_seen_at` column for the listing UI.
 
 ### Devices
 
-- `GET /api/auth/devices` — list the user's devices (id, label if any,
-  created-at, last-seen, `revoked` flag).
-- `POST /api/auth/devices/:id/revoke` — mark the device revoked and cascade:
-  delete all sessions bound to that device.
+**Shipped** (as a hard delete, not a `revoked` flag): `GET /api/auth/devices`
+lists the user's devices (id, name, platform, created-at, last-seen,
+`is_current`) and `DELETE /api/auth/devices/{id}` removes one. Both are scoped to
+`user_id`; `sessions.device_id` is `ON DELETE CASCADE`, so removing a device
+deletes its sessions (revoking its bearer tokens), and `objects.source_device_id`
+is `ON DELETE SET NULL`, so its objects are detached and kept.
 
-Add `state` (`active` | `revoked`) + `revoked_at` to `devices`. A revoked device
-id cannot start a new session or re-register; reject it in the device-login and
-registration paths.
+Still open if soft-revoke is wanted instead of hard delete: add `state`
+(`active` | `revoked`) + `revoked_at` to `devices` and reject a revoked device id
+in the device-login and registration paths (a hard delete currently lets the same
+device id re-register).
 
 **Object semantics on device revoke:** objects already signed by a revoked
 device stay valid and decryptable — the envelope signature is server-checked

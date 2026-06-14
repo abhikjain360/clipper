@@ -403,7 +403,10 @@ impl ApiClient {
         let resp = self
             .http
             .post(self.api_url(&["auth", "logout"])?)
-            .header("Authorization", self.auth_header().unwrap_or_default())
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
             .send()
             .await?;
 
@@ -420,7 +423,10 @@ impl ApiClient {
         let resp = self
             .http
             .get(self.api_url(&["auth", "devices"])?)
-            .header("Authorization", self.auth_header().unwrap_or_default())
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
             .send()
             .await?;
 
@@ -432,7 +438,10 @@ impl ApiClient {
         let resp = self
             .http
             .delete(url)
-            .header("Authorization", self.auth_header().unwrap_or_default())
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
             .send()
             .await?;
 
@@ -448,7 +457,10 @@ impl ApiClient {
         let resp = self
             .http
             .post(self.api_url(&["objects", "init"])?)
-            .header("Authorization", self.auth_header().unwrap_or_default())
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(req)?)
             .send()
@@ -467,7 +479,10 @@ impl ApiClient {
         let resp = self
             .http
             .put(url)
-            .header("Authorization", self.auth_header().unwrap_or_default())
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
             .header("Content-Type", "application/octet-stream")
             .body(data)
             .send()
@@ -485,7 +500,10 @@ impl ApiClient {
         let resp = self
             .http
             .post(url)
-            .header("Authorization", self.auth_header().unwrap_or_default())
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(req)?)
             .send()
@@ -520,7 +538,10 @@ impl ApiClient {
         let resp = self
             .http
             .get(url)
-            .header("Authorization", self.auth_header().unwrap_or_default())
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
             .send()
             .await?;
 
@@ -532,7 +553,10 @@ impl ApiClient {
         let resp = self
             .http
             .get(url)
-            .header("Authorization", self.auth_header().unwrap_or_default())
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
             .send()
             .await?;
 
@@ -550,7 +574,10 @@ impl ApiClient {
         let resp = self
             .http
             .get(url)
-            .header("Authorization", self.auth_header().unwrap_or_default())
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
             .send()
             .await?;
 
@@ -576,7 +603,10 @@ impl ApiClient {
         let resp = self
             .http
             .delete(url)
-            .header("Authorization", self.auth_header().unwrap_or_default())
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
             .send()
             .await?;
 

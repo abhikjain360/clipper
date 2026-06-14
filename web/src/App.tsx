@@ -387,8 +387,14 @@ function ClipboardPanel({
             }
 
             const payload = await backend.clipboardPayload(item.id);
-            const text = payload.text ?? new TextDecoder().decode(payload.bytes);
-            await writeClipboardText(text);
+            if (payload.text == null) {
+                // Non-text MIME (e.g. an image synced from another device):
+                // decoding bytes as UTF-8 would write mojibake to the clipboard.
+                // Mirror the native copy path, which rejects non-text payloads.
+                onError("This item isn't text, so it can't be copied as text.");
+                return;
+            }
+            await writeClipboardText(payload.text);
         } catch (caught) {
             onError(formatBackendError(caught));
         }
@@ -433,6 +439,7 @@ function ClipboardPanel({
                                     <Button
                                         size="$3"
                                         icon={<Copy size={16} />}
+                                        disabled={!isTextMimeType(item.mime_type)}
                                         onPress={() => void copyItem(item)}
                                     />
                                 </XStack>
@@ -768,7 +775,12 @@ function formatRelativeTime(value: string): string {
     return new Date(date).toLocaleDateString();
 }
 
-function formatByteSize(bytes: number): string {
+function formatByteSize(rawBytes: number): string {
+    // Defensive clamp: the web wasm path passes serde_wasm_bindgen output straight
+    // into this typed field, so a buggy same-user peer (meta.size) or the
+    // untrusted server (ciphertext_size fallback) could drive a negative / NaN /
+    // absurd value here. The mobile bridge already clamps its i64 size fields.
+    const bytes = Number.isFinite(rawBytes) ? Math.max(0, Math.min(rawBytes, Number.MAX_SAFE_INTEGER)) : 0;
     if (bytes < 1024) return `${bytes} B`;
     const units = ["KiB", "MiB", "GiB"];
     let value = bytes / 1024;

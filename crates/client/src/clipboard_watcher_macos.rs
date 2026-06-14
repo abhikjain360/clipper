@@ -60,10 +60,15 @@ fn run_clipboard_watcher(rt: tokio::runtime::Handle, engine: Arc<SyncEngine>) {
             state.is_logged_in()
         });
         if !logged_in {
-            // Stop watching when logged out
-            debug!("Clipboard watcher stopping: not logged in");
-            WATCHER_STARTED.store(false, Ordering::Release);
-            return;
+            // Stay alive but idle rather than stopping. The watcher thread runs
+            // for the lifetime of the process and is login-gated, which removes a
+            // start/stop race on WATCHER_STARTED: a login landing between this
+            // check and a `store(false)` could otherwise observe the flag still
+            // set, skip starting a new watcher, and then the exiting thread would
+            // clear it — leaving the user logged in with no watcher. Reset the
+            // change counter so a later login re-reads the pasteboard fresh.
+            last_change_count = -1;
+            continue;
         }
 
         match read_clipboard(&mut last_change_count) {

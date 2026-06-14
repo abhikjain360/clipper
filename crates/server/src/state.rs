@@ -11,14 +11,16 @@ use std::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use clipper_core::crypto;
-use sea_orm::{Database, DatabaseConnection, EntityTrait, QueryOrder, QuerySelect};
+use sea_orm::{
+    ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+};
 use sea_orm_migration::MigratorTrait;
 use tokio::sync::broadcast::{self, Receiver};
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthInfo, config::ServerConfig, entity::event_log, error::ServerResult, migration,
-    rate_limit::RateLimiter, secret::ServerSecrets, ws::WsBroadcast,
+    auth::AuthInfo, config::ServerConfig, entity::{event_log, objects}, error::ServerResult,
+    migration, rate_limit::RateLimiter, secret::ServerSecrets, ws::WsBroadcast,
 };
 
 const WS_TICKET_BYTES: usize = 32;
@@ -148,17 +150,32 @@ impl AppState {
     /// Seed the in-memory `event_log.seq` clock from the largest seq already
     /// persisted, so a restart (or a wall clock that jumped backward) can never
     /// reissue a value at or below one a client has already observed.
+    ///
+    /// Seqs are assigned both to `event_log` rows and to `objects.created_seq`,
+    /// so seeding from `event_log` alone is unsafe: `cleanup_old_events` prunes
+    /// the log after a retention window, so a surviving object's `created_seq`
+    /// can outlive its log row. After such pruning a restart could otherwise
+    /// reissue a seq at or beneath a live object's `created_seq`. Seed from the
+    /// max of BOTH tables, mirroring `ws::get_latest_seq`.
     async fn seed_event_seq(&self) -> ServerResult<()> {
-        let max_seq: Option<i64> = event_log::Entity::find()
+        let max_event_seq: Option<i64> = event_log::Entity::find()
             .select_only()
             .column(event_log::Column::Seq)
             .order_by_desc(event_log::Column::Seq)
             .into_tuple()
             .one(self.db())
             .await?;
-        self.inner
-            .event_seq
-            .store(max_seq.unwrap_or(0), Ordering::SeqCst);
+        let max_object_seq: Option<i64> = objects::Entity::find()
+            .filter(objects::Column::CreatedSeq.is_not_null())
+            .select_only()
+            .column(objects::Column::CreatedSeq)
+            .order_by_desc(objects::Column::CreatedSeq)
+            .into_tuple::<Option<i64>>()
+            .one(self.db())
+            .await?
+            .flatten();
+        let seed = max_event_seq.unwrap_or(0).max(max_object_seq.unwrap_or(0));
+        self.inner.event_seq.store(seed, Ordering::SeqCst);
         Ok(())
     }
 
@@ -564,6 +581,61 @@ mod tests {
             assert!(next > prev, "seq must strictly increase: {next} !> {prev}");
             prev = next;
         }
+    }
+
+    // After event_log pruning, a surviving object's `created_seq` must still
+    // floor the seq clock so a restart never reissues a seq beneath a live
+    // object — even when the wall clock is behind that seq.
+    #[tokio::test]
+    async fn seed_event_seq_covers_objects_created_seq_after_log_pruning() {
+        use sea_orm::{ActiveModelTrait, ConnectionTrait, Set};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        // One connection so the PRAGMA below and the insert share the same
+        // in-memory database.
+        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
+        opt.max_connections(1);
+        let db = Database::connect(opt).await.expect("db");
+        let state = AppState::open_with_db(db, dir.path().to_path_buf())
+            .await
+            .expect("state");
+        // The object's FK to `users` is irrelevant to this seq check.
+        state
+            .db()
+            .execute_unprepared("PRAGMA foreign_keys = OFF")
+            .await
+            .expect("disable fk");
+
+        // A surviving object whose event_log row was pruned: a created_seq far
+        // above the current wall clock, with no matching event_log entry.
+        let future_seq = Utc::now().timestamp_micros() + 1_000_000_000_000;
+        let now = Utc::now().to_rfc3339();
+        objects::ActiveModel {
+            id: Set(Uuid::now_v7()),
+            user_id: Set(Uuid::now_v7()),
+            kind: Set("file".to_string()),
+            meta_ciphertext: Set(Vec::new()),
+            meta_nonce: Set(Vec::new()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            expires_at: Set(None),
+            source_device_id: Set(None),
+            envelope: Set(Vec::new()),
+            status: Set("complete".to_string()),
+            created_seq: Set(Some(future_seq)),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert object");
+
+        // Re-seed as a fresh process would on restart.
+        state.seed_event_seq().await.expect("reseed");
+
+        let next = state.next_event_seq();
+        assert!(
+            next > future_seq,
+            "seq must not be reissued at/beneath a live object's created_seq: {next} !> {future_seq}",
+        );
     }
 
     #[tokio::test]

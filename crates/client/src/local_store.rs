@@ -307,7 +307,10 @@ impl LocalStore {
         visible_clipboard_limit: usize,
     ) -> Result<LocalVisibleState, LocalStoreError> {
         #[cfg(not(target_family = "wasm"))]
-        self.sweep_orphaned_temp_files().await;
+        {
+            self.sweep_orphaned_temp_files().await;
+            self.sweep_orphaned_clipboard_payloads().await;
+        }
         let mut memory = MemoryState::default();
         for record in self.all_stored_object_records().await? {
             match self
@@ -881,6 +884,41 @@ impl LocalStore {
         sweep_orphaned_temp_files(&self.clipboard_dir()).await;
     }
 
+    /// Remove clipboard payload sidecars whose object record is gone. The sidecar
+    /// is written alongside its record (see
+    /// `persist_clipboard_present_encrypted_inner`), so a crash or IO error
+    /// between the two writes can leave a committed `{id}.payload.ciphertext` with
+    /// no `{id}.json` record. Nothing else reclaims it: `all_stored_object_records`
+    /// reads only `object_dir`, and the temp sweep matches only `*.tmp`. Runs once
+    /// at hydrate.
+    async fn sweep_orphaned_clipboard_payloads(&self) {
+        let mut record_ids = std::collections::HashSet::new();
+        if let Ok(mut read_dir) = tokio::fs::read_dir(self.object_dir()).await {
+            while let Ok(Some(entry)) = read_dir.next_entry().await {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("json")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                {
+                    record_ids.insert(stem.to_string());
+                }
+            }
+        }
+        let Ok(mut read_dir) = tokio::fs::read_dir(self.clipboard_dir()).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = read_dir.next_entry().await {
+            let path = entry.path();
+            if let Some(object_id) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".payload.ciphertext"))
+                && !record_ids.contains(object_id)
+            {
+                _ = tokio::fs::remove_file(&path).await;
+            }
+        }
+    }
+
     async fn stored_object_record(
         &self,
         object_id: &str,
@@ -1095,7 +1133,20 @@ impl LocalStore {
         let mut index = self.read_object_index(&storage)?;
         index.retain(|id| id != record.id());
         index.push(record.id().to_string());
-        index.truncate(OBJECT_INDEX_LIMIT);
+        // The index is oldest-first (the newest id is pushed to the tail). Evict
+        // the OLDEST ids once over the cap: `truncate` would instead keep the
+        // front (oldest) and drop the just-pushed newest id. For each evicted id
+        // also drop its record and payload siblings — enumeration is index-only
+        // (there is no Storage key scan), so an off-index entry would otherwise
+        // leak its ciphertext forever.
+        if index.len() > OBJECT_INDEX_LIMIT {
+            let overflow = index.len() - OBJECT_INDEX_LIMIT;
+            for evicted_id in index.drain(..overflow) {
+                let _ = storage.remove_item(&self.object_record_key(&evicted_id));
+                let _ = storage.remove_item(&self.clipboard_payload_ciphertext_key(&evicted_id));
+                let _ = storage.remove_item(&self.legacy_clipboard_payload_key(&evicted_id));
+            }
+        }
         let index_json = serde_json::to_string(&index)?;
         storage
             .set_item(&self.object_index_key(), &index_json)
@@ -1569,14 +1620,14 @@ async fn sweep_orphaned_temp_files(dir: &Path) {
         match read_dir.next_entry().await {
             Ok(Some(entry)) => {
                 let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) == Some("tmp") {
-                    if let Err(error) = tokio::fs::remove_file(&path).await {
-                        tracing::warn!(
-                            path = %path.display(),
-                            "Failed to remove stale temp file: {}",
-                            error
-                        );
-                    }
+                if path.extension().and_then(|ext| ext.to_str()) == Some("tmp")
+                    && let Err(error) = tokio::fs::remove_file(&path).await
+                {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "Failed to remove stale temp file: {}",
+                        error
+                    );
                 }
             }
             Ok(None) => break,
