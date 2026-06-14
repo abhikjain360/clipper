@@ -15,6 +15,7 @@ const MAX_SESSION_TOKEN_BYTES: usize = 64;
 const DEFAULT_MAX_USER_STORAGE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_USER_OBJECTS: u64 = 10_000;
 const DEFAULT_MAX_USER_DEVICES: u64 = 32;
+const DEFAULT_MAX_USER_WS_CONNECTIONS: u64 = 32;
 
 const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
     server: ServerDefaults {
@@ -43,6 +44,7 @@ const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
         max_user_storage_bytes: DEFAULT_MAX_USER_STORAGE_BYTES,
         max_user_objects: DEFAULT_MAX_USER_OBJECTS,
         max_user_devices: DEFAULT_MAX_USER_DEVICES,
+        max_user_ws_connections: DEFAULT_MAX_USER_WS_CONNECTIONS,
     },
     clipboard: ClipboardConfig {
         ttl_days: 7,
@@ -265,6 +267,12 @@ pub struct LimitsConfig {
     /// once a user is at this cap they must reclaim a device before adding more.
     #[garde(custom(validate_max_user_devices))]
     pub max_user_devices: u64,
+    /// Maximum concurrent live WebSocket connections per user. Bounds FD/task
+    /// exhaustion from one authenticated account. Independent of
+    /// `max_user_devices`: one device (e.g. a browser profile) can open several
+    /// connections (tabs, reconnect overlap), so this is its own ceiling.
+    #[garde(range(min = 1))]
+    pub max_user_ws_connections: u64,
 }
 
 impl LimitsConfig {
@@ -278,7 +286,8 @@ impl LimitsConfig {
                 max_object_meta_ciphertext_bytes,
                 max_user_storage_bytes,
                 max_user_objects,
-                max_user_devices
+                max_user_devices,
+                max_user_ws_connections
             ]
         );
     }
@@ -495,6 +504,9 @@ pub struct LimitsConfigOverrides {
     /// Maximum device rows retained per user.
     #[arg(long = "max-user-devices")]
     pub max_user_devices: Option<u64>,
+    /// Maximum concurrent live WebSocket connections per user.
+    #[arg(long = "max-user-ws-connections")]
+    pub max_user_ws_connections: Option<u64>,
 }
 
 #[derive(Args, Debug, Clone, Default, Deserialize)]
@@ -724,6 +736,7 @@ mod tests {
                 max_user_storage_bytes = 8192
                 max_user_objects = 12
                 max_user_devices = 5
+                max_user_ws_connections = 7
 
                 [clipboard]
                 ttl_days = 2
@@ -770,6 +783,7 @@ mod tests {
         assert_eq!(config.limits.max_user_storage_bytes, 8192);
         assert_eq!(config.limits.max_user_objects, 12);
         assert_eq!(config.limits.max_user_devices, 5);
+        assert_eq!(config.limits.max_user_ws_connections, 7);
         assert_eq!(config.clipboard.ttl_days, 2);
         assert_eq!(config.clipboard.max_items, 25);
         assert_eq!(config.list.default_limit, 10);
@@ -819,6 +833,10 @@ mod tests {
 
         let mut config = ServerConfig::default();
         config.limits.max_user_devices = i64::MAX as u64 + 1;
+        assert!(config.validate_config().is_err());
+
+        let mut config = ServerConfig::default();
+        config.limits.max_user_ws_connections = 0;
         assert!(config.validate_config().is_err());
     }
 

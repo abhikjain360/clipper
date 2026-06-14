@@ -205,6 +205,8 @@ max_file_meta_ciphertext_bytes = 65536
 max_object_meta_ciphertext_bytes = 65536
 max_user_storage_bytes = 10737418240
 max_user_objects = 10000
+max_user_devices = 32
+max_user_ws_connections = 32
 
 [clipboard]
 ttl_days = 7

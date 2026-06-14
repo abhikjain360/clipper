@@ -294,6 +294,45 @@ After upgrade, a socket has `WS_HELLO_TIMEOUT = 10s` to send the initial
 This bounds the cheapest pre-handshake task/file-descriptor hold. **This is also
 a hard-coded constant.**
 
+### Established connection lifecycle: ping, idle close, session re-check
+
+Once a socket has sent its `hello`, `handle_socket` runs a server-driven
+keepalive on a `WS_PING_INTERVAL = 30s` timer. The server owns this clock:
+clients never initiate pings — the browser WebSocket API cannot send them — so
+relying on a client heartbeat is not an option. On each tick:
+
+- **Idle close.** Any inbound frame (Pong, Ping, Text, Binary) resets a
+  last-activity timer; if none arrives within `WS_IDLE_TIMEOUT = 75s` (~2 missed
+  pings of margin) the connection is closed. This reaps dead/zombie connections
+  so they release their per-user slot and file descriptor instead of lingering
+  until TCP eventually notices.
+- **Session re-check.** The backing session is re-read and its `expires_at`
+  re-validated (mirroring `auth_middleware`); a deleted row also closes the
+  connection. A bearer token lives ~30 days, so this stops a long-lived stream
+  from outliving its credential. A transient DB error is treated as
+  still-valid and re-checked next tick. Primary auth still happens at ticket
+  mint; this is the long-connection backstop.
+
+Both `WS_PING_INTERVAL` and `WS_IDLE_TIMEOUT` are hard-coded constants in
+`ws.rs`.
+
+### Per-user concurrent WebSocket connections
+
+`limits.max_user_ws_connections` (default 32) caps how many live connections one
+user may hold at once. `handle_socket` reserves a slot via
+`AppState::try_acquire_ws_slot` **before** reading the `hello` (so the cheapest
+exhaustion variant — many concurrent connects — is bounded up front); a user at
+the cap is rejected with a typed `connection_limit` WebSocket error. The slot is
+held by an RAII guard (`WsConnectionGuard`) for the connection's lifetime and
+released on any exit — clean close, idle timeout, or socket error — and the
+per-user counter entry is dropped once it returns to zero.
+
+This is **independent of `max_user_devices`**: one device (e.g. a browser
+profile) can open several connections — multiple tabs, or transient reconnect
+overlap — so the connection ceiling is its own knob, not derived from the device
+count. There is no global aggregate cap; total live connections are bounded only
+transitively (registered users × this per-user cap).
+
 ### Per-user pending WebSocket tickets
 
 Minted-but-unconsumed tickets live in a single in-memory `HashMap` shared by all
@@ -338,8 +377,8 @@ override flag. The relevant sections:
 
 - `[rate_limit]` — the six bucket rates plus `prune_interval_secs`.
 - `[limits]` — `max_user_storage_bytes`, `max_user_objects`,
-  `max_user_devices`, `max_file_blob_bytes`, `max_file_meta_ciphertext_bytes`,
-  `max_object_meta_ciphertext_bytes`.
+  `max_user_devices`, `max_user_ws_connections`, `max_file_blob_bytes`,
+  `max_file_meta_ciphertext_bytes`, `max_object_meta_ciphertext_bytes`.
 - `[auth]` — `max_pending_challenges`, `max_pending_ws_tickets`,
   `challenge_ttl_secs`.
 - `[clipboard]` — `max_items` (per-user clipboard retention) and `ttl_days`.
@@ -347,8 +386,11 @@ override flag. The relevant sections:
   (comma-separated IPs/CIDRs), which feeds client-IP resolution for the
   per-client buckets.
 
-The WebSocket message-size cap, pre-hello timeout, and broadcast channel
-capacity are **not** configurable; they are constants in `ws.rs` and `state.rs`.
+The WebSocket message-size cap, pre-hello timeout, ping interval, idle timeout,
+and broadcast channel capacity are **not** configurable; they are constants in
+`ws.rs` and `state.rs`. The per-user concurrent-connection cap
+(`limits.max_user_ws_connections`) is the one WebSocket lifecycle limit that is
+configurable.
 
 ## Gaps / Not Covered Today
 
@@ -376,6 +418,7 @@ mistaken for safeguards that exist:
   (`max_object_meta_ciphertext_bytes` × `max_user_objects`), not by the
   byte quota.
 
-- **Established WebSockets have no idle/keepalive timeout and no concurrent
-  connection cap.** The pre-hello timeout only covers sockets that never finish
-  the initial protocol handshake.
+- **No global aggregate cap on live WebSocket connections.** The per-user cap
+  (`max_user_ws_connections`) bounds each account, and the server ping / idle
+  close reaps dead connections, but the server-wide total is bounded only
+  transitively (registered users × the per-user cap), not by a global ceiling.

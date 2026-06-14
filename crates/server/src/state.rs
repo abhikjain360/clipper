@@ -37,6 +37,11 @@ pub struct AppStateInner {
     pub secrets: Arc<ServerSecrets>,
     rate_limiter: RateLimiter,
     ws_channels: std::sync::Mutex<HashMap<Uuid, broadcast::Sender<WsBroadcast>>>,
+    /// Count of live WebSocket connections per user, bounding concurrent
+    /// connections so one authenticated account cannot exhaust FDs/tasks. Slots
+    /// are reserved in `try_acquire_ws_slot` and released when the returned guard
+    /// drops; an entry is removed once its count returns to zero.
+    ws_connections: std::sync::Mutex<HashMap<Uuid, u64>>,
     auth_challenges: std::sync::Mutex<HashMap<String, AuthChallenge>>,
     pending_registrations: std::sync::Mutex<HashMap<String, PendingRegistration>>,
     ws_tickets: std::sync::Mutex<HashMap<Vec<u8>, WsTicket>>,
@@ -72,6 +77,20 @@ pub struct WsTicket {
 pub struct IssuedWsTicket {
     pub ticket: String,
     pub expires_at: DateTime<Utc>,
+}
+
+/// Holds a reserved live WebSocket connection slot (see
+/// [`AppState::try_acquire_ws_slot`]); releasing it on drop returns the slot to
+/// the user's per-user budget so a clean or abrupt disconnect frees capacity.
+pub struct WsConnectionGuard {
+    state: AppState,
+    user_id: Uuid,
+}
+
+impl Drop for WsConnectionGuard {
+    fn drop(&mut self) {
+        self.state.release_ws_slot(self.user_id);
+    }
 }
 
 impl AppState {
@@ -189,6 +208,7 @@ impl AppState {
                 secrets: Arc::new(secrets),
                 rate_limiter,
                 ws_channels: std::sync::Mutex::new(HashMap::new()),
+                ws_connections: std::sync::Mutex::new(HashMap::new()),
                 auth_challenges: std::sync::Mutex::new(HashMap::new()),
                 pending_registrations: std::sync::Mutex::new(HashMap::new()),
                 ws_tickets: std::sync::Mutex::new(HashMap::new()),
@@ -294,6 +314,47 @@ impl AppState {
     #[cfg(test)]
     fn ws_broadcast_channel_count(&self) -> usize {
         self.inner.ws_channels.lock().expect("lock poisoned").len()
+    }
+
+    /// Reserve a live WebSocket connection slot for `user_id`, or return `None`
+    /// if the user is already at `limits.max_user_ws_connections`. The returned
+    /// guard releases the slot when dropped (i.e. when the connection ends), so
+    /// callers must hold it for the connection's lifetime.
+    pub fn try_acquire_ws_slot(&self, user_id: Uuid) -> Option<WsConnectionGuard> {
+        let cap = self.config().limits.max_user_ws_connections;
+        let mut conns = self.inner.ws_connections.lock().expect("lock poisoned");
+        let count = conns.entry(user_id).or_insert(0);
+        if *count >= cap {
+            // The entry already existed at the cap (cap >= 1, so a freshly
+            // inserted 0 never lands here and is incremented below).
+            return None;
+        }
+        *count += 1;
+        Some(WsConnectionGuard {
+            state: self.clone(),
+            user_id,
+        })
+    }
+
+    fn release_ws_slot(&self, user_id: Uuid) {
+        let mut conns = self.inner.ws_connections.lock().expect("lock poisoned");
+        if let Some(count) = conns.get_mut(&user_id) {
+            *count -= 1;
+            if *count == 0 {
+                conns.remove(&user_id);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn ws_connection_count(&self, user_id: Uuid) -> u64 {
+        self.inner
+            .ws_connections
+            .lock()
+            .expect("lock poisoned")
+            .get(&user_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn create_auth_challenge(
@@ -481,6 +542,17 @@ mod tests {
             .expect("state")
     }
 
+    async fn test_state_with_ws_connection_cap(cap: u64) -> AppState {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::connect("sqlite::memory:").await.expect("db");
+        let mut config = ServerConfig::default();
+        config.server.data_dir = dir.path().to_path_buf();
+        config.limits.max_user_ws_connections = cap;
+        AppState::open_with_db_and_config(db, config, ServerSecrets::test_fixture())
+            .await
+            .expect("state")
+    }
+
     // A tight loop forces many allocations into the same microsecond, exercising
     // the monotonic `prev + 1` path that keeps the sync cursor unique.
     #[tokio::test]
@@ -612,5 +684,43 @@ mod tests {
         assert!(state.consume_ws_ticket(&first.ticket).is_none());
         assert!(state.consume_ws_ticket(&other.ticket).is_some());
         assert!(state.consume_ws_ticket(&second.ticket).is_some());
+    }
+
+    #[tokio::test]
+    async fn ws_connection_slots_are_capped_per_user() {
+        let state = test_state_with_ws_connection_cap(2).await;
+        let user_id = Uuid::now_v7();
+
+        let first = state.try_acquire_ws_slot(user_id).expect("first slot");
+        let second = state.try_acquire_ws_slot(user_id).expect("second slot");
+        assert_eq!(state.ws_connection_count(user_id), 2);
+        // At the cap: the next connection is rejected.
+        assert!(state.try_acquire_ws_slot(user_id).is_none());
+
+        // Releasing a slot frees capacity for a new connection.
+        drop(first);
+        assert_eq!(state.ws_connection_count(user_id), 1);
+        let third = state
+            .try_acquire_ws_slot(user_id)
+            .expect("slot after release");
+
+        drop(second);
+        drop(third);
+        // The entry is removed once the user has no live connections.
+        assert_eq!(state.ws_connection_count(user_id), 0);
+    }
+
+    #[tokio::test]
+    async fn ws_connection_cap_is_per_user() {
+        let state = test_state_with_ws_connection_cap(1).await;
+        let user_id = Uuid::now_v7();
+        let other_user_id = Uuid::now_v7();
+
+        let _user_slot = state.try_acquire_ws_slot(user_id).expect("user slot");
+        assert!(state.try_acquire_ws_slot(user_id).is_none());
+        // A different user has an independent budget.
+        let _other_slot = state
+            .try_acquire_ws_slot(other_user_id)
+            .expect("other user slot");
     }
 }

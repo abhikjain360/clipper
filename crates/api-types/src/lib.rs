@@ -563,6 +563,9 @@ pub enum WsError {
     /// The `hello` frame could not be parsed.
     #[error("hello message was malformed")]
     InvalidHello,
+    /// The user is already at the per-user concurrent live-connection cap.
+    #[error("too many concurrent connections for this user")]
+    ConnectionLimit,
 }
 
 // -- Generic --
