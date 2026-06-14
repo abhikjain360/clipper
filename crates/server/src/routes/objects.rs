@@ -36,6 +36,44 @@ use crate::{
     ws::WsBroadcast,
 };
 
+/// Validate a client-asserted object `created_at`, returning the parsed UTC
+/// instant so callers can derive `expires_at` without re-parsing.
+///
+/// `created_at` rides in the client envelope, so it is untrusted. The orphan
+/// sweep keys on the server-assigned `updated_at` and never on this value, but a
+/// `created_at` far from the present still has effects worth bounding: a
+/// backdated clipboard item derives an already-past `expires_at` (reaped on
+/// arrival), and a far-future one derives an `expires_at` that overflows or
+/// effectively never expires. Reject anything older than the orphan TTL or more
+/// than `future_skew_secs` ahead of the server clock.
+fn validate_object_created_at(
+    created_at: &str,
+    now: chrono::DateTime<Utc>,
+    orphan_ttl_secs: u64,
+    future_skew_secs: u64,
+) -> Result<chrono::DateTime<Utc>, ApiError> {
+    let created = chrono::DateTime::parse_from_rfc3339(created_at)
+        .map_err(|e| {
+            debug!(error = %e, created_at = %created_at, "Rejected object envelope: unparseable created_at");
+            ApiError::from_code_with_message(
+                ApiErrorCode::InvalidObjectEnvelope,
+                "Invalid object envelope created_at",
+            )
+        })?
+        .with_timezone(&Utc);
+
+    let earliest = now - Duration::seconds(orphan_ttl_secs as i64);
+    let latest = now + Duration::seconds(future_skew_secs as i64);
+    if created < earliest || created > latest {
+        debug!(created_at = %created_at, "Rejected object envelope: created_at outside acceptable window");
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::InvalidObjectEnvelope,
+            "Object envelope created_at outside acceptable window",
+        ));
+    }
+    Ok(created)
+}
+
 pub async fn init_object(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
@@ -139,33 +177,22 @@ pub async fn init_object(
     let all_inline = all_inline;
 
     let created_at = req.envelope.body.created_at.clone();
-    chrono::DateTime::parse_from_rfc3339(&created_at).map_err(|e| {
-        debug!(
-            object_id = %object_id,
-            created_at = %created_at,
-            error = %e,
-            "Rejected object envelope with invalid created_at",
-        );
-        ApiError::from_code_with_message(
-            ApiErrorCode::InvalidObjectEnvelope,
-            "Invalid object envelope created_at",
-        )
-    })?;
-    let updated_at = Utc::now().to_rfc3339();
+    let now = Utc::now();
+    let created = validate_object_created_at(
+        &created_at,
+        now,
+        state.config().cleanup.orphan_upload_ttl_secs,
+        state.config().cleanup.created_at_future_skew_secs,
+    )?;
+    let updated_at = now.to_rfc3339();
     let expires_at = match req.kind {
         ObjectKind::Clipboard => {
-            // Derive the TTL boundary in UTC — the client's created_at may carry
-            // any timezone offset, but every comparison against expires_at uses a
-            // UTC instant (Utc::now().to_rfc3339()), so a non-UTC offset here would
-            // skew expiry. Use a checked add so a far-future client created_at
-            // cannot overflow chrono and panic the handler.
-            chrono::DateTime::parse_from_rfc3339(&created_at)
-                .ok()
-                .and_then(|created| {
-                    created
-                        .with_timezone(&Utc)
-                        .checked_add_signed(Duration::days(state.config().clipboard.ttl_days))
-                })
+            // Derive the TTL boundary in UTC — created_at may carry any timezone
+            // offset, but every comparison against expires_at uses a UTC instant
+            // (Utc::now().to_rfc3339()). created_at is bounded to a sane window by
+            // validate_object_created_at, so this checked add cannot overflow.
+            created
+                .checked_add_signed(Duration::days(state.config().clipboard.ttl_days))
                 .map(|expires| expires.to_rfc3339())
         }
         ObjectKind::File => None,
@@ -480,6 +507,29 @@ pub async fn upload_payload(
             ApiErrorCode::ObjectPayloadUploadInProgress,
             "Object payload upload no longer in progress",
         ));
+    }
+
+    // Bump the parent object's server-assigned updated_at so the orphan sweep
+    // (which keys on updated_at) treats an actively-progressing multi-payload
+    // upload as live rather than reaping it mid-flight. A failure here only risks
+    // an early reap on a later sweep — the payload is already durably stored — so
+    // log and continue.
+    let object_now = Utc::now().to_rfc3339();
+    if let Err(e) = objects::Entity::update_many()
+        .col_expr(
+            objects::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(object_now),
+        )
+        .filter(objects::Column::Id.eq(object_uuid))
+        .filter(objects::Column::Status.ne("complete"))
+        .exec(state.db())
+        .await
+    {
+        warn!(
+            object_id = %object_uuid,
+            error = %e,
+            "Failed to bump object updated_at after payload upload",
+        );
     }
 
     info!(device_id = %auth.device_id, object_id = %object.id, payload_id = %payload_id, "Object payload uploaded");
@@ -2280,6 +2330,55 @@ mod tests {
 
     use super::*;
     use crate::entity::{access_keys, devices, users};
+
+    #[test]
+    fn validate_object_created_at_bounds_the_window() {
+        let now = Utc::now();
+        let orphan_ttl_secs = 3600u64;
+        let future_skew_secs = 300u64;
+
+        // A timestamp at "now" is accepted and round-trips to the same instant.
+        let parsed =
+            validate_object_created_at(&now.to_rfc3339(), now, orphan_ttl_secs, future_skew_secs)
+                .expect("created_at at now is valid");
+        assert_eq!(parsed, now);
+
+        // Just inside the past floor (orphan TTL) is accepted.
+        let inside_past = now - Duration::seconds(orphan_ttl_secs as i64 - 1);
+        validate_object_created_at(
+            &inside_past.to_rfc3339(),
+            now,
+            orphan_ttl_secs,
+            future_skew_secs,
+        )
+        .expect("just inside the orphan floor is valid");
+
+        // Older than the orphan TTL (would be born orphan-eligible) is rejected.
+        let too_old = now - Duration::seconds(orphan_ttl_secs as i64 + 1);
+        let err = validate_object_created_at(
+            &too_old.to_rfc3339(),
+            now,
+            orphan_ttl_secs,
+            future_skew_secs,
+        )
+        .expect_err("backdated past the orphan floor is rejected");
+        assert_eq!(err.body().code, ApiErrorCode::InvalidObjectEnvelope);
+
+        // Further ahead than the configured skew is rejected.
+        let too_future = now + Duration::seconds(future_skew_secs as i64 + 1);
+        let err = validate_object_created_at(
+            &too_future.to_rfc3339(),
+            now,
+            orphan_ttl_secs,
+            future_skew_secs,
+        )
+        .expect_err("future-dated past the skew is rejected");
+        assert_eq!(err.body().code, ApiErrorCode::InvalidObjectEnvelope);
+
+        // Unparseable input is rejected.
+        validate_object_created_at("not-a-timestamp", now, orphan_ttl_secs, future_skew_secs)
+            .expect_err("unparseable created_at is rejected");
+    }
 
     async fn test_state() -> (AppState, TempDir) {
         test_state_with_max_items(100).await

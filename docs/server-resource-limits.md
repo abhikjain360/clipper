@@ -242,8 +242,12 @@ never go negative) and is called whenever an object's bytes leave the system:
   clipboard init/complete and also run by the periodic cleanup loop): deletes
   clipboard objects beyond `clipboard.max_items` and releases their usage.
 - **Orphan upload cleanup** (`cleanup::cleanup_orphan_object_uploads`): deletes
-  never-completed objects older than `cleanup.orphan_upload_ttl_secs` and
-  releases their usage.
+  never-completed objects with no upload progress for
+  `cleanup.orphan_upload_ttl_secs` and releases their usage. Eligibility keys on
+  the server-assigned `objects.updated_at` (stamped at init and bumped on each
+  payload upload), never the client envelope's `created_at`, so a backdated or
+  future-dated `created_at` can neither force an instant reap nor escape the
+  sweep.
 
 `delete_objects_and_release_usage` recomputes the freed usage from the rows
 being deleted (`object_usage_by_user`) inside the transaction and asserts the

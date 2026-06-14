@@ -181,13 +181,20 @@ async fn cleanup_orphan_object_uploads(state: &AppState) -> CleanupResult<()> {
 
     let txn = state.db().begin().await?;
 
+    // Eligibility keys on the server-assigned `updated_at`, never the client's
+    // `created_at`: the latter rides in the client envelope and could be
+    // backdated to make a fresh upload instantly orphan-eligible, or
+    // future-dated to escape the sweep forever. `updated_at` is stamped by the
+    // server at init and bumped on every payload upload, so this means "no
+    // upload progress for orphan_upload_ttl_secs" rather than "created long ago".
+    //
     // Select the orphan set inside the transaction with the SAME predicate the
     // delete uses. An object that races to `complete` between selection and the
     // delete is excluded by the status filter on the delete itself, so a
     // just-completed object (and its payload files) can never be destroyed here.
     let orphan_ids: Vec<Uuid> = objects::Entity::find()
         .filter(objects::Column::Status.ne("complete"))
-        .filter(objects::Column::CreatedAt.lt(&cutoff))
+        .filter(objects::Column::UpdatedAt.lt(&cutoff))
         .select_only()
         .column(objects::Column::Id)
         .into_tuple()
@@ -215,7 +222,7 @@ async fn cleanup_orphan_object_uploads(state: &AppState) -> CleanupResult<()> {
     let res = objects::Entity::delete_many()
         .filter(objects::Column::Id.is_in(orphan_ids))
         .filter(objects::Column::Status.ne("complete"))
-        .filter(objects::Column::CreatedAt.lt(&cutoff))
+        .filter(objects::Column::UpdatedAt.lt(&cutoff))
         .exec(&txn)
         .await?;
     if res.rows_affected as i64 != expected_objects {

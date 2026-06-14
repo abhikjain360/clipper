@@ -54,6 +54,7 @@ const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
         interval_secs: 60 * 60,
         event_log_retention_days: 3,
         orphan_upload_ttl_secs: 60 * 60,
+        created_at_future_skew_secs: 5 * 60,
     },
     crypto: CryptoConfig {
         access_key_hash_params: Argon2Params {
@@ -312,6 +313,12 @@ pub struct CleanupConfig {
     pub event_log_retention_days: i64,
     #[garde(range(min = 1), custom(validate_chrono_seconds))]
     pub orphan_upload_ttl_secs: u64,
+    /// How far ahead of the server clock a client-asserted object `created_at`
+    /// may sit before it is rejected at creation. A far-future `created_at`
+    /// would otherwise skew the clipboard `expires_at` it derives; the orphan
+    /// sweep itself keys on the server-assigned `updated_at`, not this value.
+    #[garde(range(min = 1), custom(validate_chrono_seconds))]
+    pub created_at_future_skew_secs: u64,
 }
 
 impl CleanupConfig {
@@ -322,7 +329,8 @@ impl CleanupConfig {
             [
                 interval_secs,
                 event_log_retention_days,
-                orphan_upload_ttl_secs
+                orphan_upload_ttl_secs,
+                created_at_future_skew_secs
             ]
         );
     }
@@ -513,6 +521,9 @@ pub struct CleanupConfigOverrides {
     /// How long incomplete file uploads may remain before cleanup.
     #[arg(long = "orphan-upload-ttl-secs")]
     pub orphan_upload_ttl_secs: Option<u64>,
+    /// How far ahead of the server clock an object `created_at` may sit.
+    #[arg(long = "created-at-future-skew-secs")]
+    pub created_at_future_skew_secs: Option<u64>,
 }
 
 #[derive(Args, Debug, Clone, Default, Deserialize)]
