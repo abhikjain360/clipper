@@ -15,9 +15,8 @@ change is only locally applied after the corresponding local write succeeds.
 ## Implementation Status
 
 The generation/snapshot sync flow described in this document is implemented
-today. The file is named `ws-sync-roadmap.md` for historical reasons; it now
-documents shipped behavior, not a future plan. The only forward-looking items
-are called out explicitly under "Future Work" below.
+today. The only forward-looking items are called out explicitly under "Future
+Work" below.
 
 Implemented and in use today:
 

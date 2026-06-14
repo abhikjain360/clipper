@@ -241,8 +241,8 @@ The on-disk / browser-storage record (`DeviceIdentityEncryptedRecord`, version
 where `wrap_key` is the export-key-derived wrapping key above and the wrap is
 XChaCha20-Poly1305 (`nonce_24 || ciphertext_with_tag`). On native targets the
 record file and its parent directory are created `0600`/`0700`, ownership-checked
-against the current euid, and written atomically; legacy plaintext identity
-records are read once and re-written in wrapped form. The locally cached object
+against the current euid, and written atomically; legacy or forged plaintext
+identity records are rejected rather than migrated. The locally cached object
 records (metadata + payload ciphertext) are stored as the same ciphertext the
 server holds, keyed by profile id derived from `K`; plaintext is only recovered
 transiently by decrypting with `K`.

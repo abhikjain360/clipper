@@ -187,7 +187,11 @@ trusted_proxies = ["127.0.0.1", "::1"]
 
 [rate_limit]
 auth_per_client_per_minute = 10
-auth_global_per_minute = 600
+auth_per_username_per_minute = 30
+auth_global_per_minute = 3000
+api_per_client_per_minute = 2400
+api_per_user_per_minute = 1200
+ws_tickets_per_user_per_minute = 30
 prune_interval_secs = 60
 
 [auth]
@@ -199,9 +203,12 @@ max_pending_ws_tickets = 4096
 max_file_blob_bytes = 536870912
 max_file_meta_ciphertext_bytes = 65536
 max_object_meta_ciphertext_bytes = 65536
+max_user_storage_bytes = 10737418240
+max_user_objects = 10000
 
 [clipboard]
 ttl_days = 7
+max_items = 100
 
 [crypto]
 access_key_hash_m_cost = 19456
@@ -218,6 +225,7 @@ max_limit = 500
 interval_secs = 3600
 event_log_retention_days = 3
 orphan_upload_ttl_secs = 3600
+created_at_future_skew_secs = 300
 ```
 
 ```sh

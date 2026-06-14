@@ -50,7 +50,7 @@ mutation.
 This repository is durable storage for the current retained clipboard working
 set, not an all-time local-first clipboard archive: server sync may sweep
 clipboard rows that fall outside the server retention contract
-(`sweep_kind`). See `docs/ws-sync-roadmap.md` for the WebSocket sync model that
+(`sweep_kind`). See `docs/ws-sync-flow.md` for the WebSocket sync model that
 separates retention-bounded clipboard history from durable file snapshots.
 
 The server still stores the durable canonical repo:
@@ -70,7 +70,8 @@ account/key gets an isolated subtree:
 
 ```text
 <data_dir>/client/
-  device-identity-v1.json        # wrapped device signing secret (shared across profiles)
+  device-identity-v1.<profile_id>.json
+                                # wrapped device signing secret for that profile
   <profile_id>/
     objects/
       <object_id>.json           # StoredObjectRecord: Present | PendingCreate | Deleted
@@ -105,9 +106,10 @@ The local cache is **encrypted at rest**, and the directory tree is locked down:
 - The device signing secret is wrapped with XChaCha20-Poly1305 under a key
   derived from the OPAQUE export key
   (`derive_device_identity_wrapping_key_from_opaque_export_key`, AAD
-  `clipper:wrap:device-signing-secret:v1`) and stored as
-  `device-identity-v1.json` version 2. Plaintext legacy identity records are
-  read once and transparently re-written encrypted.
+  `clipper:wrap:device-signing-secret:v1`) and stored as a version 2
+  `device-identity-v1.<profile_id>.json` record. The slot is profile-scoped
+  because the wrapping key is per user; plaintext or malformed identity records
+  are rejected rather than migrated.
 - Directories are created `0700` and files `0600` (`ensure_private_dir`,
   `write_private_file_atomic`). `ensure_private_dir` inspects the path with
   `symlink_metadata` (no symlink following) and refuses a directory not owned by

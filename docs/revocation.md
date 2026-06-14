@@ -11,21 +11,21 @@ In the intended release model the operator hands out access keys to friends, so
 access keys and bearer tokens are the circulating secret. End-to-end encryption
 protects *content* but does nothing for a leaked token or key: whoever holds a
 valid bearer token reads that account's sync stream until it expires. Revocation
-is the missing control. The same primitive later serves collab share-link
-revocation (see [`collab-integration.md`](collab-integration.md)).
+is the missing control.
 
 ## Current behavior
 
 - Sessions are bearer tokens: random 32 bytes, stored SHA-256-hashed in
   `sessions`, 30-day TTL, scoped by `user_id`. Auth middleware hashes the
   incoming bearer and looks up the row on each request, so **deleting the row
-  revokes the token immediately** (confirm no in-memory auth cache survives the
-  delete; invalidate it if one exists).
+  revokes the token immediately**. There is no in-memory auth cache.
 - `sessions` has no rotation/refresh: valid for 30 days or until self-logout
   (`crates/server/src/routes/auth.rs`).
+- `sessions.last_seen_at` already exists and auth middleware refreshes it at
+  most once per minute.
 - Devices live in `devices`, keyed by `(id, user_id)`, holding the Ed25519
-  signing public key. Existing-device login requires proof-of-possession. There
-  is no way to retire a device.
+  signing public key plus `last_seen_at`. Existing-device login requires
+  proof-of-possession. There is no way to retire a device.
 
 ## Plan
 
@@ -42,7 +42,7 @@ admin UI; note as future work).
 - `POST /api/auth/sessions/revoke-others` — delete all of the user's sessions
   except the current one ("log out everywhere else").
 
-Add a `last_seen_at` column to `sessions` (optional, for the listing UI).
+Use the existing `sessions.last_seen_at` column for the listing UI.
 
 ### Devices
 
@@ -68,7 +68,6 @@ Migration in `crates/server/src/migration/*.rs`, then regenerate SeaORM entities
 (`nix run .#server-entities`); do not hand-edit generated entities as the final
 change.
 
-- `sessions`: add `last_seen_at` (nullable).
 - `devices`: add `state` (default `active`) and `revoked_at` (nullable).
 
 ## Out of scope (note, don't build yet)
@@ -76,6 +75,5 @@ change.
 - Token rotation / refresh and shorter TTLs — separate hardening; revocation is
   the must-have.
 - Operator/admin cross-user revocation — wait for an admin surface.
-- Collab share-link revocation — same `state = active | revoked` pattern, built
-  with the collab document tables, not here.
-</content>
+- Future bearer-capability revocation — same `state = active | revoked` pattern,
+  built with the feature-specific tables, not here.

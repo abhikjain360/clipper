@@ -268,6 +268,11 @@ JSON `Hello` and control frames, so this is set well below the transport
 default to bound per-connection memory. **This is a hard-coded constant; there
 is no config knob.**
 
+After upgrade, a socket has `WS_HELLO_TIMEOUT = 10s` to send the initial
+`hello`; a silent connection is closed with a typed `expected_hello` error.
+This bounds the cheapest pre-handshake task/file-descriptor hold. **This is also
+a hard-coded constant.**
+
 ### Per-user pending WebSocket tickets
 
 Minted-but-unconsumed tickets live in a single in-memory `HashMap` shared by all
@@ -321,8 +326,8 @@ override flag. The relevant sections:
   (comma-separated IPs/CIDRs), which feeds client-IP resolution for the
   per-client buckets.
 
-The WebSocket message-size cap and the broadcast channel capacity are **not**
-configurable; they are constants in `ws.rs` and `state.rs` respectively.
+The WebSocket message-size cap, pre-hello timeout, and broadcast channel
+capacity are **not** configurable; they are constants in `ws.rs` and `state.rs`.
 
 ## Gaps / Not Covered Today
 
@@ -349,3 +354,7 @@ mistaken for safeguards that exist:
   bytes a user can accumulate is bounded only by `object_count`
   (`max_object_meta_ciphertext_bytes` × `max_user_objects`), not by the
   byte quota.
+
+- **Established WebSockets have no idle/keepalive timeout and no concurrent
+  connection cap.** The pre-hello timeout only covers sockets that never finish
+  the initial protocol handshake.

@@ -114,9 +114,9 @@ them (e.g. `clipboard_payload`, copy-to-clipboard, file download).
 
 Each client device has an Ed25519 signing secret used to sign object envelopes
 and login proofs (`docs/object-envelopes.md`). It is persisted across restarts
-so the device keeps a stable identity. It is stored **wrapped**, in a
-`device-identity-v1.json` file under the cache base directory (native) or under a
-`localStorage` key (web).
+so the device keeps a stable identity. It is stored **wrapped** in a
+profile-scoped `device-identity-v1.<profile_id>.json` file under the cache base
+directory (native) or under a profile-scoped `localStorage` key (web).
 
 The current on-disk record is `DeviceIdentityEncryptedRecord`:
 
@@ -133,14 +133,11 @@ Unwrapping requires the device-identity wrapping key; a wrong key fails with
 `DeviceIdentityDecrypt` (asserted by `encrypts_device_identity_at_rest`). The
 in-memory `signing_secret_key` is held in `Zeroizing`.
 
-#### Plaintext-record migration
+#### Plaintext records
 
-An older record format (`DeviceIdentityPlaintextRecord`, an unversioned
-`{ device_id?, signing_secret_key }` with the secret in the clear) is still
-*read* for backward compatibility. When such a record is loaded, the identity is
-recovered and immediately **re-written in the encrypted v2 format**
-(`migrates_plaintext_device_identity_to_encrypted_record`). This is a one-way
-upgrade; the legacy plaintext layout is never written by current code.
+Legacy or forged plaintext identity records are not accepted. A record without
+`version = 2` and `wrapped_signing_secret_key` fails closed and is not silently
+promoted into a wrapped identity (`rejects_plaintext_device_identity_record`).
 
 ## Filesystem safeguards (native, Unix)
 
@@ -149,8 +146,9 @@ desktop daemon is `dirs::data_dir()/Clipper/client` and `profile_id` is the
 lowercase hex of `SHA-256(data_key)` (`profile_id_from_encryption_key`). Keying
 the profile directory off the data key means each user (each distinct passphrase)
 gets a separate cache subtree without the username ever appearing in the path.
-The device-identity file lives directly under `base_dir` (not under a profile),
-because the signing identity is per-device, not per-user.
+The device-identity file is also keyed by `profile_id`
+(`device-identity-v1.<profile_id>.json`) because its wrapping key is derived
+from that user's OPAQUE export key.
 
 ### Directory ownership and mode
 
@@ -175,10 +173,9 @@ directories end up `0700`.
 device-identity file:
 
 1. Open a uniquely named temp file (`*.<uuid_v7>.tmp`) with `create_new(true)`
-   (fails if it already exists).
-2. On Unix, `set_permissions(0o600)` on the temp file.
-3. Write and flush.
-4. `rename` the temp file over the final path.
+   (fails if it already exists) and, on Unix, mode `0600` at open time.
+2. Write, flush, and `sync_all`.
+3. `rename` the temp file over the final path.
 
 The `rename` makes the *replacement* of an existing record atomic — a reader sees
 either the old or the new file, never a partial write. The same test asserts the
@@ -203,9 +200,9 @@ identical (same wrapped device identity, same object ciphertext) — only the
 - Object records are namespaced by a key prefix that includes the profile id
   (`clipper.client.v1.<base_dir>.<profile_id>.…`) and bounded by an index of at
   most `OBJECT_INDEX_LIMIT = 1000` ids.
-- The device-identity key (`clipper.client.v1.<base_dir>.device_identity_v1`) is
-  **not** profile-scoped, consistent with the native layout (one device identity
-  per origin/base, shared across users).
+- The device-identity key
+  (`clipper.client.v1.<base_dir>.<profile_id>.device_identity_v1`) is also
+  profile-scoped.
 
 ## The `fs-txn` crate is a different mechanism
 
@@ -236,12 +233,8 @@ document.
   wrapped native record and the `localStorage` record). Only the signing secret
   is wrapped. This is a low-sensitivity identifier, but it is metadata that is
   not protected at rest.
-- **`set_permissions(0o600)` happens after the file is created**, not via the
-  open mode, in both `write_private_file_atomic` and `FsTransaction`. There is a
-  brief window in which the temp file exists with default-umask permissions
-  before the `chmod`. On the native cache this is mitigated by the enclosing
-  directory being forced to `0700` (and uid-checked), so the window is not
-  reachable by other users in the normal layout; it is noted here for
-  completeness.
-</content>
-</invoke>
+- **`FsTransaction` sets `0600` after creating files**, not via the open mode.
+  There is a brief window in which a staged server payload file exists with
+  default-umask permissions before the `chmod`. The client local store no longer
+  has that window: `write_private_file_atomic` opens temp files with mode `0600`
+  on Unix.
