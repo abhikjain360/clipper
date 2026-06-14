@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::{collections::HashMap, path::PathBuf, sync::RwLock};
 
-use clipper_app_types::{DecryptedClipboardItem, DecryptedFileItem};
+use clipper_app_types::{CollabItem, DecryptedClipboardItem, DecryptedFileItem};
 use clipper_core::{
     crypto,
     models::{ObjectEnvelopeV1, ObjectKind, ObjectPayloadDescriptor},
@@ -54,6 +54,7 @@ pub struct LocalObjectRecord {
 pub enum LocalObjectData {
     Clipboard(LocalClipboardRecord),
     File(LocalFileRecord),
+    Collab(LocalCollabRecord),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +69,12 @@ pub struct LocalFileRecord {
     pub filename: String,
     pub mime_type: String,
     pub blob_size: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalCollabRecord {
+    pub share_token: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,7 +108,27 @@ struct StoredPresentObjectRecord {
     seen_generation: Option<u64>,
     event_seq: i64,
     created_seq: i64,
-    encrypted: EncryptedObject,
+    content: StoredPresentContent,
+}
+
+/// The present-state payload of a stored object. Clipboard and file objects are
+/// end-to-end encrypted, so they persist their encrypted material; collab docs
+/// are server-visible (no ciphertext), so they persist plaintext metadata.
+/// Modelling this as an enum keeps a collab record from ever carrying ciphertext
+/// fields (and vice versa).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "content_kind", content = "data", rename_all = "snake_case")]
+enum StoredPresentContent {
+    Encrypted(EncryptedObject),
+    Collab(StoredCollabRecord),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredCollabRecord {
+    share_token: String,
+    created_at: String,
+    source_device_id: String,
+    updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +172,7 @@ struct MemoryState {
 pub struct LocalVisibleState {
     pub clipboard_items: Vec<DecryptedClipboardItem>,
     pub files: Vec<DecryptedFileItem>,
+    pub collab_docs: Vec<CollabItem>,
 }
 
 #[derive(Debug, Default)]
@@ -291,6 +319,61 @@ impl LocalStore {
             &item_id,
             item,
             encrypted,
+            created_seq,
+            created_seq,
+            Some(generation),
+        )
+        .await?;
+        self.visible_state_inner(visible_clipboard_limit)
+            .await
+            .map(Some)
+    }
+
+    /// Persist a collab doc materialized from a live `created` event. Mirrors
+    /// `persist_local_file_present_encrypted`; collab docs carry plaintext
+    /// metadata (server-visible) rather than encrypted material.
+    pub async fn persist_local_collab_present(
+        &self,
+        item: &CollabItem,
+        source_device_id: &str,
+        created_seq: i64,
+        event_seq: i64,
+        visible_clipboard_limit: usize,
+    ) -> Result<LocalVisibleState, LocalStoreError> {
+        let item_id = validate_item_id(&item.id)?;
+        let sync = self.sync.lock().await;
+        self.persist_collab_present_inner(
+            &item_id,
+            item,
+            source_device_id,
+            created_seq,
+            event_seq,
+            Some(sync.generation),
+        )
+        .await?;
+        self.visible_state_inner(visible_clipboard_limit).await
+    }
+
+    /// Persist a collab doc seen during a reconciliation snapshot. Mirrors
+    /// `persist_snapshot_file_present_encrypted`: a stale-generation write is
+    /// dropped so a superseded snapshot cannot resurrect a since-changed object.
+    pub async fn persist_snapshot_collab_present(
+        &self,
+        item: &CollabItem,
+        source_device_id: &str,
+        created_seq: i64,
+        generation: u64,
+        visible_clipboard_limit: usize,
+    ) -> Result<Option<LocalVisibleState>, LocalStoreError> {
+        let item_id = validate_item_id(&item.id)?;
+        let sync = self.sync.lock().await;
+        if sync.generation != generation {
+            return Ok(None);
+        }
+        self.persist_collab_present_inner(
+            &item_id,
+            item,
+            source_device_id,
             created_seq,
             created_seq,
             Some(generation),
@@ -489,7 +572,7 @@ impl LocalStore {
             seen_generation: sync_meta.seen_generation,
             event_seq: sync_meta.event_seq,
             created_seq: sync_meta.created_seq,
-            encrypted: encrypted.object.clone(),
+            content: StoredPresentContent::Encrypted(encrypted.object.clone()),
         }));
         self.write_stored_clipboard_payload(item_id, &encrypted.payload_ciphertext)
             .await?;
@@ -533,7 +616,53 @@ impl LocalStore {
             seen_generation,
             event_seq,
             created_seq,
-            encrypted: encrypted.clone(),
+            content: StoredPresentContent::Encrypted(encrypted.clone()),
+        }));
+        self.write_stored_object_record(&stored_record).await?;
+        self.write_memory_record(local_record).await
+    }
+
+    async fn persist_collab_present_inner(
+        &self,
+        item_id: &str,
+        item: &CollabItem,
+        source_device_id: &str,
+        created_seq: i64,
+        event_seq: i64,
+        seen_generation: Option<u64>,
+    ) -> Result<(), LocalStoreError> {
+        if let Some(StoredObjectRecord::Deleted(record)) =
+            self.stored_object_record(item_id).await?
+            && record.event_seq > event_seq
+        {
+            return Ok(());
+        }
+
+        let local_record = LocalObjectRecord {
+            id: item.id.clone(),
+            seen_generation,
+            event_seq,
+            created_seq,
+            created_at: item.created_at.clone(),
+            source_device_id: source_device_id.to_string(),
+            data: LocalObjectData::Collab(LocalCollabRecord {
+                share_token: item.share_token.clone(),
+                updated_at: item.updated_at.clone(),
+            }),
+        };
+        debug_assert_eq!(item_id, item.id);
+        let stored_record = StoredObjectRecord::Present(Box::new(StoredPresentObjectRecord {
+            id: item.id.clone(),
+            kind: ObjectKind::Collab,
+            seen_generation,
+            event_seq,
+            created_seq,
+            content: StoredPresentContent::Collab(StoredCollabRecord {
+                share_token: item.share_token.clone(),
+                created_at: item.created_at.clone(),
+                source_device_id: source_device_id.to_string(),
+                updated_at: item.updated_at.clone(),
+            }),
         }));
         self.write_stored_object_record(&stored_record).await?;
         self.write_memory_record(local_record).await
@@ -676,6 +805,12 @@ impl LocalStore {
         Ok(records.iter().filter_map(file_item_from_record).collect())
     }
 
+    async fn collab_items_inner(&self) -> Result<Vec<CollabItem>, LocalStoreError> {
+        let mut records = self.all_memory_records().await;
+        sort_records_desc(&mut records);
+        Ok(records.iter().filter_map(collab_item_from_record).collect())
+    }
+
     async fn clipboard_payload_inner(
         &self,
         item_id: &str,
@@ -703,9 +838,10 @@ impl LocalStore {
                 .await
                 .map(Some),
             ObjectKind::File => decrypt_file_record(record, encryption_key).map(Some),
-            // Collab objects are server-visible documents with no encrypted
-            // payload to decrypt; they are not stored as local object records.
-            ObjectKind::Collab => Ok(None),
+            // Collab docs are server-visible: there is nothing to decrypt, so
+            // rebuild the display record straight from the stored plaintext
+            // metadata. (Mismatched content is a corrupt record and is dropped.)
+            ObjectKind::Collab => Ok(collab_record_from_present(record)),
         }
     }
 
@@ -714,7 +850,7 @@ impl LocalStore {
         record: &StoredPresentObjectRecord,
         encryption_key: &[u8; 32],
     ) -> Result<LocalObjectRecord, LocalStoreError> {
-        let encrypted = &record.encrypted;
+        let encrypted = present_encrypted_object(record)?;
         let meta = decrypt_clipboard_meta(
             &encrypted.meta_nonce,
             &encrypted.meta_ciphertext,
@@ -763,7 +899,7 @@ impl LocalStore {
         record: &StoredPresentObjectRecord,
         encryption_key: &[u8; 32],
     ) -> Result<Vec<u8>, LocalStoreError> {
-        let encrypted = &record.encrypted;
+        let encrypted = present_encrypted_object(record)?;
         let payload = single_payload(encrypted)?;
         let Some(ciphertext) = self.stored_clipboard_payload_ciphertext(&record.id).await? else {
             return Err(LocalStoreError::EncryptedCache(
@@ -806,6 +942,7 @@ impl LocalStore {
                 .recent_clipboard_items_inner(visible_clipboard_limit)
                 .await?,
             files: self.file_items_inner().await?,
+            collab_docs: self.collab_items_inner().await?,
         })
     }
 
@@ -1313,11 +1450,46 @@ struct DeviceIdentityEncryptedRecord {
     wrapped_signing_secret_key: Vec<u8>,
 }
 
+/// Extract the encrypted object from a present record, rejecting a collab
+/// record routed here by mistake. Clipboard/file decode paths require it; a
+/// `Collab` content here means a corrupt or mis-routed record.
+fn present_encrypted_object(
+    record: &StoredPresentObjectRecord,
+) -> Result<&EncryptedObject, LocalStoreError> {
+    match &record.content {
+        StoredPresentContent::Encrypted(encrypted) => Ok(encrypted),
+        StoredPresentContent::Collab(_) => Err(LocalStoreError::EncryptedCache(
+            "expected an encrypted object but found a collab record".into(),
+        )),
+    }
+}
+
+/// Rebuild a collab display record from a stored present record. Returns `None`
+/// for a non-collab content variant (a corrupt record), so a mismatched record
+/// is dropped rather than surfaced.
+fn collab_record_from_present(record: &StoredPresentObjectRecord) -> Option<LocalObjectRecord> {
+    let StoredPresentContent::Collab(collab) = &record.content else {
+        return None;
+    };
+    Some(LocalObjectRecord {
+        id: record.id.clone(),
+        seen_generation: record.seen_generation,
+        event_seq: record.event_seq,
+        created_seq: record.created_seq,
+        created_at: collab.created_at.clone(),
+        source_device_id: collab.source_device_id.clone(),
+        data: LocalObjectData::Collab(LocalCollabRecord {
+            share_token: collab.share_token.clone(),
+            updated_at: collab.updated_at.clone(),
+        }),
+    })
+}
+
 fn decrypt_file_record(
     record: &StoredPresentObjectRecord,
     encryption_key: &[u8; 32],
 ) -> Result<LocalObjectRecord, LocalStoreError> {
-    let encrypted = &record.encrypted;
+    let encrypted = present_encrypted_object(record)?;
     let meta = decrypt_file_meta_bytes(
         &encrypted.meta_nonce,
         &encrypted.meta_ciphertext,
@@ -1381,6 +1553,18 @@ fn file_item_from_record(record: &LocalObjectRecord) -> Option<DecryptedFileItem
         blob_size: file.blob_size,
         created_at: record.created_at.clone(),
         source_device_id: record.source_device_id.clone(),
+    })
+}
+
+fn collab_item_from_record(record: &LocalObjectRecord) -> Option<CollabItem> {
+    let LocalObjectData::Collab(collab) = &record.data else {
+        return None;
+    };
+    Some(CollabItem {
+        id: record.id.clone(),
+        share_token: collab.share_token.clone(),
+        created_at: record.created_at.clone(),
+        updated_at: collab.updated_at.clone(),
     })
 }
 

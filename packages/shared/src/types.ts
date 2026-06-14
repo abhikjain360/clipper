@@ -18,6 +18,13 @@ export type FileItem = {
   source_device_id: string;
 };
 
+export type CollabItem = {
+  id: string;
+  share_token: string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type AuthenticatedSession = {
   username: string;
   device_id: string;
@@ -44,6 +51,7 @@ export type AppState = {
   connection_status: ConnectionStatus;
   clipboard_items: ClipboardItem[];
   files: FileItem[];
+  collab_docs: CollabItem[];
   error?: string | null;
 };
 
@@ -84,6 +92,9 @@ export type ClipperBackend = {
   downloadFileBytes: (fileId: string) => Promise<Uint8Array>;
   downloadFileToDialog?: (fileId: string, defaultFilename: string) => Promise<boolean>;
   deleteFile: (fileId: string) => Promise<void>;
+  createCollabDoc: () => Promise<CollabItem>;
+  deleteCollabDoc: (objectId: string) => Promise<void>;
+  getCollabDocMeta: (objectId: string) => Promise<CollabItem>;
   listDevices: () => Promise<DeviceInfo[]>;
   removeDevice: (deviceId: string) => Promise<void>;
 };

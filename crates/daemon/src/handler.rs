@@ -26,8 +26,9 @@ use crate::{
     protocol::{
         AuthChallenge, AuthenticateResult, ClipboardPayloadResult, CopyToLocalResult,
         DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, DeviceListResult,
-        IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams, RegisterParams,
-        RegisterResult, UploadFileResult, ipc_client_auth_message, ipc_daemon_auth_message,
+        IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES,
+        IPC_AUTH_VERSION, LoginParams, RegisterParams, RegisterResult, UploadFileResult,
+        ipc_client_auth_message, ipc_daemon_auth_message,
     },
 };
 
@@ -399,6 +400,13 @@ async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> Daemo
             cmd_remove_device(id, params.device_id, engine).await
         }
         DaemonCommand::Refresh => cmd_refresh(id, engine).await,
+        DaemonCommand::CreateCollabDoc => cmd_create_collab_doc(id, engine).await,
+        DaemonCommand::DeleteCollabDoc(params) => {
+            cmd_delete_collab_doc(id, params.object_id, engine).await
+        }
+        DaemonCommand::GetCollabDocMeta(params) => {
+            cmd_get_collab_doc_meta(id, params.object_id, engine).await
+        }
     }
 }
 
@@ -648,6 +656,35 @@ async fn cmd_remove_device(
 async fn cmd_refresh(id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
     match engine.refresh().await {
         Ok(()) => DaemonResponse::success(id, None),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_create_collab_doc(id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
+    match engine.create_collab_doc().await {
+        Ok(item) => json_success(id, item),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_delete_collab_doc(
+    id: String,
+    object_id: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.delete_collab_doc(&object_id).await {
+        Ok(()) => DaemonResponse::success(id, None),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_get_collab_doc_meta(
+    id: String,
+    object_id: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.get_collab_doc_meta(&object_id).await {
+        Ok(item) => json_success(id, item),
         Err(e) => client_error(id, e),
     }
 }

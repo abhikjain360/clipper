@@ -186,6 +186,44 @@ impl ApiClient {
             })
     }
 
+    /// Decode a bounded JSON success response. The collab-doc endpoints return
+    /// JSON rather than postcard, so they cannot share `postcard_response`.
+    async fn json_response<T: DeserializeOwned>(
+        resp: reqwest::Response,
+    ) -> Result<T, ClientError> {
+        let resp = Self::checked_response(resp).await?;
+        let url = resp.url().clone();
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = read_response_body_limited(resp, MAX_ERROR_RESPONSE_BYTES).await?;
+
+        if !is_json_content_type(content_type.as_deref()) {
+            return Err(ClientError::UnexpectedResponse(format!(
+                "expected JSON response from {}, got content-type {}; status={}; body-bytes={}; body-prefix={}",
+                url,
+                content_type.as_deref().unwrap_or("<missing>"),
+                status.as_u16(),
+                bytes.len(),
+                body_preview(&bytes),
+            )));
+        }
+
+        serde_json::from_slice(&bytes).map_err(|e| {
+            ClientError::UnexpectedResponse(format!(
+                "JSON decode from {} failed: {}; status={}; body-bytes={}; body-prefix={}",
+                url,
+                e,
+                status.as_u16(),
+                bytes.len(),
+                body_preview(&bytes),
+            ))
+        })
+    }
+
     // ── Auth ──
 
     pub async fn login(
@@ -611,6 +649,68 @@ impl ApiClient {
             .await?;
 
         Self::postcard_response(resp).await
+    }
+
+    // ── Collab docs ──
+    //
+    // Unlike the object endpoints these speak JSON, not postcard: collab docs are
+    // server-visible (their Y.Doc content is not end-to-end encrypted), so there
+    // is no ciphertext payload to move over the binary object protocol.
+
+    /// `POST /api/collab-docs` — create a collab doc for the authenticated user.
+    /// The request body carries no required fields (the title lives inside the
+    /// Y.Doc), so none is sent.
+    pub async fn create_collab_doc(&self) -> Result<CreateCollabDocResponse, ClientError> {
+        let resp = self
+            .http
+            .post(self.api_url(&["collab-docs"])?)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .send()
+            .await?;
+
+        Self::json_response(resp).await
+    }
+
+    /// `GET /api/collab-docs/:id/meta` — fetch a collab doc's share token and
+    /// `updated_at`. Does not return `yjs_state` (that flows over the Y-sync
+    /// WebSocket in Phase 3).
+    pub async fn get_collab_doc_meta(
+        &self,
+        object_id: &str,
+    ) -> Result<CollabDocMeta, ClientError> {
+        let url = self.api_url(&["collab-docs", object_id, "meta"])?;
+        let resp = self
+            .http
+            .get(url)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .send()
+            .await?;
+
+        Self::json_response(resp).await
+    }
+
+    /// `DELETE /api/collab-docs/:id` — delete the authenticated owner's collab
+    /// doc. The server returns 204 No Content with no body.
+    pub async fn delete_collab_doc(&self, object_id: &str) -> Result<(), ClientError> {
+        let url = self.api_url(&["collab-docs", object_id])?;
+        let resp = self
+            .http
+            .delete(url)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .send()
+            .await?;
+
+        Self::checked_response(resp).await?;
+        Ok(())
     }
 }
 

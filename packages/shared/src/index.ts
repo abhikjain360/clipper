@@ -3,6 +3,7 @@ export type {
   ClipboardItem,
   ClipboardPayload,
   ClipperBackend,
+  CollabItem,
   ConnectionStatus,
   DeviceInfo,
   FileItem,

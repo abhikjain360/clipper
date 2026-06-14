@@ -5,12 +5,12 @@ mod ipc_secret;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use clipper_app_types::{AppState, DeviceInfo};
+use clipper_app_types::{AppState, CollabItem, DeviceInfo};
 use clipper_daemon_types::{
-    ClipboardPayloadResult, DaemonCommand, DeleteFileParams, DownloadFileParams,
-    LoginParams, RegisterParams, RemoveDeviceParams, SendClipboardPayloadParams,
-    UploadFileParams, ClipboardPayloadParams, CopyToLocalParams, RegisterResult,
-    UploadFileResult, DeviceListResult,
+    ClipboardPayloadParams, ClipboardPayloadResult, DaemonCommand,
+    DeleteCollabDocParams, DeleteFileParams, DeviceListResult, DownloadFileParams,
+    GetCollabDocMetaParams, LoginParams, RegisterParams, RegisterResult, RemoveDeviceParams,
+    SendClipboardPayloadParams, UploadFileParams, UploadFileResult,
 };
 use daemon_client::{DaemonClient, DaemonClientError};
 use serde::{Deserialize, Serialize, Serializer};
@@ -126,6 +126,9 @@ pub fn run() {
             download_file_to_dialog,
             download_file_bytes,
             delete_file,
+            create_collab_doc,
+            delete_collab_doc,
+            get_collab_doc_meta,
             list_devices,
             remove_device,
         ])
@@ -419,6 +422,36 @@ async fn delete_file(backend: State<'_, DesktopBackend>, file_id: String) -> Com
         .send_ok(DaemonCommand::DeleteFile(DeleteFileParams { file_id }))
         .await?;
     Ok(())
+}
+
+#[tauri::command]
+async fn create_collab_doc(backend: State<'_, DesktopBackend>) -> CommandResult<CollabItem> {
+    Ok(backend.daemon.send_result::<CollabItem>(DaemonCommand::CreateCollabDoc).await?)
+}
+
+#[tauri::command]
+async fn delete_collab_doc(
+    backend: State<'_, DesktopBackend>,
+    object_id: String,
+) -> CommandResult<()> {
+    backend
+        .daemon
+        .send_ok(DaemonCommand::DeleteCollabDoc(DeleteCollabDocParams { object_id }))
+        .await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_collab_doc_meta(
+    backend: State<'_, DesktopBackend>,
+    object_id: String,
+) -> CommandResult<CollabItem> {
+    Ok(backend
+        .daemon
+        .send_result::<CollabItem>(DaemonCommand::GetCollabDocMeta(GetCollabDocMetaParams {
+            object_id,
+        }))
+        .await?)
 }
 
 #[tauri::command]

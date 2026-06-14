@@ -35,6 +35,20 @@ pub struct DecryptedFileItem {
     pub source_device_id: String,
 }
 
+/// A collab document for display. Unlike clipboard/file items, a collab doc is
+/// server-visible (its Y.Doc content is not end-to-end encrypted), so there is
+/// no decrypted metadata to surface. In Phase 2 the only fields are the object
+/// id, the share token, and timestamps; the real title lives inside the Y.Doc
+/// state and is wired up in Phase 3.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct CollabItem {
+    pub id: String,
+    pub share_token: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// One of the user's registered devices, for the device-management screen.
 /// `is_current` marks the device this client is logged in on, so the UI can
 /// steer the user to "Log Out" instead of revoking the session they are using.
@@ -75,6 +89,7 @@ pub struct AppState {
     pub connection_status: ConnectionStatus,
     pub clipboard_items: Vec<DecryptedClipboardItem>,
     pub files: Vec<DecryptedFileItem>,
+    pub collab_docs: Vec<CollabItem>,
     pub error: Option<String>,
 }
 

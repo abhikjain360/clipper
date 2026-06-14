@@ -7,8 +7,8 @@ use std::{
 };
 
 pub use clipper_app_types::{
-    AppState, AuthenticatedSession, ClipboardPayload, ConnectionStatus, DecryptedClipboardItem,
-    DecryptedFileItem, DeviceInfo, SavedProfile,
+    AppState, AuthenticatedSession, ClipboardPayload, CollabItem, ConnectionStatus,
+    DecryptedClipboardItem, DecryptedFileItem, DeviceInfo, SavedProfile,
 };
 use clipper_core::{crypto, models::*};
 use futures_util::{StreamExt, stream};
@@ -981,6 +981,76 @@ impl SyncEngine {
         Ok(())
     }
 
+    // ── Collab docs ──
+
+    /// Create a collab doc. The server suppresses the originating device's own
+    /// WS `created` event, and the encrypted-object snapshot never lists collab
+    /// objects, so the new doc is persisted into the local store here — otherwise
+    /// it would never appear on the device that created it. The seq and
+    /// `created_at` are assigned client-side (the create response carries neither,
+    /// and the server seq is a wall-clock microsecond timestamp, so a local one
+    /// of the same magnitude sorts correctly and is superseded by any later
+    /// `deleted` event).
+    pub async fn create_collab_doc(&self) -> Result<CollabItem, ClientError> {
+        let response = self.api.create_collab_doc().await?;
+        let object_id = response.object_id.to_string();
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let local_seq = chrono::Utc::now().timestamp_micros();
+        let item = CollabItem {
+            id: object_id.clone(),
+            share_token: response.share_token,
+            created_at: created_at.clone(),
+            updated_at: created_at,
+        };
+        let visible = self
+            .local_store
+            .persist_local_collab_present(&item, "", local_seq, local_seq, RECENT_CLIPBOARD_LIMIT)
+            .await?;
+        self.publish_visible_state(visible).await;
+        info!(object_id = %object_id, "Collab doc created");
+        Ok(item)
+    }
+
+    /// Delete a collab doc owned by the current user. Mirrors `delete_file`: the
+    /// server's `deleted_seq` is not returned by this endpoint (it responds 204),
+    /// so a local wall-clock microsecond seq tombstones the record; it is always
+    /// later than the create seq, so the delete wins.
+    pub async fn delete_collab_doc(&self, object_id: &str) -> Result<(), ClientError> {
+        self.api.delete_collab_doc(object_id).await?;
+        let delete_seq = chrono::Utc::now().timestamp_micros();
+        let visible = self
+            .local_store
+            .apply_local_delete(
+                ObjectKind::Collab,
+                object_id,
+                delete_seq,
+                RECENT_CLIPBOARD_LIMIT,
+            )
+            .await?;
+        self.publish_visible_state(visible).await;
+        info!(object_id = %object_id, "Collab doc deleted");
+        Ok(())
+    }
+
+    /// Fetch a collab doc's current metadata (share token + `updated_at`) from
+    /// the server. Used by the per-doc detail view.
+    pub async fn get_collab_doc_meta(&self, object_id: &str) -> Result<CollabItem, ClientError> {
+        let meta = self.api.get_collab_doc_meta(object_id).await?;
+        // The meta endpoint does not return `created_at`; fall back to the
+        // locally cached value when present, otherwise reuse `updated_at` (they
+        // are equal until the first Phase 3 edit).
+        let created_at = {
+            let state = self.state.read().await;
+            state
+                .collab_docs
+                .iter()
+                .find(|doc| doc.id == object_id)
+                .map(|doc| doc.created_at.clone())
+        }
+        .unwrap_or_else(|| meta.updated_at.clone());
+        Ok(collab_item_from_meta(&meta, created_at))
+    }
+
     // ── Sync ──
 
     pub async fn refresh(&self) -> Result<(), ClientError> {
@@ -993,6 +1063,7 @@ impl SyncEngine {
             let mut state = self.state.write().await;
             state.clipboard_items = visible.clipboard_items;
             state.files = visible.files;
+            state.collab_docs = visible.collab_docs;
         }
         self.bump_version();
     }
@@ -1033,16 +1104,27 @@ impl SyncEngine {
                 event_type,
                 object_kind,
                 object_id,
-                ..
+                created_at,
             }) => {
                 debug!("WS event seq={} type={}", seq, event_type);
                 match event_type {
                     ObjectEventType::Created => {
-                        self.handle_created_event(generation, object_kind, object_id, seq)
-                            .await?;
+                        self.handle_created_event(
+                            generation,
+                            object_kind,
+                            object_id,
+                            seq,
+                            created_at,
+                        )
+                        .await?;
                     }
-                    ObjectEventType::Deleted if object_kind == ObjectKind::File => {
-                        self.handle_deleted_event(generation, ObjectKind::File, object_id, seq)
+                    // Files and collab docs are the deletable object kinds.
+                    // Clipboard items expire passively and never emit deletes.
+                    ObjectEventType::Deleted
+                        if object_kind == ObjectKind::File
+                            || object_kind == ObjectKind::Collab =>
+                    {
+                        self.handle_deleted_event(generation, object_kind, object_id, seq)
                             .await?;
                     }
                     ObjectEventType::Deleted => {
@@ -1207,6 +1289,25 @@ impl SyncEngine {
         Ok(())
     }
 
+    async fn persist_collab_snapshot_item(
+        &self,
+        item: &CollabItem,
+        created_seq: i64,
+        generation: u64,
+    ) -> Result<(), ClientError> {
+        // The collab-doc meta endpoint does not expose the creating device, and
+        // it is not surfaced in `CollabItem`, so the stored record carries an
+        // empty source device id.
+        if let Some(visible) = self
+            .local_store
+            .persist_snapshot_collab_present(item, "", created_seq, generation, RECENT_CLIPBOARD_LIMIT)
+            .await?
+        {
+            self.publish_visible_state(visible).await;
+        }
+        Ok(())
+    }
+
     async fn persist_clipboard_snapshot_item(
         &self,
         object: &DecryptedClipboardObject,
@@ -1301,6 +1402,7 @@ impl SyncEngine {
         kind: ObjectKind,
         object_id: ObjectId,
         event_seq: i64,
+        created_at: String,
     ) -> Result<(), ClientError> {
         let object_id_text = object_id.to_string();
         let should_materialize = self
@@ -1312,7 +1414,7 @@ impl SyncEngine {
             let engine = Arc::clone(self);
             spawn_background(async move {
                 if let Err(error) = engine
-                    .materialize_object(generation, kind, object_id, event_seq)
+                    .materialize_object(generation, kind, object_id, event_seq, created_at)
                     .await
                 {
                     warn!(
@@ -1357,15 +1459,16 @@ impl SyncEngine {
         kind: ObjectKind,
         object_id: ObjectId,
         event_seq: i64,
+        created_at: String,
     ) -> Result<(), ClientError> {
         // Collab objects are server-visible documents, not end-to-end-encrypted
-        // objects: they are never returned by the encrypted-object endpoints and
-        // are not materialized into the local object store. Wiring collab into
-        // the sync engine / app state is Phase 2 UI work tracked separately; here
-        // we just skip them so the match stays total.
+        // objects: they are never returned by the encrypted-object endpoints, so
+        // they are materialized from the dedicated collab-doc meta endpoint
+        // rather than `get_object`.
         if kind == ObjectKind::Collab {
-            debug!(object_id = %object_id, event_seq, "Skipping materialize for collab object");
-            return Ok(());
+            return self
+                .materialize_collab(generation, object_id, event_seq, created_at)
+                .await;
         }
 
         let api = &self.api;
@@ -1413,10 +1516,37 @@ impl SyncEngine {
                 )
                 .await?;
             }
-            // Skipped above before any network call; an explicit arm keeps the
-            // match total without re-handling it.
+            // Routed to `materialize_collab` above before any network call; an
+            // explicit arm keeps the match total without re-handling it.
             ObjectKind::Collab => {}
         }
+        Ok(())
+    }
+
+    /// Materialize a collab doc from a live `created` event. The encrypted-object
+    /// endpoints exclude collab objects, so the share token / `updated_at` come
+    /// from `GET /api/collab-docs/:id/meta` instead. A 404 means the doc was
+    /// deleted between the event and this fetch, so drop the local marker.
+    async fn materialize_collab(
+        self: &Arc<Self>,
+        generation: u64,
+        object_id: ObjectId,
+        event_seq: i64,
+        created_at: String,
+    ) -> Result<(), ClientError> {
+        let object_id_text = object_id.to_string();
+        let meta = match self.api.get_collab_doc_meta(&object_id_text).await {
+            Ok(meta) => meta,
+            Err(error) if is_not_found_error(&error) => {
+                self.remove_absent_object(generation, &object_id_text)
+                    .await?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        let item = collab_item_from_meta(&meta, created_at);
+        self.persist_collab_snapshot_item(&item, event_seq, generation)
+            .await?;
         Ok(())
     }
 
@@ -2138,6 +2268,17 @@ fn decrypt_file_object_item(
         created_at: item.created_at.clone(),
         source_device_id: item.source_device_id.to_string(),
     })
+}
+
+/// Build a display `CollabItem` from server meta plus a `created_at` the meta
+/// endpoint does not carry (sourced from the live event or the local cache).
+fn collab_item_from_meta(meta: &CollabDocMeta, created_at: String) -> CollabItem {
+    CollabItem {
+        id: meta.object_id.to_string(),
+        share_token: meta.share_token.clone(),
+        created_at,
+        updated_at: meta.updated_at.clone(),
+    }
 }
 
 fn clipboard_display_text(mime_type: &str, data: &[u8]) -> String {

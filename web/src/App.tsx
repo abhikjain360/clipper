@@ -1,8 +1,12 @@
 import {
+    ArrowLeft,
     Clipboard,
     Copy,
     Download,
     Eye,
+    FileCode,
+    FilePlus,
+    FileText,
     FileUp,
     Files,
     Folder,
@@ -36,7 +40,7 @@ import {
     readClipboardText,
     writeClipboardText,
 } from "./backend";
-import type { AppState, ClipboardItem, DeviceInfo, FileItem } from "@clipper/shared";
+import type { AppState, ClipboardItem, CollabItem, DeviceInfo, FileItem } from "@clipper/shared";
 import { CodeEditor } from "./CodeEditor";
 
 const VIM_MODE_STORAGE_KEY = "clipper_vim_mode";
@@ -311,6 +315,13 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                         Files
                     </Button>
                     <Button
+                        theme={location.startsWith("/collab") ? "blue" : undefined}
+                        icon={<FileText size={16} />}
+                        onPress={() => setLocation("/collab")}
+                    >
+                        Collab Docs
+                    </Button>
+                    <Button
                         theme={location === "/devices" ? "blue" : undefined}
                         icon={<Smartphone size={16} />}
                         onPress={() => setLocation("/devices")}
@@ -324,6 +335,16 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                 <Switch>
                     <Route path="/files">
                         <FilesPanel files={state.files} onState={onState} onError={setError} />
+                    </Route>
+                    <Route path="/collab/:id">
+                        {(params) => <CollabDocView id={params.id} onError={setError} />}
+                    </Route>
+                    <Route path="/collab">
+                        <CollabPanel
+                            collabDocs={state.collab_docs}
+                            onState={onState}
+                            onError={setError}
+                        />
                     </Route>
                     <Route path="/devices">
                         <DevicesPanel onError={setError} />
@@ -712,6 +733,217 @@ function FileViewerOverlay({
     );
 }
 
+function CollabPanel({
+    collabDocs,
+    onState,
+    onError,
+}: {
+    collabDocs: CollabItem[];
+    onState: (state: AppState) => void;
+    onError: (error: string | null) => void;
+}) {
+    const [, setLocation] = useLocation();
+    const [busy, setBusy] = useState(false);
+
+    async function createDoc() {
+        setBusy(true);
+        onError(null);
+        try {
+            const backend = await clipperBackend();
+            const created = await backend.createCollabDoc();
+            onState(await backend.getState());
+            setLocation(`/collab/${created.id}`);
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    async function copyLink(item: CollabItem) {
+        onError(null);
+        try {
+            await writeClipboardText(shareLink(item.share_token));
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        }
+    }
+
+    async function deleteDoc(item: CollabItem) {
+        onError(null);
+        try {
+            const backend = await clipperBackend();
+            await backend.deleteCollabDoc(item.id);
+            onState(await backend.getState());
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        }
+    }
+
+    return (
+        <YStack gap="$3" flex={1}>
+            <XStack justify="space-between" items="center" gap="$2" flexWrap="wrap">
+                <H2 size="$6">Collab Docs</H2>
+                <Button
+                    icon={busy ? <Spinner /> : <FilePlus size={16} />}
+                    onPress={() => void createDoc()}
+                    disabled={busy}
+                >
+                    New Doc
+                </Button>
+            </XStack>
+
+            {collabDocs.length === 0 ? (
+                <EmptyState icon={<FileText size={28} />} title="No collab docs yet" />
+            ) : (
+                <ScrollView>
+                    <YStack gap="$2" pb="$4">
+                        {collabDocs.map((item) => (
+                            <ListCard key={item.id}>
+                                <XStack items="center" justify="space-between" gap="$3">
+                                    <XStack
+                                        items="center"
+                                        gap="$3"
+                                        flex={1}
+                                        cursor="pointer"
+                                        onPress={() => setLocation(`/collab/${item.id}`)}
+                                    >
+                                        <FileCode size={22} color="#6fb4ff" />
+                                        <YStack flex={1} gap="$1">
+                                            <Text numberOfLines={1}>{collabTitle(item.id)}</Text>
+                                            <Paragraph size="$2" color="#9aa4ad">
+                                                {formatRelativeTime(item.created_at)}
+                                            </Paragraph>
+                                        </YStack>
+                                    </XStack>
+                                    <XStack gap="$1">
+                                        <Button
+                                            size="$3"
+                                            icon={<Copy size={16} />}
+                                            onPress={() => void copyLink(item)}
+                                        />
+                                        <Button
+                                            size="$3"
+                                            icon={<Trash2 size={16} color="#ff6b6b" />}
+                                            onPress={() => void deleteDoc(item)}
+                                        />
+                                    </XStack>
+                                </XStack>
+                            </ListCard>
+                        ))}
+                    </YStack>
+                </ScrollView>
+            )}
+        </YStack>
+    );
+}
+
+function CollabDocView({
+    id,
+    onError,
+}: {
+    id: string;
+    onError: (error: string | null) => void;
+}) {
+    const [, setLocation] = useLocation();
+    const [meta, setMeta] = useState<CollabItem | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [copied, setCopied] = useState(false);
+
+    useEffect(() => {
+        let cancelled = false;
+        setLoading(true);
+        onError(null);
+
+        async function load() {
+            try {
+                const backend = await clipperBackend();
+                const loaded = await backend.getCollabDocMeta(id);
+                if (!cancelled) setMeta(loaded);
+            } catch (caught) {
+                if (!cancelled) onError(formatBackendError(caught));
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+        }
+
+        void load();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [id, onError]);
+
+    async function copyLink() {
+        if (!meta) return;
+        onError(null);
+        try {
+            await writeClipboardText(shareLink(meta.share_token));
+            setCopied(true);
+            globalThis.setTimeout(() => setCopied(false), 2000);
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        }
+    }
+
+    return (
+        <YStack gap="$3" flex={1}>
+            <XStack justify="space-between" items="center" gap="$2" flexWrap="wrap">
+                <XStack items="center" gap="$3" flex={1}>
+                    <Button
+                        size="$3"
+                        icon={<ArrowLeft size={16} />}
+                        onPress={() => setLocation("/collab")}
+                    />
+                    <H2 size="$6">{collabTitle(id)}</H2>
+                </XStack>
+            </XStack>
+
+            {loading ? (
+                <EmptyState icon={<Spinner />} title="Loading doc..." />
+            ) : meta ? (
+                <YStack gap="$3" flex={1}>
+                    <ListCard>
+                        <XStack items="center" justify="space-between" gap="$3" flexWrap="wrap">
+                            <YStack flex={1} gap="$1">
+                                <Paragraph size="$2" color="#9aa4ad">
+                                    Share link
+                                </Paragraph>
+                                <Text
+                                    numberOfLines={1}
+                                    style={{
+                                        fontFamily:
+                                            "ui-monospace, SFMono-Regular, Menlo, monospace",
+                                    }}
+                                >
+                                    {shareLink(meta.share_token)}
+                                </Text>
+                            </YStack>
+                            <Button
+                                size="$3"
+                                icon={<Copy size={16} />}
+                                onPress={() => void copyLink()}
+                            >
+                                {copied ? "Copied" : "Copy link"}
+                            </Button>
+                        </XStack>
+                    </ListCard>
+                    <Card
+                        flex={1}
+                        bg="#171a1d"
+                        overflow="hidden"
+                        style={{ borderColor: "#252b31", borderWidth: 1 }}
+                    >
+                        <CodeEditor content="" lang="markdown" />
+                    </Card>
+                </YStack>
+            ) : (
+                <EmptyState icon={<FileText size={28} />} title="Doc unavailable" />
+            )}
+        </YStack>
+    );
+}
+
 function DevicesPanel({ onError }: { onError: (error: string | null) => void }) {
     const [devices, setDevices] = useState<DeviceInfo[] | null>(null);
     const [busy, setBusy] = useState(false);
@@ -869,6 +1101,20 @@ function ConnectionBadge({ status }: { status: AppState["connection_status"] }) 
 
 function isTextMimeType(mimeType: string): boolean {
     return mimeType.toLowerCase().split(";")[0]?.trim().startsWith("text/") ?? false;
+}
+
+// Placeholder collab-doc title. The real title lives inside the Y.Doc state and
+// is wired up in Phase 3; until then the doc is identified by a short id prefix.
+function collabTitle(id: string): string {
+    return `Doc · ${id.slice(0, 8)}`;
+}
+
+// The public share URL a doc's share token resolves to. The `/s/:share_token`
+// route itself is a Phase 3b addition; the link is shown and copyable now.
+function shareLink(shareToken: string): string {
+    const origin =
+        typeof window === "undefined" ? "" : window.location.origin;
+    return `${origin}/s/${shareToken}`;
 }
 
 function formatRelativeTime(value: string): string {

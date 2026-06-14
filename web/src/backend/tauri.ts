@@ -1,5 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppState, ClipboardPayload, ClipperBackend, DeviceInfo } from "@clipper/shared";
+import type {
+    AppState,
+    ClipboardPayload,
+    ClipperBackend,
+    CollabItem,
+    DeviceInfo,
+} from "@clipper/shared";
 
 type RawClipboardPayload = {
     mimeType: string;
@@ -38,6 +44,9 @@ export function tauriBackend(): ClipperBackend {
         downloadFileToDialog: (fileId, defaultFilename) =>
             invoke<boolean>("download_file_to_dialog", { fileId, defaultFilename }),
         deleteFile: (fileId) => invoke<void>("delete_file", { fileId }),
+        createCollabDoc: () => invoke<CollabItem>("create_collab_doc"),
+        deleteCollabDoc: (objectId) => invoke<void>("delete_collab_doc", { objectId }),
+        getCollabDocMeta: (objectId) => invoke<CollabItem>("get_collab_doc_meta", { objectId }),
         listDevices: () => invoke<DeviceInfo[]>("list_devices"),
         removeDevice: (deviceId) => invoke<void>("remove_device", { deviceId }),
     };

@@ -71,6 +71,9 @@ pub enum DaemonCommand {
     ListDevices,
     RemoveDevice(RemoveDeviceParams),
     Refresh,
+    CreateCollabDoc,
+    DeleteCollabDoc(DeleteCollabDocParams),
+    GetCollabDocMeta(GetCollabDocMetaParams),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +173,16 @@ pub struct DeleteFileParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoveDeviceParams {
     pub device_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteCollabDocParams {
+    pub object_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetCollabDocMetaParams {
+    pub object_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
