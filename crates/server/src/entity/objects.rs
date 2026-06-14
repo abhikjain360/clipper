@@ -20,7 +20,7 @@ pub struct Model {
     pub updated_at: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub expires_at: Option<String>,
-    pub source_device_id: Uuid,
+    pub source_device_id: Option<Uuid>,
     #[sea_orm(column_type = "Blob")]
     pub envelope: Vec<u8>,
     #[sea_orm(column_type = "Text")]
@@ -35,7 +35,7 @@ pub enum Relation {
         from = "Column::SourceDeviceId",
         to = "super::devices::Column::Id",
         on_update = "Cascade",
-        on_delete = "Restrict"
+        on_delete = "SetNull"
     )]
     Devices,
     #[sea_orm(has_many = "super::object_payloads::Entity")]

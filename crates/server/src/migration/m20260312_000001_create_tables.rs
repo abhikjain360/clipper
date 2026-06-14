@@ -183,7 +183,12 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Objects::CreatedAt).text().not_null())
                     .col(ColumnDef::new(Objects::UpdatedAt).text().not_null())
                     .col(ColumnDef::new(Objects::ExpiresAt).text())
-                    .col(ColumnDef::new(Objects::SourceDeviceId).uuid().not_null())
+                    // Nullable so a device can be reclaimed without taking its
+                    // objects with it: the FK below is ON DELETE SET NULL, which
+                    // detaches the provenance pointer rather than blocking or
+                    // cascade-deleting the object. The authoritative source
+                    // device id still lives, signed, inside the object envelope.
+                    .col(ColumnDef::new(Objects::SourceDeviceId).uuid())
                     .col(ColumnDef::new(Objects::Envelope).blob().not_null())
                     .col(
                         ColumnDef::new(Objects::Status)
@@ -204,7 +209,7 @@ impl MigrationTrait for Migration {
                             .name("fk_objects_source_device_id")
                             .from(Objects::Table, Objects::SourceDeviceId)
                             .to(Devices::Table, Devices::Id)
-                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_delete(ForeignKeyAction::SetNull)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .foreign_key(

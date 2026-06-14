@@ -24,6 +24,15 @@ export type AuthenticatedSession = {
   device_name: string;
 };
 
+export type DeviceInfo = {
+  id: string;
+  name: string;
+  platform: string;
+  created_at: string;
+  last_seen_at: string;
+  is_current: boolean;
+};
+
 export type SavedProfile = {
   username: string;
   device_name: string;
@@ -75,4 +84,6 @@ export type ClipperBackend = {
   downloadFileBytes: (fileId: string) => Promise<Uint8Array>;
   downloadFileToDialog?: (fileId: string, defaultFilename: string) => Promise<boolean>;
   deleteFile: (fileId: string) => Promise<void>;
+  listDevices: () => Promise<DeviceInfo[]>;
+  removeDevice: (deviceId: string) => Promise<void>;
 };

@@ -191,6 +191,17 @@ pin or otherwise independently verify device public keys, so the signature check
 confirms only that the envelope is internally consistent with whatever key the
 server returned — see "Trust model".
 
+`source_device_signing_public_key` is `Option<…>` and is **`None` once the
+source device has been reclaimed**: the `objects.source_device_id` foreign key is
+`ON DELETE SET NULL`, so deleting a device detaches its objects (the column
+becomes NULL) and the server no longer holds a key to attest provenance. With no
+key the client **skips** `Verify(pk_D, …)` but still performs every other
+equality check above and, critically, the AEAD step — which is the real
+authenticity mechanism (see "Trust model"). `item.source_device_id` itself is
+unaffected: the server reports it from the signed envelope body, which survives
+reclamation, so the `body.source_device_id == item.source_device_id` check still
+holds.
+
 ### Ciphertext-substitution argument
 
 If a server swaps object `Y`'s ciphertext into object `X`, the receiver uses

@@ -14,6 +14,7 @@ const MIN_SESSION_TOKEN_BYTES: usize = 32;
 const MAX_SESSION_TOKEN_BYTES: usize = 64;
 const DEFAULT_MAX_USER_STORAGE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_USER_OBJECTS: u64 = 10_000;
+const DEFAULT_MAX_USER_DEVICES: u64 = 32;
 
 const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
     server: ServerDefaults {
@@ -41,6 +42,7 @@ const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
         max_object_meta_ciphertext_bytes: 64 * 1024,
         max_user_storage_bytes: DEFAULT_MAX_USER_STORAGE_BYTES,
         max_user_objects: DEFAULT_MAX_USER_OBJECTS,
+        max_user_devices: DEFAULT_MAX_USER_DEVICES,
     },
     clipboard: ClipboardConfig {
         ttl_days: 7,
@@ -259,6 +261,10 @@ pub struct LimitsConfig {
     pub max_user_storage_bytes: u64,
     #[garde(custom(validate_max_user_objects))]
     pub max_user_objects: u64,
+    /// Maximum device rows retained per user. Each new-device login mints a row;
+    /// once a user is at this cap they must reclaim a device before adding more.
+    #[garde(custom(validate_max_user_devices))]
+    pub max_user_devices: u64,
 }
 
 impl LimitsConfig {
@@ -271,7 +277,8 @@ impl LimitsConfig {
                 max_file_meta_ciphertext_bytes,
                 max_object_meta_ciphertext_bytes,
                 max_user_storage_bytes,
-                max_user_objects
+                max_user_objects,
+                max_user_devices
             ]
         );
     }
@@ -485,6 +492,9 @@ pub struct LimitsConfigOverrides {
     /// Maximum object rows retained per user.
     #[arg(long = "max-user-objects")]
     pub max_user_objects: Option<u64>,
+    /// Maximum device rows retained per user.
+    #[arg(long = "max-user-devices")]
+    pub max_user_devices: Option<u64>,
 }
 
 #[derive(Args, Debug, Clone, Default, Deserialize)]
@@ -608,6 +618,18 @@ fn validate_max_user_objects(value: &u64, _: &()) -> garde::Result {
     Ok(())
 }
 
+fn validate_max_user_devices(value: &u64, _: &()) -> garde::Result {
+    if *value == 0 {
+        return Err(garde::Error::new("must be greater than zero"));
+    }
+    if *value > i64::MAX as u64 {
+        return Err(garde::Error::new(
+            "must fit in a signed 64-bit integer for database counters",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_chrono_seconds(value: &u64, _: &()) -> garde::Result {
     if *value > i64::MAX as u64 {
         return Err(garde::Error::new(
@@ -701,6 +723,7 @@ mod tests {
                 max_object_meta_ciphertext_bytes = 4096
                 max_user_storage_bytes = 8192
                 max_user_objects = 12
+                max_user_devices = 5
 
                 [clipboard]
                 ttl_days = 2
@@ -746,6 +769,7 @@ mod tests {
         assert_eq!(config.limits.max_object_meta_ciphertext_bytes, 4096);
         assert_eq!(config.limits.max_user_storage_bytes, 8192);
         assert_eq!(config.limits.max_user_objects, 12);
+        assert_eq!(config.limits.max_user_devices, 5);
         assert_eq!(config.clipboard.ttl_days, 2);
         assert_eq!(config.clipboard.max_items, 25);
         assert_eq!(config.list.default_limit, 10);
@@ -787,6 +811,14 @@ mod tests {
 
         let mut config = ServerConfig::default();
         config.limits.max_user_objects = i64::MAX as u64 + 1;
+        assert!(config.validate_config().is_err());
+
+        let mut config = ServerConfig::default();
+        config.limits.max_user_devices = 0;
+        assert!(config.validate_config().is_err());
+
+        let mut config = ServerConfig::default();
+        config.limits.max_user_devices = i64::MAX as u64 + 1;
         assert!(config.validate_config().is_err());
     }
 

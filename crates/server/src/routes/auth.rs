@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Extension, State},
+    extract::{Extension, Path, State},
     http::{HeaderMap, StatusCode},
 };
 use base64::Engine;
@@ -8,14 +8,15 @@ use chrono::{Duration, Utc};
 use clipper_core::{
     crypto,
     models::{
-        DEVICE_LOGIN_PROOF_VERSION, DeviceLoginProofBodyV1, LoginChallengeRequest,
-        LoginChallengeResponse, LoginRequest, LoginResponse, OkResponse, RegisterFinishRequest,
-        RegisterFinishResponse, RegisterStartRequest, RegisterStartResponse, ServerInfo,
+        DEVICE_LOGIN_PROOF_VERSION, DeviceListItem, DeviceListResponse, DeviceLoginProofBodyV1,
+        LoginChallengeRequest, LoginChallengeResponse, LoginRequest, LoginResponse, OkResponse,
+        RegisterFinishRequest, RegisterFinishResponse, RegisterStartRequest, RegisterStartResponse,
+        ServerInfo,
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DerivePartialModel, EntityTrait, QueryFilter,
-    Set, SqlErr, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DerivePartialModel, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, Set, SqlErr, TransactionTrait,
 };
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -300,6 +301,7 @@ pub async fn register_finish(
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string()),
             token_bytes: state.config().crypto.session_token_bytes,
+            max_devices: state.config().limits.max_user_devices,
             session_proof: SessionProof::Registration,
         },
     )
@@ -451,6 +453,7 @@ pub async fn login(
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string()),
             token_bytes: state.config().crypto.session_token_bytes,
+            max_devices: state.config().limits.max_user_devices,
             session_proof: SessionProof::Login(DeviceLoginProof {
                 challenge_id: req.challenge_id,
                 challenge: auth_challenge.device_proof_challenge,
@@ -492,6 +495,80 @@ pub async fn logout(
     info!(device_id = %auth.device_id, "Logout");
 
     Ok(Json(OkResponse {}))
+}
+
+/// `GET /api/auth/devices` — list the authenticated user's registered devices,
+/// most recently seen first. Scoped to `auth.user_id` so it never surfaces
+/// another user's devices; internal columns (`user_id`, `signing_public_key`)
+/// are not exposed.
+pub async fn list_devices(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
+) -> Result<Postcard<DeviceListResponse>, ApiError> {
+    let rows = devices::Entity::find()
+        .filter(devices::Column::UserId.eq(auth.user_id))
+        .order_by_desc(devices::Column::LastSeenAt)
+        .all(state.db())
+        .await
+        .map_err(|e| {
+            error!(user_id = %auth.user_id, error = %e, "Failed to list devices");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
+
+    let devices = rows
+        .into_iter()
+        .map(|device| DeviceListItem {
+            id: device.id.into(),
+            name: device.name,
+            platform: device.platform,
+            created_at: device.created_at,
+            last_seen_at: device.last_seen_at,
+        })
+        .collect();
+
+    Ok(Postcard(DeviceListResponse { devices }))
+}
+
+/// `DELETE /api/auth/devices/{id}` — remove one of the authenticated user's
+/// devices (the counterpart to the per-user device cap). The delete is scoped to
+/// `auth.user_id`, so a user can only remove their own devices and an unknown or
+/// foreign id returns 404 rather than touching another account.
+///
+/// Removing the row relies on the device FKs: `sessions.device_id` is
+/// `ON DELETE CASCADE`, so the device's sessions (its live bearer tokens) are
+/// revoked; `objects.source_device_id` is `ON DELETE SET NULL`, so the objects
+/// it created are detached and preserved, not deleted. A user may remove the
+/// device they are currently using — that just invalidates the current session,
+/// equivalent to logging out.
+pub async fn delete_device(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
+    Path(device_id): Path<String>,
+) -> Result<Postcard<OkResponse>, ApiError> {
+    let device_uuid = Uuid::parse_str(&device_id)
+        .map_err(|_| error_response(StatusCode::BAD_REQUEST, "Invalid device id"))?;
+
+    let deleted = devices::Entity::delete_many()
+        .filter(devices::Column::Id.eq(device_uuid))
+        .filter(devices::Column::UserId.eq(auth.user_id))
+        .exec(state.db())
+        .await
+        .map_err(|e| {
+            error!(
+                user_id = %auth.user_id,
+                device_id = %device_uuid,
+                error = %e,
+                "Failed to delete device",
+            );
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?;
+
+    if deleted.rows_affected == 0 {
+        return Err(error_response(StatusCode::NOT_FOUND, "Device not found"));
+    }
+
+    info!(user_id = %auth.user_id, device_id = %device_uuid, "Device removed");
+    Ok(Postcard(OkResponse {}))
 }
 
 fn access_key_hash(
@@ -687,6 +764,36 @@ where
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
             })?;
     } else {
+        // A new-device login mints a fresh device row. Cap how many a user can
+        // accumulate: device rows sit outside the storage/object quotas, so
+        // without this a credentialed account could grow the table without
+        // bound. Existing devices re-authenticating take the branch above and
+        // are never blocked; a user at the cap reclaims a device to free a slot.
+        //
+        // The count and insert are not one atomic step (login runs outside a
+        // transaction), so two concurrent new-device logins could both pass the
+        // check and overshoot by a small margin. That is acceptable for a coarse
+        // anti-abuse bound — it still prevents the unbounded growth the cap targets.
+        let device_count = devices::Entity::find()
+            .filter(devices::Column::UserId.eq(user_id))
+            .count(db)
+            .await
+            .map_err(|e| {
+                error!(user_id = %user_id, error = %e, "Failed to count user devices for cap");
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+            })?;
+        if device_count >= options.max_devices {
+            warn!(
+                user_id = %user_id,
+                device_count,
+                max_devices = options.max_devices,
+                "Rejected new-device login that would exceed the per-user device cap",
+            );
+            return Err(error_response(
+                StatusCode::FORBIDDEN,
+                "Device limit reached",
+            ));
+        }
         devices::ActiveModel {
             id: Set(device_id),
             user_id: Set(user_id),
@@ -767,6 +874,7 @@ struct SessionOptions {
     ip: String,
     user_agent: Option<String>,
     token_bytes: usize,
+    max_devices: u64,
     session_proof: SessionProof,
 }
 
@@ -864,11 +972,24 @@ mod tests {
     };
 
     async fn empty_state() -> (AppState, TempDir) {
+        empty_state_with_config(|_| {}).await
+    }
+
+    async fn empty_state_with_config(
+        apply: impl FnOnce(&mut crate::config::ServerConfig),
+    ) -> (AppState, TempDir) {
         let data_dir = tempfile::tempdir().expect("tempdir");
         let db = Database::connect("sqlite::memory:").await.expect("db");
-        let state = AppState::open_with_db(db, data_dir.path().to_path_buf())
-            .await
-            .expect("state");
+        let mut config = crate::config::ServerConfig::default();
+        config.server.data_dir = data_dir.path().to_path_buf();
+        apply(&mut config);
+        let state = AppState::open_with_db_and_config(
+            db,
+            config,
+            crate::secret::ServerSecrets::test_fixture(),
+        )
+        .await
+        .expect("state");
         let now = Utc::now().to_rfc3339();
         let wrapped_salt = secret_storage::wrap_access_key_hash_salt(
             state.secrets(),
@@ -894,7 +1015,14 @@ mod tests {
     }
 
     async fn test_state(passphrase: &[u8]) -> (AppState, TempDir) {
-        let (state, data_dir) = empty_state().await;
+        test_state_with_config(passphrase, |_| {}).await
+    }
+
+    async fn test_state_with_config(
+        passphrase: &[u8],
+        apply: impl FnOnce(&mut crate::config::ServerConfig),
+    ) -> (AppState, TempDir) {
+        let (state, data_dir) = empty_state_with_config(apply).await;
         let user_id = Uuid::now_v7();
         // Register against the server-wide setup that empty_state persisted, so
         // a later challenge/login (which loads it from server_config) matches.
@@ -1384,6 +1512,253 @@ mod tests {
 
         assert!(!resp.token.is_empty());
         assert!(!resp.device_id.is_empty());
+    }
+
+    // The per-user device cap is the backstop against a credentialed user
+    // minting unbounded device rows. It must block only NEW devices: an existing
+    // device re-authenticating creates no row and must keep working at the cap.
+    #[tokio::test]
+    async fn device_cap_blocks_new_devices_but_not_existing_ones() {
+        let passphrase = b"correct horse battery staple";
+        let (state, _data_dir) = test_state_with_config(passphrase, |config| {
+            config.limits.max_user_devices = 1;
+        })
+        .await;
+
+        let device_id = Uuid::now_v7();
+        let signing_secret = test_device_signing_secret_key();
+
+        // First login mints the user's one allowed device (new device: the
+        // proof is not consulted, so omit it).
+        let (challenge_req, client_state) = challenge_request("alice", passphrase);
+        let Postcard(login_challenge) = challenge(State(state.clone()), validated(challenge_req))
+            .await
+            .expect("challenge");
+        let req = login_request_for_device(
+            login_challenge,
+            &client_state,
+            passphrase,
+            device_id,
+            signing_secret,
+            false,
+        );
+        login(
+            State(state.clone()),
+            client_ip(),
+            HeaderMap::new(),
+            validated(req),
+        )
+        .await
+        .expect("first device within cap");
+
+        // Re-authenticating that same device reuses its row, so the cap does not
+        // apply even though the user already sits at the limit.
+        let (challenge_req, client_state) = challenge_request("alice", passphrase);
+        let Postcard(login_challenge) = challenge(State(state.clone()), validated(challenge_req))
+            .await
+            .expect("challenge");
+        let req = login_request_for_device(
+            login_challenge,
+            &client_state,
+            passphrase,
+            device_id,
+            signing_secret,
+            true,
+        );
+        login(
+            State(state.clone()),
+            client_ip(),
+            HeaderMap::new(),
+            validated(req),
+        )
+        .await
+        .expect("existing device re-auth is not blocked at cap");
+
+        // A second, distinct device would mint a new row and is rejected.
+        let (challenge_req, client_state) = challenge_request("alice", passphrase);
+        let Postcard(login_challenge) = challenge(State(state.clone()), validated(challenge_req))
+            .await
+            .expect("challenge");
+        let req = login_request(login_challenge, &client_state, passphrase);
+        let err = login(State(state), client_ip(), HeaderMap::new(), validated(req))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    fn auth_info(user_id: Uuid) -> AuthInfo {
+        AuthInfo {
+            session_id: Uuid::now_v7(),
+            user_id,
+            device_id: Uuid::now_v7(),
+        }
+    }
+
+    async fn alice_user_id(state: &AppState) -> Uuid {
+        users::Entity::find()
+            .select_only()
+            .column(users::Column::Id)
+            .into_tuple::<Uuid>()
+            .one(state.db())
+            .await
+            .expect("query user id")
+            .expect("user id")
+    }
+
+    async fn insert_test_device(
+        state: &AppState,
+        user_id: Uuid,
+        name: &str,
+        last_seen_at: &str,
+    ) -> Uuid {
+        let device_id = Uuid::now_v7();
+        let now = Utc::now().to_rfc3339();
+        devices::ActiveModel {
+            id: Set(device_id),
+            user_id: Set(user_id),
+            name: Set(name.into()),
+            platform: Set("test".into()),
+            signing_public_key: Set(test_device_signing_public_key()),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            last_seen_at: Set(last_seen_at.into()),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert device");
+        device_id
+    }
+
+    async fn insert_extra_user(state: &AppState) -> Uuid {
+        let now = Utc::now().to_rfc3339();
+        let user_id = Uuid::now_v7();
+        let access_key_hash = Uuid::now_v7().to_string();
+        access_keys::ActiveModel {
+            key_hash: Set(access_key_hash.clone()),
+            created_at: Set(now.clone()),
+            expires_at: Set(None),
+            used_at: Set(Some(now.clone())),
+            used_by_user_id: Set(Some(user_id)),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert access key");
+        users::ActiveModel {
+            id: Set(user_id),
+            username: Set(format!("user-{}", user_id.as_simple())),
+            opaque_password_file: Set(vec![1]),
+            encryption_salt: Set(vec![2]),
+            access_key_hash: Set(access_key_hash),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            storage_bytes: Set(0),
+            object_count: Set(0),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert user");
+        user_id
+    }
+
+    #[tokio::test]
+    async fn list_devices_returns_user_devices_most_recent_first() {
+        let passphrase = b"correct horse battery staple";
+        let (state, _data_dir) = test_state(passphrase).await;
+        let user_id = alice_user_id(&state).await;
+
+        let older = insert_test_device(&state, user_id, "laptop", "2026-06-10T00:00:00Z").await;
+        let newer = insert_test_device(&state, user_id, "phone", "2026-06-13T00:00:00Z").await;
+
+        let Postcard(list) = list_devices(State(state.clone()), Extension(auth_info(user_id)))
+            .await
+            .expect("list devices");
+
+        assert_eq!(list.devices.len(), 2);
+        // Most recently seen first.
+        assert_eq!(list.devices[0].id.into_uuid(), newer);
+        assert_eq!(list.devices[0].name, "phone");
+        assert_eq!(list.devices[1].id.into_uuid(), older);
+    }
+
+    #[tokio::test]
+    async fn delete_device_removes_row_and_validates_id() {
+        let passphrase = b"correct horse battery staple";
+        let (state, _data_dir) = test_state(passphrase).await;
+        let user_id = alice_user_id(&state).await;
+        let device_id = insert_test_device(&state, user_id, "laptop", "2026-06-10T00:00:00Z").await;
+
+        // Deleting an existing device succeeds and removes the row.
+        delete_device(
+            State(state.clone()),
+            Extension(auth_info(user_id)),
+            Path(device_id.to_string()),
+        )
+        .await
+        .expect("delete device");
+        let remaining = devices::Entity::find()
+            .filter(devices::Column::UserId.eq(user_id))
+            .all(state.db())
+            .await
+            .expect("query devices");
+        assert!(remaining.is_empty());
+
+        // Deleting an unknown id is a 404, not a silent success.
+        let err = delete_device(
+            State(state.clone()),
+            Extension(auth_info(user_id)),
+            Path(Uuid::now_v7().to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+
+        // A malformed id is a 400.
+        let err = delete_device(
+            State(state),
+            Extension(auth_info(user_id)),
+            Path("not-a-uuid".into()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // Device endpoints are scoped to the authenticated user. A user must not be
+    // able to enumerate or remove another user's devices (IDOR).
+    #[tokio::test]
+    async fn delete_device_cannot_remove_another_users_device() {
+        let passphrase = b"correct horse battery staple";
+        let (state, _data_dir) = test_state(passphrase).await;
+        let alice = alice_user_id(&state).await;
+        let bob = insert_extra_user(&state).await;
+        let bob_device =
+            insert_test_device(&state, bob, "bob-laptop", "2026-06-10T00:00:00Z").await;
+
+        // Alice cannot delete Bob's device — the user-scoped delete matches no
+        // row, so it is a 404 rather than a cross-account deletion.
+        let err = delete_device(
+            State(state.clone()),
+            Extension(auth_info(alice)),
+            Path(bob_device.to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+
+        // Bob's device is untouched.
+        assert!(
+            devices::Entity::find_by_id(bob_device)
+                .one(state.db())
+                .await
+                .expect("query device")
+                .is_some()
+        );
+
+        // And Alice's listing never includes Bob's device.
+        let Postcard(list) = list_devices(State(state), Extension(auth_info(alice)))
+            .await
+            .expect("list");
+        assert!(list.devices.is_empty());
     }
 
     #[tokio::test]

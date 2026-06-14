@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppState, ClipboardPayload, ClipperBackend } from "@clipper/shared";
+import type { AppState, ClipboardPayload, ClipperBackend, DeviceInfo } from "@clipper/shared";
 
 type RawClipboardPayload = {
     mimeType: string;
@@ -38,6 +38,8 @@ export function tauriBackend(): ClipperBackend {
         downloadFileToDialog: (fileId, defaultFilename) =>
             invoke<boolean>("download_file_to_dialog", { fileId, defaultFilename }),
         deleteFile: (fileId) => invoke<void>("delete_file", { fileId }),
+        listDevices: () => invoke<DeviceInfo[]>("list_devices"),
+        removeDevice: (deviceId) => invoke<void>("remove_device", { deviceId }),
     };
 }
 

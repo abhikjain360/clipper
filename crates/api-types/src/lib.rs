@@ -475,7 +475,10 @@ pub struct ObjectListItem {
     pub payloads: Vec<ObjectPayloadDescriptor>,
     pub created_at: String,
     pub source_device_id: DeviceId,
-    pub source_device_signing_public_key: Vec<u8>,
+    /// `None` once the source device has been reclaimed: the server no longer
+    /// holds its signing key, so object provenance cannot be re-attested and the
+    /// client falls back to the export-key AEAD AAD for authenticity.
+    pub source_device_signing_public_key: Option<Vec<u8>>,
     pub envelope: ObjectEnvelopeV1,
 }
 
@@ -489,6 +492,25 @@ pub struct ObjectListCursor {
 pub struct ObjectListResponse {
     pub items: Vec<ObjectListItem>,
     pub next_after: Option<ObjectListCursor>,
+}
+
+// -- Devices --
+
+/// One of the authenticated user's registered devices, as returned by
+/// `GET /api/auth/devices`. Internal columns (`user_id`, `signing_public_key`)
+/// are deliberately not exposed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceListItem {
+    pub id: DeviceId,
+    pub name: String,
+    pub platform: String,
+    pub created_at: String,
+    pub last_seen_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceListResponse {
+    pub devices: Vec<DeviceListItem>,
 }
 
 // -- WebSocket --

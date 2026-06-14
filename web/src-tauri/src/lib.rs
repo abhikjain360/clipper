@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use clipper_app_types::AppState;
+use clipper_app_types::{AppState, DeviceInfo};
 use clipper_client::engine::{ClipboardPayload, SyncEngine, TEXT_CLIPBOARD_MIME_TYPE};
 use serde::{Serialize, Serializer};
 use tauri::{Manager, State};
@@ -120,6 +120,8 @@ pub fn run() {
             download_file_to_dialog,
             download_file_bytes,
             delete_file,
+            list_devices,
+            remove_device,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
@@ -385,6 +387,17 @@ async fn download_file_bytes(
 #[tauri::command]
 async fn delete_file(backend: State<'_, DesktopBackend>, file_id: String) -> CommandResult<()> {
     backend.engine.delete_file(&file_id).await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_devices(backend: State<'_, DesktopBackend>) -> CommandResult<Vec<DeviceInfo>> {
+    Ok(backend.engine.list_devices().await?)
+}
+
+#[tauri::command]
+async fn remove_device(backend: State<'_, DesktopBackend>, device_id: String) -> CommandResult<()> {
+    backend.engine.remove_device(&device_id).await?;
     Ok(())
 }
 

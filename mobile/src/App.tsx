@@ -7,9 +7,10 @@ import {
   Folder,
   LogOut,
   RefreshCw,
+  Smartphone,
   Trash2,
 } from "lucide-react-native";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { SafeAreaView, StatusBar } from "react-native";
 import { TamaguiProvider } from "tamagui";
 import {
@@ -27,7 +28,7 @@ import {
   XStack,
   YStack,
 } from "tamagui";
-import type { AppState, ClipboardItem, FileItem } from "@clipper/shared";
+import type { AppState, ClipboardItem, DeviceInfo, FileItem } from "@clipper/shared";
 import {
   backend,
   formatBackendError,
@@ -38,7 +39,7 @@ import {
 } from "./backend";
 import tamaguiConfig from "./tamagui.config";
 
-type TabName = "clipboard" | "files";
+type TabName = "clipboard" | "files" | "devices";
 
 export default function App() {
   return (
@@ -287,6 +288,12 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                 <Text>Files</Text>
               </XStack>
             </Tabs.Tab>
+            <Tabs.Tab value="devices" flex={1}>
+              <XStack items="center" gap="$2">
+                <Smartphone size={16} />
+                <Text>Devices</Text>
+              </XStack>
+            </Tabs.Tab>
           </Tabs.List>
 
           {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
@@ -296,6 +303,9 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
           </Tabs.Content>
           <Tabs.Content value="files" flex={1}>
             <FilesPanel files={state.files} onState={onState} onError={setError} />
+          </Tabs.Content>
+          <Tabs.Content value="devices" flex={1}>
+            <DevicesPanel onError={setError} />
           </Tabs.Content>
         </Tabs>
       </YStack>
@@ -472,6 +482,97 @@ function FilesPanel({
                       onPress={() => void deleteFile(file)}
                     />
                   </XStack>
+                </XStack>
+              </ListCard>
+            ))}
+          </YStack>
+        </ScrollView>
+      )}
+    </YStack>
+  );
+}
+
+function DevicesPanel({ onError }: { onError: (error: string | null) => void }) {
+  const [devices, setDevices] = useState<DeviceInfo[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const loadDevices = useCallback(async () => {
+    setBusy(true);
+    onError(null);
+    try {
+      setDevices(await backend.listDevices());
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    } finally {
+      setBusy(false);
+    }
+  }, [onError]);
+
+  useEffect(() => {
+    void loadDevices();
+  }, [loadDevices]);
+
+  async function removeDevice(device: DeviceInfo) {
+    onError(null);
+    try {
+      await backend.removeDevice(device.id);
+      await loadDevices();
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }
+
+  return (
+    <YStack gap="$3" flex={1} pt="$3">
+      <XStack justify="space-between" items="center" gap="$2">
+        <H2 size="$6">Devices</H2>
+        <Button
+          icon={busy ? <Spinner /> : <RefreshCw size={16} />}
+          onPress={() => void loadDevices()}
+          disabled={busy}
+        >
+          Refresh
+        </Button>
+      </XStack>
+
+      <Paragraph size="$2" color="#9aa4ad">
+        Removing a device signs it out everywhere and revokes its access. The objects it shared are
+        kept.
+      </Paragraph>
+
+      {devices === null ? (
+        <EmptyState icon={<Spinner />} title="Loading devices..." />
+      ) : devices.length === 0 ? (
+        <EmptyState icon={<Smartphone size={28} />} title="No devices" />
+      ) : (
+        <ScrollView>
+          <YStack gap="$2" pb="$4">
+            {devices.map((device) => (
+              <ListCard key={device.id}>
+                <XStack items="center" justify="space-between" gap="$3">
+                  <XStack items="center" gap="$3" flex={1}>
+                    <Smartphone size={22} color="#6fb4ff" />
+                    <YStack flex={1} gap="$1">
+                      <XStack items="center" gap="$2">
+                        <Text numberOfLines={1}>{device.name}</Text>
+                        {device.is_current && (
+                          <Paragraph size="$1" color="#6fb4ff">
+                            This device
+                          </Paragraph>
+                        )}
+                      </XStack>
+                      <Paragraph size="$2" color="#9aa4ad">
+                        {device.platform} - last seen {formatRelativeTime(device.last_seen_at)}
+                      </Paragraph>
+                    </YStack>
+                  </XStack>
+                  {!device.is_current && (
+                    <Button
+                      size="$3"
+                      icon={<Trash2 size={16} color="#ff6b6b" />}
+                      onPress={() => void removeDevice(device)}
+                    />
+                  )}
                 </XStack>
               </ListCard>
             ))}

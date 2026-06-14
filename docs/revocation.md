@@ -25,7 +25,17 @@ is the missing control.
   most once per minute.
 - Devices live in `devices`, keyed by `(id, user_id)`, holding the Ed25519
   signing public key plus `last_seen_at`. Existing-device login requires
-  proof-of-possession. There is no way to retire a device.
+  proof-of-possession. The number of devices per user is now capped
+  (`limits.max_user_devices`, enforced in `issue_session`; see
+  [`server-resource-limits.md`](server-resource-limits.md)), but there is still
+  no user-facing flow to retire a device — that is the gap this doc plans to
+  close.
+- The schema is already prepared for device retirement:
+  `objects.source_device_id` is nullable with an `ON DELETE SET NULL` foreign
+  key, so deleting a device detaches the objects it created (rather than the old
+  `ON DELETE RESTRICT`, which would have blocked the delete) without losing the
+  objects. A reclaim/revoke flow therefore only needs the endpoint and the
+  session cascade, not a schema change to the objects table.
 
 ## Plan
 
@@ -60,7 +70,11 @@ device stay valid and decryptable — the envelope signature is server-checked
 provenance, not the load-bearing authenticity mechanism (that is AEAD+AAD under
 `K`; see [`object-envelopes.md`](object-envelopes.md)). Revocation stops *future*
 use of the device id; it does not retroactively invalidate history. Document this
-so the guarantee is not over-claimed.
+so the guarantee is not over-claimed. If a revoke also **deletes** the device row
+(rather than just flagging it), the `ON DELETE SET NULL` foreign key nulls each
+object's `source_device_id`; the list/get response then returns
+`source_device_signing_public_key = None` and the client skips the (now
+unavailable) provenance check while still verifying AEAD+AAD.
 
 ## Schema / migration
 

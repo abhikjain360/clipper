@@ -170,6 +170,27 @@ cleanup (`crates/server/src/cleanup.rs`).
 Both are validated to be non-zero and to fit in a signed 64-bit integer (they
 are stored and compared as `i64` database counters).
 
+### Per-user device cap
+
+Each new-device login mints a `devices` row, which sits **outside** the storage
+and object quota above. `limits.max_user_devices` (default 32) bounds how many a
+single user can accumulate: `issue_session`
+(`crates/server/src/routes/auth.rs`) counts the user's existing devices before
+inserting a new one and rejects the login with `403 Device limit reached` once
+the user is at the cap. An existing device re-authenticating reuses its row and
+is never blocked. The count and insert are not one transaction, so concurrent
+new-device logins can overshoot the cap by a small margin — acceptable for a
+coarse anti-abuse bound that still prevents unbounded growth. The value is
+validated like the other quotas (non-zero, fits `i64`).
+
+A user at the cap frees a slot by reclaiming a device. The
+`objects.source_device_id` foreign key is `ON DELETE SET NULL`, so deleting a
+device detaches the objects it created (their provenance pointer becomes NULL)
+rather than blocking the delete or cascading into the objects; the authoritative
+source device id still lives, signed, inside each object envelope. (A
+user-facing device-removal endpoint is not yet wired up — see
+`docs/revocation.md`.)
+
 ### What counts toward the quota
 
 The reserved byte amount for an object is computed by
@@ -317,7 +338,7 @@ override flag. The relevant sections:
 
 - `[rate_limit]` — the six bucket rates plus `prune_interval_secs`.
 - `[limits]` — `max_user_storage_bytes`, `max_user_objects`,
-  `max_file_blob_bytes`, `max_file_meta_ciphertext_bytes`,
+  `max_user_devices`, `max_file_blob_bytes`, `max_file_meta_ciphertext_bytes`,
   `max_object_meta_ciphertext_bytes`.
 - `[auth]` — `max_pending_challenges`, `max_pending_ws_tickets`,
   `challenge_ttl_secs`.

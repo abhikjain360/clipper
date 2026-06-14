@@ -8,7 +8,7 @@ use std::{
 
 pub use clipper_app_types::{
     AppState, AuthenticatedSession, ClipboardPayload, ConnectionStatus, DecryptedClipboardItem,
-    DecryptedFileItem, SavedProfile,
+    DecryptedFileItem, DeviceInfo, SavedProfile,
 };
 use clipper_core::{crypto, models::*};
 use futures_util::{StreamExt, stream};
@@ -368,6 +368,56 @@ impl SyncEngine {
         self.bump_version();
         info!("Logged out");
         Ok(())
+    }
+
+    // ── Devices ──
+
+    /// List the user's registered devices, marking the one this client is
+    /// logged in on (`is_current`) so the UI can keep it out of harm's way.
+    pub async fn list_devices(&self) -> Result<Vec<DeviceInfo>, ClientError> {
+        let current_device_id = self.current_device_id().await?;
+        let response = self.api.list_devices().await?;
+        Ok(response
+            .devices
+            .into_iter()
+            .map(|device| {
+                let id = device.id.to_string();
+                DeviceInfo {
+                    is_current: id == current_device_id,
+                    id,
+                    name: device.name,
+                    platform: device.platform,
+                    created_at: device.created_at,
+                    last_seen_at: device.last_seen_at,
+                }
+            })
+            .collect())
+    }
+
+    /// Remove one of the user's devices. Removing the current device revokes
+    /// this session server-side, so we tear down local auth state the way
+    /// `logout` does and let the UI return to the login screen.
+    pub async fn remove_device(&self, device_id: &str) -> Result<(), ClientError> {
+        let current_device_id = self.current_device_id().await?;
+        self.api.remove_device(device_id).await?;
+        if device_id == current_device_id {
+            self.api.clear_token();
+            *self.encryption_key.write().await = None;
+            *self.device_signing_key.write().await = None;
+            self.local_store.clear_memory().await;
+            *self.state.write().await = AppState::default();
+            info!("Removed the current device; local session cleared");
+        }
+        self.bump_version();
+        Ok(())
+    }
+
+    async fn current_device_id(&self) -> Result<String, ClientError> {
+        let state = self.state.read().await;
+        state
+            .device_id()
+            .map(ToString::to_string)
+            .ok_or(ClientError::NotAuthenticated)
     }
 
     // ── Clipboard ──
@@ -2010,8 +2060,17 @@ fn verify_object_list_item_envelope(item: &ObjectListItem) -> Result<(), ClientE
         }
     }
 
-    crypto::verify_object_envelope_signature(&item.source_device_signing_public_key, &item.envelope)
-        .map_err(ClientError::from)
+    // When the source device has been reclaimed the server cannot supply its
+    // signing key, so the Ed25519 provenance check is unavailable. The envelope
+    // is already cross-checked against the item above, and the export-key AEAD
+    // AAD (verified at decrypt time) is the real authenticity mechanism, so an
+    // absent key downgrades provenance verification rather than rejecting the
+    // object.
+    match &item.source_device_signing_public_key {
+        Some(public_key) => crypto::verify_object_envelope_signature(public_key, &item.envelope)
+            .map_err(ClientError::from),
+        None => Ok(()),
+    }
 }
 
 fn verify_payload_hash(
@@ -2190,7 +2249,7 @@ mod tests {
             payloads: payload_ids.iter().copied().map(descriptor).collect(),
             created_at: "2026-06-13T00:00:00Z".into(),
             source_device_id: device_id,
-            source_device_signing_public_key: public_key.to_vec(),
+            source_device_signing_public_key: Some(public_key.to_vec()),
             envelope: ObjectEnvelopeV1 { body, signature },
         }
     }
@@ -2221,5 +2280,50 @@ mod tests {
         // ceiling and not an off-by-one that rejects valid lists.
         let item = signed_item_with_payload_count(MAX_OBJECT_PAYLOAD_ENTRIES);
         verify_object_list_item_envelope(&item).expect("payload count at the cap must verify");
+    }
+
+    #[test]
+    fn envelope_verification_accepts_reclaimed_source_device_without_key() {
+        // When the source device has been reclaimed the server cannot return its
+        // signing key, so provenance is unverifiable. The object must still be
+        // accepted (the AEAD AAD is the real authenticity mechanism); only the
+        // Ed25519 provenance check is skipped. A tampered signature with no key
+        // present must therefore NOT cause rejection here.
+        let mut item = signed_item_with_payload_count(1);
+        item.source_device_signing_public_key = None;
+        if let Some(last) = item.envelope.signature.last_mut() {
+            *last ^= 0x01;
+        }
+        verify_object_list_item_envelope(&item)
+            .expect("a reclaimed-device item with no key must still verify");
+    }
+
+    #[test]
+    fn envelope_verification_rejects_bad_signature_when_key_present() {
+        // The complement: while the source device still exists, a tampered
+        // signature must be rejected, proving the key-present path still verifies.
+        let mut item = signed_item_with_payload_count(1);
+        if let Some(last) = item.envelope.signature.last_mut() {
+            *last ^= 0x01;
+        }
+        verify_object_list_item_envelope(&item)
+            .expect_err("a tampered signature with a key present must be rejected");
+    }
+
+    #[tokio::test]
+    async fn device_ops_require_authentication() {
+        // Both device operations must short-circuit with NotAuthenticated before
+        // any network call when there is no active session.
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", std::env::temp_dir());
+        assert!(matches!(
+            engine.list_devices().await,
+            Err(ClientError::NotAuthenticated),
+        ));
+        assert!(matches!(
+            engine
+                .remove_device("00000000-0000-0000-0000-000000000000")
+                .await,
+            Err(ClientError::NotAuthenticated),
+        ));
     }
 }

@@ -35,6 +35,20 @@ pub struct DecryptedFileItem {
     pub source_device_id: String,
 }
 
+/// One of the user's registered devices, for the device-management screen.
+/// `is_current` marks the device this client is logged in on, so the UI can
+/// steer the user to "Log Out" instead of revoking the session they are using.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub platform: String,
+    pub created_at: String,
+    pub last_seen_at: String,
+    pub is_current: bool,
+}
+
 /// Connection status visible to the UI.
 #[derive(
     Debug, Clone, Default, PartialEq, Serialize, Deserialize, AsRefStr, Display, EnumString,

@@ -6,6 +6,7 @@ import {
   type ClipboardPayload as NativeClipboardPayload,
   type DecryptedClipboardItem,
   type DecryptedFileItem,
+  type DeviceInfo as NativeDeviceInfo,
 } from "./generated/clipper_app_types";
 import {
   MobileClipperClient,
@@ -17,6 +18,7 @@ import type {
   ClipboardPayload,
   ClipperBackend,
   ConnectionStatus,
+  DeviceInfo,
   FileItem,
 } from "@clipper/shared";
 
@@ -30,12 +32,14 @@ export function createMobileBackend(
     deleteFile: async (fileId) => client.deleteFile(fileId),
     downloadFileBytes: async (fileId) => new Uint8Array(client.downloadFileBytes(fileId)),
     getState: async () => mapAppState(client.getState()),
+    listDevices: async () => client.listDevices().map(mapDeviceInfo),
     login: async (passphrase, username, deviceName, serverUrl) =>
       client.login(passphrase, username, deviceName, serverUrl),
     logout: async () => client.logout(),
     refresh: async () => client.refresh(),
     register: async (accessKey, username, passphrase, deviceName, serverUrl) =>
       client.register(accessKey, username, passphrase, deviceName, serverUrl),
+    removeDevice: async (deviceId) => client.removeDevice(deviceId),
     sendClipboardPayload: async (mimeType, bytes) =>
       client.sendClipboardPayload(mimeType, arrayBufferFrom(bytes)),
     sendClipboardText: async (text) => client.sendClipboardText(text),
@@ -95,6 +99,17 @@ function mapFileItem(item: DecryptedFileItem): FileItem {
     id: item.id,
     mime_type: item.mimeType,
     source_device_id: item.sourceDeviceId,
+  };
+}
+
+function mapDeviceInfo(device: NativeDeviceInfo): DeviceInfo {
+  return {
+    created_at: device.createdAt,
+    id: device.id,
+    is_current: device.isCurrent,
+    last_seen_at: device.lastSeenAt,
+    name: device.name,
+    platform: device.platform,
   };
 }
 

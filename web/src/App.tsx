@@ -7,9 +7,10 @@ import {
     Folder,
     LogOut,
     RefreshCw,
+    Smartphone,
     Trash2,
 } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Route, Switch, useLocation } from "wouter";
 import {
     Button,
@@ -33,7 +34,7 @@ import {
     readClipboardText,
     writeClipboardText,
 } from "./backend";
-import type { AppState, ClipboardItem, FileItem } from "@clipper/shared";
+import type { AppState, ClipboardItem, DeviceInfo, FileItem } from "@clipper/shared";
 
 export default function App() {
     const [state, setState] = useState<AppState | null>(null);
@@ -291,7 +292,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
             <YStack width="100%" maxW={1100} self="center" p="$4" gap="$3" flex={1}>
                 <XStack gap="$2" flexWrap="wrap">
                     <Button
-                        theme={location === "/files" ? undefined : "blue"}
+                        theme={location === "/" ? "blue" : undefined}
                         icon={<Clipboard size={16} />}
                         onPress={() => setLocation("/")}
                     >
@@ -304,6 +305,13 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                     >
                         Files
                     </Button>
+                    <Button
+                        theme={location === "/devices" ? "blue" : undefined}
+                        icon={<Smartphone size={16} />}
+                        onPress={() => setLocation("/devices")}
+                    >
+                        Devices
+                    </Button>
                 </XStack>
 
                 {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
@@ -311,6 +319,9 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                 <Switch>
                     <Route path="/files">
                         <FilesPanel files={state.files} onState={onState} onError={setError} />
+                    </Route>
+                    <Route path="/devices">
+                        <DevicesPanel onError={setError} />
                     </Route>
                     <Route>
                         <ClipboardPanel
@@ -569,6 +580,100 @@ function FilesPanel({
                                             onPress={() => void deleteFile(file)}
                                         />
                                     </XStack>
+                                </XStack>
+                            </ListCard>
+                        ))}
+                    </YStack>
+                </ScrollView>
+            )}
+        </YStack>
+    );
+}
+
+function DevicesPanel({ onError }: { onError: (error: string | null) => void }) {
+    const [devices, setDevices] = useState<DeviceInfo[] | null>(null);
+    const [busy, setBusy] = useState(false);
+
+    const loadDevices = useCallback(async () => {
+        setBusy(true);
+        onError(null);
+        try {
+            const backend = await clipperBackend();
+            setDevices(await backend.listDevices());
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        } finally {
+            setBusy(false);
+        }
+    }, [onError]);
+
+    useEffect(() => {
+        void loadDevices();
+    }, [loadDevices]);
+
+    async function removeDevice(device: DeviceInfo) {
+        onError(null);
+        try {
+            const backend = await clipperBackend();
+            await backend.removeDevice(device.id);
+            await loadDevices();
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        }
+    }
+
+    return (
+        <YStack gap="$3" flex={1}>
+            <XStack justify="space-between" items="center" gap="$2" flexWrap="wrap">
+                <H2 size="$6">Devices</H2>
+                <Button
+                    icon={busy ? <Spinner /> : <RefreshCw size={16} />}
+                    onPress={() => void loadDevices()}
+                    disabled={busy}
+                >
+                    Refresh
+                </Button>
+            </XStack>
+
+            <Paragraph size="$2" color="#9aa4ad">
+                Removing a device signs it out everywhere and revokes its access. The objects it
+                shared are kept.
+            </Paragraph>
+
+            {devices === null ? (
+                <EmptyState icon={<Spinner />} title="Loading devices..." />
+            ) : devices.length === 0 ? (
+                <EmptyState icon={<Smartphone size={28} />} title="No devices" />
+            ) : (
+                <ScrollView>
+                    <YStack gap="$2" pb="$4">
+                        {devices.map((device) => (
+                            <ListCard key={device.id}>
+                                <XStack items="center" justify="space-between" gap="$3">
+                                    <XStack items="center" gap="$3" flex={1}>
+                                        <Smartphone size={22} color="#6fb4ff" />
+                                        <YStack flex={1} gap="$1">
+                                            <XStack items="center" gap="$2" flexWrap="wrap">
+                                                <Text numberOfLines={1}>{device.name}</Text>
+                                                {device.is_current && (
+                                                    <Paragraph size="$1" color="#6fb4ff">
+                                                        This device
+                                                    </Paragraph>
+                                                )}
+                                            </XStack>
+                                            <Paragraph size="$2" color="#9aa4ad">
+                                                {device.platform} - last seen{" "}
+                                                {formatRelativeTime(device.last_seen_at)}
+                                            </Paragraph>
+                                        </YStack>
+                                    </XStack>
+                                    {!device.is_current && (
+                                        <Button
+                                            size="$3"
+                                            icon={<Trash2 size={16} color="#ff6b6b" />}
+                                            onPress={() => void removeDevice(device)}
+                                        />
+                                    )}
                                 </XStack>
                             </ListCard>
                         ))}

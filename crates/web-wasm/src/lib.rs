@@ -186,6 +186,23 @@ pub fn delete_file(file_id: String) -> Promise {
     })
 }
 
+#[wasm_bindgen(js_name = listDevices)]
+pub fn list_devices() -> Promise {
+    ok_promise(async {
+        let devices = engine().list_devices().await.map_err(js_error)?;
+        let value = serde_wasm_bindgen::to_value(&devices).map_err(js_error)?;
+        Ok(value)
+    })
+}
+
+#[wasm_bindgen(js_name = removeDevice)]
+pub fn remove_device(device_id: String) -> Promise {
+    ok_promise(async move {
+        engine().remove_device(&device_id).await.map_err(js_error)?;
+        Ok(JsValue::UNDEFINED)
+    })
+}
+
 fn engine() -> Arc<SyncEngine> {
     Arc::clone(&ENGINE)
 }

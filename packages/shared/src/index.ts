@@ -4,5 +4,6 @@ export type {
   ClipboardPayload,
   ClipperBackend,
   ConnectionStatus,
+  DeviceInfo,
   FileItem,
 } from "./types";

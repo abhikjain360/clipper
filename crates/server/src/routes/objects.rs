@@ -250,7 +250,7 @@ pub async fn init_object(
             created_at: Set(created_at_str.to_owned()),
             updated_at: Set(updated_at_str.to_owned()),
             expires_at: Set(expires_at),
-            source_device_id: Set(device_id),
+            source_device_id: Set(Some(device_id)),
             envelope: Set(envelope_bytes),
             status: Set("pending".into()),
             created_seq: Set(None),
@@ -843,7 +843,7 @@ struct ListedObjectRow {
     meta_ciphertext: Vec<u8>,
     meta_nonce: Vec<u8>,
     created_at: String,
-    source_device_id: Uuid,
+    source_device_id: Option<Uuid>,
     envelope: Vec<u8>,
 }
 
@@ -862,7 +862,7 @@ struct ListedPayloadRow {
 struct ObjectUploadRow {
     id: Uuid,
     kind: String,
-    source_device_id: Uuid,
+    source_device_id: Option<Uuid>,
     status: String,
     created_seq: Option<i64>,
 }
@@ -1179,9 +1179,11 @@ async fn object_list_items(
             .push(payload);
     }
 
+    // Objects whose source device was reclaimed (FK SET NULL) contribute no id
+    // here; their signing key is simply absent from the response below.
     let source_device_ids: Vec<Uuid> = objects
         .iter()
-        .map(|object| object.source_device_id)
+        .filter_map(|object| object.source_device_id)
         .collect();
     let device_public_keys = if source_device_ids.is_empty() {
         HashMap::new()
@@ -1217,25 +1219,34 @@ async fn object_list_items(
             );
             ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
-        let envelope = postcard::from_bytes(&object.envelope).map_err(|e| {
-            error!(
-                object_id = %object.id,
-                error = %e,
-                "Stored object envelope could not be decoded",
-            );
-            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-        })?;
-        let source_device_signing_public_key = device_public_keys
-            .get(&object.source_device_id)
-            .cloned()
-            .ok_or_else(|| {
+        let envelope: clipper_core::models::ObjectEnvelopeV1 =
+            postcard::from_bytes(&object.envelope).map_err(|e| {
                 error!(
                     object_id = %object.id,
-                    source_device_id = %object.source_device_id,
-                    "Object source device row is missing while listing objects",
+                    error = %e,
+                    "Stored object envelope could not be decoded",
                 );
                 ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
             })?;
+        let source_device_signing_public_key = match object.source_device_id {
+            Some(source_device_id) => Some(
+                device_public_keys
+                    .get(&source_device_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        error!(
+                            object_id = %object.id,
+                            source_device_id = %source_device_id,
+                            "Object source device row is missing while listing objects",
+                        );
+                        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+                    })?,
+            ),
+            // Source device reclaimed: no key to attest provenance. The client
+            // falls back to the export-key AEAD AAD (the real authenticity
+            // mechanism) and skips the Ed25519 provenance check.
+            None => None,
+        };
         items.push(ObjectListItem {
             id: object.id.into(),
             kind: object.kind.parse().map_err(|_| {
@@ -1261,7 +1272,9 @@ async fn object_list_items(
                 })
                 .collect(),
             created_at: object.created_at.clone(),
-            source_device_id: object.source_device_id.into(),
+            // Report the source device from the signed envelope body, which
+            // survives device reclamation, rather than the nullable DB column.
+            source_device_id: envelope.body.source_device_id,
             source_device_signing_public_key,
             envelope,
         });
@@ -1718,11 +1731,11 @@ async fn object_for_upload(
             ApiError::from_code_with_message(ApiErrorCode::ObjectNotFound, "Object not found")
         })?;
 
-    if object.source_device_id != device_id {
+    if object.source_device_id != Some(device_id) {
         warn!(
             object_id = %object_id,
             user_id = %user_id,
-            source_device_id = %object.source_device_id,
+            source_device_id = ?object.source_device_id,
             request_device_id = %device_id,
             "Rejected object upload mutation from non-source device",
         );
@@ -1823,7 +1836,7 @@ async fn idempotent_init_response(
 ) -> Result<ObjectInitResponse, ApiError> {
     let object_id = req.id.into_uuid();
     if existing.user_id != user_id
-        || existing.source_device_id != device_id
+        || existing.source_device_id != Some(device_id)
         || existing.kind != req.kind.to_string()
         || existing.meta_nonce != req.meta_nonce
         || existing.meta_ciphertext != req.meta_ciphertext
@@ -2329,7 +2342,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::entity::{access_keys, devices, users};
+    use crate::entity::{access_keys, devices, objects, users};
 
     #[test]
     fn validate_object_created_at_bounds_the_window() {
@@ -2731,6 +2744,76 @@ mod tests {
         .expect("download");
         let bytes = to_bytes(body, usize::MAX).await.expect("bytes");
         assert_eq!(&bytes[..], ciphertext);
+    }
+
+    // Reclaiming a device must not take its objects with it. The source-device
+    // FK is ON DELETE SET NULL, so deleting the device detaches the provenance
+    // pointer rather than blocking (the old ON DELETE RESTRICT) or cascade-
+    // deleting: the object survives, its source_device_id becomes NULL, and the
+    // list response simply omits the now-unavailable source-device signing key.
+    #[tokio::test]
+    async fn reclaiming_source_device_detaches_objects_instead_of_blocking() {
+        let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
+        let object_id = Uuid::now_v7().to_string();
+        let payload_id = Uuid::now_v7().to_string();
+        let ciphertext = b"encrypted clipboard payload";
+
+        init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                object_id.clone(),
+                payload_id,
+                ObjectKind::Clipboard,
+                ciphertext,
+                true,
+                device_id,
+                &signing_secret_key,
+            )),
+        )
+        .await
+        .expect("init");
+
+        // Deleting the referenced device is not blocked by the object.
+        let deleted = devices::Entity::delete_by_id(device_id)
+            .exec(state.db())
+            .await
+            .expect("device delete is not blocked by referencing objects");
+        assert_eq!(deleted.rows_affected, 1);
+
+        // The object survives with a detached (NULL) source device.
+        let object_uuid: Uuid = object_id.parse().expect("object id");
+        let object = objects::Entity::find_by_id(object_uuid)
+            .one(state.db())
+            .await
+            .expect("query object")
+            .expect("object still exists after device reclamation");
+        assert_eq!(object.source_device_id, None);
+
+        // Listing still returns the object; its source device id comes from the
+        // signed envelope, but the signing key is now absent.
+        let Postcard(list) = list_objects(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Query(ObjectListQuery {
+                kind: Some("clipboard".into()),
+                limit: None,
+                created_seq_lte: None,
+                after: None,
+            }),
+        )
+        .await
+        .expect("list");
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].id.to_string(), object_id);
+        assert_eq!(
+            list.items[0].source_device_id.to_string(),
+            device_id.to_string()
+        );
+        assert!(list.items[0].source_device_signing_public_key.is_none());
     }
 
     #[tokio::test]

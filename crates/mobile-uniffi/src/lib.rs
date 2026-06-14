@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use clipper_app_types::{AppState, ClipboardPayload};
+use clipper_app_types::{AppState, ClipboardPayload, DeviceInfo};
 use clipper_client::{
     api_client::ClientError,
     engine::{SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
@@ -215,6 +215,20 @@ impl MobileClipperClient {
         self.block_on({
             let engine = Arc::clone(&self.engine);
             async move { engine.delete_file(&file_id).await }
+        })
+    }
+
+    pub fn list_devices(&self) -> Result<Vec<DeviceInfo>, MobileError> {
+        self.block_on({
+            let engine = Arc::clone(&self.engine);
+            async move { engine.list_devices().await }
+        })
+    }
+
+    pub fn remove_device(&self, device_id: String) -> Result<(), MobileError> {
+        self.block_on({
+            let engine = Arc::clone(&self.engine);
+            async move { engine.remove_device(&device_id).await }
         })
     }
 }

@@ -23,7 +23,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{Method, header},
     middleware,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use clap::{Parser, Subcommand};
 use tower_http::{
@@ -292,6 +292,11 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
     // private routes
     let authed = Router::new()
         .route("/api/auth/logout", post(routes::auth::logout))
+        .route("/api/auth/devices", get(routes::auth::list_devices))
+        .route(
+            "/api/auth/devices/{id}",
+            delete(routes::auth::delete_device),
+        )
         .route("/api/ws-ticket", post(ws::mint_ws_ticket))
         .route("/api/objects/init", post(routes::objects::init_object))
         .route(

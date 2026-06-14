@@ -69,7 +69,8 @@ Every object read and mutation filters on `objects::Column::UserId`:
   ownership check. Only `file` objects are deletable.
 - `object_list_items` resolves source-device signing keys with
   `devices::Column::UserId.eq(user_id)`, so it never surfaces another user's
-  device key.
+  device key. Objects whose `source_device_id` is NULL (source device reclaimed)
+  contribute no lookup and return `source_device_signing_public_key = None`.
 
 ### Payloads — ownership proven through the parent object
 
@@ -162,7 +163,9 @@ Foreign keys that exist:
 - `sessions.user_id` → `users(id)` and `sessions.device_id` → `devices(id)`
   (both `ON DELETE CASCADE`).
 - `objects.user_id` → `users(id)` (`ON DELETE CASCADE`) and
-  `objects.source_device_id` → `devices(id)` (`ON DELETE RESTRICT`).
+  `objects.source_device_id` → `devices(id)` (nullable, `ON DELETE SET NULL`):
+  reclaiming a device detaches the objects it created rather than blocking the
+  delete or cascading into them.
 - `object_payloads.object_id` → `objects(id)` (`ON DELETE CASCADE`).
 - `event_log.user_id` → `users(id)` (`ON DELETE CASCADE`).
 - `users.access_key_hash` → `access_keys(key_hash)` (`ON DELETE RESTRICT`).

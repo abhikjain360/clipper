@@ -7,7 +7,7 @@
 //! response, and event payloads cannot drift.
 
 use clipper_api_types::{ApiErrorCode, ErrorResponse};
-use clipper_app_types::AppState;
+use clipper_app_types::{AppState, DeviceInfo};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -68,6 +68,8 @@ pub enum DaemonCommand {
     UploadFile(UploadFileParams),
     DownloadFile(DownloadFileParams),
     DeleteFile(DeleteFileParams),
+    ListDevices,
+    RemoveDevice(RemoveDeviceParams),
     Refresh,
 }
 
@@ -136,6 +138,16 @@ pub struct DownloadFileParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteFileParams {
     pub file_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveDeviceParams {
+    pub device_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceListResult {
+    pub devices: Vec<DeviceInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

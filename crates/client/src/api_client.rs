@@ -129,6 +129,13 @@ impl ApiClient {
         *self.token.write().expect("api token lock poisoned") = token;
     }
 
+    /// Drop the cached bearer token without a server round-trip. Used when the
+    /// current session has already been invalidated server-side (e.g. the user
+    /// removed the device they are logged in on).
+    pub fn clear_token(&self) {
+        self.set_token(None);
+    }
+
     async fn checked_response(resp: reqwest::Response) -> Result<reqwest::Response, ClientError> {
         if !resp.status().is_success() {
             return Err(api_error_from_response(resp).await);
@@ -405,6 +412,31 @@ impl ApiClient {
         }
         self.set_token(None);
         Ok(())
+    }
+
+    // ── Devices ──
+
+    pub async fn list_devices(&self) -> Result<DeviceListResponse, ClientError> {
+        let resp = self
+            .http
+            .get(self.api_url(&["auth", "devices"])?)
+            .header("Authorization", self.auth_header().unwrap_or_default())
+            .send()
+            .await?;
+
+        Self::postcard_response(resp).await
+    }
+
+    pub async fn remove_device(&self, device_id: &str) -> Result<OkResponse, ClientError> {
+        let url = self.api_url(&["auth", "devices", device_id])?;
+        let resp = self
+            .http
+            .delete(url)
+            .header("Authorization", self.auth_header().unwrap_or_default())
+            .send()
+            .await?;
+
+        Self::postcard_response(resp).await
     }
 
     // ── Objects ──

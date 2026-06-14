@@ -25,9 +25,9 @@ use crate::{
     keychain::{self, Credentials},
     protocol::{
         AuthChallenge, AuthenticateResult, ClipboardPayloadResult, CopyToLocalResult,
-        DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, IPC_AUTH_NONCE_BYTES,
-        IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams, RegisterParams, RegisterResult,
-        UploadFileResult, ipc_client_auth_message, ipc_daemon_auth_message,
+        DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, DeviceListResult,
+        IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams, RegisterParams,
+        RegisterResult, UploadFileResult, ipc_client_auth_message, ipc_daemon_auth_message,
     },
 };
 
@@ -394,6 +394,10 @@ async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> Daemo
             cmd_download_file(id, params.file_id, params.target_path, engine).await
         }
         DaemonCommand::DeleteFile(params) => cmd_delete_file(id, params.file_id, engine).await,
+        DaemonCommand::ListDevices => cmd_list_devices(id, engine).await,
+        DaemonCommand::RemoveDevice(params) => {
+            cmd_remove_device(id, params.device_id, engine).await
+        }
         DaemonCommand::Refresh => cmd_refresh(id, engine).await,
     }
 }
@@ -618,6 +622,24 @@ async fn cmd_download_file(
 
 async fn cmd_delete_file(id: String, file_id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
     match engine.delete_file(&file_id).await {
+        Ok(()) => DaemonResponse::success(id, None),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_list_devices(id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
+    match engine.list_devices().await {
+        Ok(devices) => json_success(id, DeviceListResult { devices }),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_remove_device(
+    id: String,
+    device_id: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.remove_device(&device_id).await {
         Ok(()) => DaemonResponse::success(id, None),
         Err(e) => client_error(id, e),
     }
