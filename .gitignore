@@ -29,9 +29,12 @@ web/src-tauri/gen/
 web/src/generated/
 mobile/node_modules/
 mobile/.expo/
+mobile/.tamagui/
 mobile/android/
 mobile/ios/
 packages/*/node_modules/
+packages/mobile-bridge/android/.cxx/
+packages/mobile-bridge/android/build/
 packages/mobile-bridge/android/CMakeLists.txt
 packages/mobile-bridge/android/build.gradle
 packages/mobile-bridge/android/cpp-adapter.cpp
