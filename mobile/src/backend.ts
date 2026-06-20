@@ -1,10 +1,21 @@
 import * as Clipboard from "expo-clipboard";
 import * as DocumentPicker from "expo-document-picker";
-import { File, Paths } from "expo-file-system";
+import { Directory, File, Paths } from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { createMobileBackend } from "@clipper/mobile-bridge/adapter";
 
-export const backend = createMobileBackend();
+export const backend = createMobileBackend({ dataDir: resolveDataDir() });
+
+// The native engine persists its SQLite store and blobs under this path.
+// expo-file-system reports locations as `file://` URIs, but the Rust side
+// (`resolve_data_dir`) needs a bare absolute path, so strip the scheme. The
+// document directory is app-private and survives across launches (unlike the
+// cache directory), and has no platform default on Android — hence we must pass
+// it explicitly rather than relying on the native fallback.
+function resolveDataDir(): string {
+  const dir = new Directory(Paths.document, "clipper-mobile");
+  return decodeURIComponent(dir.uri.replace(/^file:\/\//, ""));
+}
 
 export async function readClipboardText(): Promise<string> {
   return await Clipboard.getStringAsync();

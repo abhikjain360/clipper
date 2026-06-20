@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use clipper_app_types::{AppState, ClipboardPayload, DeviceInfo};
+use clipper_app_types::{AppState, ClipboardPayload, CollabItem, DeviceInfo};
 use clipper_client::{
     api_client::ClientError,
     engine::{SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
@@ -204,6 +204,19 @@ impl MobileClipperClient {
     pub async fn remove_device(&self, device_id: String) -> Result<(), MobileError> {
         self.engine.remove_device(&device_id).await?;
         Ok(())
+    }
+
+    pub async fn create_collab_doc(&self) -> Result<CollabItem, MobileError> {
+        Ok(self.engine.create_collab_doc().await?)
+    }
+
+    pub async fn delete_collab_doc(&self, object_id: String) -> Result<(), MobileError> {
+        self.engine.delete_collab_doc(&object_id).await?;
+        Ok(())
+    }
+
+    pub async fn get_collab_doc_meta(&self, object_id: String) -> Result<CollabItem, MobileError> {
+        Ok(self.engine.get_collab_doc_meta(&object_id).await?)
     }
 }
 

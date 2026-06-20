@@ -4,6 +4,7 @@ import {
   ConnectionStatus as NativeConnectionStatus,
   type AppState as NativeAppState,
   type ClipboardPayload as NativeClipboardPayload,
+  type CollabItem as NativeCollabItem,
   type DecryptedClipboardItem,
   type DecryptedFileItem,
   type DeviceInfo as NativeDeviceInfo,
@@ -17,14 +18,31 @@ import type {
   ClipboardItem,
   ClipboardPayload,
   ClipperBackend,
+  CollabItem,
   ConnectionStatus,
   DeviceInfo,
   FileItem,
 } from "@clipper/shared";
 
-export function createMobileBackend(
-  client: MobileClipperClientLike = MobileClipperClient.newWithDefaultServer(),
-): ClipperBackend {
+export interface CreateMobileBackendOptions {
+  /**
+   * Absolute filesystem path for the engine's local store. Required on Android:
+   * the native `dirs::data_dir()` returns `None` there, so the Rust side cannot
+   * resolve a relative/empty path and fails with `DataDirUnavailable`. The
+   * caller (which owns the platform filesystem API) must supply this.
+   */
+  dataDir?: string;
+  /** Inject a pre-built native client (tests); takes precedence over `dataDir`. */
+  client?: MobileClipperClientLike;
+}
+
+export function createMobileBackend(options: CreateMobileBackendOptions = {}): ClipperBackend {
+  // Empty strings let the Rust constructor apply its own defaults (server URL,
+  // device name) via `non_empty_or_default`; only `dataDir` must be a real
+  // absolute path on Android.
+  const client =
+    options.client ??
+    new MobileClipperClient("", options.dataDir ?? "", "Android-Clipper", "android");
   // Every networked method on the native client is now an async UniFFI export
   // mapped to a JS Promise, so awaiting it yields the React Native JS thread for
   // the whole call instead of blocking it (the former busy-poll/`block_on`
@@ -32,9 +50,12 @@ export function createMobileBackend(
   return {
     clipboardPayload: async (id) => mapClipboardPayload(await client.clipboardPayload(id)),
     connect: async () => client.connect(),
+    createCollabDoc: async () => mapCollabItem(await client.createCollabDoc()),
     defaultServerUrl: () => client.defaultServerUrl(),
+    deleteCollabDoc: async (objectId) => client.deleteCollabDoc(objectId),
     deleteFile: async (fileId) => client.deleteFile(fileId),
     downloadFileBytes: async (fileId) => new Uint8Array(await client.downloadFileBytes(fileId)),
+    getCollabDocMeta: async (objectId) => mapCollabItem(await client.getCollabDocMeta(objectId)),
     getState: async () => mapAppState(await client.getState()),
     listDevices: async () => (await client.listDevices()).map(mapDeviceInfo),
     login: async (passphrase, username, deviceName, serverUrl) =>
@@ -64,6 +85,7 @@ export default createMobileBackend;
 function mapAppState(state: NativeAppState): AppState {
   return {
     clipboard_items: state.clipboardItems.map(mapClipboardItem),
+    collab_docs: state.collabDocs.map(mapCollabItem),
     connection_status: mapConnectionStatus(state.connectionStatus),
     error: state.error ?? null,
     files: state.files.map(mapFileItem),
@@ -80,6 +102,15 @@ function mapAppState(state: NativeAppState): AppState {
           username: state.session.username,
         }
       : null,
+  };
+}
+
+function mapCollabItem(item: NativeCollabItem): CollabItem {
+  return {
+    created_at: item.createdAt,
+    id: item.id,
+    share_token: item.shareToken,
+    updated_at: item.updatedAt,
   };
 }
 

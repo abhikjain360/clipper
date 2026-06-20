@@ -9,3 +9,5 @@ overrides:
 allowBuilds:
   esbuild: true
   msgpackr-extract: true
+patchedDependencies:
+  uniffi-bindgen-react-native@0.31.0-3: patches/uniffi-bindgen-react-native@0.31.0-3.patch

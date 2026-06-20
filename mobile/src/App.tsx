@@ -11,7 +11,7 @@ import {
   Trash2,
 } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { SafeAreaView, StatusBar } from "react-native";
+import { Platform, SafeAreaView, StatusBar } from "react-native";
 import { TamaguiProvider } from "tamagui";
 import {
   Button,
@@ -98,6 +98,15 @@ function ClipperApp() {
   return <HomeScreen state={state} onState={setState} />;
 }
 
+// Dev builds pre-fill a server URL for convenience; production ships no default,
+// so the field starts empty and the user must enter their own server. On the
+// Android emulator the host loopback is reachable via 10.0.2.2 (127.0.0.1 would
+// target the emulator itself); the iOS simulator reaches the host on 127.0.0.1.
+function devDefaultServerUrl(): string {
+  if (!__DEV__) return "";
+  return Platform.OS === "android" ? "http://10.0.2.2:8787" : "http://127.0.0.1:8787";
+}
+
 function LoginScreen({
   initialUsername,
   onState,
@@ -106,19 +115,13 @@ function LoginScreen({
   onState: (state: AppState) => void;
 }) {
   const [mode, setMode] = useState<"login" | "register">("login");
-  const [serverUrl, setServerUrl] = useState("");
+  const [serverUrl, setServerUrl] = useState(devDefaultServerUrl());
   const [username, setUsername] = useState(initialUsername);
   const [passphrase, setPassphrase] = useState("");
   const [accessKey, setAccessKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busyRef = useRef(false);
-
-  useEffect(() => {
-    void Promise.resolve(backend.defaultServerUrl())
-      .then(setServerUrl)
-      .catch(() => setServerUrl("http://127.0.0.1:8787"));
-  }, []);
 
   async function authenticate() {
     if (busyRef.current) return;

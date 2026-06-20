@@ -1,0 +1,24 @@
+diff --git a/crates/ubrn_cli/templates/jsi/android/CMakeLists.txt b/crates/ubrn_cli/templates/jsi/android/CMakeLists.txt
+--- a/crates/ubrn_cli/templates/jsi/android/CMakeLists.txt
++++ b/crates/ubrn_cli/templates/jsi/android/CMakeLists.txt
+@@ -13,15 +13,15 @@
+ set (CMAKE_VERBOSE_MAKEFILE ON)
+ set (CMAKE_CXX_STANDARD 17)
+
+-# Resolve the path to the uniffi-bindgen-react-native package
++# Resolve the path to the uniffi-bindgen-react-native package.
++# Use the main CJS entry point (always exported) and navigate to the package
++# root; ./package.json is absent from the exports map and fails strict
++# resolution in Node 12+.
+ execute_process(
+-    COMMAND node -p "require.resolve('uniffi-bindgen-react-native/package.json')"
++    COMMAND node -p "require('path').resolve(require.resolve('uniffi-bindgen-react-native'), '../../../../')"
+     OUTPUT_VARIABLE UNIFFI_BINDGEN_PATH
+     OUTPUT_STRIP_TRAILING_WHITESPACE
+ )
+-# Get the directory; get_filename_component and cmake_path will normalize
+-# paths with Windows path separators.
+-get_filename_component(UNIFFI_BINDGEN_PATH "${UNIFFI_BINDGEN_PATH}" DIRECTORY)
+
+ # Specifies a path to native header files.
+ include_directories(
