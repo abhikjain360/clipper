@@ -32,17 +32,41 @@ export interface CreateMobileBackendOptions {
    * caller (which owns the platform filesystem API) must supply this.
    */
   dataDir?: string;
-  /** Inject a pre-built native client (tests); takes precedence over `dataDir`. */
+  /**
+   * Server base URL the native client is pinned to at construction. The engine
+   * fixes its base URL at init, so this must match the URL later passed to
+   * `login`/`register`; the app sources both from one place.
+   */
+  serverUrl?: string;
+  /** Inject a pre-built native client (tests); takes precedence over the above. */
   client?: MobileClipperClientLike;
 }
 
 export function createMobileBackend(options: CreateMobileBackendOptions = {}): ClipperBackend {
   // Empty strings let the Rust constructor apply its own defaults (server URL,
-  // device name) via `non_empty_or_default`; only `dataDir` must be a real
-  // absolute path on Android.
-  const client =
-    options.client ??
-    new MobileClipperClient("", options.dataDir ?? "", "Android-Clipper", "android");
+  // device name) via `non_empty_or_default`; `dataDir` must be a real absolute
+  // path on Android.
+  const dataDir = options.dataDir ?? "";
+  const injected = options.client != null;
+  let currentServerUrl = options.serverUrl ?? "";
+  let client =
+    options.client ?? new MobileClipperClient(currentServerUrl, dataDir, "Android-Clipper", "android");
+
+  // The native client pins its server URL at construction: the engine fixes its
+  // base URL at init and `login`/`register` reject a different URL. Production
+  // ships no default, so the user supplies the server at auth time — re-point the
+  // client by reconstructing it (a fresh engine over the same data dir, the
+  // in-process analog of the daemon respawning) the first time the URL differs.
+  // The caller restarts its state-watch loop when the session changes, so it
+  // follows the new client. An injected client (tests) is never replaced.
+  function clientFor(serverUrl: string): MobileClipperClientLike {
+    const target = serverUrl.trim();
+    if (!injected && target.length > 0 && target !== currentServerUrl) {
+      client = new MobileClipperClient(target, dataDir, "Android-Clipper", "android");
+      currentServerUrl = target;
+    }
+    return client;
+  }
   // Every networked method on the native client is now an async UniFFI export
   // mapped to a JS Promise, so awaiting it yields the React Native JS thread for
   // the whole call instead of blocking it (the former busy-poll/`block_on`
@@ -59,11 +83,11 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     getState: async () => mapAppState(await client.getState()),
     listDevices: async () => (await client.listDevices()).map(mapDeviceInfo),
     login: async (passphrase, username, deviceName, serverUrl) =>
-      client.login(passphrase, username, deviceName, serverUrl),
+      clientFor(serverUrl).login(passphrase, username, deviceName, serverUrl),
     logout: async () => client.logout(),
     refresh: async () => client.refresh(),
     register: async (accessKey, username, passphrase, deviceName, serverUrl) =>
-      client.register(accessKey, username, passphrase, deviceName, serverUrl),
+      clientFor(serverUrl).register(accessKey, username, passphrase, deviceName, serverUrl),
     removeDevice: async (deviceId) => client.removeDevice(deviceId),
     sendClipboardPayload: async (mimeType, bytes) =>
       client.sendClipboardPayload(mimeType, arrayBufferFrom(bytes)),

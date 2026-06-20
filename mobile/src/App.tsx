@@ -2,6 +2,9 @@ import {
   Clipboard,
   Copy,
   Download,
+  FileCode,
+  FilePlus,
+  FileText,
   FileUp,
   Files,
   Folder,
@@ -11,7 +14,7 @@ import {
   Trash2,
 } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Platform, SafeAreaView, StatusBar } from "react-native";
+import { SafeAreaView, StatusBar } from "react-native";
 import { TamaguiProvider } from "tamagui";
 import {
   Button,
@@ -28,9 +31,11 @@ import {
   XStack,
   YStack,
 } from "tamagui";
-import type { AppState, ClipboardItem, DeviceInfo, FileItem } from "@clipper/shared";
+import type { AppState, ClipboardItem, CollabItem, DeviceInfo, FileItem } from "@clipper/shared";
 import {
   backend,
+  collabShareLink,
+  devDefaultServerUrl,
   formatBackendError,
   pickUploadFile,
   readClipboardText,
@@ -39,7 +44,7 @@ import {
 } from "./backend";
 import tamaguiConfig from "./tamagui.config";
 
-type TabName = "clipboard" | "files" | "devices";
+type TabName = "clipboard" | "files" | "devices" | "collab";
 
 export default function App() {
   return (
@@ -55,6 +60,10 @@ export default function App() {
 function ClipperApp() {
   const [state, setState] = useState<AppState | null>(null);
   const [startupError, setStartupError] = useState<string | null>(null);
+  // Restart the state-watch loop when the session changes: a production login can
+  // re-point the backend at a new server (a fresh native client), so the loop
+  // must re-subscribe to that client's state channel instead of the old one's.
+  const sessionKey = state?.session?.device_id ?? null;
 
   useEffect(() => {
     let cancelled = false;
@@ -83,7 +92,7 @@ function ClipperApp() {
       // Cancel the in-flight waitForStateChange UniFFI future on unmount.
       controller.abort();
     };
-  }, []);
+  }, [sessionKey]);
 
   if (startupError) {
     return <CenteredStatus title="Cannot start Clipper" message={startupError} />;
@@ -96,15 +105,6 @@ function ClipperApp() {
   }
 
   return <HomeScreen state={state} onState={setState} />;
-}
-
-// Dev builds pre-fill a server URL for convenience; production ships no default,
-// so the field starts empty and the user must enter their own server. On the
-// Android emulator the host loopback is reachable via 10.0.2.2 (127.0.0.1 would
-// target the emulator itself); the iOS simulator reaches the host on 127.0.0.1.
-function devDefaultServerUrl(): string {
-  if (!__DEV__) return "";
-  return Platform.OS === "android" ? "http://10.0.2.2:8787" : "http://127.0.0.1:8787";
 }
 
 function LoginScreen({
@@ -307,6 +307,12 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                 <Text>Devices</Text>
               </XStack>
             </Tabs.Tab>
+            <Tabs.Tab value="collab" flex={1}>
+              <XStack items="center" gap="$2">
+                <FileCode size={16} />
+                <Text>Collab</Text>
+              </XStack>
+            </Tabs.Tab>
           </Tabs.List>
 
           {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
@@ -319,6 +325,9 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
           </Tabs.Content>
           <Tabs.Content value="devices" flex={1}>
             <DevicesPanel onError={setError} />
+          </Tabs.Content>
+          <Tabs.Content value="collab" flex={1}>
+            <CollabPanel collabDocs={state.collab_docs} onState={onState} onError={setError} />
           </Tabs.Content>
         </Tabs>
       </YStack>
@@ -594,6 +603,103 @@ function DevicesPanel({ onError }: { onError: (error: string | null) => void }) 
       )}
     </YStack>
   );
+}
+
+function CollabPanel({
+  collabDocs,
+  onState,
+  onError,
+}: {
+  collabDocs: CollabItem[];
+  onState: (state: AppState) => void;
+  onError: (error: string | null) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function createDoc() {
+    setBusy(true);
+    onError(null);
+    try {
+      await backend.createCollabDoc();
+      onState(await backend.getState());
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyLink(item: CollabItem) {
+    onError(null);
+    try {
+      await writeClipboardText(collabShareLink(item.share_token));
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }
+
+  async function deleteDoc(item: CollabItem) {
+    onError(null);
+    try {
+      await backend.deleteCollabDoc(item.id);
+      onState(await backend.getState());
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }
+
+  return (
+    <YStack gap="$3" flex={1} pt="$3">
+      <XStack justify="space-between" items="center" gap="$2">
+        <H2 size="$6">Collab Docs</H2>
+        <Button
+          icon={busy ? <Spinner /> : <FilePlus size={16} />}
+          onPress={() => void createDoc()}
+          disabled={busy}
+        >
+          New Doc
+        </Button>
+      </XStack>
+
+      {collabDocs.length === 0 ? (
+        <EmptyState icon={<FileText size={28} />} title="No collab docs yet" />
+      ) : (
+        <ScrollView>
+          <YStack gap="$2" pb="$4">
+            {collabDocs.map((item) => (
+              <ListCard key={item.id}>
+                <XStack items="center" justify="space-between" gap="$3">
+                  <XStack items="center" gap="$3" flex={1}>
+                    <FileCode size={22} color="#6fb4ff" />
+                    <YStack flex={1} gap="$1">
+                      <Text numberOfLines={1}>{collabTitle(item.id)}</Text>
+                      <Paragraph size="$2" color="#9aa4ad">
+                        {formatRelativeTime(item.created_at)}
+                      </Paragraph>
+                    </YStack>
+                  </XStack>
+                  <XStack gap="$1">
+                    <Button size="$3" icon={<Copy size={16} />} onPress={() => void copyLink(item)} />
+                    <Button
+                      size="$3"
+                      icon={<Trash2 size={16} color="#ff6b6b" />}
+                      onPress={() => void deleteDoc(item)}
+                    />
+                  </XStack>
+                </XStack>
+              </ListCard>
+            ))}
+          </YStack>
+        </ScrollView>
+      )}
+    </YStack>
+  );
+}
+
+// Phase 2 collab docs have no real title yet (it lives in the Y.Doc and is wired
+// up in Phase 3), so label each doc by a short prefix of its object id.
+function collabTitle(id: string): string {
+  return `Doc ${id.slice(0, 8)}`;
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {

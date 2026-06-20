@@ -4,7 +4,10 @@ import { Directory, File, Paths } from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { createMobileBackend } from "@clipper/mobile-bridge/adapter";
 
-export const backend = createMobileBackend({ dataDir: resolveDataDir() });
+export const backend = createMobileBackend({
+  dataDir: resolveDataDir(),
+  serverUrl: devDefaultServerUrl(),
+});
 
 // The native engine persists its SQLite store and blobs under this path.
 // expo-file-system reports locations as `file://` URIs, but the Rust side
@@ -15,6 +18,25 @@ export const backend = createMobileBackend({ dataDir: resolveDataDir() });
 function resolveDataDir(): string {
   const dir = new Directory(Paths.document, "clipper-mobile");
   return decodeURIComponent(dir.uri.replace(/^file:\/\//, ""));
+}
+
+// Dev builds pin a loopback server for convenience; production ships no default,
+// so the login field starts empty and the user enters their own server. The
+// native client only permits plain HTTP to loopback hosts (the emulator's
+// 10.0.2.2 alias is rejected), so on Android run `adb reverse tcp:8787 tcp:8787`
+// to make the device's localhost reach the host server. The native client fixes
+// its base URL at construction, so this single value seeds both the client and
+// the login form (they must match).
+export function devDefaultServerUrl(): string {
+  return __DEV__ ? "http://127.0.0.1:8787" : "";
+}
+
+// The public URL a collab doc's share token resolves to on the server's web UI
+// (`/s/:share_token`). NOTE: this uses the configured (dev) server origin; a
+// shareable public origin for production builds is still to be wired up.
+export function collabShareLink(shareToken: string): string {
+  const origin = devDefaultServerUrl();
+  return origin ? `${origin}/s/${shareToken}` : `/s/${shareToken}`;
 }
 
 export async function readClipboardText(): Promise<string> {
