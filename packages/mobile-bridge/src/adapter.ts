@@ -50,7 +50,8 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
   const injected = options.client != null;
   let currentServerUrl = options.serverUrl ?? "";
   let client =
-    options.client ?? new MobileClipperClient(currentServerUrl, dataDir, "Android-Clipper", "android");
+    options.client ??
+    new MobileClipperClient(currentServerUrl, dataDir, "Android-Clipper", "android");
 
   // The native client pins its server URL at construction: the engine fixes its
   // base URL at init and `login`/`register` reject a different URL. Production

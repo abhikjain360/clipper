@@ -14,7 +14,8 @@ import {
   Trash2,
 } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { SafeAreaView, StatusBar } from "react-native";
+import { StatusBar } from "react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { TamaguiProvider } from "tamagui";
 import {
   Button,
@@ -49,10 +50,12 @@ type TabName = "clipboard" | "files" | "devices" | "collab";
 export default function App() {
   return (
     <TamaguiProvider config={tamaguiConfig} defaultTheme="dark">
-      <StatusBar barStyle="light-content" />
-      <SafeAreaView style={{ flex: 1, backgroundColor: "#101214" }}>
-        <ClipperApp />
-      </SafeAreaView>
+      <SafeAreaProvider>
+        <StatusBar barStyle="light-content" />
+        <SafeAreaView style={{ flex: 1, backgroundColor: "#101214" }}>
+          <ClipperApp />
+        </SafeAreaView>
+      </SafeAreaProvider>
     </TamaguiProvider>
   );
 }
@@ -679,7 +682,11 @@ function CollabPanel({
                     </YStack>
                   </XStack>
                   <XStack gap="$1">
-                    <Button size="$3" icon={<Copy size={16} />} onPress={() => void copyLink(item)} />
+                    <Button
+                      size="$3"
+                      icon={<Copy size={16} />}
+                      onPress={() => void copyLink(item)}
+                    />
                     <Button
                       size="$3"
                       icon={<Trash2 size={16} color="#ff6b6b" />}

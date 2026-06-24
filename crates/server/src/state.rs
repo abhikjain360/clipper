@@ -19,8 +19,14 @@ use tokio::sync::broadcast::{self, Receiver};
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthInfo, config::ServerConfig, entity::{event_log, objects}, error::ServerResult,
-    migration, rate_limit::RateLimiter, secret::ServerSecrets, ws::WsBroadcast,
+    auth::AuthInfo,
+    config::ServerConfig,
+    entity::{event_log, objects},
+    error::ServerResult,
+    migration,
+    rate_limit::RateLimiter,
+    secret::ServerSecrets,
+    ws::WsBroadcast,
 };
 
 const WS_TICKET_BYTES: usize = 32;

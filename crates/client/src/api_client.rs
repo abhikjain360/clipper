@@ -188,9 +188,7 @@ impl ApiClient {
 
     /// Decode a bounded JSON success response. The collab-doc endpoints return
     /// JSON rather than postcard, so they cannot share `postcard_response`.
-    async fn json_response<T: DeserializeOwned>(
-        resp: reqwest::Response,
-    ) -> Result<T, ClientError> {
+    async fn json_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T, ClientError> {
         let resp = Self::checked_response(resp).await?;
         let url = resp.url().clone();
         let status = resp.status();
@@ -677,10 +675,7 @@ impl ApiClient {
     /// `GET /api/collab-docs/:id/meta` — fetch a collab doc's share token and
     /// `updated_at`. Does not return `yjs_state` (that flows over the Y-sync
     /// WebSocket in Phase 3).
-    pub async fn get_collab_doc_meta(
-        &self,
-        object_id: &str,
-    ) -> Result<CollabDocMeta, ClientError> {
+    pub async fn get_collab_doc_meta(&self, object_id: &str) -> Result<CollabDocMeta, ClientError> {
         let url = self.api_url(&["collab-docs", object_id, "meta"])?;
         let resp = self
             .http

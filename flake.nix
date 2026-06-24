@@ -20,8 +20,8 @@
       forAllSystems = nixpkgs.lib.genAttrs systems;
       rustStableDate = "2026-05-28";
       rustStableManifestSha256 = "sha256-mvUGEOHYJpn3ikC5hckneuGixaC+yGrkMM/liDIDgoU=";
-      rustNightlyDate = "2026-06-04";
-      rustNightlyManifestSha256 = "sha256-gQBIgkaAydtk9H+rmJBeyHNfZr/m1GybGmyApwvGF8E=";
+      rustNightlyDate = "2026-06-24";
+      rustNightlyManifestSha256 = "sha256-PE5LNcr5lBBooaIBFWERXCPNXTQFZwIw8BriQdgf29Q=";
       wasmRustTarget = "wasm32-unknown-unknown";
       androidRustTargets = [
         "aarch64-linux-android"
@@ -299,6 +299,13 @@
           }
           // mkTaskSpec "tauri-build";
 
+          tauri-open = {
+            program = "clipper-tauri-open";
+            description = "Open the built macOS Tauri app bundle";
+            runtimeInputs = denoRuntimeInputs;
+          }
+          // mkTaskSpec "tauri-open";
+
           mobile-check = {
             program = "clipper-mobile-check";
             description = "Type check and lint the React Native mobile packages";
@@ -332,6 +339,15 @@
             denoPermissions = mobileTaskPermissions;
           }
           // mkTaskSpec "mobile-uniffi-android";
+
+          mobile-android-release = {
+            program = "clipper-mobile-android-release";
+            description = "Build the release Android APK (release UniFFI lib + Gradle assembleRelease)";
+            runtimeInputs = mobileRuntimeInputs;
+            env = stableEnv;
+            denoPermissions = mobileTaskPermissions;
+          }
+          // mkTaskSpec "mobile-android-release";
         };
       mkCommandScripts =
         system:

@@ -242,7 +242,12 @@ impl MigrationTrait for Migration {
         // the widened `objects`/`event_log` definitions in place. The XOR check
         // still admits every pre-collab row, so existing data stays valid.
         manager
-            .drop_table(Table::drop().table(CollabDocs::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(CollabDocs::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         Ok(())
     }

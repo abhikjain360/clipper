@@ -44,11 +44,21 @@
   - These wrappers install the pnpm workspace from `pnpm-lock.yaml`, use the
     flake Rust toolchain, regenerate the browser wasm package for Vite, and
     invoke the Tauri CLI from `web/package.json`.
+- Open the built macOS app bundle: `nix run .#tauri-open`
+  - Opens `target/release/bundle/macos/Clipper.app` (build it first with
+    `nix run .#tauri-build`). macOS only.
 - Mobile lint/type check: `nix run .#mobile-check`
 - Generate the Android React Native UniFFI bridge:
   `nix run .#mobile-uniffi-android`
 - Start the Expo development server: `nix run .#mobile-start`
-- Run the Android React Native app: `nix run .#mobile-android`
+- Run the Android React Native app (debug): `nix run .#mobile-android`
+- Build the release Android APK: `nix run .#mobile-android-release`
+  - Builds the UniFFI native lib in release, then runs Gradle
+    `assembleRelease`. Output APK:
+    `mobile/android/app/build/outputs/apk/release/app-release.apk`. Needs the
+    host Android SDK/NDK and a JDK. The committed `release` build type signs
+    with the debug keystore, so the APK is installable for testing but is not a
+    distribution-signed artifact.
 
 - Local server setup and serve:
 

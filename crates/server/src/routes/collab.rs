@@ -20,13 +20,9 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use clipper_core::{
     crypto,
-    models::{
-        ApiErrorCode, CollabDocMeta, CreateCollabDocResponse, ObjectEventType, ObjectKind,
-    },
+    models::{ApiErrorCode, CollabDocMeta, CreateCollabDocResponse, ObjectEventType, ObjectKind},
 };
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DerivePartialModel, EntityTrait, QueryFilter, Set,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DerivePartialModel, EntityTrait, QueryFilter, Set};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 

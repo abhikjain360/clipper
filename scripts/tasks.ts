@@ -1,5 +1,6 @@
 import {
   directoryExists,
+  fileExists,
   findRepoRoot,
   joinPath,
   moduleDir,
@@ -228,11 +229,7 @@ async function runMobileTask(
   await runPackagePnpmScript(repoRoot, env, "mobile", script, args);
 }
 
-async function buildDaemon(
-  repoRoot: string,
-  env: Env,
-  release: boolean,
-): Promise<void> {
+async function buildDaemon(repoRoot: string, env: Env, release: boolean): Promise<void> {
   const cargo = await command("cargo", env);
   const extraArgs = release ? ["--release"] : [];
   await runCommand(cargo, ["build", ...extraArgs, "-p", "clipper-daemon"], {
@@ -273,9 +270,7 @@ async function runTauriBuild(
   // distribution (hdiutil create -srcfolder Clipper.app ...).
   if (Deno.build.os === "darwin") {
     const tauriConf = JSON.parse(
-      await Deno.readTextFile(
-        joinPath(repoRoot, "web/src-tauri/tauri.conf.json"),
-      ),
+      await Deno.readTextFile(joinPath(repoRoot, "web/src-tauri/tauri.conf.json")),
     ) as { productName: string };
     const macOSBin = joinPath(
       repoRoot,
@@ -291,12 +286,66 @@ async function runTauriBuild(
   }
 }
 
+async function runTauriOpen(
+  { env, repoRoot }: TaskContext,
+  args: readonly string[],
+): Promise<void> {
+  if (Deno.build.os !== "darwin") {
+    throw new Error("tauri-open is only supported on macOS");
+  }
+
+  const tauriConf = JSON.parse(
+    await Deno.readTextFile(joinPath(repoRoot, "web/src-tauri/tauri.conf.json")),
+  ) as { productName: string };
+  const appBundle = joinPath(repoRoot, `target/release/bundle/macos/${tauriConf.productName}.app`);
+
+  if (!(await directoryExists(appBundle))) {
+    throw new Error(`app bundle not found at ${appBundle}; run \`nix run .#tauri-build\` first`);
+  }
+
+  await runCommand(await command("open", env), [appBundle, ...args], {
+    cwd: repoRoot,
+    env,
+  });
+}
+
 async function runMobileUniffiAndroid(
   { env: initialEnv, repoRoot }: TaskContext,
   args: readonly string[],
 ): Promise<void> {
   const env = useStableToolchain(initialEnv);
   await runPackagePnpmScript(repoRoot, env, "packages/mobile-bridge", "ubrn:android", args);
+}
+
+async function runMobileAndroidRelease(
+  { env: initialEnv, repoRoot }: TaskContext,
+  args: readonly string[],
+): Promise<void> {
+  const env = useStableToolchain(initialEnv);
+
+  // Build the UniFFI native lib in release so the APK ships release .so files,
+  // not the debug ones that `mobile-android` (expo run:android) produces.
+  await runPackagePnpmScript(repoRoot, env, "packages/mobile-bridge", "ubrn:android", [
+    "--release",
+  ]);
+
+  // Assemble the release APK with Gradle. Android SDK/NDK and the JDK come from
+  // the host environment, matching how `mobile-android` drives expo run:android.
+  const androidDir = joinPath(repoRoot, "mobile/android");
+  const gradlew = joinPath(androidDir, "gradlew");
+  if (!(await fileExists(gradlew))) {
+    throw new Error(`gradlew not found at ${gradlew}; is the Android project generated?`);
+  }
+
+  await runCommand(gradlew, ["assembleRelease", ...args], {
+    cwd: androidDir,
+    env,
+  });
+
+  const apk = joinPath(androidDir, "app/build/outputs/apk/release/app-release.apk");
+  if (await fileExists(apk)) {
+    console.log(`Release APK → ${apk}`);
+  }
 }
 
 async function runJsCheck({ env, repoRoot }: TaskContext, args: readonly string[]): Promise<void> {
@@ -325,10 +374,12 @@ const taskHandlers: Readonly<Record<string, TaskHandler>> = {
   "web-serve": (context, args) => runWebTask("web-serve", context, args),
   "tauri-dev": runTauriDev,
   "tauri-build": runTauriBuild,
+  "tauri-open": runTauriOpen,
   "mobile-check": runMobileCheck,
   "mobile-start": (context, args) => runMobileTask("mobile-start", context, args),
   "mobile-android": (context, args) => runMobileTask("mobile-android", context, args),
   "mobile-uniffi-android": runMobileUniffiAndroid,
+  "mobile-android-release": runMobileAndroidRelease,
 };
 
 function usage(): never {
