@@ -420,7 +420,7 @@ mistaken for safeguards that exist:
 - **No HTTP header-read timeout, whole-request timeout, or connection/concurrency
   cap.** The server runs a bare `axum::serve`; hyper applies no header-read or
   whole-request deadline by default and Tokio caps no accepted connections, and
-  the rate limiters run only *after* hyper has parsed the request line + headers.
+  the rate limiters run only _after_ hyper has parsed the request line + headers.
   A peer that trickles headers one byte at a time is therefore never counted
   against any bucket — an unauthenticated slow-loris that also pins a task + FD
   per connection. The streaming upload path has no per-chunk read timeout either.

@@ -191,6 +191,7 @@ task writes `Y.encodeStateAsUpdate()` back to `collab_docs.yjs_state`.
 **New WS endpoint: `GET /api/collab-docs/:id/ws`**
 
 Accepts either:
+
 - A session Bearer token (authenticated owner or any device of the owner), or
 - `?token=<share_token>` (anyone with the link, no user account required).
 
@@ -213,12 +214,16 @@ HTML file or wscat before any UI work.
 - Upgrade `<CodeEditor>` in the collab doc view to a live `yjs` + `y-websocket`
   document:
   ```ts
-  const ydoc = new Y.Doc()
-  const ytext = ydoc.getText("content")
+  const ydoc = new Y.Doc();
+  const ytext = ydoc.getText("content");
   const provider = new WebsocketProvider(wsBase, docId, ydoc, {
-    params: authenticated ? { /* session via header */ } : { token: shareToken },
-  })
-  yCollab(ytext, provider.awareness)  // @codemirror/collab binding
+    params: authenticated
+      ? {
+          /* session via header */
+        }
+      : { token: shareToken },
+  });
+  yCollab(ytext, provider.awareness); // @codemirror/collab binding
   ```
 - Awareness (live cursors and user badges): set `provider.awareness` local
   state with the user's display name and a stable colour derived from their
@@ -261,16 +266,16 @@ No, and splitting it is cleaner:
 
 ## Packages to add
 
-| Package | Phase | Where |
-|---|---|---|
-| `@codemirror/view`, `@codemirror/state`, `@codemirror/commands` | 1 | `web/package.json` |
-| `@codemirror/lang-*` (markdown, js, rust, …) | 1 | `web/package.json` |
-| `@codemirror/vim` | 1 | `web/package.json` |
-| `yjs` | 3b | `web/package.json` |
-| `y-websocket` | 3b | `web/package.json` |
-| `@codemirror/collab` | 3b | `web/package.json` |
-| `yrs` | 3a | `crates/server/Cargo.toml` |
-| `y-sync` | 3a | `crates/server/Cargo.toml` |
+| Package                                                         | Phase | Where                      |
+| --------------------------------------------------------------- | ----- | -------------------------- |
+| `@codemirror/view`, `@codemirror/state`, `@codemirror/commands` | 1     | `web/package.json`         |
+| `@codemirror/lang-*` (markdown, js, rust, …)                    | 1     | `web/package.json`         |
+| `@codemirror/vim`                                               | 1     | `web/package.json`         |
+| `yjs`                                                           | 3b    | `web/package.json`         |
+| `y-websocket`                                                   | 3b    | `web/package.json`         |
+| `@codemirror/collab`                                            | 3b    | `web/package.json`         |
+| `yrs`                                                           | 3a    | `crates/server/Cargo.toml` |
+| `y-sync`                                                        | 3a    | `crates/server/Cargo.toml` |
 
 ---
 

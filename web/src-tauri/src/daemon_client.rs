@@ -1,6 +1,3 @@
-use std::path::PathBuf;
-
-use clipper_app_types::AppState;
 use clipper_daemon_types::DaemonCommand;
 use serde::de::DeserializeOwned;
 
@@ -91,9 +88,7 @@ mod inner {
     }
 
     impl DaemonClient {
-        pub fn new_with_future(
-            data_dir: PathBuf,
-        ) -> (Self, impl std::future::Future<Output = ()>) {
+        pub fn new_with_future(data_dir: PathBuf) -> (Self, impl std::future::Future<Output = ()>) {
             let (tx, rx) = mpsc::unbounded_channel::<PendingRequest>();
             let shared = Arc::new(Shared {
                 state: RwLock::new(AppState::default()),
@@ -187,9 +182,12 @@ mod inner {
             .await
             .map_err(|e| format!("auth read: {e}"))?;
         let DaemonEvent::AuthChallenge {
-            auth_challenge: AuthChallenge { protocol_version, daemon_nonce },
-        } = serde_json::from_str::<DaemonEvent>(&line)
-            .map_err(|e| format!("auth parse: {e}"))?
+            auth_challenge:
+                AuthChallenge {
+                    protocol_version,
+                    daemon_nonce,
+                },
+        } = serde_json::from_str::<DaemonEvent>(&line).map_err(|e| format!("auth parse: {e}"))?
         else {
             return Err("expected AuthChallenge".into());
         };
@@ -198,13 +196,16 @@ mod inner {
             return Err(format!("unsupported protocol version {protocol_version}"));
         }
 
-        let secret = ipc_secret::load_ipc_secret(data_dir)
-            .map_err(|e| format!("load IPC secret: {e}"))?;
+        let secret =
+            ipc_secret::load_ipc_secret(data_dir).map_err(|e| format!("load IPC secret: {e}"))?;
 
         let mut client_nonce = [0u8; IPC_AUTH_NONCE_BYTES];
         rand::rng().fill(&mut client_nonce);
 
-        let tag = hmac_tag(&secret, &ipc_client_auth_message(&daemon_nonce, &client_nonce))?;
+        let tag = hmac_tag(
+            &secret,
+            &ipc_client_auth_message(&daemon_nonce, &client_nonce),
+        )?;
 
         let req = DaemonRequest::new(
             "auth".into(),
@@ -214,9 +215,12 @@ mod inner {
                 tag,
             }),
         );
-        write_line(writer, &serde_json::to_string(&req).map_err(|e| e.to_string())?)
-            .await
-            .map_err(|e| format!("auth write: {e}"))?;
+        write_line(
+            writer,
+            &serde_json::to_string(&req).map_err(|e| e.to_string())?,
+        )
+        .await
+        .map_err(|e| format!("auth write: {e}"))?;
 
         let line = read_line(reader)
             .await
@@ -224,14 +228,18 @@ mod inner {
         match serde_json::from_str::<DaemonResponse>(&line)
             .map_err(|e| format!("auth result parse: {e}"))?
         {
-            DaemonResponse::Success { result: Some(val), .. } => {
-                let result: AuthenticateResult = serde_json::from_value(val)
-                    .map_err(|e| format!("auth result decode: {e}"))?;
+            DaemonResponse::Success {
+                result: Some(val), ..
+            } => {
+                let result: AuthenticateResult =
+                    serde_json::from_value(val).map_err(|e| format!("auth result decode: {e}"))?;
                 if result.tag.len() != IPC_AUTH_TAG_BYTES {
                     return Err("daemon auth tag wrong length".into());
                 }
-                let expected =
-                    hmac_tag(&secret, &ipc_daemon_auth_message(&daemon_nonce, &client_nonce))?;
+                let expected = hmac_tag(
+                    &secret,
+                    &ipc_daemon_auth_message(&daemon_nonce, &client_nonce),
+                )?;
                 if result.tag != expected {
                     return Err("daemon HMAC verification failed".into());
                 }
@@ -298,10 +306,7 @@ mod inner {
     async fn read_line(reader: &mut BufReader<OwnedReadHalf>) -> Result<String, String> {
         let mut buf = Vec::new();
         loop {
-            let available = reader
-                .fill_buf()
-                .await
-                .map_err(|e| format!("read: {e}"))?;
+            let available = reader.fill_buf().await.map_err(|e| format!("read: {e}"))?;
             if available.is_empty() {
                 return Err("daemon disconnected".into());
             }
@@ -328,8 +333,7 @@ mod inner {
     }
 
     fn hmac_tag(secret: &Zeroizing<Vec<u8>>, message: &[u8]) -> Result<Vec<u8>, String> {
-        let mut mac =
-            HmacSha256::new_from_slice(secret).map_err(|e| format!("HMAC init: {e}"))?;
+        let mut mac = HmacSha256::new_from_slice(secret).map_err(|e| format!("HMAC init: {e}"))?;
         mac.update(message);
         Ok(mac.finalize().into_bytes().to_vec())
     }

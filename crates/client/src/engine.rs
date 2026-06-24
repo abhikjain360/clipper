@@ -1121,8 +1121,7 @@ impl SyncEngine {
                     // Files and collab docs are the deletable object kinds.
                     // Clipboard items expire passively and never emit deletes.
                     ObjectEventType::Deleted
-                        if object_kind == ObjectKind::File
-                            || object_kind == ObjectKind::Collab =>
+                        if object_kind == ObjectKind::File || object_kind == ObjectKind::Collab =>
                     {
                         self.handle_deleted_event(generation, object_kind, object_id, seq)
                             .await?;
@@ -1300,7 +1299,13 @@ impl SyncEngine {
         // empty source device id.
         if let Some(visible) = self
             .local_store
-            .persist_snapshot_collab_present(item, "", created_seq, generation, RECENT_CLIPBOARD_LIMIT)
+            .persist_snapshot_collab_present(
+                item,
+                "",
+                created_seq,
+                generation,
+                RECENT_CLIPBOARD_LIMIT,
+            )
             .await?
         {
             self.publish_visible_state(visible).await;

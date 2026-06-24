@@ -228,11 +228,7 @@ async function runMobileTask(
   await runPackagePnpmScript(repoRoot, env, "mobile", script, args);
 }
 
-async function buildDaemon(
-  repoRoot: string,
-  env: Env,
-  release: boolean,
-): Promise<void> {
+async function buildDaemon(repoRoot: string, env: Env, release: boolean): Promise<void> {
   const cargo = await command("cargo", env);
   const extraArgs = release ? ["--release"] : [];
   await runCommand(cargo, ["build", ...extraArgs, "-p", "clipper-daemon"], {
@@ -273,9 +269,7 @@ async function runTauriBuild(
   // distribution (hdiutil create -srcfolder Clipper.app ...).
   if (Deno.build.os === "darwin") {
     const tauriConf = JSON.parse(
-      await Deno.readTextFile(
-        joinPath(repoRoot, "web/src-tauri/tauri.conf.json"),
-      ),
+      await Deno.readTextFile(joinPath(repoRoot, "web/src-tauri/tauri.conf.json")),
     ) as { productName: string };
     const macOSBin = joinPath(
       repoRoot,

@@ -2,15 +2,14 @@ mod daemon_client;
 mod daemon_spawn;
 mod ipc_secret;
 
-use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::{path::PathBuf, sync::OnceLock};
 
 use clipper_app_types::{AppState, CollabItem, DeviceInfo};
 use clipper_daemon_types::{
-    ClipboardPayloadParams, ClipboardPayloadResult, DaemonCommand,
-    DeleteCollabDocParams, DeleteFileParams, DeviceListResult, DownloadFileParams,
-    GetCollabDocMetaParams, LoginParams, RegisterParams, RegisterResult, RemoveDeviceParams,
-    SendClipboardPayloadParams, UploadFileParams, UploadFileResult,
+    ClipboardPayloadParams, ClipboardPayloadResult, DaemonCommand, DeleteCollabDocParams,
+    DeleteFileParams, DeviceListResult, DownloadFileParams, GetCollabDocMetaParams, LoginParams,
+    RegisterParams, RegisterResult, RemoveDeviceParams, SendClipboardPayloadParams,
+    UploadFileParams, UploadFileResult,
 };
 use daemon_client::{DaemonClient, DaemonClientError};
 use serde::{Deserialize, Serialize, Serializer};
@@ -76,7 +75,11 @@ struct DesktopClipboardPayload {
 
 impl From<ClipboardPayloadResult> for DesktopClipboardPayload {
     fn from(r: ClipboardPayloadResult) -> Self {
-        Self { mime_type: r.mime_type, bytes: r.bytes, text: r.text }
+        Self {
+            mime_type: r.mime_type,
+            bytes: r.bytes,
+            text: r.text,
+        }
     }
 }
 
@@ -218,7 +221,10 @@ async fn wait_for_state_change(
     backend: State<'_, DesktopBackend>,
     seen_version: u64,
 ) -> CommandResult<u64> {
-    Ok(backend.daemon.wait_for_state_change_after(seen_version).await)
+    Ok(backend
+        .daemon
+        .wait_for_state_change_after(seen_version)
+        .await)
 }
 
 #[tauri::command]
@@ -404,9 +410,9 @@ async fn download_file_bytes(
             target_path: tmp.to_string_lossy().into_owned(),
         }))
         .await;
-    if result.is_err() {
+    if let Err(err) = result {
         tokio::fs::remove_file(&tmp).await.ok();
-        return Err(result.unwrap_err().into());
+        return Err(err.into());
     }
     let bytes = tokio::fs::read(&tmp)
         .await
@@ -426,7 +432,10 @@ async fn delete_file(backend: State<'_, DesktopBackend>, file_id: String) -> Com
 
 #[tauri::command]
 async fn create_collab_doc(backend: State<'_, DesktopBackend>) -> CommandResult<CollabItem> {
-    Ok(backend.daemon.send_result::<CollabItem>(DaemonCommand::CreateCollabDoc).await?)
+    Ok(backend
+        .daemon
+        .send_result::<CollabItem>(DaemonCommand::CreateCollabDoc)
+        .await?)
 }
 
 #[tauri::command]
@@ -436,7 +445,9 @@ async fn delete_collab_doc(
 ) -> CommandResult<()> {
     backend
         .daemon
-        .send_ok(DaemonCommand::DeleteCollabDoc(DeleteCollabDocParams { object_id }))
+        .send_ok(DaemonCommand::DeleteCollabDoc(DeleteCollabDocParams {
+            object_id,
+        }))
         .await?;
     Ok(())
 }
@@ -464,13 +475,12 @@ async fn list_devices(backend: State<'_, DesktopBackend>) -> CommandResult<Vec<D
 }
 
 #[tauri::command]
-async fn remove_device(
-    backend: State<'_, DesktopBackend>,
-    device_id: String,
-) -> CommandResult<()> {
+async fn remove_device(backend: State<'_, DesktopBackend>, device_id: String) -> CommandResult<()> {
     backend
         .daemon
-        .send_ok(DaemonCommand::RemoveDevice(RemoveDeviceParams { device_id }))
+        .send_ok(DaemonCommand::RemoveDevice(RemoveDeviceParams {
+            device_id,
+        }))
         .await?;
     Ok(())
 }
@@ -510,13 +520,23 @@ fn safe_dialog_filename(filename: &str) -> String {
             ch => ch,
         })
         .collect::<String>();
-    if cleaned.is_empty() { "clipper-download".to_string() } else { cleaned }
+    if cleaned.is_empty() {
+        "clipper-download".to_string()
+    } else {
+        cleaned
+    }
 }
 
 fn temp_path(suffix: &str) -> PathBuf {
     let safe: String = suffix
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     std::env::temp_dir().join(format!("clipper-{}-{}", std::process::id(), safe))
 }

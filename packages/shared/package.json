@@ -13,9 +13,9 @@
     "lint": "oxlint ."
   },
   "devDependencies": {
-    "@typescript/native-preview": "7.0.0-dev.20260613.1",
-    "oxfmt": "0.54.0",
-    "oxlint": "1.69.0",
+    "@typescript/native-preview": "7.0.0-dev.20260623.1",
+    "oxfmt": "0.56.0",
+    "oxlint": "1.71.0",
     "typescript": "6.0.3"
   }
 }

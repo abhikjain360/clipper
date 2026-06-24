@@ -20,8 +20,8 @@
       forAllSystems = nixpkgs.lib.genAttrs systems;
       rustStableDate = "2026-05-28";
       rustStableManifestSha256 = "sha256-mvUGEOHYJpn3ikC5hckneuGixaC+yGrkMM/liDIDgoU=";
-      rustNightlyDate = "2026-06-04";
-      rustNightlyManifestSha256 = "sha256-gQBIgkaAydtk9H+rmJBeyHNfZr/m1GybGmyApwvGF8E=";
+      rustNightlyDate = "2026-06-24";
+      rustNightlyManifestSha256 = "sha256-PE5LNcr5lBBooaIBFWERXCPNXTQFZwIw8BriQdgf29Q=";
       wasmRustTarget = "wasm32-unknown-unknown";
       androidRustTargets = [
         "aarch64-linux-android"

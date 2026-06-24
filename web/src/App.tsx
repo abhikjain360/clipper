@@ -838,13 +838,7 @@ function CollabPanel({
     );
 }
 
-function CollabDocView({
-    id,
-    onError,
-}: {
-    id: string;
-    onError: (error: string | null) => void;
-}) {
+function CollabDocView({ id, onError }: { id: string; onError: (error: string | null) => void }) {
     const [, setLocation] = useLocation();
     const [meta, setMeta] = useState<CollabItem | null>(null);
     const [loading, setLoading] = useState(true);
@@ -1112,8 +1106,7 @@ function collabTitle(id: string): string {
 // The public share URL a doc's share token resolves to. The `/s/:share_token`
 // route itself is a Phase 3b addition; the link is shown and copyable now.
 function shareLink(shareToken: string): string {
-    const origin =
-        typeof window === "undefined" ? "" : window.location.origin;
+    const origin = typeof window === "undefined" ? "" : window.location.origin;
     return `${origin}/s/${shareToken}`;
 }
 
