@@ -117,6 +117,13 @@ function LoginScreen({
     const busyRef = useRef(false);
 
     useEffect(() => {
+        // Hosted builds bake the production API in via VITE_SERVER_URL; dev
+        // builds fall through to the wasm default (localhost).
+        const envUrl = import.meta.env.VITE_SERVER_URL as string | undefined;
+        if (envUrl) {
+            setServerUrl(envUrl);
+            return;
+        }
         void defaultServerUrl()
             .then(setServerUrl)
             .catch(() => setServerUrl("http://127.0.0.1:8787"));
