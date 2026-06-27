@@ -6,6 +6,13 @@ overrides:
   uuid: 11.1.1
   esbuild: 0.28.1
   esbuild-wasm: 0.28.1
+  # CodeMirror requires a single @codemirror/state (and view) instance — facets
+  # use identity checks. Transitive deps (lang packs, theme-one-dark, language)
+  # pull 6.6.0/6.43.1 while our direct deps pin 6.7.0/6.43.2; the resulting
+  # duplicate instances make EditorState.create reject extensions from the other
+  # copy ("Unrecognized extension value"). Pin both to one version.
+  "@codemirror/state": 6.7.0
+  "@codemirror/view": 6.43.2
 allowBuilds:
   esbuild: true
   msgpackr-extract: true

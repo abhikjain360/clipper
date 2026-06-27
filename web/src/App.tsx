@@ -53,6 +53,7 @@ import {
     writeClipboardText,
 } from "./backend";
 import type { AppState, ClipboardItem, CollabItem, DeviceInfo, FileItem } from "@clipper/shared";
+import { ErrorBoundary } from "./ErrorBoundary";
 
 // Lazy-loaded so the heavy CodeMirror dependency (editor core, vim mode, and the
 // per-language packs) splits into its own chunk and stays off the initial load
@@ -72,6 +73,37 @@ const codeEditorFallback = (
         }}
     >
         Loading editor…
+    </div>
+);
+
+// Shown if the editor subtree throws (e.g. a chunk fails to load/mount). Keeps
+// the failure local to the editor slot instead of blanking the whole app.
+const renderEditorError = (error: Error): ReactNode => (
+    <div
+        style={{
+            flex: 1,
+            minHeight: 0,
+            display: "grid",
+            placeItems: "center",
+            padding: 16,
+            textAlign: "center",
+        }}
+    >
+        <div>
+            <div style={{ color: "#ff8f8f", fontWeight: 600, marginBottom: 6 }}>
+                Editor failed to load
+            </div>
+            <div
+                style={{
+                    color: "#9aa4ad",
+                    fontSize: 12,
+                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                    maxWidth: 520,
+                }}
+            >
+                {error.message}
+            </div>
+        </div>
     </div>
 );
 
@@ -772,9 +804,11 @@ function FileViewerOverlay({
                 </XStack>
             </div>
             <div style={{ flex: 1, minHeight: 0 }}>
-                <Suspense fallback={codeEditorFallback}>
-                    <CodeEditor content={content} lang={filename} vimMode={vimMode} />
-                </Suspense>
+                <ErrorBoundary fallback={renderEditorError}>
+                    <Suspense fallback={codeEditorFallback}>
+                        <CodeEditor content={content} lang={filename} vimMode={vimMode} />
+                    </Suspense>
+                </ErrorBoundary>
             </div>
         </div>
     );
@@ -975,9 +1009,11 @@ function CollabDocView({ id, onError }: { id: string; onError: (error: string | 
                         overflow="hidden"
                         style={{ borderColor: "#252b31", borderWidth: 1 }}
                     >
-                        <Suspense fallback={codeEditorFallback}>
-                            <CodeEditor content="" lang="markdown" />
-                        </Suspense>
+                        <ErrorBoundary fallback={renderEditorError}>
+                            <Suspense fallback={codeEditorFallback}>
+                                <CodeEditor content="" lang="markdown" />
+                            </Suspense>
+                        </ErrorBoundary>
                     </Card>
                 </YStack>
             ) : (
