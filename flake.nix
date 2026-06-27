@@ -306,6 +306,19 @@
           }
           // mkTaskSpec "tauri-open";
 
+          tauri-macos-install = {
+            program = "clipper-tauri-macos-install";
+            description = "Build the Tauri app, package a drag-to-Applications DMG, and open it (macOS)";
+            runtimeInputs = tauriRuntimeInputs;
+            env = stableEnv + wasmEnv;
+          }
+          // mkTaskSpec "tauri-macos-install"
+          # Packaging the DMG needs Deno write access (temp staging dir, symlink,
+          # dmg output), so widen the default read/env/run task permissions.
+          // {
+            denoPermissions = denoTaskPermissions ++ [ "--allow-write" ];
+          };
+
           mobile-check = {
             program = "clipper-mobile-check";
             description = "Type check and lint the React Native mobile packages";

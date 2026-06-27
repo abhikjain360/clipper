@@ -309,6 +309,70 @@ async function runTauriOpen(
   });
 }
 
+async function runTauriMacOSInstall(context: TaskContext, args: readonly string[]): Promise<void> {
+  if (Deno.build.os !== "darwin") {
+    throw new Error("tauri-macos-install is only supported on macOS");
+  }
+
+  // Build the .app and inject the release daemon into it. We package the DMG
+  // ourselves from the patched bundle instead of letting Tauri emit one: Tauri
+  // builds its DMG during `tauri build`, before runTauriBuild injects
+  // clipper-daemon, so that DMG would ship a broken app. Keeping the build
+  // driven by tauri.conf.json (targets: ["app"]) means no config change is
+  // needed to get an installer.
+  await runTauriBuild(context, args);
+
+  const { env, repoRoot } = context;
+  const tauriConf = JSON.parse(
+    await Deno.readTextFile(joinPath(repoRoot, "web/src-tauri/tauri.conf.json")),
+  ) as { productName: string };
+
+  const appBundle = joinPath(repoRoot, `target/release/bundle/macos/${tauriConf.productName}.app`);
+  if (!(await directoryExists(appBundle))) {
+    throw new Error(`app bundle not found at ${appBundle}; the Tauri build did not produce it`);
+  }
+
+  // Stage the patched .app beside an /Applications symlink so the mounted DMG
+  // shows the classic "drag the app onto Applications" install window.
+  const stageDir = await Deno.makeTempDir({ prefix: "clipper-dmg-" });
+  try {
+    await runCommand(
+      await command("ditto", env),
+      [appBundle, joinPath(stageDir, `${tauriConf.productName}.app`)],
+      { cwd: repoRoot, env },
+    );
+    await Deno.symlink("/Applications", joinPath(stageDir, "Applications"));
+
+    const dmgDir = joinPath(repoRoot, "target/release/bundle/dmg");
+    await Deno.mkdir(dmgDir, { recursive: true });
+    const dmgPath = joinPath(dmgDir, `${tauriConf.productName}.dmg`);
+
+    await runCommand(
+      await command("hdiutil", env),
+      [
+        "create",
+        "-volname",
+        tauriConf.productName,
+        "-srcfolder",
+        stageDir,
+        "-fs",
+        "HFS+",
+        "-format",
+        "UDZO",
+        "-ov",
+        dmgPath,
+      ],
+      { cwd: repoRoot, env },
+    );
+    console.log(`Installer DMG → ${dmgPath}`);
+
+    // Open it so Finder shows the drag-to-Applications window.
+    await runCommand(await command("open", env), [dmgPath], { cwd: repoRoot, env });
+  } finally {
+    await Deno.remove(stageDir, { recursive: true });
+  }
+}
+
 async function runMobileUniffiAndroid(
   { env: initialEnv, repoRoot }: TaskContext,
   args: readonly string[],
@@ -375,6 +439,7 @@ const taskHandlers: Readonly<Record<string, TaskHandler>> = {
   "tauri-dev": runTauriDev,
   "tauri-build": runTauriBuild,
   "tauri-open": runTauriOpen,
+  "tauri-macos-install": runTauriMacOSInstall,
   "mobile-check": runMobileCheck,
   "mobile-start": (context, args) => runMobileTask("mobile-start", context, args),
   "mobile-android": (context, args) => runMobileTask("mobile-android", context, args),
