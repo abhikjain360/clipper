@@ -856,6 +856,7 @@ name = "clipper-api-types"
 version = "0.1.0"
 dependencies = [
  "garde",
+ "postcard",
  "serde",
  "sha2",
  "strum 0.28.0",

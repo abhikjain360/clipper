@@ -417,8 +417,13 @@ pub struct ObjectPayloadUpload {
     pub upload_url: String,
 }
 
+// Externally tagged (serde default): this rides the wire as postcard, which is
+// a non-self-describing format. Internally/adjacently tagged or untagged enums
+// force serde into `deserialize_any`, which postcard rejects at runtime with
+// `WontImplement` ("a feature that PostCard will never implement") — it
+// serializes fine but fails to decode. Keep this externally tagged so postcard
+// can round-trip it.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
 pub enum ObjectInitResponse {
     Complete {
         created_seq: i64,
@@ -882,6 +887,32 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    /// `ObjectInitResponse` rides the wire as postcard, a non-self-describing
+    /// format. An internally/adjacently tagged or untagged enum here would
+    /// serialize but fail to decode with postcard's `WontImplement`, silently
+    /// breaking every `/api/objects/init` call. Round-trip both variants to keep
+    /// it externally tagged.
+    #[test]
+    fn object_init_response_round_trips_through_postcard() {
+        for response in [
+            ObjectInitResponse::Complete {
+                created_seq: 1_782_566_530_991_901,
+            },
+            ObjectInitResponse::Pending {
+                upload_urls: vec![ObjectPayloadUpload {
+                    id: ObjectPayloadId::from(uuid::Uuid::nil()),
+                    upload_url: "https://example.invalid/upload".to_string(),
+                }],
+            },
+        ] {
+            let bytes = postcard::to_allocvec(&response)
+                .expect("ObjectInitResponse must serialize as postcard");
+            let decoded: ObjectInitResponse = postcard::from_bytes(&bytes)
+                .expect("ObjectInitResponse must decode from postcard (not deserialize_any)");
+            assert_eq!(format!("{response:?}"), format!("{decoded:?}"));
+        }
     }
 
     #[test]
