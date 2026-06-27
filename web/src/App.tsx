@@ -48,6 +48,7 @@ import {
     formatBackendError,
     isTauriRuntime,
     readClipboardText,
+    resolveServerUrl,
     resumeSession,
     saveSessionCredentials,
     writeClipboardText,
@@ -107,9 +108,21 @@ const renderEditorError = (error: Error): ReactNode => (
     </div>
 );
 
-const VIM_MODE_STORAGE_KEY = "clipper_vim_mode";
-
 export default function App() {
+    // The public share page is reachable without a session, so it sits above the
+    // engine startup / login gate — opening a share link never boots the
+    // authenticated client.
+    return (
+        <Switch>
+            <Route path="/s/:token">{(params) => <SharePage token={params.token} />}</Route>
+            <Route>
+                <MainApp />
+            </Route>
+        </Switch>
+    );
+}
+
+function MainApp() {
     const [state, setState] = useState<AppState | null>(null);
     const [startupError, setStartupError] = useState<string | null>(null);
 
@@ -414,7 +427,13 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                         <FilesPanel files={state.files} onState={onState} onError={setError} />
                     </Route>
                     <Route path="/collab/:id">
-                        {(params) => <CollabDocView id={params.id} onError={setError} />}
+                        {(params) => (
+                            <CollabDocView
+                                id={params.id}
+                                displayName={state.session?.username ?? "You"}
+                                onError={setError}
+                            />
+                        )}
                     </Route>
                     <Route path="/collab">
                         <CollabPanel
@@ -740,10 +759,6 @@ function FileViewerOverlay({
     content: string;
     onClose: () => void;
 }) {
-    const [vimMode, setVimMode] = useState(
-        () => globalThis.localStorage?.getItem(VIM_MODE_STORAGE_KEY) === "true",
-    );
-
     useEffect(() => {
         function onKeyDown(event: KeyboardEvent) {
             if (event.key === "Escape") onClose();
@@ -754,14 +769,6 @@ function FileViewerOverlay({
         globalThis.addEventListener("keydown", onKeyDown, true);
         return () => globalThis.removeEventListener("keydown", onKeyDown, true);
     }, [onClose]);
-
-    function toggleVimMode() {
-        setVimMode((previous) => {
-            const next = !previous;
-            globalThis.localStorage?.setItem(VIM_MODE_STORAGE_KEY, String(next));
-            return next;
-        });
-    }
 
     return (
         <div
@@ -796,17 +803,12 @@ function FileViewerOverlay({
                 >
                     {filename}
                 </span>
-                <XStack items="center" gap="$2">
-                    <Button size="$3" theme={vimMode ? "blue" : undefined} onPress={toggleVimMode}>
-                        Vim
-                    </Button>
-                    <Button size="$3" icon={<X size={16} />} onPress={onClose} />
-                </XStack>
+                <Button size="$3" icon={<X size={16} />} onPress={onClose} />
             </div>
             <div style={{ flex: 1, minHeight: 0 }}>
                 <ErrorBoundary fallback={renderEditorError}>
                     <Suspense fallback={codeEditorFallback}>
-                        <CodeEditor content={content} lang={filename} vimMode={vimMode} />
+                        <CodeEditor content={content} lang={filename} />
                     </Suspense>
                 </ErrorBoundary>
             </div>
@@ -919,9 +921,18 @@ function CollabPanel({
     );
 }
 
-function CollabDocView({ id, onError }: { id: string; onError: (error: string | null) => void }) {
+function CollabDocView({
+    id,
+    displayName,
+    onError,
+}: {
+    id: string;
+    displayName: string;
+    onError: (error: string | null) => void;
+}) {
     const [, setLocation] = useLocation();
     const [meta, setMeta] = useState<CollabItem | null>(null);
+    const [serverUrl, setServerUrl] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [copied, setCopied] = useState(false);
 
@@ -933,8 +944,16 @@ function CollabDocView({ id, onError }: { id: string; onError: (error: string | 
         async function load() {
             try {
                 const backend = await clipperBackend();
-                const loaded = await backend.getCollabDocMeta(id);
-                if (!cancelled) setMeta(loaded);
+                // The share token (for the WS credential) comes from the doc meta;
+                // the server base URL is where the live-sync socket connects.
+                const [loaded, resolvedServerUrl] = await Promise.all([
+                    backend.getCollabDocMeta(id),
+                    resolveServerUrl(),
+                ]);
+                if (!cancelled) {
+                    setMeta(loaded);
+                    setServerUrl(resolvedServerUrl);
+                }
             } catch (caught) {
                 if (!cancelled) onError(formatBackendError(caught));
             } finally {
@@ -1009,16 +1028,99 @@ function CollabDocView({ id, onError }: { id: string; onError: (error: string | 
                         overflow="hidden"
                         style={{ borderColor: "#252b31", borderWidth: 1 }}
                     >
-                        <ErrorBoundary fallback={renderEditorError}>
-                            <Suspense fallback={codeEditorFallback}>
-                                <CodeEditor content="" lang="markdown" />
-                            </Suspense>
-                        </ErrorBoundary>
+                        {serverUrl ? (
+                            <ErrorBoundary fallback={renderEditorError}>
+                                <Suspense fallback={codeEditorFallback}>
+                                    <CodeEditor
+                                        collab={{
+                                            objectId: id,
+                                            shareToken: meta.share_token,
+                                            serverUrl,
+                                            displayName,
+                                        }}
+                                    />
+                                </Suspense>
+                            </ErrorBoundary>
+                        ) : (
+                            codeEditorFallback
+                        )}
                     </Card>
                 </YStack>
             ) : (
                 <EmptyState icon={<FileText size={28} />} title="Doc unavailable" />
             )}
+        </YStack>
+    );
+}
+
+// Public, unauthenticated editor for a share link (`/s/:token`). It resolves the
+// token to a document id via the public meta endpoint, then live-edits over the
+// same Y-sync WebSocket the owner uses — no account, no nav chrome.
+function SharePage({ token }: { token: string }) {
+    const [info, setInfo] = useState<{ objectId: string; serverUrl: string } | null>(null);
+    const [error, setError] = useState<string | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        async function load() {
+            try {
+                const serverUrl = await resolveServerUrl();
+                const base = serverUrl.replace(/\/$/, "");
+                const response = await fetch(`${base}/api/s/${encodeURIComponent(token)}/meta`);
+                if (!response.ok) {
+                    throw new Error(
+                        response.status === 404
+                            ? "This share link is invalid or no longer exists."
+                            : `Could not open the document (HTTP ${response.status}).`,
+                    );
+                }
+                const meta = (await response.json()) as { object_id: string };
+                if (!cancelled) setInfo({ objectId: meta.object_id, serverUrl });
+            } catch (caught) {
+                if (!cancelled) setError(caught instanceof Error ? caught.message : String(caught));
+            }
+        }
+
+        void load();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [token]);
+
+    if (error) {
+        return <CenteredStatus title="Can't open document" message={error} />;
+    }
+    if (!info) {
+        return <CenteredStatus title="Opening shared document" loading />;
+    }
+
+    return (
+        <YStack minH="100vh" bg="#101214">
+            <YStack flex={1} style={{ minHeight: 0 }}>
+                <ErrorBoundary fallback={renderEditorError}>
+                    <Suspense fallback={codeEditorFallback}>
+                        <CodeEditor
+                            collab={{
+                                objectId: info.objectId,
+                                shareToken: token,
+                                serverUrl: info.serverUrl,
+                                displayName: "Guest",
+                            }}
+                        />
+                    </Suspense>
+                </ErrorBoundary>
+            </YStack>
+            <XStack
+                justify="center"
+                py="$2"
+                style={{ borderTopColor: "#252b31", borderTopWidth: 1 }}
+            >
+                <Text fontSize={12} color="#5b6571">
+                    Made with Clipper
+                </Text>
+            </XStack>
         </YStack>
     );
 }

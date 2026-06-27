@@ -525,6 +525,17 @@ pub struct CollabDocMeta {
     pub updated_at: String,
 }
 
+/// `GET /api/s/:share_token/meta` response. Unauthenticated: the share token in
+/// the path is the sole credential. Returns just enough for the public share
+/// page to open the Y-sync WebSocket — the document id (the WS route is keyed by
+/// it) and `updated_at`. The content itself flows over the WebSocket, never this
+/// endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShareMeta {
+    pub object_id: ObjectId,
+    pub updated_at: String,
+}
+
 // -- Devices --
 
 /// One of the authenticated user's registered devices, as returned by

@@ -40,6 +40,7 @@ tower-http = { version = "0.7.0", features = ["trace", "limit", "cors"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 uuid = { workspace = true, features = ["v7", "serde"] }
+yrs = "0.27.2"
 zeroize.workspace = true
 
 [dev-dependencies]

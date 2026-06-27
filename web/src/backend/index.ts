@@ -127,3 +127,31 @@ export async function resumeSession(): Promise<boolean> {
         return false;
     }
 }
+
+// Resolve the server base URL for connections that bypass the wasm engine — the
+// collab Y-sync WebSocket and the public share page open these directly. The
+// priority mirrors the login screen:
+//   1. VITE_SERVER_URL — baked into hosted builds (the production API).
+//   2. The exact URL the user logged in with (browser session-resume store).
+//   3. The engine's compiled-in default (local dev / native shell).
+export async function resolveServerUrl(): Promise<string> {
+    const envUrl = import.meta.env.VITE_SERVER_URL as string | undefined;
+    if (envUrl) return envUrl;
+    const stored = readStoredServerUrl();
+    if (stored) return stored;
+    return await defaultServerUrl();
+}
+
+function readStoredServerUrl(): string | null {
+    if (typeof sessionStorage === "undefined") return null;
+    try {
+        const raw = sessionStorage.getItem(SESSION_CREDENTIALS_KEY);
+        if (!raw) return null;
+        const creds = JSON.parse(raw) as Partial<SessionCredentials>;
+        return typeof creds.serverUrl === "string" && creds.serverUrl.length > 0
+            ? creds.serverUrl
+            : null;
+    } catch {
+        return null;
+    }
+}

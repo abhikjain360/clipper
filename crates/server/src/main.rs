@@ -1,5 +1,6 @@
 mod auth;
 mod cleanup;
+mod collab_sync;
 mod config;
 mod entity;
 mod error;
@@ -367,6 +368,23 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
         .route(
             "/api/ws-ticket/connect",
             get(ws::ws_ticket_handler).route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                rate_limit::api_rate_limit_middleware,
+            )),
+        )
+        // Collab Y-sync WebSocket and the public share-meta lookup are
+        // unauthenticated — the share token is the credential — so they throttle
+        // per client IP like the ticket connect route above.
+        .route(
+            "/api/collab-docs/{id}/ws",
+            get(routes::collab::collab_ws_handler).route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                rate_limit::api_rate_limit_middleware,
+            )),
+        )
+        .route(
+            "/api/s/{share_token}/meta",
+            get(routes::collab::get_share_meta).route_layer(middleware::from_fn_with_state(
                 state.clone(),
                 rate_limit::api_rate_limit_middleware,
             )),

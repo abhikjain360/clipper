@@ -12,15 +12,18 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State, WebSocketUpgrade},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use clipper_core::{
     crypto,
-    models::{ApiErrorCode, CollabDocMeta, CreateCollabDocResponse, ObjectEventType, ObjectKind},
+    models::{
+        ApiErrorCode, CollabDocMeta, CreateCollabDocResponse, ObjectEventType, ObjectKind,
+        ShareMeta,
+    },
 };
 use sea_orm::{ActiveModelTrait, ColumnTrait, DerivePartialModel, EntityTrait, QueryFilter, Set};
 use tracing::{debug, error, info};
@@ -28,8 +31,9 @@ use uuid::Uuid;
 
 use crate::{
     auth::AuthInfo,
+    collab_sync,
     entity::{collab_docs, event_log, objects},
-    routes::{ApiError, with_txn},
+    routes::{ApiError, error_response, with_txn},
     state::AppState,
     ws::WsBroadcast,
 };
@@ -364,4 +368,136 @@ async fn load_owned_collab_doc_id(
         );
         ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })
+}
+
+/// Query string for the collab Y-sync WebSocket. The share token is the sole
+/// credential for this (unauthenticated) endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct CollabWsQuery {
+    token: Option<String>,
+}
+
+/// `GET /api/collab-docs/:id/ws` — the live Y-sync WebSocket for a collab doc.
+///
+/// Unauthenticated: access is granted by a `?token=<share_token>` matching the
+/// document's stored share token. The owner reaches it with that same token
+/// (obtained from the authenticated meta endpoint); an anonymous share-link
+/// visitor with the token from the public page. Once upgraded the socket speaks
+/// the binary y-sync protocol (see `crate::collab_sync`), not the JSON event
+/// protocol of `/api/ws`.
+pub async fn collab_ws_handler(
+    State(state): State<AppState>,
+    Path(object_id): Path<String>,
+    Query(query): Query<CollabWsQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let object_uuid =
+        Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
+    let token = query.token.unwrap_or_default();
+
+    let (collab_doc_id, initial_state) = authorize_collab_ws(&state, object_uuid, &token)
+        .await?
+        .ok_or_else(|| {
+            debug!(object_id = %object_uuid, "Rejected collab WebSocket with invalid share token");
+            error_response(StatusCode::FORBIDDEN, "Invalid share token")
+        })?;
+
+    Ok(ws
+        .max_message_size(collab_sync::COLLAB_WS_MAX_MESSAGE_BYTES)
+        .max_frame_size(collab_sync::COLLAB_WS_MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| {
+            collab_sync::handle_collab_socket(socket, state, collab_doc_id, initial_state)
+        }))
+}
+
+/// Resolve a collab object id plus share token to the backing `collab_docs.id`
+/// and its persisted state, enforcing that the token matches. Returns
+/// `Ok(None)` when the object is missing, is not a collab doc, or the token is
+/// wrong — all of which the caller maps to a single 403 so the endpoint is not
+/// an existence oracle. Database failures surface as an `ApiError`.
+async fn authorize_collab_ws(
+    state: &AppState,
+    object_id: Uuid,
+    token: &str,
+) -> Result<Option<(Uuid, Option<Vec<u8>>)>, ApiError> {
+    if token.is_empty() {
+        return Ok(None);
+    }
+
+    let object = objects::Entity::find_by_id(object_id)
+        .filter(objects::Column::Kind.eq(ObjectKind::Collab.as_ref()))
+        .into_partial_model::<CollabObjectRow>()
+        .one(state.db())
+        .await
+        .map_err(|e| {
+            error!(object_id = %object_id, error = %e, "Failed to look up collab object for WebSocket");
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+    let Some(object) = object else {
+        return Ok(None);
+    };
+    let Some(collab_doc_id) = object.collab_doc_id else {
+        return Ok(None);
+    };
+
+    let doc = collab_docs::Entity::find_by_id(collab_doc_id)
+        .one(state.db())
+        .await
+        .map_err(|e| {
+            error!(collab_doc_id = %collab_doc_id, error = %e, "Failed to load collab_docs row for WebSocket");
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+    let Some(doc) = doc else {
+        return Ok(None);
+    };
+    if doc.share_token != token {
+        return Ok(None);
+    }
+
+    Ok(Some((collab_doc_id, doc.yjs_state)))
+}
+
+#[derive(Debug, DerivePartialModel)]
+#[sea_orm(entity = "objects::Entity", from_query_result)]
+struct ShareObjectRow {
+    id: Uuid,
+}
+
+/// `GET /api/s/:share_token/meta` — unauthenticated lookup of a shared collab
+/// doc by its share token, for the public share page. Returns the object id (the
+/// WS route is keyed by it) and `updated_at`; never the document content.
+pub async fn get_share_meta(
+    State(state): State<AppState>,
+    Path(share_token): Path<String>,
+) -> Result<Json<ShareMeta>, ApiError> {
+    let doc = collab_docs::Entity::find()
+        .filter(collab_docs::Column::ShareToken.eq(&share_token))
+        .one(state.db())
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Failed to look up collab doc by share token");
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?
+        .ok_or_else(|| ApiError::from_code(ApiErrorCode::ObjectNotFound))?;
+
+    let object = objects::Entity::find()
+        .filter(objects::Column::CollabDocId.eq(doc.id))
+        .into_partial_model::<ShareObjectRow>()
+        .one(state.db())
+        .await
+        .map_err(|e| {
+            error!(collab_doc_id = %doc.id, error = %e, "Failed to find object for shared collab doc");
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?
+        .ok_or_else(|| {
+            // The collab_docs row exists but its objects row does not; the FK is
+            // ON DELETE CASCADE, so this is a data inconsistency.
+            error!(collab_doc_id = %doc.id, "Shared collab doc has no backing object row");
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+
+    Ok(Json(ShareMeta {
+        object_id: object.id.into(),
+        updated_at: doc.updated_at,
+    }))
 }

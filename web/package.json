@@ -43,7 +43,10 @@
         "react-dom": "19.2.7",
         "tamagui": "2.3.3",
         "vite": "8.1.0",
-        "wouter": "3.10.0"
+        "wouter": "3.10.0",
+        "y-codemirror.next": "^0.3.5",
+        "y-websocket": "^3.0.0",
+        "yjs": "^13.6.31"
     },
     "devDependencies": {
         "@tauri-apps/cli": "2.11.3",

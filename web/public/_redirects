@@ -1,0 +1,5 @@
+# SPA fallback: every unmatched path serves the app shell so client-side routes
+# (e.g. /collab/:id and the public /s/:share_token share links) resolve on a
+# direct load or reload instead of 404ing. The frontend talks to the API on a
+# separate origin, so nothing under this origin needs to bypass the fallback.
+/*  /index.html  200

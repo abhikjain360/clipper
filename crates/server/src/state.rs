@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::AuthInfo,
+    collab_sync::{CollabRoom, MAX_CONNS_PER_ROOM},
     config::ServerConfig,
     entity::{event_log, objects},
     error::ServerResult,
@@ -50,6 +51,10 @@ pub struct AppStateInner {
     /// are reserved in `try_acquire_ws_slot` and released when the returned guard
     /// drops; an entry is removed once its count returns to zero.
     ws_connections: std::sync::Mutex<HashMap<Uuid, u64>>,
+    /// Loaded collaborative document rooms, keyed by `collab_docs.id`. A room is
+    /// created on the first WebSocket connection to a document and removed when
+    /// the last connection closes (see `crate::collab_sync`).
+    collab_rooms: std::sync::Mutex<HashMap<Uuid, Arc<CollabRoom>>>,
     auth_challenges: std::sync::Mutex<HashMap<String, AuthChallenge>>,
     pending_registrations: std::sync::Mutex<HashMap<String, PendingRegistration>>,
     ws_tickets: std::sync::Mutex<HashMap<Vec<u8>, WsTicket>>,
@@ -232,6 +237,7 @@ impl AppState {
                 rate_limiter,
                 ws_channels: std::sync::Mutex::new(HashMap::new()),
                 ws_connections: std::sync::Mutex::new(HashMap::new()),
+                collab_rooms: std::sync::Mutex::new(HashMap::new()),
                 auth_challenges: std::sync::Mutex::new(HashMap::new()),
                 pending_registrations: std::sync::Mutex::new(HashMap::new()),
                 ws_tickets: std::sync::Mutex::new(HashMap::new()),
@@ -366,6 +372,40 @@ impl AppState {
             if *count == 0 {
                 conns.remove(&user_id);
             }
+        }
+    }
+
+    /// Acquire (loading if necessary) the room for a collab document and reserve
+    /// a connection slot on it. `initial_state` seeds a freshly created room from
+    /// persisted `yjs_state`; it is ignored when the room is already loaded.
+    /// Returns `None` if the room is already at [`MAX_CONNS_PER_ROOM`].
+    pub fn acquire_collab_room(
+        &self,
+        collab_doc_id: Uuid,
+        initial_state: Option<Vec<u8>>,
+    ) -> Option<Arc<CollabRoom>> {
+        let mut rooms = self.inner.collab_rooms.lock().expect("lock poisoned");
+        let room = rooms
+            .entry(collab_doc_id)
+            .or_insert_with(|| CollabRoom::new(collab_doc_id, initial_state))
+            .clone();
+        // A freshly created room is at count 0, so a first connection is never
+        // rejected here; only an already-full room is.
+        if room.conn_count().load(Ordering::Relaxed) >= MAX_CONNS_PER_ROOM {
+            // An empty room we just created (count 0) can never reach this branch,
+            // so there is nothing to roll back.
+            return None;
+        }
+        room.conn_count().fetch_add(1, Ordering::SeqCst);
+        Some(room)
+    }
+
+    /// Release a collab room connection slot, unloading the room once no
+    /// connections remain so its CRDT state and observer are dropped.
+    pub fn release_collab_room(&self, room: &Arc<CollabRoom>) {
+        let mut rooms = self.inner.collab_rooms.lock().expect("lock poisoned");
+        if room.conn_count().fetch_sub(1, Ordering::SeqCst) <= 1 {
+            rooms.remove(&room.collab_doc_id);
         }
     }
 
