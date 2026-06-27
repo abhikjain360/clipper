@@ -76,20 +76,26 @@ impl EngineManager {
 
     /// Return the engine, building it bound to `requested_url` the first time.
     /// Once an engine exists, `requested_url` must match its base URL.
+    ///
+    /// The returned flag is `true` when this call freshly built the engine and
+    /// `false` when it reused an existing one. Callers that then authenticate use
+    /// it to decide whether a failure should [`discard_engine`](Self::discard_engine):
+    /// a freshly built engine that fails login must not pin its URL for the rest
+    /// of the daemon's lifetime.
     pub async fn get_or_build(
         &self,
         requested_url: Option<&str>,
-    ) -> Result<Arc<SyncEngine>, ClientError> {
+    ) -> Result<(Arc<SyncEngine>, bool), ClientError> {
         if let Some(engine) = self.engine().await {
             ensure_requested_base_url(&engine, requested_url)?;
-            return Ok(engine);
+            return Ok((engine, false));
         }
 
         let mut slot = self.slot.write().await;
         // Another task may have built it while we waited for the write lock.
         if let Some(engine) = slot.as_ref() {
             ensure_requested_base_url(engine, requested_url)?;
-            return Ok(Arc::clone(engine));
+            return Ok((Arc::clone(engine), false));
         }
 
         // Read the stored profile once: it provides the URL fallback and the
@@ -117,7 +123,20 @@ impl EngineManager {
         drop(slot);
         // Wake the state watcher now that there is an engine to subscribe to.
         self.bump_ready();
-        Ok(engine)
+        Ok((engine, true))
+    }
+
+    /// Drop a freshly built engine whose authentication failed, releasing the
+    /// server URL it was bound to so the next login/register can target a
+    /// different server (e.g. the user corrects a mistyped URL and retries).
+    ///
+    /// Unlike [`clear`](Self::clear), this keeps the stored profile so the
+    /// login form stays prefilled: a failed login must not erase the saved
+    /// username/server.
+    pub async fn discard_engine(&self) {
+        *self.slot.write().await = None;
+        // Wake the state watcher so it drops its subscription to the gone engine.
+        self.bump_ready();
     }
 
     /// Drop the current engine (on logout) so the next login/register can target a
@@ -185,12 +204,20 @@ mod tests {
         let mgr = manager("first-use", None);
         assert!(mgr.engine().await.is_none());
 
-        let engine = mgr
+        let (engine, freshly_built) = mgr
             .get_or_build(Some("https://a.example"))
             .await
             .expect("build engine");
+        assert!(freshly_built, "first use builds the engine");
         assert_eq!(engine.base_url(), "https://a.example");
         assert!(mgr.engine().await.is_some());
+
+        // Reusing the existing engine reports it was not freshly built.
+        let (_, freshly_built) = mgr
+            .get_or_build(Some("https://a.example"))
+            .await
+            .expect("reuse engine");
+        assert!(!freshly_built, "second use reuses the engine");
     }
 
     #[tokio::test]
@@ -207,7 +234,7 @@ mod tests {
         // After clear (logout) the next build may target a different server.
         mgr.clear().await;
         assert!(mgr.engine().await.is_none());
-        let engine = mgr
+        let (engine, _) = mgr
             .get_or_build(Some("https://b.example"))
             .await
             .expect("rebuild b");
@@ -215,9 +242,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discard_engine_releases_url_but_keeps_profile() {
+        // A first login against the wrong server pins that URL...
+        let mgr = manager("discard", Some(creds("https://stored.example", "alice")));
+        let (engine, freshly_built) = mgr
+            .get_or_build(Some("https://wrong.example"))
+            .await
+            .expect("build wrong");
+        assert!(freshly_built);
+        assert_eq!(engine.base_url(), "https://wrong.example");
+        assert!(matches!(
+            mgr.get_or_build(Some("https://right.example")).await,
+            Err(ClientError::InvalidServerUrl(_))
+        ));
+
+        // ...but discarding the failed engine releases the pin while keeping the
+        // saved profile prefill (unlike `clear`), so the user can correct the URL.
+        mgr.discard_engine().await;
+        assert!(mgr.engine().await.is_none());
+        assert_eq!(
+            mgr.saved_profile().await.expect("profile kept").username,
+            "alice"
+        );
+        let (engine, freshly_built) = mgr
+            .get_or_build(Some("https://right.example"))
+            .await
+            .expect("rebuild right");
+        assert!(freshly_built);
+        assert_eq!(engine.base_url(), "https://right.example");
+    }
+
+    #[tokio::test]
     async fn falls_back_to_stored_url_when_request_omits_it() {
         let mgr = manager("fallback", Some(creds("https://stored.example", "alice")));
-        let engine = mgr.get_or_build(None).await.expect("build from stored");
+        let (engine, _) = mgr.get_or_build(None).await.expect("build from stored");
         assert_eq!(engine.base_url(), "https://stored.example");
     }
 

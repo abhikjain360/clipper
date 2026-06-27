@@ -458,8 +458,8 @@ async fn cmd_login(id: String, params: LoginParams, manager: &EngineManager) -> 
 
     // Build the engine bound to the requested server on first login, or reuse the
     // one this daemon already built (in which case the URL must match).
-    let engine = match manager.get_or_build(server_url.as_deref()).await {
-        Ok(engine) => engine,
+    let (engine, freshly_built) = match manager.get_or_build(server_url.as_deref()).await {
+        Ok(result) => result,
         Err(error) => return client_error(id, error),
     };
 
@@ -484,7 +484,14 @@ async fn cmd_login(id: String, params: LoginParams, manager: &EngineManager) -> 
             }
             DaemonResponse::success(id, None)
         }
-        Err(e) => client_error(id, e),
+        Err(e) => {
+            // A login that just built the engine must not pin its URL for the
+            // daemon's lifetime; drop it so the user can fix the URL and retry.
+            if freshly_built {
+                manager.discard_engine().await;
+            }
+            client_error(id, e)
+        }
     }
 }
 
@@ -504,8 +511,8 @@ async fn cmd_register(
 
     // Build the engine bound to the requested server on first register, or reuse
     // the one this daemon already built (in which case the URL must match).
-    let engine = match manager.get_or_build(server_url.as_deref()).await {
-        Ok(engine) => engine,
+    let (engine, freshly_built) = match manager.get_or_build(server_url.as_deref()).await {
+        Ok(result) => result,
         Err(error) => return client_error(id, error),
     };
 
@@ -531,7 +538,14 @@ async fn cmd_register(
             }
             json_success(id, RegisterResult { username })
         }
-        Err(e) => client_error(id, e),
+        Err(e) => {
+            // A register that just built the engine must not pin its URL for the
+            // daemon's lifetime; drop it so the user can fix the URL and retry.
+            if freshly_built {
+                manager.discard_engine().await;
+            }
+            client_error(id, e)
+        }
     }
 }
 
