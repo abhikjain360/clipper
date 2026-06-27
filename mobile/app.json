@@ -6,11 +6,15 @@
     "orientation": "portrait",
     "scheme": "clipper",
     "userInterfaceStyle": "dark",
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "android": {
       "package": "com.clipper.mobile",
       "allowBackup": false
     },
-    "plugins": []
+    "plugins": [
+      "expo-secure-store"
+    ]
   }
 }

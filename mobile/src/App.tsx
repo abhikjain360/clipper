@@ -2,6 +2,7 @@ import {
   Clipboard,
   Copy,
   Download,
+  Eye,
   FileCode,
   FilePlus,
   FileText,
@@ -12,9 +13,10 @@ import {
   RefreshCw,
   Smartphone,
   Trash2,
+  X,
 } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { StatusBar } from "react-native";
+import { Modal, Platform, StatusBar, TextInput } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { TamaguiProvider } from "tamagui";
 import {
@@ -35,17 +37,29 @@ import {
 import type { AppState, ClipboardItem, CollabItem, DeviceInfo, FileItem } from "@clipper/shared";
 import {
   backend,
+  clearCredentials,
   collabShareLink,
   devDefaultServerUrl,
   formatBackendError,
   pickUploadFile,
   readClipboardText,
+  resumeSession,
+  saveCredentials,
   shareDownloadedFile,
   writeClipboardText,
 } from "./backend";
 import tamaguiConfig from "./tamagui.config";
 
 type TabName = "clipboard" | "files" | "devices" | "collab";
+type ViewerContent = { title: string; content: string };
+
+// Android renders code with the platform "monospace" family; iOS has no such
+// alias, so fall back to Menlo there.
+const MONOSPACE_FONT = Platform.select({
+  ios: "Menlo",
+  android: "monospace",
+  default: "monospace",
+});
 
 export default function App() {
   return (
@@ -63,18 +77,50 @@ export default function App() {
 function ClipperApp() {
   const [state, setState] = useState<AppState | null>(null);
   const [startupError, setStartupError] = useState<string | null>(null);
+  // Guards the one-time cold-start unlock below. Starts true so we never flash
+  // the login screen before the resume attempt settles.
+  const [resuming, setResuming] = useState(true);
   // Restart the state-watch loop when the session changes: a production login can
   // re-point the backend at a new server (a fresh native client), so the loop
   // must re-subscribe to that client's state channel instead of the old one's.
   const sessionKey = state?.session?.device_id ?? null;
 
+  // Cold-start session resume. Empty deps + the component staying mounted across
+  // background/refocus mean this runs exactly once per process launch: bringing a
+  // still-alive app back into focus never re-prompts for the fingerprint. Only a
+  // fresh launch (process killed/evicted) re-runs it.
   useEffect(() => {
+    let cancelled = false;
+
+    async function run() {
+      try {
+        await backend.connect();
+        await resumeSession();
+      } catch {
+        // Nothing stored, biometric cancelled, or auto-login failed — fall
+        // through to the manual login screen.
+      } finally {
+        if (!cancelled) setResuming(false);
+      }
+    }
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // State-watch loop. Held until the resume attempt settles so it reads the
+  // post-resume session, then re-subscribes whenever the session changes.
+  useEffect(() => {
+    if (resuming) return;
+
     let cancelled = false;
     const controller = new AbortController();
 
     async function run() {
       try {
-        await backend.connect();
         let seenVersion = await backend.stateVersion();
         if (cancelled) return;
         setState(await backend.getState());
@@ -95,13 +141,13 @@ function ClipperApp() {
       // Cancel the in-flight waitForStateChange UniFFI future on unmount.
       controller.abort();
     };
-  }, [sessionKey]);
+  }, [sessionKey, resuming]);
 
   if (startupError) {
     return <CenteredStatus title="Cannot start Clipper" message={startupError} />;
   }
 
-  if (!state) return <CenteredStatus title="Starting Clipper" loading />;
+  if (resuming || !state) return <CenteredStatus title="Starting Clipper" loading />;
 
   if (!state.session) {
     return <LoginScreen initialUsername={state.saved_profile?.username ?? ""} onState={setState} />;
@@ -139,6 +185,10 @@ function LoginScreen({
       } else {
         await backend.register(accessKey, username, passphrase, "", serverUrl);
       }
+      // Persist behind biometric so the next cold start can resume without the
+      // passphrase. Best-effort and self-contained: a cancelled/unavailable
+      // biometric leaves the session unsaved without failing the login.
+      await saveCredentials({ passphrase, username, deviceName: "", serverUrl });
       onState(await backend.getState());
     } catch (caught) {
       setError(formatBackendError(caught));
@@ -240,6 +290,8 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
 
   async function logout() {
     setError(null);
+    // Forget the stored passphrase so the device stops auto-resuming.
+    await clearCredentials();
     try {
       await backend.logout();
     } catch (caught) {
@@ -349,6 +401,8 @@ function ClipboardPanel({
 }) {
   const [busy, setBusy] = useState(false);
 
+  const [viewing, setViewing] = useState<ViewerContent | null>(null);
+
   async function addClipboardText() {
     setBusy(true);
     onError(null);
@@ -381,6 +435,20 @@ function ClipboardPanel({
     }
   }
 
+  async function viewItem(item: ClipboardItem) {
+    onError(null);
+    try {
+      const payload = await backend.clipboardPayload(item.id);
+      if (payload.text === null) {
+        onError(`Cannot view ${payload.mimeType} as text`);
+        return;
+      }
+      setViewing({ title: item.mime_type, content: payload.text });
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }
+
   return (
     <YStack gap="$3" flex={1} pt="$3">
       <XStack justify="space-between" items="center" gap="$2">
@@ -408,13 +476,30 @@ function ClipboardPanel({
                       {item.mime_type} - {formatRelativeTime(item.created_at)}
                     </Paragraph>
                   </YStack>
-                  <Button size="$3" icon={<Copy size={16} />} onPress={() => void copyItem(item)} />
+                  <XStack gap="$1">
+                    <Button
+                      size="$3"
+                      icon={<Eye size={16} />}
+                      onPress={() => void viewItem(item)}
+                    />
+                    <Button
+                      size="$3"
+                      icon={<Copy size={16} />}
+                      onPress={() => void copyItem(item)}
+                    />
+                  </XStack>
                 </XStack>
               </ListCard>
             ))}
           </YStack>
         </ScrollView>
       )}
+
+      <ContentViewer
+        viewing={viewing}
+        onClose={() => setViewing(null)}
+        onError={onError}
+      />
     </YStack>
   );
 }
@@ -429,6 +514,8 @@ function FilesPanel({
   onError: (error: string | null) => void;
 }) {
   const [busy, setBusy] = useState(false);
+
+  const [viewing, setViewing] = useState<ViewerContent | null>(null);
 
   async function uploadFile() {
     setBusy(true);
@@ -450,6 +537,16 @@ function FilesPanel({
     try {
       const bytes = await backend.downloadFileBytes(file.id);
       await shareDownloadedFile(file.filename, file.mime_type, bytes);
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }
+
+  async function viewFile(file: FileItem) {
+    onError(null);
+    try {
+      const bytes = await backend.downloadFileBytes(file.id);
+      setViewing({ title: file.filename, content: decodeUtf8(bytes) });
     } catch (caught) {
       onError(formatBackendError(caught));
     }
@@ -496,6 +593,13 @@ function FilesPanel({
                     </YStack>
                   </XStack>
                   <XStack gap="$1">
+                    {isViewableText(file.mime_type, file.filename) && (
+                      <Button
+                        size="$3"
+                        icon={<Eye size={16} />}
+                        onPress={() => void viewFile(file)}
+                      />
+                    )}
                     <Button
                       size="$3"
                       icon={<Download size={16} />}
@@ -513,6 +617,12 @@ function FilesPanel({
           </YStack>
         </ScrollView>
       )}
+
+      <ContentViewer
+        viewing={viewing}
+        onClose={() => setViewing(null)}
+        onError={onError}
+      />
     </YStack>
   );
 }
@@ -777,4 +887,90 @@ function formatRelativeTime(value: string): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+// Read-only, monospace content viewer. Files are immutable and clipboard items
+// are snapshots, so there is nothing to edit here — this mirrors the web editor,
+// which is also read-only. CodeMirror has no React Native build, so this is a
+// plain TextInput, not a syntax-highlighting editor.
+function ContentViewer({
+  viewing,
+  onClose,
+  onError,
+}: {
+  viewing: ViewerContent | null;
+  onClose: () => void;
+  onError: (error: string | null) => void;
+}) {
+  async function copyAll() {
+    if (!viewing) return;
+    try {
+      await writeClipboardText(viewing.content);
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }
+
+  return (
+    <Modal visible={viewing !== null} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: "#101214" }}>
+        <XStack
+          items="center"
+          justify="space-between"
+          gap="$2"
+          px="$3"
+          py="$2"
+          borderBottomColor="#252b31"
+          borderBottomWidth={1}
+        >
+          <Text flex={1} numberOfLines={1} fontWeight="600" color="#e6e9ec">
+            {viewing?.title ?? ""}
+          </Text>
+          <Button size="$3" icon={<Copy size={16} />} onPress={() => void copyAll()} />
+          <Button size="$3" icon={<X size={16} />} onPress={onClose} />
+        </XStack>
+        <TextInput
+          value={viewing?.content ?? ""}
+          editable={false}
+          multiline
+          scrollEnabled
+          style={{
+            flex: 1,
+            color: "#e6e9ec",
+            backgroundColor: "#101214",
+            fontFamily: MONOSPACE_FONT,
+            fontSize: 13,
+            lineHeight: 18,
+            padding: 12,
+            textAlignVertical: "top",
+          }}
+        />
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+// Whether a file looks like UTF-8 text worth showing in the viewer. Errs toward
+// showing for unknown types; genuinely binary content just renders as mojibake,
+// which is acceptable for a simple viewer.
+function isViewableText(mimeType: string, filename: string): boolean {
+  const mime = mimeType.toLowerCase();
+  if (mime.startsWith("text/")) return true;
+  if (/^application\/(json|xml|javascript|x-yaml|yaml|toml|x-sh|x-shellscript)\b/.test(mime)) {
+    return true;
+  }
+  return /\.(txt|md|markdown|json|ya?ml|toml|rs|tsx?|jsx?|py|css|html?|xml|sh|c|h|cc|cpp|hpp|go|java|kt|kts|rb|php|sql|log|ini|cfg|conf|env|lock)$/i.test(
+    filename,
+  );
+}
+
+// Decode downloaded file bytes as UTF-8 for the viewer. Modern Hermes ships
+// TextDecoder; the byte loop is a defensive fallback if it is ever absent.
+function decodeUtf8(bytes: Uint8Array): string {
+  if (typeof TextDecoder !== "undefined") {
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  }
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 1) out += String.fromCharCode(bytes[i] ?? 0);
+  return out;
 }
