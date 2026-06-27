@@ -42,11 +42,14 @@ import {
     YStack,
 } from "tamagui";
 import {
+    clearSessionCredentials,
     clipperBackend,
     defaultServerUrl,
     formatBackendError,
     isTauriRuntime,
     readClipboardText,
+    resumeSession,
+    saveSessionCredentials,
     writeClipboardText,
 } from "./backend";
 import type { AppState, ClipboardItem, CollabItem, DeviceInfo, FileItem } from "@clipper/shared";
@@ -85,6 +88,9 @@ export default function App() {
             try {
                 const backend = await clipperBackend();
                 await backend.connect();
+                // Browser only: replay a stored login so a reload skips the
+                // login screen. No-op under Tauri or when nothing is stored.
+                await resumeSession();
                 let seenVersion = await backend.stateVersion();
                 if (cancelled) return;
                 setState(await backend.getState());
@@ -172,6 +178,8 @@ function LoginScreen({
             } else {
                 await backend.register(accessKey, username, passphrase, "", serverUrl);
             }
+            // Persist for reload resume (browser only; sessionStorage).
+            saveSessionCredentials({ passphrase, username, deviceName: "", serverUrl });
             onState(await backend.getState());
         } catch (caught) {
             setError(formatBackendError(caught));
@@ -294,6 +302,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
 
     async function logout() {
         setError(null);
+        clearSessionCredentials();
         try {
             const backend = await clipperBackend();
             await backend.logout();
