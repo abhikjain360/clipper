@@ -61,12 +61,11 @@
         "active": true,
         "targets": ["app"],
         "icon": [
+            "icons/32x32.png",
+            "icons/128x128.png",
+            "icons/128x128@2x.png",
             "icons/icon.icns",
-            "icons/app_icon_32.png",
-            "icons/app_icon_128.png",
-            "icons/app_icon_256.png",
-            "icons/app_icon_512.png",
-            "icons/app_icon_1024.png"
+            "icons/icon.ico"
         ]
     }
 }
