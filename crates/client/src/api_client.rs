@@ -709,6 +709,23 @@ impl ApiClient {
     }
 }
 
+/// rustls config for the native HTTP client: the `ring` provider (installed as
+/// the process default by [`crate::ensure_crypto_provider`]) plus the bundled
+/// webpki-roots trust store, advertising HTTP/2 then HTTP/1.1 via ALPN. Bundled
+/// roots keep the HTTP path free of Android trust-store JNI setup, matching the
+/// WebSocket path. Built explicitly because reqwest's own rustls wiring would
+/// otherwise pull aws-lc-rs and the platform verifier.
+#[cfg(not(target_family = "wasm"))]
+fn default_tls_config() -> rustls::ClientConfig {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config
+}
+
 /// Native builds get explicit transport limits: a hostile or wedged server
 /// must not be able to hold a request open forever, and redirects are
 /// disabled so API requests only ever go to the configured host. The wasm
@@ -716,7 +733,9 @@ impl ApiClient {
 /// fetch/redirect policy there.
 #[cfg(not(target_family = "wasm"))]
 fn build_http_client() -> Result<Client, ClientError> {
+    crate::ensure_crypto_provider();
     Ok(Client::builder()
+        .use_preconfigured_tls(default_tls_config())
         .connect_timeout(std::time::Duration::from_secs(10))
         // Per-read-chunk timeout rather than a whole-request deadline, so
         // large payload downloads stay viable on slow links.

@@ -1623,6 +1623,10 @@ impl SyncEngine {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite;
 
+        // tokio-tungstenite builds its own rustls ClientConfig from the
+        // process-default provider; ensure that's ring before connecting.
+        crate::ensure_crypto_provider();
+
         let (token, ws_url, host) = {
             let api = &self.api;
             let t = api
