@@ -11,6 +11,8 @@ fn main() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod clients;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+mod engine_manager;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod error;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod handler;
@@ -31,7 +33,7 @@ use std::{
 };
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-use clipper_client::engine::SyncEngine;
+use clipper_client::engine::AppState;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use clipper_daemon_types::ipc_path;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -42,6 +44,7 @@ use tracing::{error, info, warn};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::{
     clients::ClientManager,
+    engine_manager::EngineManager,
     error::{DaemonError, DaemonResult},
     protocol::DaemonEvent,
 };
@@ -214,6 +217,14 @@ async fn main() {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+async fn broadcast_state(client_mgr: &ClientManager, state: AppState) {
+    let event = DaemonEvent::state_changed(state);
+    if let Ok(json) = serde_json::to_string(&event) {
+        client_mgr.broadcast(&json).await;
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn run() -> DaemonResult<()> {
     let default_server_url = parse_args();
 
@@ -273,34 +284,55 @@ async fn run() -> DaemonResult<()> {
             None
         }
     };
-    let server_url = loaded_creds
-        .as_ref()
-        .map(|creds| creds.server_url.as_str())
-        .unwrap_or(default_server_url.as_str());
-
-    let engine = SyncEngine::try_new_with_data_dir(server_url, data_dir.join("client"))?;
-    if let Some(creds) = loaded_creds {
-        engine
-            .set_saved_profile(Some(creds.username), Some(creds.device_name))
-            .await;
-    }
+    // The engine is built lazily on the first login/register using the URL that
+    // request carries; until then we only know the default and the stored
+    // profile (used to prefill the login form). The passphrase is never
+    // persisted, so there is nothing to authenticate at startup anyway.
+    let engine_manager = EngineManager::new(data_dir.clone(), default_server_url, loaded_creds);
 
     let client_mgr = Arc::new(ClientManager::new());
 
-    // Spawn state watcher that broadcasts to all clients
+    // Broadcast engine state changes to all clients. The engine is created on
+    // login and torn down on logout, so the watcher re-subscribes whenever it is
+    // (re)built or cleared.
     {
-        let engine = Arc::clone(&engine);
+        let engine_manager = Arc::clone(&engine_manager);
         let client_mgr = Arc::clone(&client_mgr);
-        let mut rx = engine.subscribe();
         tokio::spawn(async move {
+            let mut ready = engine_manager.subscribe_ready();
             loop {
-                if rx.changed().await.is_err() {
-                    break;
-                }
-                let state = engine.get_state().await;
-                let event = DaemonEvent::state_changed(state);
-                if let Ok(json) = serde_json::to_string(&event) {
-                    client_mgr.broadcast(&json).await;
+                match engine_manager.engine().await {
+                    Some(engine) => {
+                        let mut state_rx = engine.subscribe();
+                        // Snapshot once so clients see the current state even if a
+                        // change landed before we subscribed.
+                        broadcast_state(&client_mgr, engine.get_state().await).await;
+                        loop {
+                            tokio::select! {
+                                changed = state_rx.changed() => {
+                                    if changed.is_err() {
+                                        break;
+                                    }
+                                    broadcast_state(&client_mgr, engine.get_state().await).await;
+                                }
+                                generation = ready.changed() => {
+                                    if generation.is_err() {
+                                        return;
+                                    }
+                                    // Engine (re)built or cleared; re-evaluate.
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        // No session: tell clients they are logged out, then wait
+                        // for the next login/register to install an engine.
+                        broadcast_state(&client_mgr, engine_manager.current_state().await).await;
+                        if ready.changed().await.is_err() {
+                            return;
+                        }
+                    }
                 }
             }
         });
@@ -341,12 +373,16 @@ async fn run() -> DaemonResult<()> {
                                 continue;
                             }
                         }
-                        let engine = Arc::clone(&engine);
+                        let engine_manager = Arc::clone(&engine_manager);
                         let client_mgr = Arc::clone(&client_mgr);
                         let data_dir = data_dir.clone();
                         let (read_half, write_half) = stream.into_split();
                         tokio::spawn(handler::handle_connection(
-                            read_half, write_half, engine, client_mgr, data_dir,
+                            read_half,
+                            write_half,
+                            engine_manager,
+                            client_mgr,
+                            data_dir,
                         ));
                     }
                     Err(e) => {

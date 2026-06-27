@@ -22,6 +22,7 @@ use zeroize::Zeroize;
 
 use crate::{
     clients::ClientManager,
+    engine_manager::EngineManager,
     keychain::{self, Credentials},
     protocol::{
         AuthChallenge, AuthenticateResult, ClipboardPayloadResult, CopyToLocalResult,
@@ -39,7 +40,7 @@ type HmacSha256 = Hmac<Sha256>;
 pub async fn handle_connection(
     read_half: OwnedReadHalf,
     write_half: OwnedWriteHalf,
-    engine: Arc<SyncEngine>,
+    engine_manager: Arc<EngineManager>,
     client_mgr: Arc<ClientManager>,
     data_dir: PathBuf,
 ) {
@@ -53,7 +54,7 @@ pub async fn handle_connection(
     let (client_id, mut broadcast_rx) = client_mgr.register().await;
 
     // Send initial state
-    let state = engine.get_state().await;
+    let state = engine_manager.current_state().await;
     let event = DaemonEvent::state_changed(state);
     if let Ok(json) = serde_json::to_string(&event) {
         let mut w = writer.lock().await;
@@ -78,7 +79,7 @@ pub async fn handle_connection(
                             continue;
                         }
                         let response = match serde_json::from_str::<DaemonRequest>(&trimmed) {
-                            Ok(req) => dispatch_command(req, &engine).await,
+                            Ok(req) => dispatch_command(req, &engine_manager).await,
                             Err(e) => DaemonResponse::error_message(
                                 String::new(),
                                 format!("Invalid request: {}", e),
@@ -371,40 +372,63 @@ where
     Ok(Some(trimmed))
 }
 
-async fn dispatch_command(req: DaemonRequest, engine: &Arc<SyncEngine>) -> DaemonResponse {
+async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> DaemonResponse {
     let id = req.id.clone();
     match req.command {
+        // Commands that operate without (or create) the engine.
         DaemonCommand::Authenticate(_) => {
             DaemonResponse::error_message(id, "Already authenticated")
         }
-        DaemonCommand::Login(params) => cmd_login(id, params, engine).await,
-        DaemonCommand::Register(params) => cmd_register(id, params, engine).await,
-        DaemonCommand::Logout => cmd_logout(id, engine).await,
-        DaemonCommand::GetState => cmd_get_state(id, engine).await,
-        DaemonCommand::SendClipboard(params) => cmd_send_clipboard(id, params.text, engine).await,
-        DaemonCommand::SendClipboardPayload(params) => {
-            cmd_send_clipboard_payload(id, params.mime_type, params.bytes, engine).await
-        }
-        DaemonCommand::CopyToLocal(params) => cmd_copy_to_local(id, params.item_id, engine).await,
-        DaemonCommand::ClipboardPayload(params) => {
-            cmd_clipboard_payload(id, params.item_id, engine).await
-        }
-        DaemonCommand::UploadFile(params) => cmd_upload_file(id, params.file_path, engine).await,
-        DaemonCommand::DownloadFile(params) => {
-            cmd_download_file(id, params.file_id, params.target_path, engine).await
-        }
-        DaemonCommand::DeleteFile(params) => cmd_delete_file(id, params.file_id, engine).await,
-        DaemonCommand::ListDevices => cmd_list_devices(id, engine).await,
-        DaemonCommand::RemoveDevice(params) => {
-            cmd_remove_device(id, params.device_id, engine).await
-        }
-        DaemonCommand::Refresh => cmd_refresh(id, engine).await,
-        DaemonCommand::CreateCollabDoc => cmd_create_collab_doc(id, engine).await,
-        DaemonCommand::DeleteCollabDoc(params) => {
-            cmd_delete_collab_doc(id, params.object_id, engine).await
-        }
-        DaemonCommand::GetCollabDocMeta(params) => {
-            cmd_get_collab_doc_meta(id, params.object_id, engine).await
+        DaemonCommand::Login(params) => cmd_login(id, params, manager).await,
+        DaemonCommand::Register(params) => cmd_register(id, params, manager).await,
+        DaemonCommand::GetState => cmd_get_state(id, manager).await,
+        DaemonCommand::Logout => cmd_logout(id, manager).await,
+        // Everything else needs a session: resolve the engine once, or report
+        // that the user has not logged in yet.
+        command => {
+            let Some(engine) = manager.engine().await else {
+                return DaemonResponse::error_message(id, "Not logged in");
+            };
+            match command {
+                DaemonCommand::SendClipboard(params) => {
+                    cmd_send_clipboard(id, params.text, &engine).await
+                }
+                DaemonCommand::SendClipboardPayload(params) => {
+                    cmd_send_clipboard_payload(id, params.mime_type, params.bytes, &engine).await
+                }
+                DaemonCommand::CopyToLocal(params) => {
+                    cmd_copy_to_local(id, params.item_id, &engine).await
+                }
+                DaemonCommand::ClipboardPayload(params) => {
+                    cmd_clipboard_payload(id, params.item_id, &engine).await
+                }
+                DaemonCommand::UploadFile(params) => {
+                    cmd_upload_file(id, params.file_path, &engine).await
+                }
+                DaemonCommand::DownloadFile(params) => {
+                    cmd_download_file(id, params.file_id, params.target_path, &engine).await
+                }
+                DaemonCommand::DeleteFile(params) => {
+                    cmd_delete_file(id, params.file_id, &engine).await
+                }
+                DaemonCommand::ListDevices => cmd_list_devices(id, &engine).await,
+                DaemonCommand::RemoveDevice(params) => {
+                    cmd_remove_device(id, params.device_id, &engine).await
+                }
+                DaemonCommand::Refresh => cmd_refresh(id, &engine).await,
+                DaemonCommand::CreateCollabDoc => cmd_create_collab_doc(id, &engine).await,
+                DaemonCommand::DeleteCollabDoc(params) => {
+                    cmd_delete_collab_doc(id, params.object_id, &engine).await
+                }
+                DaemonCommand::GetCollabDocMeta(params) => {
+                    cmd_get_collab_doc_meta(id, params.object_id, &engine).await
+                }
+                DaemonCommand::Authenticate(_)
+                | DaemonCommand::Login(_)
+                | DaemonCommand::Register(_)
+                | DaemonCommand::GetState
+                | DaemonCommand::Logout => unreachable!("handled by the outer match"),
+            }
         }
     }
 }
@@ -423,28 +447,7 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     bytes
 }
 
-async fn ensure_requested_base_url(
-    engine: &Arc<SyncEngine>,
-    requested: &str,
-) -> Result<(), ClientError> {
-    let requested = requested.trim();
-    if requested.is_empty() {
-        return Ok(());
-    }
-    let configured = engine.base_url();
-    if normalize_server_url(requested) == normalize_server_url(&configured) {
-        return Ok(());
-    }
-    Err(ClientError::InvalidServerUrl(format!(
-        "Server URL is fixed at client init: configured {configured}, requested {requested}"
-    )))
-}
-
-fn normalize_server_url(url: &str) -> &str {
-    url.trim().trim_end_matches('/')
-}
-
-async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) -> DaemonResponse {
+async fn cmd_login(id: String, params: LoginParams, manager: &EngineManager) -> DaemonResponse {
     let LoginParams {
         passphrase,
         username,
@@ -453,11 +456,12 @@ async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) ->
     } = params;
     let device_name = device_name.as_deref().unwrap_or(default_device_name());
 
-    if let Some(url) = server_url.as_deref()
-        && let Err(error) = ensure_requested_base_url(engine, url).await
-    {
-        return client_error(id, error);
-    }
+    // Build the engine bound to the requested server on first login, or reuse the
+    // one this daemon already built (in which case the URL must match).
+    let engine = match manager.get_or_build(server_url.as_deref()).await {
+        Ok(engine) => engine,
+        Err(error) => return client_error(id, error),
+    };
 
     match engine
         .login_with_platform(&passphrase, &username, device_name, platform_name())
@@ -487,7 +491,7 @@ async fn cmd_login(id: String, params: LoginParams, engine: &Arc<SyncEngine>) ->
 async fn cmd_register(
     id: String,
     params: RegisterParams,
-    engine: &Arc<SyncEngine>,
+    manager: &EngineManager,
 ) -> DaemonResponse {
     let RegisterParams {
         access_key,
@@ -498,11 +502,12 @@ async fn cmd_register(
     } = params;
     let device_name = device_name.as_deref().unwrap_or(default_device_name());
 
-    if let Some(url) = server_url.as_deref()
-        && let Err(error) = ensure_requested_base_url(engine, url).await
-    {
-        return client_error(id, error);
-    }
+    // Build the engine bound to the requested server on first register, or reuse
+    // the one this daemon already built (in which case the URL must match).
+    let engine = match manager.get_or_build(server_url.as_deref()).await {
+        Ok(engine) => engine,
+        Err(error) => return client_error(id, error),
+    };
 
     match engine
         .register_with_platform(
@@ -530,21 +535,27 @@ async fn cmd_register(
     }
 }
 
-async fn cmd_logout(id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
+async fn cmd_logout(id: String, manager: &EngineManager) -> DaemonResponse {
+    // Nothing to tear down if the user never logged in this daemon lifetime.
+    let Some(engine) = manager.engine().await else {
+        return DaemonResponse::success(id, None);
+    };
     match engine.logout().await {
         Ok(()) => {
             if let Err(e) = keychain::clear_credentials() {
                 warn!("Failed to clear stored server profile: {}", e);
             }
+            // Drop the engine so the next login/register can target a different
+            // server without restarting the daemon.
+            manager.clear().await;
             DaemonResponse::success(id, None)
         }
         Err(e) => client_error(id, e),
     }
 }
 
-async fn cmd_get_state(id: String, engine: &Arc<SyncEngine>) -> DaemonResponse {
-    let state = engine.get_state().await;
-    json_success(id, state)
+async fn cmd_get_state(id: String, manager: &EngineManager) -> DaemonResponse {
+    json_success(id, manager.current_state().await)
 }
 
 async fn cmd_send_clipboard(id: String, text: String, engine: &Arc<SyncEngine>) -> DaemonResponse {

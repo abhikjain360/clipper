@@ -24,7 +24,7 @@ const PRIVATE_DIR_MODE: u32 = 0o700;
 #[cfg(target_os = "linux")]
 const PRIVATE_FILE_MODE: u32 = 0o600;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
     pub device_name: String,
     pub server_url: String,
