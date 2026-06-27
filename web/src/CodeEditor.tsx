@@ -1,15 +1,7 @@
 import { useEffect, useRef } from "react";
-import { EditorState, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import { oneDark } from "@codemirror/theme-one-dark";
-import { vim } from "@replit/codemirror-vim";
-import { markdown } from "@codemirror/lang-markdown";
-import { javascript } from "@codemirror/lang-javascript";
-import { css } from "@codemirror/lang-css";
-import { html } from "@codemirror/lang-html";
-import { rust } from "@codemirror/lang-rust";
-import { python } from "@codemirror/lang-python";
-import { json } from "@codemirror/lang-json";
 
 interface CodeEditorProps {
     content: string;
@@ -23,9 +15,11 @@ const fillHeightTheme = EditorView.theme({
     ".cm-scroller": { overflow: "auto" },
 });
 
-// Map a filename / extension / MIME hint to a CodeMirror language extension.
-// Returns null when the type is unknown so we render with no language support.
-function languageExtension(lang: string | undefined): Extension | null {
+// Dynamically import only the CodeMirror language pack the current file needs so
+// each grammar splits into its own chunk instead of shipping all of them up
+// front. Returns null when the type is unknown so we render with no language
+// support.
+async function loadLanguage(lang: string | undefined): Promise<Extension | null> {
     if (!lang) return null;
 
     const lower = lang.toLowerCase();
@@ -37,22 +31,22 @@ function languageExtension(lang: string | undefined): Extension | null {
     switch (ext) {
         case "md":
         case "markdown":
-            return markdown();
+            return (await import("@codemirror/lang-markdown")).markdown();
         case "js":
         case "jsx":
         case "ts":
         case "tsx":
-            return javascript();
+            return (await import("@codemirror/lang-javascript")).javascript();
         case "css":
-            return css();
+            return (await import("@codemirror/lang-css")).css();
         case "html":
-            return html();
+            return (await import("@codemirror/lang-html")).html();
         case "rs":
-            return rust();
+            return (await import("@codemirror/lang-rust")).rust();
         case "py":
-            return python();
+            return (await import("@codemirror/lang-python")).python();
         case "json":
-            return json();
+            return (await import("@codemirror/lang-json")).json();
         default:
             return null;
     }
@@ -65,28 +59,44 @@ export function CodeEditor({ content, lang, vimMode }: CodeEditorProps) {
         const host = hostRef.current;
         if (!host) return undefined;
 
-        const extensions: Extension[] = [];
-        // Vim has to be installed before other keymaps so its bindings win.
-        if (vimMode) extensions.push(vim());
-        extensions.push(
-            lineNumbers(),
-            oneDark,
-            fillHeightTheme,
-            EditorView.lineWrapping,
-            // File objects are immutable; the viewer is strictly read-only.
-            EditorState.readOnly.of(true),
-            EditorView.editable.of(false),
-        );
-
-        const languageSupport = languageExtension(lang);
-        if (languageSupport) extensions.push(languageSupport);
+        let cancelled = false;
+        // Compartments let us slot vim and the language pack in after their
+        // chunks load without blocking the editor's first paint. Vim sits first
+        // so its keymap keeps precedence over the other bindings once loaded.
+        const vimCompartment = new Compartment();
+        const languageCompartment = new Compartment();
 
         const view = new EditorView({
-            state: EditorState.create({ doc: content, extensions }),
+            state: EditorState.create({
+                doc: content,
+                extensions: [
+                    vimCompartment.of([]),
+                    lineNumbers(),
+                    oneDark,
+                    fillHeightTheme,
+                    EditorView.lineWrapping,
+                    // File objects are immutable; the viewer is strictly read-only.
+                    EditorState.readOnly.of(true),
+                    EditorView.editable.of(false),
+                    languageCompartment.of([]),
+                ],
+            }),
             parent: host,
         });
 
+        if (vimMode) {
+            void import("@replit/codemirror-vim").then(({ vim }) => {
+                if (!cancelled) view.dispatch({ effects: vimCompartment.reconfigure(vim()) });
+            });
+        }
+        void loadLanguage(lang).then((language) => {
+            if (!cancelled && language) {
+                view.dispatch({ effects: languageCompartment.reconfigure(language) });
+            }
+        });
+
         return () => {
+            cancelled = true;
             view.destroy();
         };
     }, [content, lang, vimMode]);

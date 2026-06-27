@@ -16,7 +16,16 @@ import {
     Trash2,
     X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+    Suspense,
+    lazy,
+    useCallback,
+    useEffect,
+    useRef,
+    useState,
+    type FormEvent,
+    type ReactNode,
+} from "react";
 import { Route, Switch, useLocation } from "wouter";
 import {
     Button,
@@ -41,7 +50,27 @@ import {
     writeClipboardText,
 } from "./backend";
 import type { AppState, ClipboardItem, CollabItem, DeviceInfo, FileItem } from "@clipper/shared";
-import { CodeEditor } from "./CodeEditor";
+
+// Lazy-loaded so the heavy CodeMirror dependency (editor core, vim mode, and the
+// per-language packs) splits into its own chunk and stays off the initial load
+// path — it is only fetched when a file/doc is actually opened.
+const CodeEditor = lazy(() =>
+    import("./CodeEditor").then((module) => ({ default: module.CodeEditor })),
+);
+
+const codeEditorFallback = (
+    <div
+        style={{
+            flex: 1,
+            minHeight: 0,
+            display: "grid",
+            placeItems: "center",
+            color: "#5b6571",
+        }}
+    >
+        Loading editor…
+    </div>
+);
 
 const VIM_MODE_STORAGE_KEY = "clipper_vim_mode";
 
@@ -734,7 +763,9 @@ function FileViewerOverlay({
                 </XStack>
             </div>
             <div style={{ flex: 1, minHeight: 0 }}>
-                <CodeEditor content={content} lang={filename} vimMode={vimMode} />
+                <Suspense fallback={codeEditorFallback}>
+                    <CodeEditor content={content} lang={filename} vimMode={vimMode} />
+                </Suspense>
             </div>
         </div>
     );
@@ -935,7 +966,9 @@ function CollabDocView({ id, onError }: { id: string; onError: (error: string | 
                         overflow="hidden"
                         style={{ borderColor: "#252b31", borderWidth: 1 }}
                     >
-                        <CodeEditor content="" lang="markdown" />
+                        <Suspense fallback={codeEditorFallback}>
+                            <CodeEditor content="" lang="markdown" />
+                        </Suspense>
                     </Card>
                 </YStack>
             ) : (
