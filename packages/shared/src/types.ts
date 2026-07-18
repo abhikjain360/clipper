@@ -61,6 +61,12 @@ export type ClipboardPayload = {
   text: string | null;
 };
 
+export type SessionResumeMaterial = {
+  token: string;
+  dataKey: string;
+  wrappingKey: string;
+};
+
 export type ClipperBackend = {
   connect: () => Promise<void>;
   defaultServerUrl: () => string | Promise<string>;
@@ -97,4 +103,17 @@ export type ClipperBackend = {
   getCollabDocMeta: (objectId: string) => Promise<CollabItem>;
   listDevices: () => Promise<DeviceInfo[]>;
   removeDevice: (deviceId: string) => Promise<void>;
+  // Browser session resume. `sessionResumeMaterial` snapshots the bearer token
+  // and OPAQUE-derived keys (never the passphrase) after login; `resume`
+  // re-mounts the session from them on reload without an OPAQUE login. Under
+  // Tauri these are inert — the desktop daemon owns the session.
+  resume: (
+    token: string,
+    dataKey: string,
+    wrappingKey: string,
+    username: string,
+    deviceName: string,
+    serverUrl: string,
+  ) => Promise<void>;
+  sessionResumeMaterial: () => Promise<SessionResumeMaterial | null>;
 };

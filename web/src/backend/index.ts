@@ -1,4 +1,5 @@
 import type { ClipperBackend } from "./types";
+import type { SessionResumeMaterial } from "@clipper/shared";
 
 let backendPromise: Promise<ClipperBackend> | undefined;
 
@@ -53,21 +54,29 @@ export function formatBackendError(error: unknown): string {
 
 // ── Browser session resume (sessionStorage) ──
 //
-// The passphrase is otherwise never persisted (the E2E encryption keys derive
-// from it). To skip re-login on every page reload, the browser client keeps the
-// login credentials in sessionStorage: they survive an F5/reload but are wiped
-// when the tab closes, bounding exposure to the tab's lifetime. Skipped under
-// Tauri, where the desktop daemon owns credentials and the passphrase must not
-// land in the webview store.
+// The passphrase is NEVER persisted. To skip re-login on a page reload, the
+// browser client stashes a resume blob — the server's bearer token plus the two
+// OPAQUE-derived child keys (data key + device-identity wrapping key) — in
+// sessionStorage. It survives an F5/reload but is wiped when the tab closes,
+// bounding exposure to the tab's lifetime. `resume()` re-mounts the existing
+// device from it without an OPAQUE login. Skipped under Tauri, where the desktop
+// daemon owns the session and survives webview reloads.
 //
-// sessionStorage is plaintext and same-origin-script readable, so this is only
-// as safe as the page is against XSS; the localStorage device identity stays
-// encrypted regardless.
+// What this is and is not: the stored keys are derived leaves, not the
+// passphrase/OPAQUE root. They decrypt cached content and let the device act
+// while the token is live, but they cannot re-derive the passphrase, re-run
+// login, or enroll a new device, and the token is server-revocable (logout /
+// device removal). The data key is still raw bytes a same-origin script (XSS)
+// could read — the wasm AEAD needs raw key bytes, so a non-extractable WebCrypto
+// handle cannot help — so this is only as safe as the page is against XSS. See
+// docs/local-at-rest-encryption.md.
 
-const SESSION_CREDENTIALS_KEY = "clipper.session.v1";
+const SESSION_RESUME_KEY = "clipper.session.v2";
 
-type SessionCredentials = {
-    passphrase: string;
+type SessionResume = {
+    token: string;
+    dataKey: string;
+    wrappingKey: string;
     username: string;
     deviceName: string;
     serverUrl: string;
@@ -77,49 +86,66 @@ function sessionResumeAvailable(): boolean {
     return !isTauriRuntime() && typeof sessionStorage !== "undefined";
 }
 
-export function saveSessionCredentials(creds: SessionCredentials): void {
-    if (!sessionResumeAvailable()) return;
+// Persist a resume blob after login. `material` comes from the backend (null
+// under Tauri or before an engine exists), so this no-ops there. The passphrase
+// is never part of it.
+export function saveSessionResume(
+    material: SessionResumeMaterial | null,
+    username: string,
+    deviceName: string,
+    serverUrl: string,
+): void {
+    if (!sessionResumeAvailable() || !material) return;
+    const resume: SessionResume = { ...material, username, deviceName, serverUrl };
     try {
-        sessionStorage.setItem(SESSION_CREDENTIALS_KEY, JSON.stringify(creds));
+        sessionStorage.setItem(SESSION_RESUME_KEY, JSON.stringify(resume));
     } catch {
         // Private mode / quota — resume is best-effort; the login still succeeded.
     }
 }
 
-export function clearSessionCredentials(): void {
+export function clearSessionResume(): void {
     if (typeof sessionStorage === "undefined") return;
     try {
-        sessionStorage.removeItem(SESSION_CREDENTIALS_KEY);
+        sessionStorage.removeItem(SESSION_RESUME_KEY);
     } catch {
         /* ignore */
     }
 }
 
-// Replay a stored login so a reload lands straight on the app. Returns true on
-// success. Never throws: a missing entry, a parse failure, or a failed login
-// (stale creds / server down) just falls back to the manual login screen.
+// Replay a stored session so a reload lands straight on the app. Returns true on
+// success. Never throws: a missing entry, a parse failure, or a failed resume
+// (revoked/expired token, server down) just falls back to the manual login
+// screen.
 export async function resumeSession(): Promise<boolean> {
     if (!sessionResumeAvailable()) return false;
 
     let raw: string | null = null;
     try {
-        raw = sessionStorage.getItem(SESSION_CREDENTIALS_KEY);
+        raw = sessionStorage.getItem(SESSION_RESUME_KEY);
     } catch {
         return false;
     }
     if (!raw) return false;
 
-    let creds: SessionCredentials;
+    let resume: SessionResume;
     try {
-        creds = JSON.parse(raw) as SessionCredentials;
+        resume = JSON.parse(raw) as SessionResume;
     } catch {
-        clearSessionCredentials();
+        clearSessionResume();
         return false;
     }
 
     try {
         const backend = await clipperBackend();
-        await backend.login(creds.passphrase, creds.username, creds.deviceName, creds.serverUrl);
+        await backend.resume(
+            resume.token,
+            resume.dataKey,
+            resume.wrappingKey,
+            resume.username,
+            resume.deviceName,
+            resume.serverUrl,
+        );
         return true;
     } catch {
         // Transient or stale — keep the entry (a later reload may succeed) and
@@ -145,11 +171,11 @@ export async function resolveServerUrl(): Promise<string> {
 function readStoredServerUrl(): string | null {
     if (typeof sessionStorage === "undefined") return null;
     try {
-        const raw = sessionStorage.getItem(SESSION_CREDENTIALS_KEY);
+        const raw = sessionStorage.getItem(SESSION_RESUME_KEY);
         if (!raw) return null;
-        const creds = JSON.parse(raw) as Partial<SessionCredentials>;
-        return typeof creds.serverUrl === "string" && creds.serverUrl.length > 0
-            ? creds.serverUrl
+        const resume = JSON.parse(raw) as Partial<SessionResume>;
+        return typeof resume.serverUrl === "string" && resume.serverUrl.length > 0
+            ? resume.serverUrl
             : null;
     } catch {
         return null;

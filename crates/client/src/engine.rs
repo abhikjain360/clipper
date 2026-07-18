@@ -66,12 +66,34 @@ pub struct SyncEngine {
     local_store: LocalStore,
     encryption_key: RwLock<Option<Zeroizing<[u8; 32]>>>,
     device_signing_key: RwLock<Option<Zeroizing<[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]>>>,
+    /// Retained after auth so the browser client can persist a session-resume
+    /// blob (`{ token, data key, this wrapping key }`) and later boot via
+    /// [`SyncEngine::resume_with_platform`] without re-running OPAQUE. It is no
+    /// more sensitive than the data key it sits beside, and is cleared on
+    /// logout / current-device removal. Native shells keep their engine resident
+    /// and never read it back, but holding it is harmless there.
+    device_identity_wrapping_key: RwLock<Option<Zeroizing<[u8; 32]>>>,
     state: RwLock<AppState>,
     state_tx: watch::Sender<u64>,
     state_version: std::sync::atomic::AtomicU64,
     ws_restart_tx: watch::Sender<u64>,
     ws_restart_rx: watch::Receiver<u64>,
     suppressed_payload: RwLock<Option<([u8; 32], std::time::Instant)>>,
+}
+
+/// Secrets a browser client needs to resume a session after a page reload
+/// without persisting the passphrase. Produced by
+/// [`SyncEngine::session_resume_material`] and consumed by
+/// [`SyncEngine::resume_with_platform`].
+///
+/// Deliberately excludes the passphrase and the OPAQUE export key: `data_key`
+/// and `device_identity_wrapping_key` are derived leaves (they cannot re-derive
+/// the root, re-run login, or enroll a new device) and `token` is
+/// server-revocable. See `docs/local-at-rest-encryption.md`.
+pub struct SessionResumeMaterial {
+    pub token: String,
+    pub data_key: Zeroizing<[u8; 32]>,
+    pub device_identity_wrapping_key: Zeroizing<[u8; 32]>,
 }
 
 impl SyncEngine {
@@ -90,6 +112,7 @@ impl SyncEngine {
             local_store: LocalStore::new(data_dir),
             encryption_key: RwLock::new(None),
             device_signing_key: RwLock::new(None),
+            device_identity_wrapping_key: RwLock::new(None),
             state: RwLock::new(AppState::default()),
             state_tx: tx,
             state_version: std::sync::atomic::AtomicU64::new(0),
@@ -197,6 +220,7 @@ impl SyncEngine {
             login_resp.username.clone(),
             login_resp.device_id.clone(),
             encryption_key,
+            device_identity_wrapping_key,
             signing_identity,
         )
         .await?;
@@ -257,6 +281,7 @@ impl SyncEngine {
             register_resp.username.clone(),
             register_resp.device_id.clone(),
             encryption_key,
+            device_identity_wrapping_key,
             signing_identity,
         )
         .await?;
@@ -270,12 +295,86 @@ impl SyncEngine {
         Ok(register_resp.username)
     }
 
+    /// Resume a previously authenticated session from persisted material rather
+    /// than an OPAQUE login: a still-valid bearer `token`, the OPAQUE-derived
+    /// `data_key`, and the matching `device_identity_wrapping_key`. No passphrase
+    /// is involved, so resume can neither re-derive the OPAQUE root nor enroll a
+    /// new device — it only re-mounts the device the persisted identity already
+    /// names.
+    ///
+    /// The token is checked against the server first; a revoked/expired token, a
+    /// missing local device identity, or a wrapping key that fails to unwrap it
+    /// all error so the UI can fall back to the login screen.
+    pub async fn resume_with_platform(
+        self: &Arc<Self>,
+        token: String,
+        data_key: Zeroizing<[u8; 32]>,
+        device_identity_wrapping_key: Zeroizing<[u8; 32]>,
+        username: &str,
+        device_name: &str,
+    ) -> Result<(), ClientError> {
+        self.api.restore_token(token);
+        if let Err(error) = self.api.validate_session().await {
+            // Never leave a dead token resident; force a clean re-login instead.
+            self.api.clear_token();
+            return Err(error);
+        }
+
+        let profile_id = profile_id_from_encryption_key(&data_key);
+        let signing_identity = self
+            .local_store
+            .load_device_signing_identity(&profile_id, &device_identity_wrapping_key)
+            .await?
+            .ok_or(ClientError::NoResumableDeviceIdentity)?;
+        let device_id = signing_identity
+            .device_id
+            .clone()
+            .ok_or(ClientError::NoResumableDeviceIdentity)?;
+
+        self.finish_auth(
+            device_name,
+            username.to_string(),
+            device_id.clone(),
+            data_key,
+            device_identity_wrapping_key,
+            signing_identity,
+        )
+        .await?;
+
+        info!("Session resumed, device_id={device_id}");
+        Ok(())
+    }
+
+    /// Snapshot the secrets a browser client needs to resume this session after a
+    /// reload without persisting the passphrase. Returns `None` before auth.
+    ///
+    /// The data key decrypts all object content, so this is sensitive — but it is
+    /// deliberately *not the OPAQUE root*: it cannot re-derive the passphrase,
+    /// re-run login, or enroll a new device, and the token is server-revocable.
+    /// The caller owns where these land (the web client uses `sessionStorage`).
+    pub async fn session_resume_material(&self) -> Option<SessionResumeMaterial> {
+        let token = self.api.token()?;
+        let data_key = self.encryption_key.read().await.as_ref().cloned()?;
+        let device_identity_wrapping_key = self
+            .device_identity_wrapping_key
+            .read()
+            .await
+            .as_ref()
+            .cloned()?;
+        Some(SessionResumeMaterial {
+            token,
+            data_key,
+            device_identity_wrapping_key,
+        })
+    }
+
     async fn finish_auth(
         self: &Arc<Self>,
         device_name: &str,
         username: String,
         device_id: String,
         encryption_key: Zeroizing<[u8; 32]>,
+        device_identity_wrapping_key: Zeroizing<[u8; 32]>,
         signing_identity: DeviceSigningIdentity,
     ) -> Result<(), ClientError> {
         let cache_key = *encryption_key;
@@ -284,6 +383,7 @@ impl SyncEngine {
 
         *self.encryption_key.write().await = Some(encryption_key);
         *self.device_signing_key.write().await = Some(signing_identity.signing_secret_key);
+        *self.device_identity_wrapping_key.write().await = Some(device_identity_wrapping_key);
 
         {
             let mut state = self.state.write().await;
@@ -365,6 +465,7 @@ impl SyncEngine {
         self.api.clear_token();
         *self.encryption_key.write().await = None;
         *self.device_signing_key.write().await = None;
+        *self.device_identity_wrapping_key.write().await = None;
         self.local_store.clear_memory().await;
         {
             let mut state = self.state.write().await;
@@ -416,6 +517,7 @@ impl SyncEngine {
             self.api.clear_token();
             *self.encryption_key.write().await = None;
             *self.device_signing_key.write().await = None;
+            *self.device_identity_wrapping_key.write().await = None;
             self.local_store.clear_memory().await;
             *self.state.write().await = AppState::default();
             self.bump_version();

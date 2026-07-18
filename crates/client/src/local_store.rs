@@ -524,6 +524,20 @@ impl LocalStore {
             .await
     }
 
+    /// Load an existing device signing identity for `profile_id`, or `None` if
+    /// none is stored. Unlike
+    /// [`LocalStore::load_or_create_device_signing_identity`] this never mints a
+    /// new identity — session resume must re-mount the device the persisted keys
+    /// already name rather than enroll a fresh one.
+    pub async fn load_device_signing_identity(
+        &self,
+        profile_id: &str,
+        wrapping_key: &[u8; 32],
+    ) -> Result<Option<DeviceSigningIdentity>, LocalStoreError> {
+        self.load_device_signing_identity_inner(profile_id, wrapping_key)
+            .await
+    }
+
     pub async fn persist_device_signing_identity(
         &self,
         profile_id: &str,
@@ -991,6 +1005,17 @@ impl LocalStore {
             .await
     }
 
+    async fn load_device_signing_identity_inner(
+        &self,
+        profile_id: &str,
+        wrapping_key: &[u8; 32],
+    ) -> Result<Option<DeviceSigningIdentity>, LocalStoreError> {
+        let Some(record) = self.read_device_identity_record(profile_id).await? else {
+            return Ok(None);
+        };
+        device_identity_from_record(record, wrapping_key).map(Some)
+    }
+
     async fn read_device_identity_record(
         &self,
         profile_id: &str,
@@ -1232,6 +1257,23 @@ impl LocalStore {
     ) -> Result<(), LocalStoreError> {
         let storage = browser_storage()?;
         self.write_browser_device_identity(&storage, profile_id, identity, wrapping_key)
+    }
+
+    async fn load_device_signing_identity_inner(
+        &self,
+        profile_id: &str,
+        wrapping_key: &[u8; 32],
+    ) -> Result<Option<DeviceSigningIdentity>, LocalStoreError> {
+        let storage = browser_storage()?;
+        let Some(json) = storage
+            .get_item(&self.device_identity_key(profile_id))
+            .map_err(storage_error)?
+        else {
+            return Ok(None);
+        };
+        let record = serde_json::from_str::<DeviceIdentityEncryptedRecord>(&json)
+            .map_err(LocalStoreError::from)?;
+        device_identity_from_record(record, wrapping_key).map(Some)
     }
 
     fn write_browser_device_identity(

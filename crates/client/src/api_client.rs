@@ -136,6 +136,14 @@ impl ApiClient {
         self.set_token(None);
     }
 
+    /// Install a bearer token issued by a prior authenticated session, without an
+    /// OPAQUE login. Used to resume a browser session from persisted material;
+    /// call [`ApiClient::validate_session`] afterwards to confirm the token is
+    /// still live before the engine starts acting on it.
+    pub fn restore_token(&self, token: String) {
+        self.set_token(Some(token));
+    }
+
     async fn checked_response(resp: reqwest::Response) -> Result<reqwest::Response, ClientError> {
         if !resp.status().is_success() {
             return Err(api_error_from_response(resp).await);
@@ -450,6 +458,24 @@ impl ApiClient {
             warn!("Logout returned {}", resp.status());
         }
         self.set_token(None);
+        Ok(())
+    }
+
+    /// Confirm the server still accepts the current bearer token (it exists and
+    /// has not expired or been revoked). Returns `Ok(())` for a live session and
+    /// a `ClientError::Api` (401) once the token is no longer valid, so a resume
+    /// attempt can fall back to the login screen.
+    pub async fn validate_session(&self) -> Result<(), ClientError> {
+        let resp = self
+            .http
+            .get(self.api_url(&["auth", "validate"])?)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .send()
+            .await?;
+        Self::checked_response(resp).await?;
         Ok(())
     }
 
@@ -1010,6 +1036,11 @@ pub enum ClientError {
     /// key required for this action is missing. The client must log in first.
     #[error("Not authenticated; sign in first")]
     NotAuthenticated,
+    /// A session resume found no usable local device identity for the persisted
+    /// keys (missing record, a wrapping key that fails to unwrap it, or no
+    /// server-assigned device id). The client must perform a full login.
+    #[error("No resumable device identity; sign in again")]
+    NoResumableDeviceIdentity,
     /// A clipboard or object MIME type the client does not know how to handle.
     #[error("Unsupported MIME type: {mime_type}")]
     UnsupportedMimeType { mime_type: String },
@@ -1130,7 +1161,7 @@ impl ClientError {
             Self::Crypto(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.to_string()),
             Self::WebSocket(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.clone()),
             Self::LocalStore(error) => ErrorResponse::new(ApiErrorCode::Storage, error.clone()),
-            Self::NotAuthenticated => {
+            Self::NotAuthenticated | Self::NoResumableDeviceIdentity => {
                 ErrorResponse::new(ApiErrorCode::Unauthorized, self.to_string())
             }
             Self::UnsupportedMimeType { .. } => {

@@ -42,7 +42,7 @@ import {
     YStack,
 } from "tamagui";
 import {
-    clearSessionCredentials,
+    clearSessionResume,
     clipperBackend,
     defaultServerUrl,
     formatBackendError,
@@ -50,7 +50,7 @@ import {
     readClipboardText,
     resolveServerUrl,
     resumeSession,
-    saveSessionCredentials,
+    saveSessionResume,
     writeClipboardText,
 } from "./backend";
 import type { AppState, ClipboardItem, CollabItem, DeviceInfo, FileItem } from "@clipper/shared";
@@ -223,8 +223,11 @@ function LoginScreen({
             } else {
                 await backend.register(accessKey, username, passphrase, "", serverUrl);
             }
-            // Persist for reload resume (browser only; sessionStorage).
-            saveSessionCredentials({ passphrase, username, deviceName: "", serverUrl });
+            // Persist a resume blob — server token + derived keys, never the
+            // passphrase — so a reload skips re-login. Browser-only; under Tauri
+            // `sessionResumeMaterial()` returns null and nothing is stored.
+            const material = await backend.sessionResumeMaterial();
+            saveSessionResume(material, username, "", serverUrl);
             onState(await backend.getState());
         } catch (caught) {
             setError(formatBackendError(caught));
@@ -347,7 +350,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
 
     async function logout() {
         setError(null);
-        clearSessionCredentials();
+        clearSessionResume();
         try {
             const backend = await clipperBackend();
             await backend.logout();

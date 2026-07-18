@@ -293,6 +293,7 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
     // private routes
     let authed = Router::new()
         .route("/api/auth/logout", post(routes::auth::logout))
+        .route("/api/auth/validate", get(routes::auth::validate))
         .route("/api/auth/devices", get(routes::auth::list_devices))
         .route(
             "/api/auth/devices/{id}",

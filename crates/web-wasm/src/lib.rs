@@ -1,11 +1,12 @@
 use std::sync::{Arc, LazyLock, RwLock};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clipper_client::engine::{AppState, ClipboardPayload, SyncEngine, TEXT_CLIPBOARD_MIME_TYPE};
 use js_sys::{Object, Promise, Reflect, Uint8Array};
 use tokio::sync::watch;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_DEVICE_NAME: &str = "Web";
@@ -171,6 +172,69 @@ pub fn register(
             .await
             .map_err(js_error)?;
         Ok(JsValue::from(username))
+    })
+}
+
+/// Resume a session from material persisted by the JS layer after a prior login:
+/// a still-valid bearer `token` and the base64 `data_key` / `wrapping_key`. No
+/// passphrase is involved. A revoked/expired token or a missing local device
+/// identity rejects, so the caller falls back to the login screen.
+#[wasm_bindgen(js_name = resume)]
+pub fn resume(
+    token: String,
+    data_key: String,
+    wrapping_key: String,
+    username: String,
+    device_name: String,
+    server_url: String,
+) -> Promise {
+    ok_promise(async move {
+        let data_key = decode_resume_key(&data_key)?;
+        let wrapping_key = decode_resume_key(&wrapping_key)?;
+        let engine = HOLDER.get_or_build(&server_url)?;
+        engine
+            .resume_with_platform(
+                token,
+                data_key,
+                wrapping_key,
+                &username,
+                non_empty_or_default(&device_name, DEFAULT_DEVICE_NAME),
+            )
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::UNDEFINED)
+    })
+}
+
+/// Snapshot the secrets needed to resume this session after a reload, base64
+/// encoded for the JS layer to stash (the web client uses `sessionStorage`).
+/// Returns `null` before login. Deliberately never includes the passphrase.
+#[wasm_bindgen(js_name = sessionResumeMaterial)]
+pub fn session_resume_material() -> Promise {
+    ok_promise(async {
+        let Some(engine) = HOLDER.engine() else {
+            return Ok(JsValue::NULL);
+        };
+        let Some(material) = engine.session_resume_material().await else {
+            return Ok(JsValue::NULL);
+        };
+        let object = Object::new();
+        Reflect::set(
+            &object,
+            &JsValue::from("token"),
+            &JsValue::from(material.token),
+        )?;
+        Reflect::set(
+            &object,
+            &JsValue::from("dataKey"),
+            &JsValue::from(STANDARD.encode(&*material.data_key)),
+        )?;
+        Reflect::set(
+            &object,
+            &JsValue::from("wrappingKey"),
+            &JsValue::from(STANDARD.encode(&*material.device_identity_wrapping_key)),
+        )?;
+        Ok(object.into())
     })
 }
 
@@ -355,6 +419,21 @@ fn ensure_requested_base_url(engine: &SyncEngine, requested: &str) -> Result<(),
 
 fn normalize_server_url(url: &str) -> &str {
     url.trim().trim_end_matches('/')
+}
+
+/// Decode a base64 32-byte key from the JS resume store into a zeroizing array.
+/// The intermediate decode buffer is wiped so the only lingering copy is the
+/// returned `Zeroizing`.
+fn decode_resume_key(value: &str) -> Result<Zeroizing<[u8; 32]>, JsValue> {
+    let mut bytes = STANDARD
+        .decode(value.trim())
+        .map_err(|_| js_error("invalid resume key encoding"))?;
+    let array: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| js_error("resume key must be 32 bytes"))?;
+    bytes.zeroize();
+    Ok(Zeroizing::new(array))
 }
 
 fn non_empty_or_default<'a>(value: &'a str, default: &'a str) -> &'a str {

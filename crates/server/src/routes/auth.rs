@@ -510,6 +510,18 @@ pub async fn logout(
     Ok(Json(OkResponse {}))
 }
 
+/// `GET /api/auth/validate` — confirm the caller's bearer token is still live.
+///
+/// Reaching this handler means `auth_middleware` already verified the session
+/// token (it exists and has not expired) and refreshed `last_seen_at`. The web
+/// client calls this before resuming a session from persisted key material, so a
+/// revoked or expired token falls back cleanly to the login screen instead of
+/// booting into a broken, unauthenticated session. It returns no private data.
+pub async fn validate(Extension(auth): Extension<AuthInfo>) -> Json<OkResponse> {
+    debug!(device_id = %auth.device_id, "Validated session token for resume");
+    Json(OkResponse {})
+}
+
 /// `GET /api/auth/devices` — list the authenticated user's registered devices,
 /// most recently seen first. Scoped to `auth.user_id` so it never surfaces
 /// another user's devices; internal columns (`user_id`, `signing_public_key`)

@@ -8,6 +8,7 @@ license-file.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
+base64.workspace = true
 clipper-client.workspace = true
 serde.workspace = true
 serde-wasm-bindgen.workspace = true

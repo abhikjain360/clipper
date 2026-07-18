@@ -90,9 +90,16 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     register: async (accessKey, username, passphrase, deviceName, serverUrl) =>
       clientFor(serverUrl).register(accessKey, username, passphrase, deviceName, serverUrl),
     removeDevice: async (deviceId) => client.removeDevice(deviceId),
+    // Browser-only session resume (see the web client). The mobile app resumes
+    // from the OS keystore via its own flow, so these are inert here and exist
+    // only to satisfy the shared backend contract.
+    resume: async () => {
+      throw new Error("Session resume is handled by the mobile keystore flow");
+    },
     sendClipboardPayload: async (mimeType, bytes) =>
       client.sendClipboardPayload(mimeType, arrayBufferFrom(bytes)),
     sendClipboardText: async (text) => client.sendClipboardText(text),
+    sessionResumeMaterial: async () => null,
     stateVersion: () => client.stateVersion(),
     uploadFileBytes: async (filename, mimeType, bytes) =>
       client.uploadFileBytes(filename, mimeType, arrayBufferFrom(bytes)),

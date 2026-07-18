@@ -1051,6 +1051,7 @@ dependencies = [
 name = "clipper-web-wasm"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "clipper-client",
  "console_error_panic_hook",
  "js-sys",

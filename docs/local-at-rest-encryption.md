@@ -204,6 +204,42 @@ _storage medium_ differs. Important differences from the native path:
   (`clipper.client.v1.<base_dir>.<profile_id>.device_identity_v1`) is also
   profile-scoped.
 
+### Browser session resume (`sessionStorage`)
+
+So a page reload does not force re-authentication, the standalone web client
+keeps a **session-resume blob** in `sessionStorage` under `clipper.session.v2`.
+It is written after a successful login/register and read on the next load
+(`web/src/backend/index.ts`; `SyncEngine::session_resume_material` /
+`SyncEngine::resume_with_platform` in `crates/client/src/engine.rs`). It holds,
+all base64-encoded:
+
+- the server **bearer token** (the 30-day session credential),
+- the **data key**, and
+- the **device-identity wrapping key**.
+
+It deliberately does **not** hold the passphrase or the OPAQUE export key. On
+resume the client re-installs the token, confirms it is still live
+(`GET /api/auth/validate`), then unwraps the existing on-disk device identity
+with the stored wrapping key and re-mounts the engine — no OPAQUE login runs and
+no new device is enrolled.
+
+This is a deliberate confidentiality trade-off, recorded here per the client
+security audit (finding A1):
+
+- `sessionStorage` is plaintext and same-origin-script readable, and the data
+  key must be present as raw bytes for the wasm XChaCha20-Poly1305 AEAD (a
+  non-extractable WebCrypto key cannot back it), so a script running on the
+  origin (XSS) could read the blob, which decrypts all object content.
+- What the blob is **not**: the passphrase/OPAQUE root. It cannot re-derive the
+  passphrase, re-run OPAQUE login, or enroll a new device. The bearer token is
+  **server-revocable** (logout or device removal deletes the session row), and
+  the blob is wiped when the tab closes. So unlike persisting the passphrase,
+  removing the device or rotating the token bounds an attacker's access instead
+  of granting permanent, revocation-proof compromise.
+- Native shells do not use this path: under Tauri the daemon owns the session
+  and survives webview reloads, and the mobile client persists credentials in
+  the OS keystore behind biometric/device authentication.
+
 ## The `fs-txn` crate is a different mechanism
 
 `crates/fs-txn/src/lib.rs` (`FsTransaction`) is **not** what `local_store` uses

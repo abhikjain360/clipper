@@ -7,4 +7,5 @@ export type {
   ConnectionStatus,
   DeviceInfo,
   FileItem,
+  SessionResumeMaterial,
 } from "./types";

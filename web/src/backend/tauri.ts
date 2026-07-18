@@ -49,6 +49,11 @@ export function tauriBackend(): ClipperBackend {
         getCollabDocMeta: (objectId) => invoke<CollabItem>("get_collab_doc_meta", { objectId }),
         listDevices: () => invoke<DeviceInfo[]>("list_devices"),
         removeDevice: (deviceId) => invoke<void>("remove_device", { deviceId }),
+        // Browser-only session resume. The desktop daemon owns credentials and
+        // survives webview reloads, so these are never invoked under Tauri; they
+        // exist only to satisfy the shared backend contract.
+        resume: () => Promise.reject(new Error("Session resume is not used under Tauri")),
+        sessionResumeMaterial: () => Promise.resolve(null),
     };
 }
 
