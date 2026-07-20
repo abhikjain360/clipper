@@ -40,7 +40,10 @@ on every login or registration (`ApiClient::login_prepare` /
 `register_prepare`), held only in memory inside `SyncEngine`
 (`encryption_key` and, indirectly via the loaded signing key, the wrapping key),
 and dropped on logout. They live inside `Zeroizing` wrappers so per-call copies
-are wiped on drop.
+are wiped on drop. Two known exceptions (2026-07-19 audit R23): the `cache_key`
+stack copy held across cache hydration (`engine.rs:380`), and the plain
+`Vec<u8>` returned by `crypto::decrypt` / `unwrap_with_key` during
+device-identity unwrap, are not wiped on drop.
 
 This means a cold attacker who reads the on-disk cache (or `localStorage`) but
 does not know the passphrase cannot decrypt anything: the only persisted secret
@@ -234,11 +237,20 @@ security audit (finding A1):
   passphrase, re-run OPAQUE login, or enroll a new device. The bearer token is
   **server-revocable** (logout or device removal deletes the session row), and
   the blob is wiped when the tab closes. So unlike persisting the passphrase,
-  removing the device or rotating the token bounds an attacker's access instead
-  of granting permanent, revocation-proof compromise.
+  removing the device or rotating the token bounds an attacker's **API
+  access** — with an important limit (2026-07-19 audit R14): the data key is
+  static (HKDF of the OPAQUE export key, never rotated), so revocation cannot
+  claw back ciphertext an attacker already recorded (including the
+  `localStorage` ciphertext cache, which outlives the tab); against a malicious
+  server that archives ciphertext, content confidentiality past and future is
+  lost until a passphrase-rotation feature exists.
 - Native shells do not use this path: under Tauri the daemon owns the session
-  and survives webview reloads, and the mobile client persists credentials in
-  the OS keystore behind biometric/device authentication.
+  and survives webview reloads. The mobile client currently persists the
+  **passphrase itself** — the OPAQUE/E2E root, not the revocable resume
+  material above — in the OS keystore behind Class-3 biometric authentication
+  (2026-07-19 audit R1: Keystore-wrapped and biometric-gated, so a separate
+  installed app cannot read it, but revocation cannot bound a store compromise;
+  migrating to the v2 resume material is tracked as R1).
 
 ## The `fs-txn` crate is a different mechanism
 
@@ -268,7 +280,13 @@ document.
 - **`device_id` is stored in cleartext** in the device-identity record (both the
   wrapped native record and the `localStorage` record). Only the signing secret
   is wrapped. This is a low-sensitivity identifier, but it is metadata that is
-  not protected at rest.
+  not protected at rest. It is also **unauthenticated** (the wrap AAD is a
+  constant, not bound to the record header): a same-uid process or same-origin
+  script can substitute another UUID undetected, causing silent device-identity
+  migration on the next login (the server mints a new device row for the fresh
+  id) or, via the re-mint path for malformed ids, loss of the registered
+  identity (2026-07-19 audit R25). The fix is to bind `device_id ‖ profile_id`
+  into the wrap AAD.
 - **`FsTransaction` sets `0600` after creating files**, not via the open mode.
   There is a brief window in which a staged server payload file exists with
   default-umask permissions before the `chmod`. The client local store no longer

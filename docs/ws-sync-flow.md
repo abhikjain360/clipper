@@ -116,7 +116,11 @@ During a generation:
    a local write.
 5. A successful snapshot may remove old local objects that were in snapshot scope
    but were not seen.
-6. A failed or partial snapshot does not sweep anything.
+6. A failed or partial snapshot does not sweep anything. (Caveat, 2026-07-19
+   audit R20: a per-_item_ failure — tampered ciphertext, transient download
+   error, unsupported MIME — does not fail the snapshot; the item is treated as
+   "not seen" and the end-of-snapshot sweep removes its previously good local
+   copy.)
 
 The client applies local state changes one at a time so snapshot work, live
 events, and object fetches cannot overwrite each other incorrectly.
@@ -130,7 +134,10 @@ The client tracks each known object in one of three states.
 2. Pending create means a live create event was seen, but the object has not
    been fetched and decrypted yet.
 3. Deleted means a delete event was seen in the current generation and older
-   snapshot or fetch results must not resurrect the object.
+   snapshot or fetch results must not resurrect the object. _(Known flaw,
+   2026-07-19 audit R18: the sweep deletes stale-generation delete markers, so
+   this protection currently lasts only one generation — a server that keeps
+   listing a deleted file resurrects it on the client's second reconnect.)_
 
 Persisted local object records hold only encrypted object material (metadata
 ciphertext, payload descriptors, the signed envelope, and for clipboard the
@@ -198,7 +205,10 @@ blob download remains user-initiated.
 If materialization fails:
 
 1. The pending object remains hidden.
-2. The client retries while the generation is still current.
+2. The client retries while the generation is still current. _(Status note,
+   2026-07-19 audit R21: retry is **not implemented** — the spawned task warns
+   once and gives up; the item stays hidden until the next reconnect's
+   snapshot, or permanently for collab docs, which have no snapshot — R9.)_
 3. If the server says the object is absent or no longer retained, the pending
    state is removed.
 4. The client does not fall back to a broad refresh for a single create.
@@ -212,7 +222,8 @@ receives a live file delete:
 2. Remove the local file metadata from visible state.
 3. Remove any cached local blob for that file.
 4. Ignore later snapshot or fetch results for that object if they are older than
-   the delete marker.
+   the delete marker. _(Bounded by the R18 flaw noted above: the marker is only
+   honored for one generation today.)_
 
 A delete event for any non-file object kind is logged and ignored by the client,
 because the server only emits delete events for files.
@@ -312,7 +323,11 @@ For each object:
 
 1. Newer known state wins.
 2. Duplicate or older creates are ignored.
-3. Newer deletes hide the object and block older creates from resurrecting it.
+3. Newer deletes hide the object and block older creates from resurrecting it —
+   but see R18: the blocking marker survives only one generation today. Also
+   note "newer" is computed on server-supplied seqs with no sanity bound
+   (2026-07-19 audit R2): a far-future seq poisons this ordering and makes the
+   object delete-immune until R2's validation lands.
 4. A create never downgrades a present object back to pending.
 5. A visible present object without a create sequence is invalid local state and
    must be repaired or removed.

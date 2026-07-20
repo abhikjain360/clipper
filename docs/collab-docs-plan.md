@@ -140,6 +140,13 @@ No `yjs_state` read/write in this phase — those columns exist but are unused.
 - Sync engine and local store handle `kind = 'collab'` in event log and object
   listings; collab objects surface in the app state alongside files.
 
+> **Status note (2026-07-19 audit R9):** shipped code diverges from this — the
+> object listing explicitly excludes collab (`objects.rs:921-925`), no collab
+> list endpoint exists, and reconciliation snapshots only File/Clipboard.
+> Consequence: a missed live `created`/`deleted` event is never recovered
+> (per-device view forks; ghost entries after delete). Fix tracked as R9: add
+> `GET /api/collab-docs` plus a collab snapshot/sweep in `start_reconciliation`.
+
 ### Web + desktop UI
 
 - New "Collab Docs" section in the nav, separate from Files.

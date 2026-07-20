@@ -18,6 +18,15 @@ clamps). What remains is below. No anonymous/remote critical or high was found â
 every item here requires a local position, an authenticated account, or the
 already-assumed partially-untrusted server.
 
+Most recent cryptography-focused review: **2026-07-20**
+(`docs/crypto-review-2026-07-20.md`) â€” an independent pass over the primitives,
+OPAQUE, the server pepper, client at-rest encryption, and the device signature
+scheme. It independently confirmed the crypto core is sound and adds hardening
+recommendations (pin/strengthen the OPAQUE KSF, signature domain separation,
+bind `device_id` into the device-identity wrap AAD). The principal open crypto
+decision is **data-key rotation / passphrase change** (CR1): without it, any
+data-key or passphrase exposure is permanent rather than bounded.
+
 ## Needs a decision
 
 Ordered by severity. Each notes _why_ it needs a call (the tradeoff or policy
