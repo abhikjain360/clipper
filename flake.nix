@@ -18,10 +18,10 @@
         "x86_64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-      rustStableDate = "2026-05-28";
-      rustStableManifestSha256 = "sha256-mvUGEOHYJpn3ikC5hckneuGixaC+yGrkMM/liDIDgoU=";
-      rustNightlyDate = "2026-06-24";
-      rustNightlyManifestSha256 = "sha256-PE5LNcr5lBBooaIBFWERXCPNXTQFZwIw8BriQdgf29Q=";
+      rustStableDate = "2026-08-20";
+      rustStableManifestSha256 = "sha256-P30Tm3O7vQAE725YtDCDHGjNrSsfZO4us11UwJGZSJo=";
+      rustNightlyDate = "2026-08-24";
+      rustNightlyManifestSha256 = "sha256-Y7Q5o/eN4OOuwJ9W8XbLXVXkJEMxJg6RZz99pEEe8jg=";
       wasmRustTarget = "wasm32-unknown-unknown";
       androidRustTargets = [
         "aarch64-linux-android"
@@ -59,6 +59,52 @@
         system:
         let
           fenixPkgs = fenix.packages.${system};
+          # Work around https://github.com/nix-community/fenix/issues/242:
+          # since the 2026-08 stable manifests, rust-lld/rust-objcopy on Darwin
+          # are dynamically linked against @rpath/libLLVM.dylib with an rpath of
+          # @loader_path/../lib, i.e. lib/rustlib/<host>/lib/libLLVM.dylib, but
+          # the fenix component layout only installs $out/lib/libLLVM.dylib.
+          # fenix's combine postBuild only fixes up $out/bin, and an
+          # overrideAttrs postBuild on a symlinkJoin result is never run (the
+          # builder splices postBuild at definition time), so wrap the combined
+          # toolchain in another symlinkJoin that dereferences the rustlib tool
+          # symlinks and rewrites the dylib reference to an absolute path.
+          fixDarwinLlvmTools =
+            toolchain:
+            if nixpkgs.lib.hasSuffix "-darwin" system then
+              let
+                pkgs = mkPkgs system;
+              in
+              pkgs.symlinkJoin {
+                name = "${toolchain.name}-lldfix";
+                paths = [ toolchain ];
+                nativeBuildInputs = [ pkgs.darwin.cctools ];
+                postBuild = ''
+                  # Dereference bin/ and librustc_driver (like fenix's combine
+                  # does) so rustc resolves its sysroot to this output instead
+                  # of the unwrapped rustc component — the sysroot follows the
+                  # real location of the loaded librustc_driver dylib.
+                  for file in $(find "$out/bin" -xtype f -maxdepth 1); do
+                    install -m755 "$(readlink "$file")" "$out/bin"
+                  done
+                  for file in "$out"/lib/librustc_driver-*; do
+                    if [ -L "$file" ]; then
+                      install "$(readlink "$file")" "$file"
+                    fi
+                  done
+                  for tool in "$out"/lib/rustlib/*/bin/rust-lld "$out"/lib/rustlib/*/bin/rust-objcopy "$out"/lib/rustlib/*/bin/wasm-component-ld; do
+                    if [ -L "$tool" ] && [ -e "$out/lib/libLLVM.dylib" ]; then
+                      real=$(readlink "$tool")
+                      rm "$tool"
+                      cp "$real" "$tool"
+                      chmod u+w "$tool"
+                      install_name_tool -change @rpath/libLLVM.dylib "$out/lib/libLLVM.dylib" "$tool"
+                    fi
+                  done
+                '';
+              }
+            else
+              toolchain;
           stableArgs = {
             channel = "stable";
             date = rustStableDate;
@@ -73,24 +119,28 @@
           nightlyChannel = fenixPkgs.toolchainOf nightlyArgs;
         in
         {
-          stable = fenixPkgs.combine (
-            [
-              stableChannel.cargo
-              stableChannel.rustc
-              stableChannel.rustfmt
-              stableChannel.clippy
-              stableChannel.rust-src
-              stableChannel.rust-analyzer
-            ]
-            ++ map (t: (fenixPkgs.targets.${t}.toolchainOf stableArgs).rust-std) stableRustTargets
+          stable = fixDarwinLlvmTools (
+            fenixPkgs.combine (
+              [
+                stableChannel.cargo
+                stableChannel.rustc
+                stableChannel.rustfmt
+                stableChannel.clippy
+                stableChannel.rust-src
+                stableChannel.rust-analyzer
+              ]
+              ++ map (t: (fenixPkgs.targets.${t}.toolchainOf stableArgs).rust-std) stableRustTargets
+            )
           );
-          nightly = fenixPkgs.combine [
-            nightlyChannel.cargo
-            nightlyChannel.rustc
-            nightlyChannel.rustfmt
-            nightlyChannel.rust-src
-            (fenixPkgs.targets.${wasmRustTarget}.toolchainOf nightlyArgs).rust-std
-          ];
+          nightly = fixDarwinLlvmTools (
+            fenixPkgs.combine [
+              nightlyChannel.cargo
+              nightlyChannel.rustc
+              nightlyChannel.rustfmt
+              nightlyChannel.rust-src
+              (fenixPkgs.targets.${wasmRustTarget}.toolchainOf nightlyArgs).rust-std
+            ]
+          );
         };
       mkCommandSpecs =
         system:

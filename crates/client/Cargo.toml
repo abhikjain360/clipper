@@ -33,19 +33,15 @@ zeroize.workspace = true
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 rand.workspace = true
 tokio = { workspace = true, features = ["full"] }
-tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 # Pin rustls to the `ring` provider. rustls's default provider (aws-lc-rs)
 # aborts inside aws-lc's CPU jitter-entropy self-test when cross-compiled for
 # Android, crashing the app on the first TLS connection (login). ring uses the
 # OS CSPRNG and has no such path. `webpki-roots` supplies a bundled trust store
 # so the HTTP client needs no Android trust-store JNI plumbing, matching the
 # WebSocket path (tokio-tungstenite `rustls-tls-webpki-roots`).
-rustls = { version = "0.23", default-features = false, features = [
-  "ring",
-  "std",
-  "logging",
-] }
-webpki-roots = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+webpki-roots = "1.0"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

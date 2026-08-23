@@ -495,11 +495,7 @@ function ClipboardPanel({
         </ScrollView>
       )}
 
-      <ContentViewer
-        viewing={viewing}
-        onClose={() => setViewing(null)}
-        onError={onError}
-      />
+      <ContentViewer viewing={viewing} onClose={() => setViewing(null)} onError={onError} />
     </YStack>
   );
 }
@@ -618,11 +614,7 @@ function FilesPanel({
         </ScrollView>
       )}
 
-      <ContentViewer
-        viewing={viewing}
-        onClose={() => setViewing(null)}
-        onError={onError}
-      />
+      <ContentViewer viewing={viewing} onClose={() => setViewing(null)} onError={onError} />
     </YStack>
   );
 }

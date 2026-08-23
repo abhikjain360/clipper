@@ -52,7 +52,7 @@ Re-derived from code so the surface does not get re-litigated:
   `object-meta-aad` / `object-payload-aad` domain strings. The nonce deliberately
   is **not** in the AAD — this is correct, not a gap: ChaCha20-Poly1305's tag
   already authenticates the nonce, so a server cannot change the nonce without
-  failing decryption. `created_at` *is* authenticated, so a server cannot rewrite
+  failing decryption. `created_at` _is_ authenticated, so a server cannot rewrite
   an object's timestamp without breaking the tag. Ciphertext swap or retargeting
   between objects / payload slots / meta-vs-payload roles fails the tag.
 - **Key separation.** The data key, the device-identity wrapping key, and the five
@@ -84,14 +84,14 @@ Re-derived from code so the surface does not get re-litigated:
 
 ## Findings
 
-| #   | Sev (threat-model / bulletproof-goal) | Area      | Title                                                                 |
-| --- | ------------------------------------- | --------- | --------------------------------------------------------------------- |
-| CR1 | Low / **Strategic**                   | design    | No data-key rotation and no passphrase-change flow — compromise is permanent |
-| CR2 | Info / Medium                         | OPAQUE    | KSF is the argon2 crate *default* (19 MiB/t=2), unpinned and at OWASP's floor |
-| CR3 | Info                                  | signatures| Device key signs two message types with no domain separation (R38/R39) |
-| CR4 | Low                                   | at-rest   | `device_id` is plaintext and unauthenticated in the device-identity record (R25) |
-| CR5 | Info                                  | docs/web  | The web data key *is* script-readable — docs understate this          |
-| CR6 | Medium                                | mobile    | Confirmed R1: Android persists the passphrase (the E2E root) for biometric resume |
+| #   | Sev (threat-model / bulletproof-goal) | Area       | Title                                                                             |
+| --- | ------------------------------------- | ---------- | --------------------------------------------------------------------------------- |
+| CR1 | Low / **Strategic**                   | design     | No data-key rotation and no passphrase-change flow — compromise is permanent      |
+| CR2 | Info / Medium                         | OPAQUE     | KSF is the argon2 crate _default_ (19 MiB/t=2), unpinned and at OWASP's floor     |
+| CR3 | Info                                  | signatures | Device key signs two message types with no domain separation (R38/R39)            |
+| CR4 | Low                                   | at-rest    | `device_id` is plaintext and unauthenticated in the device-identity record (R25)  |
+| CR5 | Info                                  | docs/web   | The web data key _is_ script-readable — docs understate this                      |
+| CR6 | Medium                                | mobile     | Confirmed R1: Android persists the passphrase (the E2E root) for biometric resume |
 
 ### CR1 — [Strategic] No data-key rotation and no passphrase-change flow
 
@@ -108,7 +108,7 @@ Re-derived from code so the surface does not get re-litigated:
   API access, not ciphertext already recorded. The prior audit noted the static key as
   Low (R14) inside the web-`sessionStorage` context; under a "bulletproof" goal this is
   the single most important property to fix, because it is what converts every other
-  key-exposure scenario from *bounded* into *permanent*.
+  key-exposure scenario from _bounded_ into _permanent_.
 - **Recommendation:** add a passphrase-change / re-registration flow. OPAQUE supports
   re-registering the credential under a new passphrase, which yields a new `rwd`, a new
   export key, and therefore a new `K`; the missing piece is a client re-encrypt-under-
@@ -123,12 +123,12 @@ Re-derived from code so the surface does not get re-litigated:
   `DEFAULT_P_COST = 1`)
 - **What:** the passphrase-hardening KSF resolves to `argon2::Argon2::default()` =
   Argon2id `m = 19 MiB, t = 2, p = 1`. Two issues:
-  1. It is OWASP's *lower-bound* Argon2id recommendation. For a secrets vault, the
+  1. It is OWASP's _lower-bound_ Argon2id recommendation. For a secrets vault, the
      offline brute-force cost per passphrase guess could be raised (OWASP's first option
      is 46 MiB / t=1; 64 MiB / t=3 is a common stronger choice). The KSF runs
      client-side at login, so the tradeoff is login latency, not server load.
   2. It is **implicit.** The KSF parameters are not stored in the password file, so a
-     future `opaque-ke`/`argon2` bump that moves the default would *silently* change
+     future `opaque-ke`/`argon2` bump that moves the default would _silently_ change
      passphrase hardness — and silently break logins (or fragment clients) if deployed
      versions diverge, since `rwd` would no longer match.
 - **Why it matters:** this is the per-guess cost against an offline attacker who has the
@@ -184,7 +184,7 @@ Re-derived from code so the surface does not get re-litigated:
 - **Also verified:** the implied stronger mitigation is unavailable. WebCrypto has no
   ChaCha20-Poly1305, so the data key cannot be held as a non-extractable browser key
   without changing the E2E AEAD — and web ciphertext must stay XChaCha20-Poly1305 to
-  remain decryptable by the native clients it syncs with. So the *only* real web controls
+  remain decryptable by the native clients it syncs with. So the _only_ real web controls
   are XSS / bundle-tamper prevention (a real CSP **header** + SRI, A2), session-scoped key
   lifetime (done in `clipper.session.v2`), and — the missing keystone — key rotation (CR1).
 - **Recommendation:** correct the A3 wording (a correction note is appended to that
@@ -212,7 +212,7 @@ Re-derived from code so the surface does not get re-litigated:
 Toward "bulletproof," in order of leverage:
 
 1. **CR1 — build a key-rotation / passphrase-change flow.** This is the one change that
-   converts key-exposure from *permanent* to *bounded*; every other web/mobile key-exposure
+   converts key-exposure from _permanent_ to _bounded_; every other web/mobile key-exposure
    finding is capped by its absence.
 2. **CR2 — pin and strengthen the OPAQUE KSF.** Small, mechanical, and safe now that nothing
    is deployed; removes a silent-dependency-drift hazard and raises the offline-guess cost.

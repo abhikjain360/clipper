@@ -55,8 +55,20 @@ id = "RUSTSEC-2024-0370"
 reason = "proc-macro-error is unmaintained; transitive through glib-macros/gtk3-macros in Tauri's Linux GTK stack. No direct manifest upgrade removes it while Tauri/Wry stays on gtk-rs 0.18."
 
 [[IgnoredVulns]]
-id = "RUSTSEC-2026-0173"
-reason = "proc-macro-error2 is unmaintained; build-time proc-macro pulled in through sea-orm-macros' sea-bae dependency. No fixed version exists; revisit when sea-orm drops sea-bae."
+id = "RUSTSEC-2026-0235"
+reason = "rkyv 0.7.46 is an optional dependency of rust_decimal whose feature is not enabled anywhere in the workspace build graph (cargo tree -i finds no consumers); the 0.8.17 fix is not compatible with rust_decimal 1.x."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0215"
+reason = "smallstr 0.3.1 is transitive through yrs (sync engine); no fixed version exists."
+
+[[IgnoredVulns]]
+id = "GHSA-5p2g-fcmc-qvqq"
+reason = "image-size is transitive through Metro (React Native dev/build tooling via react-native community-cli-plugin), not shipped in app bundles; no fixed version exists."
+
+[[IgnoredVulns]]
+id = "GHSA-w3rx-r6r6-pgpr"
+reason = "image-size is transitive through Metro (React Native dev/build tooling via react-native community-cli-plugin), not shipped in app bundles; no fixed version exists."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2025-0075"

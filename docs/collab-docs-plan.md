@@ -224,11 +224,7 @@ HTML file or wscat before any UI work.
   const ydoc = new Y.Doc();
   const ytext = ydoc.getText("content");
   const provider = new WebsocketProvider(wsBase, docId, ydoc, {
-    params: authenticated
-      ? {
-          /* session via header */
-        }
-      : { token: shareToken },
+    params: authenticated ? {/* session via header */} : { token: shareToken },
   });
   yCollab(ytext, provider.awareness); // @codemirror/collab binding
   ```

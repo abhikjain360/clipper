@@ -6,15 +6,46 @@ overrides:
   uuid: 11.1.1
   esbuild: 0.28.1
   esbuild-wasm: 0.28.1
+  # Keep Expo SDK 57's native tooling on the matching metro-config; transitive
+  # deps (react-native-worklets via Tamagui) otherwise pull 0.87.
+  "@react-native/metro-config": 0.86.2
+  # @expo/log-box 57 wants dom-webview ^57.0.1 but resolution otherwise keeps
+  # the stale 56.x line.
+  "@expo/dom-webview": 57.0.1
   # CodeMirror requires a single @codemirror/state (and view) instance — facets
   # use identity checks. Transitive deps (lang packs, theme-one-dark, language)
-  # pull 6.6.0/6.43.1 while our direct deps pin 6.7.0/6.43.2; the resulting
+  # pull 6.6.0/6.43.1 while our direct deps pin 6.7.1/6.43.9; the resulting
   # duplicate instances make EditorState.create reject extensions from the other
   # copy ("Unrecognized extension value"). Pin both to one version.
-  "@codemirror/state": 6.7.0
-  "@codemirror/view": 6.43.2
+  "@codemirror/state": 6.7.1
+  "@codemirror/view": 6.43.9
 allowBuilds:
   esbuild: true
   msgpackr-extract: true
 patchedDependencies:
-  uniffi-bindgen-react-native@0.31.0-3: patches/uniffi-bindgen-react-native@0.31.0-3.patch
+  uniffi-bindgen-react-native@0.31.0-5: patches/uniffi-bindgen-react-native@0.31.0-5.patch
+minimumReleaseAgeExclude:
+  - "@expo/cli@57.0.18"
+  - "@expo/config-plugins@57.0.9"
+  - "@expo/config@57.0.9"
+  - "@expo/fingerprint@0.20.10"
+  - "@expo/image-utils@0.11.5"
+  - "@expo/metro-config@57.0.10"
+  - "@expo/metro-file-map@57.0.2"
+  - "@expo/prebuild-config@57.0.14"
+  - "@expo/require-utils@57.0.5"
+  - babel-preset-expo@57.0.8
+  - expo-asset@57.0.14
+  - expo-constants@57.0.14
+  - expo-modules-autolinking@57.0.11
+  - expo-modules-core@57.0.13
+  - expo@57.0.16
+  - expo-sharing@57.0.15
+peerDependencyRules:
+  allowedVersions:
+    # Tamagui's cross-platform peer graph (via @floating-ui/react-native and
+    # @tamagui/animations-reanimated) auto-installs react-native/react-dom into
+    # the web app's tree where they are never executed; mobile versions are
+    # pinned by the Expo SDK, so allow the mismatches.
+    react-native: 0.87.0
+    react: 19.2.3
