@@ -88,6 +88,14 @@
 - Use typed Rust errors with `thiserror`. Binary entrypoints should log via
   `tracing` and exit with typed error codes where useful; do not force stderr
   output with `eprintln!`.
+- The web bundle must contain exactly one React. `web` declares
+  `react-native-web` as a direct dependency and `web/vite.config.ts` aliases
+  both `react-native` and `react-native-web` to it. Without this, pnpm's hidden
+  hoist dir resolves Tamagui's bare `react-native-web` imports to the
+  mobile-context variant (react 19.2.3), shipping two React copies and crashing
+  render with "Cannot read properties of null (reading 'useContext')". Do not
+  remove the dep or the aliases while web and mobile pin different react
+  versions.
 - Use the configured logger (`tracing` in Rust code) for diagnostics instead of
   direct `println!`, `eprintln!`, or `dbg!` calls.
 - `sha2` must stay on the `0.10` line while `opaque-ke` depends on the `digest`

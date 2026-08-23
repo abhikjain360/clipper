@@ -41,6 +41,7 @@
         "lucide-react": "1.33.0",
         "react": "19.2.8",
         "react-dom": "19.2.8",
+        "react-native-web": "0.21.2",
         "tamagui": "2.7.7",
         "vite": "8.2.2",
         "wouter": "3.10.0",
