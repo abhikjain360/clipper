@@ -73,7 +73,9 @@ pub struct LocalFileRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalCollabRecord {
+    pub title: String,
     pub share_token: String,
+    pub share_url: Option<String>,
     pub updated_at: String,
 }
 
@@ -125,7 +127,13 @@ enum StoredPresentContent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredCollabRecord {
+    #[serde(default)]
+    title: String,
     share_token: String,
+    /// The server-built public share link, cached so the doc list can offer
+    /// "copy link" offline. Refreshed whenever the doc's meta is re-read.
+    #[serde(default)]
+    share_url: Option<String>,
     created_at: String,
     source_device_id: String,
     updated_at: String,
@@ -660,7 +668,9 @@ impl LocalStore {
             created_at: item.created_at.clone(),
             source_device_id: source_device_id.to_string(),
             data: LocalObjectData::Collab(LocalCollabRecord {
+                title: item.title.clone(),
                 share_token: item.share_token.clone(),
+                share_url: item.share_url.clone(),
                 updated_at: item.updated_at.clone(),
             }),
         };
@@ -672,7 +682,9 @@ impl LocalStore {
             event_seq,
             created_seq,
             content: StoredPresentContent::Collab(StoredCollabRecord {
+                title: item.title.clone(),
                 share_token: item.share_token.clone(),
+                share_url: item.share_url.clone(),
                 created_at: item.created_at.clone(),
                 source_device_id: source_device_id.to_string(),
                 updated_at: item.updated_at.clone(),
@@ -1521,7 +1533,9 @@ fn collab_record_from_present(record: &StoredPresentObjectRecord) -> Option<Loca
         created_at: collab.created_at.clone(),
         source_device_id: collab.source_device_id.clone(),
         data: LocalObjectData::Collab(LocalCollabRecord {
+            title: collab.title.clone(),
             share_token: collab.share_token.clone(),
+            share_url: collab.share_url.clone(),
             updated_at: collab.updated_at.clone(),
         }),
     })
@@ -1604,7 +1618,9 @@ fn collab_item_from_record(record: &LocalObjectRecord) -> Option<CollabItem> {
     };
     Some(CollabItem {
         id: record.id.clone(),
+        title: collab.title.clone(),
         share_token: collab.share_token.clone(),
+        share_url: collab.share_url.clone(),
         created_at: record.created_at.clone(),
         updated_at: collab.updated_at.clone(),
     })

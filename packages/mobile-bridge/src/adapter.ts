@@ -90,6 +90,8 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     register: async (accessKey, username, passphrase, deviceName, serverUrl) =>
       clientFor(serverUrl).register(accessKey, username, passphrase, deviceName, serverUrl),
     removeDevice: async (deviceId) => client.removeDevice(deviceId),
+    renameCollabDoc: async (objectId, title) =>
+      mapCollabItem(await client.renameCollabDoc(objectId, title)),
     // Browser-only session resume (see the web client). The mobile app resumes
     // from the OS keystore via its own flow, so these are inert here and exist
     // only to satisfy the shared backend contract.
@@ -131,6 +133,7 @@ function mapAppState(state: NativeAppState): AppState {
       ? {
           device_id: state.session.deviceId,
           device_name: state.session.deviceName,
+          server_url: state.session.serverUrl,
           username: state.session.username,
         }
       : null,
@@ -142,6 +145,8 @@ function mapCollabItem(item: NativeCollabItem): CollabItem {
     created_at: item.createdAt,
     id: item.id,
     share_token: item.shareToken,
+    share_url: item.shareUrl ?? null,
+    title: item.title,
     updated_at: item.updatedAt,
   };
 }

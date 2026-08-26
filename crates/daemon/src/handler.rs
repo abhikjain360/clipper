@@ -420,6 +420,9 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 DaemonCommand::DeleteCollabDoc(params) => {
                     cmd_delete_collab_doc(id, params.object_id, &engine).await
                 }
+                DaemonCommand::RenameCollabDoc(params) => {
+                    cmd_rename_collab_doc(id, params.object_id, params.title, &engine).await
+                }
                 DaemonCommand::GetCollabDocMeta(params) => {
                     cmd_get_collab_doc_meta(id, params.object_id, &engine).await
                 }
@@ -698,6 +701,18 @@ async fn cmd_delete_collab_doc(
 ) -> DaemonResponse {
     match engine.delete_collab_doc(&object_id).await {
         Ok(()) => DaemonResponse::success(id, None),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_rename_collab_doc(
+    id: String,
+    object_id: String,
+    title: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.rename_collab_doc(&object_id, &title).await {
+        Ok(item) => json_success(id, item),
         Err(e) => client_error(id, e),
     }
 }

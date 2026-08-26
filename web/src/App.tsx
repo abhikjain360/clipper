@@ -848,8 +848,13 @@ function CollabPanel({
 
     async function copyLink(item: CollabItem) {
         onError(null);
+        const link = shareLink(item);
+        if (!link) {
+            onError(SHARE_LINK_UNAVAILABLE);
+            return;
+        }
         try {
-            await writeClipboardText(shareLink(item.share_token));
+            await writeClipboardText(link);
         } catch (caught) {
             onError(formatBackendError(caught));
         }
@@ -896,7 +901,7 @@ function CollabPanel({
                                     >
                                         <FileCode size={22} color="#6fb4ff" />
                                         <YStack flex={1} gap="$1">
-                                            <Text numberOfLines={1}>{collabTitle(item.id)}</Text>
+                                            <Text numberOfLines={1}>{collabTitle(item)}</Text>
                                             <Paragraph size="$2" color="#9aa4ad">
                                                 {formatRelativeTime(item.created_at)}
                                             </Paragraph>
@@ -938,6 +943,17 @@ function CollabDocView({
     const [serverUrl, setServerUrl] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [copied, setCopied] = useState(false);
+    const [renaming, setRenaming] = useState(false);
+    // Held in a ref so a second copy restarts the flash instead of stacking
+    // timers (which would clear the label 2s after the *first* click).
+    const copiedTimer = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
+
+    useEffect(
+        () => () => {
+            if (copiedTimer.current !== null) globalThis.clearTimeout(copiedTimer.current);
+        },
+        [],
+    );
 
     useEffect(() => {
         let cancelled = false;
@@ -974,12 +990,35 @@ function CollabDocView({
     async function copyLink() {
         if (!meta) return;
         onError(null);
+        const link = shareLink(meta);
+        if (!link) {
+            onError(SHARE_LINK_UNAVAILABLE);
+            return;
+        }
         try {
-            await writeClipboardText(shareLink(meta.share_token));
+            await writeClipboardText(link);
             setCopied(true);
-            globalThis.setTimeout(() => setCopied(false), 2000);
+            if (copiedTimer.current !== null) globalThis.clearTimeout(copiedTimer.current);
+            copiedTimer.current = globalThis.setTimeout(() => setCopied(false), 2000);
         } catch (caught) {
             onError(formatBackendError(caught));
+        }
+    }
+
+    // Commit a rename. The server normalizes the title (trim) and returns the
+    // stored value, so the input is re-seeded from the response rather than from
+    // what was typed.
+    async function saveTitle(next: string) {
+        if (!meta) return;
+        onError(null);
+        setRenaming(true);
+        try {
+            const backend = await clipperBackend();
+            setMeta(await backend.renameCollabDoc(id, next));
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        } finally {
+            setRenaming(false);
         }
     }
 
@@ -992,7 +1031,16 @@ function CollabDocView({
                         icon={<ArrowLeft size={16} />}
                         onPress={() => setLocation("/collab")}
                     />
-                    <H2 size="$6">{collabTitle(id)}</H2>
+                    {meta ? (
+                        <TitleField
+                            title={meta.title}
+                            placeholder={collabTitle(meta)}
+                            busy={renaming}
+                            onSave={(next) => void saveTitle(next)}
+                        />
+                    ) : (
+                        <H2 size="$6">Collab doc</H2>
+                    )}
                 </XStack>
             </XStack>
 
@@ -1008,17 +1056,20 @@ function CollabDocView({
                                 </Paragraph>
                                 <Text
                                     numberOfLines={1}
+                                    color={shareLink(meta) ? undefined : "#9aa4ad"}
                                     style={{
-                                        fontFamily:
-                                            "ui-monospace, SFMono-Regular, Menlo, monospace",
+                                        fontFamily: shareLink(meta)
+                                            ? "ui-monospace, SFMono-Regular, Menlo, monospace"
+                                            : undefined,
                                     }}
                                 >
-                                    {shareLink(meta.share_token)}
+                                    {shareLink(meta) ?? SHARE_LINK_UNAVAILABLE}
                                 </Text>
                             </YStack>
                             <Button
                                 size="$3"
                                 icon={<Copy size={16} />}
+                                disabled={!shareLink(meta)}
                                 onPress={() => void copyLink()}
                             >
                                 {copied ? "Copied" : "Copy link"}
@@ -1053,6 +1104,63 @@ function CollabDocView({
                 <EmptyState icon={<FileText size={28} />} title="Doc unavailable" />
             )}
         </YStack>
+    );
+}
+
+// The collab doc's title, editable in place. The committed value is the source of
+// truth: the local draft is re-seeded whenever the saved title changes (a rename
+// from another device arrives over the event stream), except while the field is
+// focused, so a remote update cannot overwrite what is being typed.
+function TitleField({
+    title,
+    placeholder,
+    busy,
+    onSave,
+}: {
+    title: string;
+    placeholder: string;
+    busy: boolean;
+    onSave: (next: string) => void;
+}) {
+    const [draft, setDraft] = useState(title);
+    const [editing, setEditing] = useState(false);
+
+    // Also held while `busy`: committing blurs the field, so without that guard
+    // the draft would snap back to the pre-save title for as long as the request
+    // is in flight, then jump forward again — and a failed save would silently
+    // discard what the user typed.
+    useEffect(() => {
+        if (!editing && !busy) setDraft(title);
+    }, [title, editing, busy]);
+
+    function commit() {
+        setEditing(false);
+        if (draft.trim() === title.trim()) return;
+        onSave(draft);
+    }
+
+    return (
+        <XStack items="center" gap="$2" flex={1}>
+            <Input
+                flex={1}
+                maxW={480}
+                size="$4"
+                value={draft}
+                placeholder={placeholder}
+                aria-label="Document title"
+                bg="transparent"
+                borderColor={editing ? "#2f6db0" : "transparent"}
+                fontSize={20}
+                fontWeight="600"
+                onFocus={() => setEditing(true)}
+                onChangeText={setDraft}
+                onBlur={commit}
+                onKeyPress={(event) => {
+                    if (event.nativeEvent.key === "Enter") commit();
+                }}
+            />
+            {busy ? <Spinner size="small" /> : null}
+        </XStack>
     );
 }
 
@@ -1287,18 +1395,29 @@ function isTextMimeType(mimeType: string): boolean {
     return mimeType.toLowerCase().split(";")[0]?.trim().startsWith("text/") ?? false;
 }
 
-// Placeholder collab-doc title. The real title lives inside the Y.Doc state and
-// is wired up in Phase 3; until then the doc is identified by a short id prefix.
-function collabTitle(id: string): string {
-    return `Doc · ${id.slice(0, 8)}`;
+// A collab doc's display name. Titles are optional server-side, so an untitled
+// doc falls back to a short id prefix rather than rendering blank.
+function collabTitle(item: { title: string; id: string }): string {
+    const title = item.title.trim();
+    return title.length > 0 ? title : `Untitled · ${item.id.slice(0, 8)}`;
 }
 
-// The public share URL a doc's share token resolves to. The `/s/:share_token`
-// route itself is a Phase 3b addition; the link is shown and copyable now.
-function shareLink(shareToken: string): string {
+// The public URL a doc's share token resolves to, or null when there is none to
+// show. The server builds `share_url` from its configured `public_web_url` — the
+// only place that knows where the web client is hosted, since the frontend and
+// the API are separately deployed origins. A browser can fall back to its own
+// origin (it *is* the web client); the Tauri shell cannot, because its origin is
+// `tauri://localhost`, which is what a share link must never contain.
+function shareLink(item: { share_url: string | null; share_token: string }): string | null {
+    if (item.share_url) return item.share_url;
+    if (isTauriRuntime()) return null;
     const origin = typeof window === "undefined" ? "" : window.location.origin;
-    return `${origin}/s/${shareToken}`;
+    return origin ? `${origin}/s/${item.share_token}` : null;
 }
+
+// Shown in place of a share link when the server has no public web URL set.
+const SHARE_LINK_UNAVAILABLE =
+    "No share link: set the server's public web URL (CLIPPER_PUBLIC_WEB_URL).";
 
 function formatRelativeTime(value: string): string {
     const date = Date.parse(value);

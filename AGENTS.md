@@ -69,9 +69,16 @@
   chmod 600 data/clipper-server.secret
 
   export CLIPPER_SERVER_SECRET_FILE="$PWD/data/clipper-server.secret"
+  export CLIPPER_PUBLIC_WEB_URL="http://127.0.0.1:53880"
   cargo run -p clipper-server -- init --data-dir data/clipper-server
   cargo run -p clipper-server -- serve --data-dir data/clipper-server
   ```
+
+  `CLIPPER_PUBLIC_WEB_URL` (also `--public-web-url`) is the origin the web client
+  is served from. The server builds collab-doc share links from it, because no
+  client can: the frontend and the API are separate origins, and the desktop and
+  mobile shells have no web origin at all. Leave it unset and clients report that
+  share links are unavailable rather than offering a broken one.
 
   Keep the same `CLIPPER_SERVER_SECRET_FILE` value for `init`, `serve`, and
   `add-access-key`; the server database cannot be opened with a different
@@ -82,6 +89,13 @@
   ```sh
   nix run .#server-entities
   ```
+
+  This is a true no-op on an unchanged schema, and it must stay that way. SQLite
+  has no UUID type, so schema discovery reports our `UUID` columns as an opaque
+  custom type and sea-orm-cli generates them as `String` (2.x additionally marks
+  them `ignore`, which does not compile on a primary key). `scripts/server-entities.ts`
+  rewrites those columns back to `Uuid` after generation — so fix the script if
+  the codegen changes shape again, rather than hand-editing entity files.
 
 ## Dependency Notes
 
@@ -98,6 +112,13 @@
   versions.
 - Use the configured logger (`tracing` in Rust code) for diagnostics instead of
   direct `println!`, `eprintln!`, or `dbg!` calls.
+- The Tauri CSP's `connect-src` must keep `ws:` and `wss:`
+  (`web/src-tauri/tauri.conf.json`, both `csp` and `devCsp`). The collab Y-sync
+  socket is the one server connection the webview opens itself — everything else
+  goes over IPC to the daemon — and WebKit rejects a blocked `WebSocket`
+  constructor with `SecurityError: The operation is insecure.`, which surfaces as
+  "Editor failed to load". The app connects to a user-chosen server, so there is
+  no narrower static origin list to use.
 - `sha2` must stay on the `0.10` line while `opaque-ke` depends on the `digest`
   0.10 trait ecosystem.
 
@@ -115,8 +136,9 @@
 - Mobile UniFFI bindings are exported by `crates/mobile-uniffi`; app-visible
   records should be derived on `crates/app-types` types where practical.
 - Server schema changes live in `crates/server/src/migration/*.rs`; keep SeaORM
-  entities aligned by regenerating them with `sea-orm-cli`. Do not hand-edit
-  generated entity files as the final change.
+  entities aligned by regenerating them with `nix run .#server-entities`. Do not
+  hand-edit generated entity files as the final change — the generator's own
+  post-processing is where corrections belong.
 - `event_log.seq` is an application-assigned monotonic microsecond timestamp
   (see `AppState::next_event_seq`), not a database autoincrement. It is the
   sync cursor, so it must stay strictly increasing and unique; allocate it only
@@ -126,6 +148,13 @@
   ciphertext, or local-storage compatibility unless explicitly asked; prefer
   coherent current design over compatibility migrations for abandoned local
   state.
+- Collab docs are the one server-visible object kind, and their metadata follows
+  from that: `collab_docs.title` is a plaintext column so the doc list can render
+  titles without a Y-sync WebSocket per row, and `share_url` is built server-side
+  from `server.public_web_url`. Renames emit an `event_log` `updated` event —
+  collab is the only kind that admits one. Collab objects are excluded from
+  `GET /api/objects`, so `GET /api/collab-docs` is their only reconciliation
+  source; the client snapshots it alongside files and clipboard.
 - Auth is multi-user: access keys are one-time registration invites stored as
   hashes, while user passphrases must only flow through OPAQUE registration and
   login. Server handlers must scope private data by authenticated `user_id`.

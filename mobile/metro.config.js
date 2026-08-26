@@ -22,4 +22,32 @@ if (process.platform === "darwin") {
   config.maxWorkers = 1;
 }
 
+// lib0 (yjs's utility layer) publishes a `react-native` export for its Web
+// Crypto shim that imports `isomorphic-webcrypto`, an unmaintained package this
+// app does not depend on — Metro prefers that condition and the release bundle
+// fails to resolve it. Point the module at lib0's browser build instead, which
+// just reads the global `crypto`; `src/webcryptoPolyfill.ts` provides that
+// global from expo-crypto before anything touches yjs.
+// lib0's `exports` map does not publish `./webcrypto.js` as a subpath, so
+// locate the package root (`./package.json` is always exported) and join it.
+const lib0Webcrypto = path.join(
+  path.dirname(
+    require.resolve("lib0/package.json", {
+      paths: [
+        path.resolve(projectRoot, "node_modules"),
+        path.resolve(workspaceRoot, "node_modules"),
+      ],
+    }),
+  ),
+  "webcrypto.js",
+);
+const defaultResolveRequest = config.resolver.resolveRequest;
+
+config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (moduleName === "lib0/webcrypto" || moduleName === "lib0/webcrypto.js") {
+    return { type: "sourceFile", filePath: lib0Webcrypto };
+  }
+  return (defaultResolveRequest ?? context.resolveRequest)(context, moduleName, platform);
+};
+
 module.exports = config;

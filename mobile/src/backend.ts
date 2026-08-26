@@ -32,14 +32,6 @@ export function devDefaultServerUrl(): string {
   return __DEV__ ? "http://127.0.0.1:8787" : "";
 }
 
-// The public URL a collab doc's share token resolves to on the server's web UI
-// (`/s/:share_token`). NOTE: this uses the configured (dev) server origin; a
-// shareable public origin for production builds is still to be wired up.
-export function collabShareLink(shareToken: string): string {
-  const origin = devDefaultServerUrl();
-  return origin ? `${origin}/s/${shareToken}` : `/s/${shareToken}`;
-}
-
 export async function readClipboardText(): Promise<string> {
   return await Clipboard.getStringAsync();
 }

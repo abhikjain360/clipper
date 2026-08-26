@@ -58,6 +58,12 @@ const CURSOR_COLORS = [
 
 // The Y-sync WebSocket base the provider connects under. y-websocket appends
 // `/<room>` and `?params`, yielding `…/api/collab-docs/<objectId>/ws?token=…`.
+//
+// NOTE (desktop): this socket is opened by the webview itself, unlike every
+// other server call in the Tauri shell, which goes over IPC to the daemon. So
+// the Tauri CSP's `connect-src` must admit `ws:`/`wss:` — with only `'self'`,
+// WebKit rejects the constructor with "SecurityError: The operation is
+// insecure." and the editor never mounts. See `src-tauri/tauri.conf.json`.
 function collabWsBaseUrl(serverHttpUrl: string): string {
     const url = new URL(serverHttpUrl);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -68,6 +74,27 @@ function collabWsBaseUrl(serverHttpUrl: string): string {
 // viewer, collab docs, and the public share page. Same key the file viewer used
 // before the Vim toggle moved into the editor toolbar.
 const VIM_MODE_STORAGE_KEY = "clipper_vim_mode";
+
+// `localStorage` is not merely absent in some contexts — WebKit *throws*
+// `SecurityError` on the property itself (a blocked custom-scheme origin, a
+// browser set to reject site data). An optional chain does not catch that, and
+// this runs during render, so an unguarded read would take the whole editor down
+// with it. A remembered preference is not worth that.
+function readVimMode(): boolean {
+    try {
+        return globalThis.localStorage?.getItem(VIM_MODE_STORAGE_KEY) === "true";
+    } catch {
+        return false;
+    }
+}
+
+function writeVimMode(enabled: boolean): void {
+    try {
+        globalThis.localStorage?.setItem(VIM_MODE_STORAGE_KEY, String(enabled));
+    } catch {
+        // Preference is best-effort; the toggle still applies for this session.
+    }
+}
 
 export function CodeEditor({ content = "", lang, collab }: CodeEditorProps) {
     const hostRef = useRef<HTMLDivElement | null>(null);
@@ -82,9 +109,7 @@ export function CodeEditor({ content = "", lang, collab }: CodeEditorProps) {
         collab ? DEFAULT_COLLAB_LANGUAGE_ID : detectLanguageId(lang),
     );
     // Vim key bindings: an editor-wide, persisted opt-in available in every mode.
-    const [vimMode, setVimMode] = useState(
-        () => globalThis.localStorage?.getItem(VIM_MODE_STORAGE_KEY) === "true",
-    );
+    const [vimMode, setVimMode] = useState(readVimMode);
 
     // ── Provider lifecycle (collab only) ──
     // Kept separate from editor construction so toggling vim (which rebuilds the
@@ -130,11 +155,20 @@ export function CodeEditor({ content = "", lang, collab }: CodeEditorProps) {
     // ── Editor construction ──
     // Rebuilds on static-content / vim / collab-runtime changes. Language is
     // applied through its compartment (below), never by rebuilding.
+    //
+    // Deliberately keyed on `isCollab`, not `collab`: callers pass an inline
+    // object literal, so its identity changes on every parent render. Depending
+    // on it would tear down and rebuild the whole EditorView — losing the
+    // cursor, selection, scroll position, and undo history — every time the
+    // surrounding view re-rendered for an unrelated reason (a "Copied" flash, a
+    // title save). The provider effect above is already keyed on the config's
+    // primitives, so `collabRuntime` only changes when the document really does.
+    const isCollab = collab !== undefined;
     useEffect(() => {
         const host = hostRef.current;
         if (!host) return undefined;
         // In collab mode, wait until the provider/doc is ready.
-        if (collab && !collabRuntime) return undefined;
+        if (isCollab && !collabRuntime) return undefined;
 
         let cancelled = false;
 
@@ -179,7 +213,7 @@ export function CodeEditor({ content = "", lang, collab }: CodeEditorProps) {
             view.destroy();
             viewRef.current = null;
         };
-    }, [content, vimMode, collab, collabRuntime]);
+    }, [content, vimMode, isCollab, collabRuntime]);
 
     // ── Language compartment ──
     // Load the selected grammar's chunk on demand and slot it in.
@@ -206,7 +240,7 @@ export function CodeEditor({ content = "", lang, collab }: CodeEditorProps) {
     function toggleVim() {
         setVimMode((previous) => {
             const next = !previous;
-            globalThis.localStorage?.setItem(VIM_MODE_STORAGE_KEY, String(next));
+            writeVimMode(next);
             return next;
         });
     }

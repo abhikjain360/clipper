@@ -8,8 +8,8 @@ use clipper_app_types::{AppState, CollabItem, DeviceInfo};
 use clipper_daemon_types::{
     ClipboardPayloadParams, ClipboardPayloadResult, DaemonCommand, DeleteCollabDocParams,
     DeleteFileParams, DeviceListResult, DownloadFileParams, GetCollabDocMetaParams, LoginParams,
-    RegisterParams, RegisterResult, RemoveDeviceParams, SendClipboardPayloadParams,
-    UploadFileParams, UploadFileResult,
+    RegisterParams, RegisterResult, RemoveDeviceParams, RenameCollabDocParams,
+    SendClipboardPayloadParams, UploadFileParams, UploadFileResult,
 };
 use daemon_client::{DaemonClient, DaemonClientError};
 use serde::{Deserialize, Serialize, Serializer};
@@ -131,6 +131,7 @@ pub fn run() {
             delete_file,
             create_collab_doc,
             delete_collab_doc,
+            rename_collab_doc,
             get_collab_doc_meta,
             list_devices,
             remove_device,
@@ -450,6 +451,21 @@ async fn delete_collab_doc(
         }))
         .await?;
     Ok(())
+}
+
+#[tauri::command]
+async fn rename_collab_doc(
+    backend: State<'_, DesktopBackend>,
+    object_id: String,
+    title: String,
+) -> CommandResult<CollabItem> {
+    Ok(backend
+        .daemon
+        .send_result::<CollabItem>(DaemonCommand::RenameCollabDoc(RenameCollabDocParams {
+            object_id,
+            title,
+        }))
+        .await?)
 }
 
 #[tauri::command]

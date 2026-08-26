@@ -391,6 +391,7 @@ impl SyncEngine {
                 username: username.clone(),
                 device_id: device_id.clone(),
                 device_name: device_name.to_string(),
+                server_url: self.api.base_url_display(),
             });
             state.saved_profile = Some(SavedProfile {
                 username,
@@ -1095,21 +1096,50 @@ impl SyncEngine {
     /// `deleted` event).
     pub async fn create_collab_doc(&self) -> Result<CollabItem, ClientError> {
         let response = self.api.create_collab_doc().await?;
-        let object_id = response.object_id.to_string();
-        let created_at = chrono::Utc::now().to_rfc3339();
-        let local_seq = chrono::Utc::now().timestamp_micros();
-        let item = CollabItem {
-            id: object_id.clone(),
-            share_token: response.share_token,
-            created_at: created_at.clone(),
-            updated_at: created_at,
-        };
+        let item = collab_item_from_meta(&response.doc);
+        let object_id = item.id.clone();
+        let created_seq = collab_created_seq(&item.created_at);
         let visible = self
             .local_store
-            .persist_local_collab_present(&item, "", local_seq, local_seq, RECENT_CLIPBOARD_LIMIT)
+            .persist_local_collab_present(
+                &item,
+                "",
+                created_seq,
+                created_seq,
+                RECENT_CLIPBOARD_LIMIT,
+            )
             .await?;
         self.publish_visible_state(visible).await;
         info!(object_id = %object_id, "Collab doc created");
+        Ok(item)
+    }
+
+    /// Rename a collab doc. The server emits an `updated` event so the user's
+    /// other devices re-read the meta; this device applies the response directly
+    /// rather than waiting for its own event back (the server suppresses the
+    /// originating device's broadcast, exactly as for `created`).
+    pub async fn rename_collab_doc(
+        &self,
+        object_id: &str,
+        title: &str,
+    ) -> Result<CollabItem, ClientError> {
+        let meta = self.api.rename_collab_doc(object_id, title).await?;
+        let item = collab_item_from_meta(&meta);
+        let created_seq = collab_created_seq(&item.created_at);
+        // The rename must not reorder the list, so the record keeps its creation
+        // seq. The event seq is a local wall-clock microsecond stamp, matching
+        // what `create_collab_doc` and `delete_collab_doc` do — the rename
+        // response carries no server seq. Caveat inherited from those paths: a
+        // device clock running ahead of the server can stamp a seq high enough to
+        // make a later remote delete look stale and be dropped, until the next
+        // reconciliation sweep clears the record.
+        let event_seq = chrono::Utc::now().timestamp_micros();
+        let visible = self
+            .local_store
+            .persist_local_collab_present(&item, "", created_seq, event_seq, RECENT_CLIPBOARD_LIMIT)
+            .await?;
+        self.publish_visible_state(visible).await;
+        info!(object_id = %object_id, "Collab doc renamed");
         Ok(item)
     }
 
@@ -1134,23 +1164,11 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// Fetch a collab doc's current metadata (share token + `updated_at`) from
-    /// the server. Used by the per-doc detail view.
+    /// Fetch a collab doc's current metadata from the server. Used by the per-doc
+    /// detail view, which needs the share token as the Y-sync WS credential.
     pub async fn get_collab_doc_meta(&self, object_id: &str) -> Result<CollabItem, ClientError> {
         let meta = self.api.get_collab_doc_meta(object_id).await?;
-        // The meta endpoint does not return `created_at`; fall back to the
-        // locally cached value when present, otherwise reuse `updated_at` (they
-        // are equal until the first Phase 3 edit).
-        let created_at = {
-            let state = self.state.read().await;
-            state
-                .collab_docs
-                .iter()
-                .find(|doc| doc.id == object_id)
-                .map(|doc| doc.created_at.clone())
-        }
-        .unwrap_or_else(|| meta.updated_at.clone());
-        Ok(collab_item_from_meta(&meta, created_at))
+        Ok(collab_item_from_meta(&meta))
     }
 
     // ── Sync ──
@@ -1190,6 +1208,16 @@ impl SyncEngine {
                 warn!("Clipboard snapshot failed: {}", error);
             }
         });
+
+        let collab_engine = Arc::clone(self);
+        spawn_background(async move {
+            if let Err(error) = collab_engine
+                .snapshot_collab_docs(generation, stream_start_seq)
+                .await
+            {
+                warn!("Collab doc snapshot failed: {}", error);
+            }
+        });
     }
 
     async fn handle_ws_text(
@@ -1206,19 +1234,28 @@ impl SyncEngine {
                 event_type,
                 object_kind,
                 object_id,
-                created_at,
+                // The event's timestamp is not used: every object kind is
+                // materialized from an endpoint that reports its own
+                // authoritative `created_at`.
+                created_at: _,
             }) => {
                 debug!("WS event seq={} type={}", seq, event_type);
                 match event_type {
                     ObjectEventType::Created => {
-                        self.handle_created_event(
-                            generation,
-                            object_kind,
-                            object_id,
+                        self.handle_created_event(generation, object_kind, object_id, seq)
+                            .await?;
+                    }
+                    // Only collab docs mutate in place (a rename); encrypted
+                    // objects are immutable once created.
+                    ObjectEventType::Updated if object_kind == ObjectKind::Collab => {
+                        self.handle_updated_collab_event(generation, object_id, seq);
+                    }
+                    ObjectEventType::Updated => {
+                        warn!(
                             seq,
-                            created_at,
-                        )
-                        .await?;
+                            object_kind = %object_kind,
+                            "Ignoring unsupported WS update event for object kind",
+                        );
                     }
                     // Files and collab docs are the deletable object kinds.
                     // Clipboard items expire passively and never emit deletes.
@@ -1293,6 +1330,44 @@ impl SyncEngine {
             .local_store
             .sweep_kind(
                 ObjectKind::File,
+                generation,
+                stream_start_seq,
+                RECENT_CLIPBOARD_LIMIT,
+            )
+            .await?
+        {
+            self.publish_visible_state(visible).await;
+        }
+        Ok(())
+    }
+
+    /// Reconcile the full set of collab docs from `GET /api/collab-docs`.
+    ///
+    /// Collab objects carry no ciphertext, so `GET /api/objects` filters them
+    /// out and the file/clipboard snapshots never see them. Without this pass a
+    /// device would only ever learn about docs it created itself or saw a live
+    /// `created` event for — so a fresh install showed none, and a rename made
+    /// while offline (past the event-log retention window) never landed.
+    ///
+    /// The listing is unpaged: it is bounded by the per-user object cap, and each
+    /// row is a handful of short strings.
+    async fn snapshot_collab_docs(
+        self: &Arc<Self>,
+        generation: u64,
+        stream_start_seq: i64,
+    ) -> Result<(), ClientError> {
+        let listing = self.api.list_collab_docs().await?;
+        for meta in &listing.docs {
+            let item = collab_item_from_meta(meta);
+            let created_seq = collab_created_seq(&item.created_at);
+            self.persist_collab_snapshot_item(&item, created_seq, generation)
+                .await?;
+        }
+
+        if let Some(visible) = self
+            .local_store
+            .sweep_kind(
+                ObjectKind::Collab,
                 generation,
                 stream_start_seq,
                 RECENT_CLIPBOARD_LIMIT,
@@ -1509,7 +1584,6 @@ impl SyncEngine {
         kind: ObjectKind,
         object_id: ObjectId,
         event_seq: i64,
-        created_at: String,
     ) -> Result<(), ClientError> {
         let object_id_text = object_id.to_string();
         let should_materialize = self
@@ -1521,7 +1595,7 @@ impl SyncEngine {
             let engine = Arc::clone(self);
             spawn_background(async move {
                 if let Err(error) = engine
-                    .materialize_object(generation, kind, object_id, event_seq, created_at)
+                    .materialize_object(generation, kind, object_id, event_seq)
                     .await
                 {
                     warn!(
@@ -1560,22 +1634,45 @@ impl SyncEngine {
         Ok(())
     }
 
+    /// Re-read a renamed collab doc's metadata, off the event loop.
+    ///
+    /// Spawned rather than awaited, for the same two reasons `handle_created_event`
+    /// spawns its materialization: an inline fetch would stall every later event
+    /// behind it, and propagating a transient failure out of the receive loop
+    /// would tear the WebSocket down. A rename missed this way is picked up by
+    /// the collab snapshot on the next reconnect.
+    fn handle_updated_collab_event(
+        self: &Arc<Self>,
+        generation: u64,
+        object_id: ObjectId,
+        event_seq: i64,
+    ) {
+        let engine = Arc::clone(self);
+        spawn_background(async move {
+            if let Err(error) = engine.materialize_collab(generation, object_id).await {
+                warn!(
+                    object_id = %object_id,
+                    event_seq,
+                    "Failed to re-read updated collab doc: {}",
+                    error,
+                );
+            }
+        });
+    }
+
     async fn materialize_object(
         self: &Arc<Self>,
         generation: u64,
         kind: ObjectKind,
         object_id: ObjectId,
         event_seq: i64,
-        created_at: String,
     ) -> Result<(), ClientError> {
         // Collab objects are server-visible documents, not end-to-end-encrypted
         // objects: they are never returned by the encrypted-object endpoints, so
         // they are materialized from the dedicated collab-doc meta endpoint
         // rather than `get_object`.
         if kind == ObjectKind::Collab {
-            return self
-                .materialize_collab(generation, object_id, event_seq, created_at)
-                .await;
+            return self.materialize_collab(generation, object_id).await;
         }
 
         let api = &self.api;
@@ -1630,16 +1727,14 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// Materialize a collab doc from a live `created` event. The encrypted-object
-    /// endpoints exclude collab objects, so the share token / `updated_at` come
+    /// Materialize a collab doc from a live `created` or `updated` event. The
+    /// encrypted-object endpoints exclude collab objects, so its metadata comes
     /// from `GET /api/collab-docs/:id/meta` instead. A 404 means the doc was
     /// deleted between the event and this fetch, so drop the local marker.
     async fn materialize_collab(
         self: &Arc<Self>,
         generation: u64,
         object_id: ObjectId,
-        event_seq: i64,
-        created_at: String,
     ) -> Result<(), ClientError> {
         let object_id_text = object_id.to_string();
         let meta = match self.api.get_collab_doc_meta(&object_id_text).await {
@@ -1651,8 +1746,9 @@ impl SyncEngine {
             }
             Err(error) => return Err(error),
         };
-        let item = collab_item_from_meta(&meta, created_at);
-        self.persist_collab_snapshot_item(&item, event_seq, generation)
+        let item = collab_item_from_meta(&meta);
+        let created_seq = collab_created_seq(&item.created_at);
+        self.persist_collab_snapshot_item(&item, created_seq, generation)
             .await?;
         Ok(())
     }
@@ -2381,15 +2477,34 @@ fn decrypt_file_object_item(
     })
 }
 
-/// Build a display `CollabItem` from server meta plus a `created_at` the meta
-/// endpoint does not carry (sourced from the live event or the local cache).
-fn collab_item_from_meta(meta: &CollabDocMeta, created_at: String) -> CollabItem {
+/// Build a display `CollabItem` from server meta.
+fn collab_item_from_meta(meta: &CollabDocMeta) -> CollabItem {
     CollabItem {
         id: meta.object_id.to_string(),
+        title: meta.title.clone(),
         share_token: meta.share_token.clone(),
-        created_at,
+        share_url: meta.share_url.clone(),
+        created_at: meta.created_at.clone(),
         updated_at: meta.updated_at.clone(),
     }
+}
+
+/// Ordering key for a collab doc, derived from its server `created_at`.
+///
+/// Collab docs have no `created_seq` of their own: the meta and list endpoints
+/// report timestamps, not seqs. A server seq is an application-assigned
+/// microsecond wall clock, so microseconds-since-epoch from `created_at` sorts
+/// consistently against one — and, unlike the event seq of whatever event
+/// happened to surface the doc, it does not change when the doc is renamed. An
+/// unparseable timestamp falls back to now, which sorts the doc newest rather
+/// than dropping it.
+fn collab_created_seq(created_at: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map(|parsed| parsed.timestamp_micros())
+        .unwrap_or_else(|_| {
+            warn!(created_at, "Collab doc has an unparseable created_at");
+            chrono::Utc::now().timestamp_micros()
+        })
 }
 
 fn clipboard_display_text(mime_type: &str, data: &[u8]) -> String {

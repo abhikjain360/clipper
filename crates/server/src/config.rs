@@ -22,6 +22,7 @@ const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
         data_dir: ".clipper-server",
         addr: "127.0.0.1:8787",
         trusted_proxies: &[],
+        public_web_url: None,
     },
     rate_limit: RateLimitConfig {
         auth_per_client_per_minute: 10,
@@ -86,6 +87,7 @@ struct ServerDefaults {
     data_dir: &'static str,
     addr: &'static str,
     trusted_proxies: &'static [&'static str],
+    public_web_url: Option<&'static str>,
 }
 
 macro_rules! apply_nested_overrides {
@@ -138,6 +140,7 @@ impl Default for ServerConfig {
                     .iter()
                     .map(|proxy| parse_trusted_proxy(proxy).expect("valid default trusted proxy"))
                     .collect(),
+                public_web_url: DEFAULT_CONFIG.server.public_web_url.map(str::to_owned),
             },
             rate_limit: DEFAULT_CONFIG.rate_limit.clone(),
             auth: DEFAULT_CONFIG.auth.clone(),
@@ -174,14 +177,46 @@ pub struct ServerSection {
     pub addr: String,
     #[garde(skip)]
     pub trusted_proxies: Vec<IpNet>,
+    /// Public origin the web client is served from, used to build collab-doc
+    /// share links (`<public_web_url>/s/<share_token>`). The frontend and the
+    /// API are separately deployed origins, and the desktop/mobile shells have
+    /// no web origin at all, so no client can derive this — the server is the
+    /// only place that knows it. Unset means share links are unavailable.
+    #[garde(custom(validate_public_web_url))]
+    pub public_web_url: Option<String>,
 }
 
 impl ServerSection {
     fn apply_overrides(&mut self, overrides: ServerSectionOverrides) {
         apply_option_overrides!(self, overrides, [data_dir, addr]);
+        if overrides.public_web_url.is_some() {
+            self.public_web_url = overrides.public_web_url;
+        }
         if !overrides.trusted_proxies.is_empty() {
             self.trusted_proxies = overrides.trusted_proxies;
         }
+    }
+
+    /// The share link for a collab doc's token, or `None` when no public web URL
+    /// is configured. Trailing slashes are trimmed so the result never doubles.
+    pub fn share_url(&self, share_token: &str) -> Option<String> {
+        let base = self.public_web_url.as_deref()?.trim_end_matches('/');
+        Some(format!("{base}/s/{share_token}"))
+    }
+
+    /// Whether share links would be handed out over cleartext HTTP to a
+    /// non-loopback host. The share token is the sole credential for a doc, and
+    /// it travels in the URL, so on-path observers would get read/write access.
+    /// Loopback is exempt — that is the documented local-dev setup.
+    pub fn shares_over_cleartext_http(&self) -> bool {
+        let Some(url) = self.public_web_url.as_deref() else {
+            return false;
+        };
+        let Some(rest) = url.strip_prefix("http://") else {
+            return false;
+        };
+        let host = rest.split([':', '/']).next().unwrap_or_default();
+        !matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
     }
 }
 
@@ -407,6 +442,12 @@ pub struct ConfigOverrides {
 impl ConfigOverrides {
     pub fn from_env() -> Result<Self, String> {
         let mut overrides = Self::default();
+        if let Ok(value) = std::env::var("CLIPPER_PUBLIC_WEB_URL") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                overrides.server.public_web_url = Some(trimmed.to_owned());
+            }
+        }
         if let Ok(value) = std::env::var("CLIPPER_TRUSTED_PROXIES") {
             for proxy in value
                 .split(',')
@@ -432,6 +473,9 @@ pub struct ServerSectionOverrides {
     /// Address the HTTP server binds to.
     #[arg(long, value_name = "ADDR")]
     pub addr: Option<String>,
+    /// Public origin the web client is served from, used to build collab share links.
+    #[arg(long = "public-web-url", value_name = "URL")]
+    pub public_web_url: Option<String>,
     /// Trust Forwarded/X-Forwarded-For/X-Real-IP only from these proxy IPs or CIDR ranges.
     #[arg(
         long = "trusted-proxy",
@@ -647,6 +691,37 @@ fn validate_chrono_seconds(value: &u64, _: &()) -> garde::Result {
         return Err(garde::Error::new(
             "must fit in a signed 64-bit integer for chrono duration conversion",
         ));
+    }
+    Ok(())
+}
+
+/// A configured public web URL is echoed to clients as the base of a share link,
+/// so reject anything that would not work as one: it must be an absolute
+/// `http`/`https` URL with a host, and carry no query or fragment (the share
+/// token is appended as a path segment).
+fn validate_public_web_url(value: &Option<String>, _: &()) -> garde::Result {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let rest = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .ok_or_else(|| garde::Error::new("must start with http:// or https://"))?;
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if host.is_empty() {
+        return Err(garde::Error::new("must include a host"));
+    }
+    // Reject `https://someone@looks-legit.example`: this value is the visible
+    // prefix of every share link handed out, and embedded userinfo is the
+    // classic way to make a link read as a host it is not.
+    if host.contains('@') {
+        return Err(garde::Error::new("must not contain userinfo"));
+    }
+    if value.contains(['?', '#']) {
+        return Err(garde::Error::new("must not contain a query or fragment"));
+    }
+    if value.chars().any(char::is_whitespace) {
+        return Err(garde::Error::new("must not contain whitespace"));
     }
     Ok(())
 }

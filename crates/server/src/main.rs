@@ -31,7 +31,7 @@ use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use zeroize::Zeroizing;
 
@@ -285,6 +285,7 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
             Method::DELETE,
             Method::GET,
             Method::OPTIONS,
+            Method::PATCH,
             Method::POST,
             Method::PUT,
         ])
@@ -314,14 +315,17 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
             get(routes::objects::get_object).delete(routes::objects::delete_object),
         )
         .route("/api/objects", get(routes::objects::list_objects))
-        .route("/api/collab-docs", post(routes::collab::create_collab_doc))
+        .route(
+            "/api/collab-docs",
+            get(routes::collab::list_collab_docs).post(routes::collab::create_collab_doc),
+        )
         .route(
             "/api/collab-docs/{id}/meta",
             get(routes::collab::get_collab_doc_meta),
         )
         .route(
             "/api/collab-docs/{id}",
-            delete(routes::collab::delete_collab_doc),
+            delete(routes::collab::delete_collab_doc).patch(routes::collab::rename_collab_doc),
         )
         .route("/api/ws", get(ws::ws_handler))
         // Layer order (outermost first): per-client limit before token
@@ -416,6 +420,19 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("Listening on {}", addr);
+    match state.config().server.public_web_url.as_deref() {
+        Some(url) if state.config().server.shares_over_cleartext_http() => warn!(
+            public_web_url = url,
+            "Collab share links will be handed out over cleartext HTTP; the share token \
+             is the document's only credential, so anyone on the network path gets \
+             read/write access. Use https for a non-loopback deployment.",
+        ),
+        Some(url) => info!(public_web_url = url, "Collab share links enabled"),
+        None => info!(
+            "No public web URL configured; collab share links are unavailable \
+             (set CLIPPER_PUBLIC_WEB_URL or --public-web-url)",
+        ),
+    }
 
     axum::serve(
         listener,

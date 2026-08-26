@@ -10,6 +10,7 @@ import {
   Files,
   Folder,
   LogOut,
+  Pencil,
   RefreshCw,
   Smartphone,
   Trash2,
@@ -38,7 +39,6 @@ import type { AppState, ClipboardItem, CollabItem, DeviceInfo, FileItem } from "
 import {
   backend,
   clearCredentials,
-  collabShareLink,
   devDefaultServerUrl,
   formatBackendError,
   pickUploadFile,
@@ -48,6 +48,7 @@ import {
   shareDownloadedFile,
   writeClipboardText,
 } from "./backend";
+import { subscribeToCollabDoc, type CollabDocStatus } from "./collabDoc";
 import tamaguiConfig from "./tamagui.config";
 
 type TabName = "clipboard" | "files" | "devices" | "collab";
@@ -382,7 +383,12 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
             <DevicesPanel onError={setError} />
           </Tabs.Content>
           <Tabs.Content value="collab" flex={1}>
-            <CollabPanel collabDocs={state.collab_docs} onState={onState} onError={setError} />
+            <CollabPanel
+              collabDocs={state.collab_docs}
+              serverUrl={state.session?.server_url ?? ""}
+              onState={onState}
+              onError={setError}
+            />
           </Tabs.Content>
         </Tabs>
       </YStack>
@@ -712,14 +718,22 @@ function DevicesPanel({ onError }: { onError: (error: string | null) => void }) 
 
 function CollabPanel({
   collabDocs,
+  serverUrl,
   onState,
   onError,
 }: {
   collabDocs: CollabItem[];
+  serverUrl: string;
   onState: (state: AppState) => void;
   onError: (error: string | null) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [reading, setReading] = useState<CollabItem | null>(null);
+  const [renaming, setRenaming] = useState<CollabItem | null>(null);
+
+  // The open doc is re-read from the live list so a rename or a remote edit is
+  // reflected in the viewer's header without closing it.
+  const readingDoc = reading ? (collabDocs.find((doc) => doc.id === reading.id) ?? null) : null;
 
   async function createDoc() {
     setBusy(true);
@@ -736,8 +750,23 @@ function CollabPanel({
 
   async function copyLink(item: CollabItem) {
     onError(null);
+    if (!item.share_url) {
+      onError(SHARE_LINK_UNAVAILABLE);
+      return;
+    }
     try {
-      await writeClipboardText(collabShareLink(item.share_token));
+      await writeClipboardText(item.share_url);
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }
+
+  async function renameDoc(item: CollabItem, title: string) {
+    setRenaming(null);
+    onError(null);
+    try {
+      await backend.renameCollabDoc(item.id, title);
+      onState(await backend.getState());
     } catch (caught) {
       onError(formatBackendError(caught));
     }
@@ -766,6 +795,18 @@ function CollabPanel({
         </Button>
       </XStack>
 
+      <CollabDocReader
+        doc={readingDoc}
+        serverUrl={serverUrl}
+        onClose={() => setReading(null)}
+        onError={onError}
+      />
+      <RenameDocDialog
+        doc={renaming}
+        onCancel={() => setRenaming(null)}
+        onSave={(title) => renaming && void renameDoc(renaming, title)}
+      />
+
       {collabDocs.length === 0 ? (
         <EmptyState icon={<FileText size={28} />} title="No collab docs yet" />
       ) : (
@@ -774,16 +815,27 @@ function CollabPanel({
             {collabDocs.map((item) => (
               <ListCard key={item.id}>
                 <XStack items="center" justify="space-between" gap="$3">
-                  <XStack items="center" gap="$3" flex={1}>
+                  <XStack
+                    items="center"
+                    gap="$3"
+                    flex={1}
+                    onPress={() => setReading(item)}
+                    pressStyle={{ opacity: 0.6 }}
+                  >
                     <FileCode size={22} color="#6fb4ff" />
                     <YStack flex={1} gap="$1">
-                      <Text numberOfLines={1}>{collabTitle(item.id)}</Text>
+                      <Text numberOfLines={1}>{collabTitle(item)}</Text>
                       <Paragraph size="$2" color="#9aa4ad">
                         {formatRelativeTime(item.created_at)}
                       </Paragraph>
                     </YStack>
                   </XStack>
                   <XStack gap="$1">
+                    <Button
+                      size="$3"
+                      icon={<Pencil size={16} />}
+                      onPress={() => setRenaming(item)}
+                    />
                     <Button
                       size="$3"
                       icon={<Copy size={16} />}
@@ -805,11 +857,18 @@ function CollabPanel({
   );
 }
 
-// Phase 2 collab docs have no real title yet (it lives in the Y.Doc and is wired
-// up in Phase 3), so label each doc by a short prefix of its object id.
-function collabTitle(id: string): string {
-  return `Doc ${id.slice(0, 8)}`;
+// A collab doc's display name. Titles are optional server-side, so an untitled
+// doc falls back to a short id prefix rather than rendering blank.
+function collabTitle(item: { title: string; id: string }): string {
+  const title = item.title.trim();
+  return title.length > 0 ? title : `Untitled ${item.id.slice(0, 8)}`;
 }
+
+// Shown when the server has no public web URL configured, so it returned no
+// share link. Nothing the app can fix — the link has to come from the server,
+// which is the only side that knows where the web client is hosted.
+const SHARE_LINK_UNAVAILABLE =
+  "No share link: set the server's public web URL (CLIPPER_PUBLIC_WEB_URL).";
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -828,11 +887,26 @@ function ListCard({ children }: { children: ReactNode }) {
   );
 }
 
-function EmptyState({ icon, title }: { icon: ReactNode; title: string }) {
+function EmptyState({
+  icon,
+  title,
+  subtitle,
+}: {
+  icon: ReactNode;
+  title: string;
+  subtitle?: string;
+}) {
   return (
     <YStack flex={1} items="center" justify="center" gap="$3" p="$4">
       {icon}
-      <Paragraph color="#9aa4ad">{title}</Paragraph>
+      <YStack items="center" gap="$1">
+        <Paragraph color="#9aa4ad">{title}</Paragraph>
+        {subtitle === undefined ? null : (
+          <Paragraph size="$2" color="#5b6571" style={{ textAlign: "center" }}>
+            {subtitle}
+          </Paragraph>
+        )}
+      </YStack>
     </YStack>
   );
 }
@@ -879,6 +953,171 @@ function formatRelativeTime(value: string): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+// Live read-only view of a collab doc. Editing is a desktop/web affordance (it
+// needs a real code editor); on mobile the doc is worth *reading* anywhere, so
+// this subscribes to the same Y-sync socket and renders whatever arrives.
+function CollabDocReader({
+  doc,
+  serverUrl,
+  onClose,
+  onError,
+}: {
+  doc: CollabItem | null;
+  serverUrl: string;
+  onClose: () => void;
+  onError: (error: string | null) => void;
+}) {
+  const [content, setContent] = useState("");
+  const [status, setStatus] = useState<CollabDocStatus>("connecting");
+
+  const docId = doc?.id;
+  const shareToken = doc?.share_token;
+
+  useEffect(() => {
+    if (!docId || !shareToken) return undefined;
+    if (!serverUrl) {
+      onError("Not connected to a server yet.");
+      return undefined;
+    }
+
+    // Reset between documents: the previous doc's text must not flash up under
+    // the new one's title while the first sync is in flight.
+    setContent("");
+    setStatus("connecting");
+
+    const subscription = subscribeToCollabDoc({
+      objectId: docId,
+      onStatus: setStatus,
+      onText: setContent,
+      serverUrl,
+      shareToken,
+    });
+    return () => subscription.close();
+  }, [docId, shareToken, serverUrl, onError]);
+
+  async function copyAll() {
+    try {
+      await writeClipboardText(content);
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }
+
+  return (
+    <Modal visible={doc !== null} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: "#101214" }}>
+        <XStack
+          items="center"
+          justify="space-between"
+          gap="$2"
+          px="$3"
+          py="$2"
+          borderBottomColor="#252b31"
+          borderBottomWidth={1}
+        >
+          <YStack flex={1} gap="$1">
+            <Text numberOfLines={1} fontWeight="600" color="#e6e9ec">
+              {doc ? collabTitle(doc) : ""}
+            </Text>
+            <Paragraph size="$2" color={COLLAB_STATUS_COLORS[status]}>
+              {COLLAB_STATUS_LABELS[status]}
+            </Paragraph>
+          </YStack>
+          <Button size="$3" icon={<Copy size={16} />} onPress={() => void copyAll()} />
+          <Button size="$3" icon={<X size={16} />} onPress={onClose} />
+        </XStack>
+        {content.length === 0 && status === "unavailable" ? (
+          <EmptyState
+            icon={<FileText size={28} />}
+            title="Can't open this doc"
+            subtitle="It may have been deleted, or this device is offline."
+          />
+        ) : content.length === 0 && status !== "live" ? (
+          <EmptyState icon={<Spinner />} title={COLLAB_STATUS_LABELS[status]} />
+        ) : (
+          <TextInput
+            value={content}
+            editable={false}
+            multiline
+            scrollEnabled
+            style={{
+              flex: 1,
+              color: "#e6e9ec",
+              backgroundColor: "#101214",
+              fontFamily: MONOSPACE_FONT,
+              fontSize: 13,
+              lineHeight: 18,
+              padding: 12,
+              textAlignVertical: "top",
+            }}
+          />
+        )}
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+const COLLAB_STATUS_LABELS: Record<CollabDocStatus, string> = {
+  connecting: "Connecting…",
+  live: "Live",
+  offline: "Reconnecting…",
+  unavailable: "Can't open this doc",
+};
+
+// `as const` keeps these literal: Tamagui's `color` prop takes a token or a
+// literal colour, not an arbitrary `string`.
+const COLLAB_STATUS_COLORS = {
+  connecting: "#9aa4ad",
+  live: "#6eeb83",
+  offline: "#ffbc42",
+  unavailable: "#ff6b6b",
+} as const satisfies Record<CollabDocStatus, string>;
+
+// Rename prompt. React Native has no `window.prompt`, and Alert.prompt is
+// iOS-only, so the dialog is a small modal.
+function RenameDocDialog({
+  doc,
+  onCancel,
+  onSave,
+}: {
+  doc: CollabItem | null;
+  onCancel: () => void;
+  onSave: (title: string) => void;
+}) {
+  const [draft, setDraft] = useState("");
+
+  // Seed the field each time a document is picked, not on every render, so
+  // typing is not clobbered by the parent re-rendering underneath.
+  useEffect(() => {
+    if (doc) setDraft(doc.title);
+  }, [doc]);
+
+  return (
+    <Modal visible={doc !== null} animationType="fade" transparent onRequestClose={onCancel}>
+      <YStack flex={1} justify="center" p="$4" bg="rgba(0,0,0,0.6)">
+        <Card p="$4" gap="$3" bg="#171a1d" borderColor="#252b31" borderWidth={1}>
+          <H2 size="$5">Rename doc</H2>
+          <Input
+            value={draft}
+            onChangeText={setDraft}
+            placeholder="Untitled"
+            autoFocus
+            onSubmitEditing={() => onSave(draft)}
+          />
+          <XStack gap="$2" justify="flex-end">
+            <Button size="$3" onPress={onCancel}>
+              Cancel
+            </Button>
+            <Button size="$3" theme="blue" onPress={() => onSave(draft)}>
+              Save
+            </Button>
+          </XStack>
+        </Card>
+      </YStack>
+    </Modal>
+  );
 }
 
 // Read-only, monospace content viewer. Files are immutable and clipboard items

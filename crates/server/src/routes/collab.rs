@@ -2,11 +2,12 @@
 //!
 //! A collab doc is the one server-visible object kind: its content (a Y.Doc) is
 //! stored plaintext in `collab_docs.yjs_state` so the server can relay CRDT
-//! updates in Phase 3. Each collab doc has a matching `objects` row with
+//! updates. Each collab doc has a matching `objects` row with
 //! `kind = 'collab'`, `status = 'complete'`, the ciphertext columns null, and
 //! `collab_doc_id` pointing at the `collab_docs` row (the objects XOR check
-//! enforces that split). These handlers cover Phase 2 CRUD only — no Y-sync, no
-//! `yjs_state` read/write.
+//! enforces that split). These handlers cover metadata CRUD only; the document
+//! body flows over the Y-sync WebSocket (`collab_ws_handler` ->
+//! `crate::collab_sync`), the only thing that reads or writes `yjs_state`.
 //!
 //! The auth, event-log, and broadcast patterns mirror `routes::objects`.
 
@@ -21,11 +22,13 @@ use chrono::Utc;
 use clipper_core::{
     crypto,
     models::{
-        ApiErrorCode, CollabDocMeta, CreateCollabDocResponse, ObjectEventType, ObjectKind,
-        ShareMeta,
+        ApiErrorCode, CollabDocListResponse, CollabDocMeta, CreateCollabDocResponse,
+        ObjectEventType, ObjectKind, RenameCollabDocRequest, ShareMeta,
     },
 };
-use sea_orm::{ActiveModelTrait, ColumnTrait, DerivePartialModel, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DerivePartialModel, EntityTrait, QueryFilter, QueryOrder, Set,
+};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
@@ -33,7 +36,7 @@ use crate::{
     auth::AuthInfo,
     collab_sync,
     entity::{collab_docs, event_log, objects},
-    routes::{ApiError, error_response, with_txn},
+    routes::{ApiError, error_response, validate_request, with_txn},
     state::AppState,
     ws::WsBroadcast,
 };
@@ -79,6 +82,7 @@ pub async fn create_collab_doc(
             id: Set(collab_doc_id),
             owner_user_id: Set(user_id),
             share_token: Set(share_token_for_row),
+            title: Set(String::new()),
             yjs_state: Set(None),
             created_at: Set(now_ref.to_owned()),
             updated_at: Set(now_ref.to_owned()),
@@ -158,7 +162,7 @@ pub async fn create_collab_doc(
         event_type: ObjectEventType::Created,
         object_kind: ObjectKind::Collab,
         object_id: object_id.into(),
-        created_at: now,
+        created_at: now.clone(),
     });
 
     info!(device_id = %device_id, object_id = %object_id, "Collab doc created");
@@ -166,15 +170,21 @@ pub async fn create_collab_doc(
     Ok((
         StatusCode::CREATED,
         Json(CreateCollabDocResponse {
-            object_id: object_id.into(),
-            share_token,
+            doc: CollabDocMeta {
+                object_id: object_id.into(),
+                title: String::new(),
+                share_url: state.config().server.share_url(&share_token),
+                share_token,
+                created_at: now.clone(),
+                updated_at: now,
+            },
         }),
     ))
 }
 
-/// `GET /api/collab-docs/:id/meta` — return the share token and `updated_at` for
-/// the authenticated owner's collab doc. Does not return `yjs_state` (that flows
-/// over the Y-sync WebSocket in Phase 3).
+/// `GET /api/collab-docs/:id/meta` — return one of the authenticated owner's
+/// collab docs. Does not return `yjs_state` (that flows over the Y-sync
+/// WebSocket).
 pub async fn get_collab_doc_meta(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthInfo>,
@@ -209,11 +219,156 @@ pub async fn get_collab_doc_meta(
             ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
 
+    Ok(Json(collab_doc_meta(&state, object_uuid, doc)))
+}
+
+/// `PATCH /api/collab-docs/:id` — rename the authenticated owner's collab doc.
+///
+/// The title is a plaintext column rather than Y.Doc content so the doc list can
+/// render titles without opening a WebSocket per document. Emits an `updated`
+/// event so the owner's other devices re-read the meta: collab objects are
+/// excluded from the encrypted-object listing, so the event log is how a rename
+/// travels.
+pub async fn rename_collab_doc(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
+    Path(object_id): Path<String>,
+    Json(request): Json<RenameCollabDocRequest>,
+) -> Result<Json<CollabDocMeta>, ApiError> {
+    validate_request(&request)?;
+
+    let object_uuid =
+        Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
+    let collab_doc_id = load_owned_collab_doc_id(&state, auth.user_id, object_uuid).await?;
+
+    // An all-whitespace title is indistinguishable from none for display, so
+    // normalize it to empty here rather than storing padding clients must trim.
+    let title = request.title.trim().to_owned();
+    let user_id = auth.user_id;
+    let now = Utc::now().to_rfc3339();
+    let now_ref = now.as_str();
+    let title_ref = title.as_str();
+    let state_ref = &state;
+
+    let (seq, doc) = with_txn(state.db(), "rename_collab_doc", async move |txn| {
+        // The collab_docs update is the first write, so it takes the SQLite
+        // write lock; the seq is allocated only after that (see the seq
+        // ordering rule in CLAUDE.md).
+        let doc = collab_docs::ActiveModel {
+            id: Set(collab_doc_id),
+            title: Set(title_ref.to_owned()),
+            updated_at: Set(now_ref.to_owned()),
+            ..Default::default()
+        }
+        .update(txn)
+        .await
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                collab_doc_id = %collab_doc_id,
+                user_id = %user_id,
+                error = %e,
+                "Failed to update collab doc title",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+
+        let seq = state_ref.next_event_seq();
+        event_log::ActiveModel {
+            seq: Set(seq),
+            user_id: Set(user_id),
+            event_type: Set(ObjectEventType::Updated.to_string()),
+            object_kind: Set(ObjectKind::Collab.to_string()),
+            object_id: Set(object_uuid),
+            created_at: Set(now_ref.to_owned()),
+        }
+        .insert(txn)
+        .await
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                user_id = %user_id,
+                error = %e,
+                "Failed to insert collab updated event",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+
+        Ok((seq, doc))
+    })
+    .await?;
+
+    state.broadcast_ws_event(WsBroadcast {
+        user_id,
+        source_device_id: auth.device_id,
+        seq,
+        event_type: ObjectEventType::Updated,
+        object_kind: ObjectKind::Collab,
+        object_id: object_uuid.into(),
+        created_at: now,
+    });
+
+    info!(device_id = %auth.device_id, object_id = %object_uuid, "Collab doc renamed");
+
     Ok(Json(CollabDocMeta {
         object_id: object_uuid.into(),
+        title: doc.title,
+        share_url: state.config().server.share_url(&doc.share_token),
         share_token: doc.share_token,
+        created_at: doc.created_at,
         updated_at: doc.updated_at,
     }))
+}
+
+/// `GET /api/collab-docs` — every collab doc the authenticated user owns.
+///
+/// Collab objects carry no ciphertext, so `GET /api/objects` filters them out;
+/// this is how a device reconciles the full set (a fresh install, or one whose
+/// event-log cursor has aged past retention). Newest first, matching the doc
+/// list's own ordering.
+pub async fn list_collab_docs(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
+) -> Result<Json<CollabDocListResponse>, ApiError> {
+    let rows = objects::Entity::find()
+        .filter(objects::Column::UserId.eq(auth.user_id))
+        .filter(objects::Column::Kind.eq(ObjectKind::Collab.as_ref()))
+        .filter(objects::Column::CollabDocId.is_not_null())
+        .find_also_related(collab_docs::Entity)
+        .order_by_desc(objects::Column::CreatedAt)
+        .all(state.db())
+        .await
+        .map_err(|e| {
+            error!(user_id = %auth.user_id, error = %e, "Failed to list collab docs");
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+
+    let docs = rows
+        .into_iter()
+        .filter_map(|(object, doc)| {
+            let Some(doc) = doc else {
+                // The FK is ON DELETE CASCADE, so a collab object without its
+                // row is a data inconsistency. Skip it rather than fail the
+                // whole listing over one bad row.
+                error!(
+                    object_id = %object.id,
+                    user_id = %auth.user_id,
+                    "Collab object has no collab_docs row; omitting from listing",
+                );
+                return None;
+            };
+            Some(CollabDocMeta {
+                object_id: object.id.into(),
+                title: doc.title,
+                share_url: state.config().server.share_url(&doc.share_token),
+                share_token: doc.share_token,
+                created_at: object.created_at,
+                updated_at: doc.updated_at,
+            })
+        })
+        .collect();
+
+    Ok(Json(CollabDocListResponse { docs }))
 }
 
 /// `DELETE /api/collab-docs/:id` — delete the authenticated owner's collab doc.
@@ -308,8 +463,23 @@ pub async fn delete_collab_doc(
 #[derive(Debug, DerivePartialModel)]
 #[sea_orm(entity = "collab_docs::Entity", from_query_result)]
 struct CollabDocMetaRow {
+    title: String,
     share_token: String,
+    created_at: String,
     updated_at: String,
+}
+
+/// Shape a loaded `collab_docs` row as an API response, attaching the share link
+/// the server's `public_web_url` implies (absent when unconfigured).
+fn collab_doc_meta(state: &AppState, object_id: Uuid, doc: CollabDocMetaRow) -> CollabDocMeta {
+    CollabDocMeta {
+        object_id: object_id.into(),
+        title: doc.title,
+        share_url: state.config().server.share_url(&doc.share_token),
+        share_token: doc.share_token,
+        created_at: doc.created_at,
+        updated_at: doc.updated_at,
+    }
 }
 
 /// Look up a collab object by id and return its `collab_doc_id`, enforcing
@@ -465,7 +635,7 @@ struct ShareObjectRow {
 
 /// `GET /api/s/:share_token/meta` — unauthenticated lookup of a shared collab
 /// doc by its share token, for the public share page. Returns the object id (the
-/// WS route is keyed by it) and `updated_at`; never the document content.
+/// WS route is keyed by it), its title, and `updated_at`; never the content.
 pub async fn get_share_meta(
     State(state): State<AppState>,
     Path(share_token): Path<String>,
@@ -498,6 +668,7 @@ pub async fn get_share_meta(
 
     Ok(Json(ShareMeta {
         object_id: object.id.into(),
+        title: doc.title,
         updated_at: doc.updated_at,
     }))
 }

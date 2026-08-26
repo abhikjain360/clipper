@@ -368,6 +368,18 @@ pub fn delete_collab_doc(object_id: String) -> Promise {
     })
 }
 
+#[wasm_bindgen(js_name = renameCollabDoc)]
+pub fn rename_collab_doc(object_id: String, title: String) -> Promise {
+    ok_promise(async move {
+        let item = engine_or_error()?
+            .rename_collab_doc(&object_id, &title)
+            .await
+            .map_err(js_error)?;
+        let value = serde_wasm_bindgen::to_value(&item).map_err(js_error)?;
+        Ok(value)
+    })
+}
+
 #[wasm_bindgen(js_name = getCollabDocMeta)]
 pub fn get_collab_doc_meta(object_id: String) -> Promise {
     ok_promise(async move {

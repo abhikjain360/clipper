@@ -20,7 +20,13 @@ export type FileItem = {
 
 export type CollabItem = {
   id: string;
+  // Empty for a doc that has never been renamed; render a placeholder for it.
+  title: string;
   share_token: string;
+  // The server-built public link. Null when the server has no `public_web_url`
+  // configured — clients cannot derive it, since the web frontend and the API
+  // are separate origins and the native shells have no web origin at all.
+  share_url: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -29,6 +35,10 @@ export type AuthenticatedSession = {
   username: string;
   device_id: string;
   device_name: string;
+  // The server this session is with. The collab Y-sync WebSocket is opened from
+  // the UI rather than through the engine, so it needs the URL the user actually
+  // logged in to — not the compiled-in default.
+  server_url: string;
 };
 
 export type DeviceInfo = {
@@ -100,6 +110,7 @@ export type ClipperBackend = {
   deleteFile: (fileId: string) => Promise<void>;
   createCollabDoc: () => Promise<CollabItem>;
   deleteCollabDoc: (objectId: string) => Promise<void>;
+  renameCollabDoc: (objectId: string, title: string) => Promise<CollabItem>;
   getCollabDocMeta: (objectId: string) => Promise<CollabItem>;
   listDevices: () => Promise<DeviceInfo[]>;
   removeDevice: (deviceId: string) => Promise<void>;

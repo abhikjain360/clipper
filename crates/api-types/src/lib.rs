@@ -113,6 +113,11 @@ impl Default for Argon2Params {
 pub const USERNAME_MIN_LEN: usize = 3;
 pub const USERNAME_MAX_LEN: usize = 32;
 
+/// Upper bound on a collab doc's title. Titles are plaintext server-side (collab
+/// docs are the one server-visible object kind), so this only has to keep a
+/// display string from becoming a storage vector.
+pub const COLLAB_DOC_TITLE_MAX_LEN: usize = 200;
+
 /// Validate the wire format for a username: lowercase ASCII letters, digits,
 /// underscore, or hyphen; `USERNAME_MIN_LEN..=USERNAME_MAX_LEN` chars.
 pub fn validate_username(value: &str, _: &()) -> garde::Result {
@@ -316,6 +321,10 @@ pub enum ObjectKind {
 #[strum(serialize_all = "snake_case")]
 pub enum ObjectEventType {
     Created,
+    /// A server-visible object's metadata changed in place. Only collab docs
+    /// can be updated (a rename); encrypted objects are immutable, so their
+    /// lifecycle is create/delete only.
+    Updated,
     Deleted,
 }
 
@@ -502,37 +511,66 @@ pub struct ObjectListResponse {
 
 // -- Collab docs --
 
-/// `POST /api/collab-docs` request. Empty for now: a collab doc has no required
-/// fields at creation time. Its title lives inside the Y.Doc state (Phase 3),
-/// not in a column, so there is nothing to send.
+/// `POST /api/collab-docs` request. Empty: a new doc starts untitled and empty,
+/// so there is nothing to send. Rename it afterwards with
+/// [`RenameCollabDocRequest`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateCollabDocRequest {}
 
-/// `POST /api/collab-docs` response: the new collab object's id plus the random
-/// `share_token` that grants "anyone with the link" access in Phase 3.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateCollabDocResponse {
-    pub object_id: ObjectId,
-    pub share_token: String,
+/// `PATCH /api/collab-docs/:id` request — rename a collab doc.
+///
+/// The title is a plaintext column, not part of the Y.Doc: the doc list has to
+/// render titles without opening a Y-sync WebSocket per document, and collab
+/// docs are already server-visible by design. An empty title is allowed and
+/// means "untitled" — clients substitute their own placeholder.
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct RenameCollabDocRequest {
+    #[garde(length(max = COLLAB_DOC_TITLE_MAX_LEN))]
+    pub title: String,
 }
 
-/// `GET /api/collab-docs/:id/meta` response. Excludes `yjs_state`, which flows
-/// over the Y-sync WebSocket in Phase 3 rather than this metadata endpoint.
+/// `POST /api/collab-docs` response: the new collab doc's metadata, in the same
+/// shape the meta and list endpoints return.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCollabDocResponse {
+    pub doc: CollabDocMeta,
+}
+
+/// A collab doc's metadata, as returned by `POST /api/collab-docs`,
+/// `GET /api/collab-docs/:id/meta`, and `GET /api/collab-docs`. Excludes
+/// `yjs_state`, which flows over the Y-sync WebSocket rather than here.
+///
+/// `share_url` is the fully-formed public link for `share_token`, present only
+/// when the server is configured with a `public_web_url`. Clients cannot derive
+/// it: the web frontend and the API are separately deployed origins, and native
+/// shells have no web origin of their own at all.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollabDocMeta {
     pub object_id: ObjectId,
+    pub title: String,
     pub share_token: String,
+    pub share_url: Option<String>,
+    pub created_at: String,
     pub updated_at: String,
+}
+
+/// `GET /api/collab-docs` response — every collab doc the authenticated user
+/// owns. Collab objects are excluded from the encrypted-object listing (they
+/// carry no ciphertext), so this is the only way a device reconciles them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabDocListResponse {
+    pub docs: Vec<CollabDocMeta>,
 }
 
 /// `GET /api/s/:share_token/meta` response. Unauthenticated: the share token in
 /// the path is the sole credential. Returns just enough for the public share
 /// page to open the Y-sync WebSocket — the document id (the WS route is keyed by
-/// it) and `updated_at`. The content itself flows over the WebSocket, never this
-/// endpoint.
+/// it), its title, and `updated_at`. The content itself flows over the
+/// WebSocket, never this endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShareMeta {
     pub object_id: ObjectId,
+    pub title: String,
     pub updated_at: String,
 }
 

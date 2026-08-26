@@ -23,6 +23,14 @@ export function isTauriRuntime(): boolean {
     return typeof window !== "undefined" && Reflect.has(window, "__TAURI_INTERNALS__");
 }
 
+// Whether a backend already exists. Lets a caller read live session state
+// without *starting* an engine, which matters on the public share page: it is
+// deliberately reachable without a session and must not download and boot the
+// authenticated wasm client just to resolve a URL.
+function backendStarted(): boolean {
+    return backendPromise !== undefined;
+}
+
 export async function defaultServerUrl(): Promise<string> {
     return await (await clipperBackend()).defaultServerUrl();
 }
@@ -154,18 +162,47 @@ export async function resumeSession(): Promise<boolean> {
     }
 }
 
-// Resolve the server base URL for connections that bypass the wasm engine — the
-// collab Y-sync WebSocket and the public share page open these directly. The
-// priority mirrors the login screen:
+// Resolve the server base URL for connections that bypass the engine — the
+// collab Y-sync WebSocket and the public share page open these directly.
+//
+// The live session is checked first and wins outright: it is the server the user
+// actually logged in to, which is the only correct answer once there *is* a
+// session. That matters most in the Tauri shell, where the daemon owns the
+// session and every other candidate here is a build-time constant — a doc opened
+// against the compiled-in default would silently sync with nothing.
+//
+// With no session (the public share page), fall back in login-screen order:
 //   1. VITE_SERVER_URL — baked into hosted builds (the production API).
 //   2. The exact URL the user logged in with (browser session-resume store).
 //   3. The engine's compiled-in default (local dev / native shell).
 export async function resolveServerUrl(): Promise<string> {
+    const active = await activeSessionServerUrl();
+    if (active) return active;
     const envUrl = import.meta.env.VITE_SERVER_URL as string | undefined;
     if (envUrl) return envUrl;
     const stored = readStoredServerUrl();
     if (stored) return stored;
     return await defaultServerUrl();
+}
+
+// The server URL of the signed-in session, if any. Never throws: the share page
+// runs before (and without) an engine, so a failure here is an expected "no
+// session", not an error to surface.
+//
+// Skipped entirely when no backend has been started yet, so this cannot be what
+// boots one. The Tauri shell is exempt: its backend is a thin IPC client to a
+// daemon that already holds the session, and there it is the only candidate that
+// is not a build-time constant.
+async function activeSessionServerUrl(): Promise<string | null> {
+    if (!backendStarted() && !isTauriRuntime()) return null;
+    try {
+        const backend = await clipperBackend();
+        const state = await backend.getState();
+        const url = state.session?.server_url;
+        return url && url.length > 0 ? url : null;
+    } catch {
+        return null;
+    }
 }
 
 function readStoredServerUrl(): string | null {

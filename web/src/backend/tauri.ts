@@ -46,6 +46,8 @@ export function tauriBackend(): ClipperBackend {
         deleteFile: (fileId) => invoke<void>("delete_file", { fileId }),
         createCollabDoc: () => invoke<CollabItem>("create_collab_doc"),
         deleteCollabDoc: (objectId) => invoke<void>("delete_collab_doc", { objectId }),
+        renameCollabDoc: (objectId, title) =>
+            invoke<CollabItem>("rename_collab_doc", { objectId, title }),
         getCollabDocMeta: (objectId) => invoke<CollabItem>("get_collab_doc_meta", { objectId }),
         listDevices: () => invoke<DeviceInfo[]>("list_devices"),
         removeDevice: (deviceId) => invoke<void>("remove_device", { deviceId }),

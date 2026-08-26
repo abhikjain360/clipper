@@ -27,7 +27,7 @@
                 "style-src": ["'self'", "'unsafe-inline'"],
                 "img-src": ["'self'", "data:", "blob:"],
                 "font-src": ["'self'", "data:"],
-                "connect-src": ["'self'", "ipc:", "http://ipc.localhost"],
+                "connect-src": ["'self'", "ipc:", "http://ipc.localhost", "ws:", "wss:"],
                 "object-src": ["'none'"],
                 "base-uri": ["'none'"],
                 "frame-src": ["'none'"],
@@ -46,7 +46,8 @@
                     "ipc:",
                     "http://ipc.localhost",
                     "http://127.0.0.1:*",
-                    "ws://127.0.0.1:*"
+                    "ws:",
+                    "wss:"
                 ],
                 "object-src": ["'none'"],
                 "base-uri": ["'none'"],

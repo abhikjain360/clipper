@@ -11,7 +11,15 @@ use clipper_app_types::{AppState, DeviceInfo};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-pub const IPC_AUTH_VERSION: u32 = 1;
+/// Version of the daemon IPC contract, mixed into the handshake HMAC so a
+/// mismatched pair cannot talk at all instead of failing later on a payload it
+/// cannot parse. Bump this whenever a type crossing this boundary changes
+/// incompatibly — the desktop app and the daemon are separate binaries, and an
+/// old daemon can outlive an app update (it is reparented to PID 1, so it keeps
+/// running until killed).
+///
+/// v2: `AppState`'s session gained a required `server_url`.
+pub const IPC_AUTH_VERSION: u32 = 2;
 pub const IPC_AUTH_NONCE_BYTES: usize = 32;
 pub const IPC_AUTH_TAG_BYTES: usize = 32;
 
@@ -73,6 +81,7 @@ pub enum DaemonCommand {
     Refresh,
     CreateCollabDoc,
     DeleteCollabDoc(DeleteCollabDocParams),
+    RenameCollabDoc(RenameCollabDocParams),
     GetCollabDocMeta(GetCollabDocMetaParams),
 }
 
@@ -178,6 +187,12 @@ pub struct RemoveDeviceParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteCollabDocParams {
     pub object_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameCollabDocParams {
+    pub object_id: String,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

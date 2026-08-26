@@ -215,6 +215,14 @@ impl MobileClipperClient {
         Ok(())
     }
 
+    pub async fn rename_collab_doc(
+        &self,
+        object_id: String,
+        title: String,
+    ) -> Result<CollabItem, MobileError> {
+        Ok(self.engine.rename_collab_doc(&object_id, &title).await?)
+    }
+
     pub async fn get_collab_doc_meta(&self, object_id: String) -> Result<CollabItem, MobileError> {
         Ok(self.engine.get_collab_doc_meta(&object_id).await?)
     }

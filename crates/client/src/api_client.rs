@@ -682,8 +682,7 @@ impl ApiClient {
     // is no ciphertext payload to move over the binary object protocol.
 
     /// `POST /api/collab-docs` — create a collab doc for the authenticated user.
-    /// The request body carries no required fields (the title lives inside the
-    /// Y.Doc), so none is sent.
+    /// A new doc starts untitled and empty, so no request body is sent.
     pub async fn create_collab_doc(&self) -> Result<CreateCollabDocResponse, ClientError> {
         let resp = self
             .http
@@ -698,9 +697,8 @@ impl ApiClient {
         Self::json_response(resp).await
     }
 
-    /// `GET /api/collab-docs/:id/meta` — fetch a collab doc's share token and
-    /// `updated_at`. Does not return `yjs_state` (that flows over the Y-sync
-    /// WebSocket in Phase 3).
+    /// `GET /api/collab-docs/:id/meta` — fetch one collab doc's metadata. Does
+    /// not return `yjs_state` (that flows over the Y-sync WebSocket).
     pub async fn get_collab_doc_meta(&self, object_id: &str) -> Result<CollabDocMeta, ClientError> {
         let url = self.api_url(&["collab-docs", object_id, "meta"])?;
         let resp = self
@@ -710,6 +708,47 @@ impl ApiClient {
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
             )
+            .send()
+            .await?;
+
+        Self::json_response(resp).await
+    }
+
+    /// `GET /api/collab-docs` — every collab doc the user owns. Collab objects
+    /// are excluded from `GET /api/objects` (they carry no ciphertext), so this
+    /// is the reconciliation source for them.
+    pub async fn list_collab_docs(&self) -> Result<CollabDocListResponse, ClientError> {
+        let resp = self
+            .http
+            .get(self.api_url(&["collab-docs"])?)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .send()
+            .await?;
+
+        Self::json_response(resp).await
+    }
+
+    /// `PATCH /api/collab-docs/:id` — rename a collab doc, returning its updated
+    /// metadata.
+    pub async fn rename_collab_doc(
+        &self,
+        object_id: &str,
+        title: &str,
+    ) -> Result<CollabDocMeta, ClientError> {
+        let url = self.api_url(&["collab-docs", object_id])?;
+        let resp = self
+            .http
+            .patch(url)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .json(&RenameCollabDocRequest {
+                title: title.to_owned(),
+            })
             .send()
             .await?;
 

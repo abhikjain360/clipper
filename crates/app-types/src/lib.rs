@@ -36,15 +36,21 @@ pub struct DecryptedFileItem {
 }
 
 /// A collab document for display. Unlike clipboard/file items, a collab doc is
-/// server-visible (its Y.Doc content is not end-to-end encrypted), so there is
-/// no decrypted metadata to surface. In Phase 2 the only fields are the object
-/// id, the share token, and timestamps; the real title lives inside the Y.Doc
-/// state and is wired up in Phase 3.
+/// server-visible (its Y.Doc content is not end-to-end encrypted), so its
+/// metadata arrives as plaintext with nothing to decrypt.
+///
+/// `title` is empty for a doc that has never been renamed — clients render their
+/// own placeholder. `share_url` is the server-built public link, absent when the
+/// server has no `public_web_url` configured; clients cannot construct it
+/// themselves because the web frontend and the API are separate origins (and the
+/// desktop/mobile shells have no web origin at all).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct CollabItem {
     pub id: String,
+    pub title: String,
     pub share_token: String,
+    pub share_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -111,6 +117,11 @@ pub struct AuthenticatedSession {
     pub username: String,
     pub device_id: String,
     pub device_name: String,
+    /// The server this session is with. Every shell reaches the API through the
+    /// engine, so nothing needed this until the collab Y-sync WebSocket — which
+    /// the UI layer opens itself and therefore has to address by hand. The
+    /// compiled-in default is not a substitute: the user picks a server at login.
+    pub server_url: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
