@@ -347,7 +347,13 @@
             runtimeInputs = tauriRuntimeInputs;
             env = stableEnv + wasmEnv;
           }
-          // mkTaskSpec "tauri-build";
+          // mkTaskSpec "tauri-build"
+          # Copying the release daemon into the .app bundle needs Deno write
+          # access. Without it the build fails on its last step, after Tauri has
+          # already produced a bundle with no daemon beside the executable.
+          // {
+            denoPermissions = denoTaskPermissions ++ [ "--allow-write" ];
+          };
 
           tauri-open = {
             program = "clipper-tauri-open";
