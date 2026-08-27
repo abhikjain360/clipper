@@ -109,16 +109,6 @@ export function subscribeToCollabDoc(options: CollabDocOptions): CollabDocHandle
       const syncType = decoding.readVarUint(decoder);
       decoder.pos = afterMessageType;
 
-      // Report "live" only once a frame that can carry content arrives. The
-      // server opens with its own step1 — a bare state vector — so treating any
-      // sync frame as the answer would show an empty document under a green
-      // "Live" for a round trip, which is precisely what the spinner is for.
-      if (!synced && (syncType === SYNC_STEP2 || syncType === SYNC_UPDATE)) {
-        synced = true;
-        failedHandshakes = 0;
-        onStatus("live");
-      }
-
       // `readSyncMessage` applies an incoming update and, for a step1, writes
       // the step2 reply into `encoder`. Anything longer than the message-type
       // byte alone is a reply worth sending — this is also what answers the
@@ -128,6 +118,19 @@ export function subscribeToCollabDoc(options: CollabDocOptions): CollabDocHandle
       syncProtocol.readSyncMessage(decoder, encoder, doc, "remote");
       if (encoding.length(encoder) > 1 && ws.readyState === WebSocket.OPEN) {
         ws.send(encoding.toUint8Array(encoder));
+      }
+
+      // Report "live" only for a frame that can carry content, and only after it
+      // has been applied. The server opens with its own step1 — a bare state
+      // vector — so treating any sync frame as the answer would put a green
+      // "Live" over an empty document for a round trip, which is what the
+      // spinner is for. Announcing after the apply means `onText` has already
+      // delivered the content, rather than leaving that to the caller batching
+      // two updates from one event.
+      if (!synced && (syncType === SYNC_STEP2 || syncType === SYNC_UPDATE)) {
+        synced = true;
+        failedHandshakes = 0;
+        onStatus("live");
       }
     });
 
