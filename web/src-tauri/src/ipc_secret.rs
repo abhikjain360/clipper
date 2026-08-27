@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use clipper_daemon_types::ipc_secret_cache::{IpcSecretCache, cached_secret, empty_cache};
 use zeroize::Zeroizing;
 
 const IPC_SECRET_BYTES: usize = 32;
@@ -32,7 +33,7 @@ const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 const IPC_SECRET_FILE: &str = "ipc-secret-v1";
 
 #[cfg(target_os = "macos")]
-pub fn load_ipc_secret(_data_dir: &Path) -> Result<Zeroizing<Vec<u8>>, IpcSecretError> {
+fn load_ipc_secret_uncached(_data_dir: &Path) -> Result<Zeroizing<Vec<u8>>, IpcSecretError> {
     match security_framework::passwords::get_generic_password(SERVICE, IPC_SECRET_ACCOUNT) {
         Ok(secret) if secret.len() == IPC_SECRET_BYTES => Ok(Zeroizing::new(secret)),
         Ok(secret) => Err(IpcSecretError::WrongLength(secret.len())),
@@ -42,7 +43,7 @@ pub fn load_ipc_secret(_data_dir: &Path) -> Result<Zeroizing<Vec<u8>>, IpcSecret
 }
 
 #[cfg(target_os = "linux")]
-pub fn load_ipc_secret(data_dir: &Path) -> Result<Zeroizing<Vec<u8>>, IpcSecretError> {
+fn load_ipc_secret_uncached(data_dir: &Path) -> Result<Zeroizing<Vec<u8>>, IpcSecretError> {
     let path = data_dir.join(IPC_SECRET_FILE);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -56,6 +57,23 @@ pub fn load_ipc_secret(data_dir: &Path) -> Result<Zeroizing<Vec<u8>>, IpcSecretE
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn load_ipc_secret(_data_dir: &Path) -> Result<Zeroizing<Vec<u8>>, IpcSecretError> {
+fn load_ipc_secret_uncached(_data_dir: &Path) -> Result<Zeroizing<Vec<u8>>, IpcSecretError> {
     Err(IpcSecretError::UnsupportedPlatform)
+}
+
+/// This process's cached copy of the IPC secret. See
+/// [`clipper_daemon_types::ipc_secret_cache`] for why it is cached:
+/// `daemon_client::connection_loop` retries the handshake on a backoff, and the
+/// app dials before the daemon it just spawned has bound its socket, so at least
+/// one retry — and so at least one extra store read — happens on every launch.
+static IPC_SECRET: IpcSecretCache = empty_cache();
+
+/// The shared IPC secret used to authenticate to the daemon. Read from the
+/// platform store once per process; never created here — the daemon owns
+/// creation.
+pub fn load_ipc_secret(data_dir: &Path) -> Result<Zeroizing<Vec<u8>>, IpcSecretError> {
+    cached_secret(&IPC_SECRET, || {
+        tracing::debug!("Reading IPC secret from the platform credential store");
+        load_ipc_secret_uncached(data_dir)
+    })
 }

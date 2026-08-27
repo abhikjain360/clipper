@@ -88,6 +88,35 @@ Info finding in `docs/security-review.md`: the secret's confidentiality
 relies on the login keychain and the same-user OS boundary rather than on a
 per-application keychain ACL.
 
+### Read Once Per Process
+
+Each process reads the secret from the platform store **once** and holds it for
+its lifetime (`crates/daemon-types/src/ipc_secret_cache.rs`; used by
+`crates/daemon/src/keychain.rs` and `web/src-tauri/src/ipc_secret.rs`).
+
+This is not an optimisation. On macOS every read is a Keychain Services call
+that can raise an authorization prompt, and both sides used to read per
+connection: the daemon authenticates each incoming client, and the app's
+`connection_loop` retries the handshake on a backoff — and it dials before the
+daemon it just spawned has bound its socket, so a launch always includes at
+least one retry. That produced several keychain prompts per launch.
+
+The trade-offs are deliberate:
+
+- The secret stays resident for the process lifetime instead of just the
+  handshake. It was already in memory for every handshake, and it is held in a
+  `Zeroizing<Vec<u8>>` that is wiped on drop.
+- A secret rotated behind a running process's back — deleting the keychain item
+  by hand — is not picked up until that process restarts.
+- The cache lock is held across the store read, so concurrent connections wait
+  for one read instead of each starting their own (and each prompting).
+
+Prompts can still occur once per process per launch, because both binaries are
+ad-hoc signed in local builds: an ad-hoc signature's code identity changes on
+every rebuild, so a keychain ACL entry recorded by "Always Allow" stops matching
+the next build. Eliminating that needs a stable signing identity, not a code
+change here.
+
 ## Socket Path and File Validation
 
 The socket path is `daemon.sock` inside a per-user runtime directory:

@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use clipper_daemon_types::ipc_secret_cache::{IpcSecretCache, cached_secret, empty_cache};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
@@ -92,7 +93,7 @@ pub fn clear_credentials() -> KeychainResult<()> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn load_or_create_ipc_secret(_data_dir: &Path) -> KeychainResult<Zeroizing<Vec<u8>>> {
+fn load_or_create_ipc_secret_uncached(_data_dir: &Path) -> KeychainResult<Zeroizing<Vec<u8>>> {
     match security_framework::passwords::get_generic_password(SERVICE, IPC_SECRET_ACCOUNT) {
         Ok(secret) if secret.len() == IPC_SECRET_BYTES => Ok(Zeroizing::new(secret)),
         Ok(mut secret) => {
@@ -161,7 +162,7 @@ pub fn clear_credentials() -> KeychainResult<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn load_or_create_ipc_secret(data_dir: &Path) -> KeychainResult<Zeroizing<Vec<u8>>> {
+fn load_or_create_ipc_secret_uncached(data_dir: &Path) -> KeychainResult<Zeroizing<Vec<u8>>> {
     ensure_private_dir(data_dir)?;
     let path = data_dir.join(IPC_SECRET_FILE);
 
@@ -298,6 +299,21 @@ fn reject_non_regular_existing_file(path: &Path) -> std::io::Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+/// This process's cached copy of the IPC secret. See
+/// [`clipper_daemon_types::ipc_secret_cache`] for why it is cached: the daemon
+/// authenticates every incoming connection, and on macOS each store read can
+/// raise a keychain prompt.
+static IPC_SECRET: IpcSecretCache = empty_cache();
+
+/// The shared IPC secret, creating it on first use. Read from the platform
+/// store once per process.
+pub fn load_or_create_ipc_secret(data_dir: &Path) -> KeychainResult<Zeroizing<Vec<u8>>> {
+    cached_secret(&IPC_SECRET, || {
+        tracing::debug!("Reading IPC secret from the platform credential store");
+        load_or_create_ipc_secret_uncached(data_dir)
+    })
 }
 
 fn new_ipc_secret() -> Zeroizing<Vec<u8>> {

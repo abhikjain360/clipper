@@ -5,6 +5,7 @@
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod ipc_path;
+pub mod ipc_secret_cache;
 mod protocol;
 mod state;
 
