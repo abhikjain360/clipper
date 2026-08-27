@@ -189,10 +189,9 @@ impl CollabRoom {
     /// connections. Returns true if anything changed (so a persist is worth
     /// scheduling).
     ///
-    /// The delta is computed precisely: the document's state vector is captured
-    /// before applying, and the post-apply diff against it is exactly the newly
-    /// integrated content. A no-op apply (e.g. a keepalive step2 with nothing
-    /// new) yields an empty delta and is neither relayed nor persisted.
+    /// Whether anything changed comes from the transaction itself, not from the
+    /// size of the encoded diff — see the comment at the check below for why the
+    /// encoding cannot answer that question.
     fn apply_remote_update(&self, conn_id: u64, payload: &[u8]) -> bool {
         if is_empty_update(payload) {
             return false;
@@ -208,19 +207,30 @@ impl CollabRoom {
         let delta = {
             let inner = self.inner.lock().expect("collab room lock poisoned");
             let before = inner.doc.transact().state_vector();
-            {
+            let integrated = {
                 let mut txn = inner.doc.transact_mut();
                 if let Err(error) = txn.apply_update(update) {
                     debug!(collab_doc_id = %self.collab_doc_id, %error, "Failed to integrate collab update");
                     return false;
                 }
+                // Ask the transaction what it actually integrated. Judging by the
+                // encoded size cannot work: `encode_state_as_update_v1` embeds the
+                // entire delete set regardless of the state vector it is diffed
+                // against, so any document with deleted content encodes to
+                // something non-trivial even when both sides already agree.
+                //
+                // A synced client answers every one of the server's 15s keepalive
+                // step1s with exactly such a reply. Treating those as changes
+                // relayed a no-op to every other connection and rewrote
+                // `yjs_state` — restamping `updated_at` every 15 seconds for as
+                // long as anyone had the document open.
+                !txn.insert_set().is_empty() || !txn.delete_set().is_empty()
+            };
+            if !integrated {
+                return false;
             }
             inner.doc.transact().encode_state_as_update_v1(&before)
         };
-
-        if is_empty_update(&delta) {
-            return false;
-        }
         self.dirty.store(true, Ordering::SeqCst);
         let _ = self.relay.send(RelayFrame {
             origin: conn_id,
@@ -509,6 +519,9 @@ fn encode_sync(sync_type: u32, payload: &[u8]) -> Vec<u8> {
 
 /// Whether a v1 update integrated nothing: no structs and an empty delete set
 /// encode as the two-byte sequence `[0, 0]`.
+/// A cheap pre-filter for a payload that cannot carry anything: an update with
+/// no structs and no deletions. Not a test for "changes nothing" — only the
+/// transaction that applies it can answer that (see `apply_remote_update`).
 fn is_empty_update(update: &[u8]) -> bool {
     update.len() <= 2
 }
@@ -608,6 +621,47 @@ mod tests {
         let room = CollabRoom::new(Uuid::now_v7(), None);
         assert!(room.apply_remote_update(1, &text_update("hello")));
         assert!(room.dirty.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn re_syncing_a_document_with_deletions_is_not_a_change() {
+        // A synced client answers the server's 15s keepalive step1 with a step2
+        // built from its own state. Nothing has changed, so nothing must be
+        // integrated, relayed, or persisted.
+        //
+        // Deletions are what make this a real case rather than a theoretical
+        // one: `encode_state_as_update_v1` embeds the *whole* delete set
+        // regardless of the state vector it is diffed against, so any document
+        // with deleted content produces a non-trivial encoding even when the two
+        // sides agree.
+        let doc = Doc::new();
+        let text = doc.get_or_insert_text("content");
+        {
+            let mut txn = doc.transact_mut();
+            text.insert(&mut txn, 0, "hello world");
+            text.remove_range(&mut txn, 5, 6);
+        }
+        let state = doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        assert!(
+            state.len() > 2,
+            "a deleted-content document must encode to more than an empty update \
+             for this test to exercise anything: got {} bytes",
+            state.len(),
+        );
+
+        let room = CollabRoom::new(Uuid::now_v7(), Some(state.clone()));
+        let mut rx = room.relay.subscribe();
+        assert!(
+            !room.apply_remote_update(1, &state),
+            "re-sending state the room already holds is not a change",
+        );
+        assert!(!room.dirty.load(Ordering::SeqCst));
+        assert!(
+            rx.try_recv().is_err(),
+            "a no-op re-sync must not be relayed to other clients",
+        );
     }
 
     #[test]
