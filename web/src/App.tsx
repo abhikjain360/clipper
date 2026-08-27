@@ -24,6 +24,7 @@ import {
     useRef,
     useState,
     type FormEvent,
+    type KeyboardEvent as ReactKeyboardEvent,
     type ReactNode,
 } from "react";
 import { Route, Switch, useLocation } from "wouter";
@@ -1124,6 +1125,10 @@ function TitleField({
 }) {
     const [draft, setDraft] = useState(title);
     const [editing, setEditing] = useState(false);
+    // Set by Escape so the blur it triggers discards the draft instead of
+    // saving it. A ref, not state, because `commit` runs in the same tick as
+    // the key handler and would not see a state update yet.
+    const cancelled = useRef(false);
 
     // Also held while `busy`: committing blurs the field, so without that guard
     // the draft would snap back to the pre-save title for as long as the request
@@ -1135,6 +1140,11 @@ function TitleField({
 
     function commit() {
         setEditing(false);
+        if (cancelled.current) {
+            cancelled.current = false;
+            setDraft(title);
+            return;
+        }
         if (draft.trim() === title.trim()) return;
         onSave(draft);
     }
@@ -1155,8 +1165,21 @@ function TitleField({
                 onFocus={() => setEditing(true)}
                 onChangeText={setDraft}
                 onBlur={commit}
-                onKeyPress={(event) => {
-                    if (event.nativeEvent.key === "Enter") commit();
+                onKeyDown={(event: ReactKeyboardEvent<HTMLInputElement>) => {
+                    // Tamagui's web `Input` is `styled(View)`, not
+                    // react-native-web's `TextInput`, so React Native's
+                    // `onKeyPress`/`onSubmitEditing` callbacks and its
+                    // blur-on-submit behaviour never fire here — this is a
+                    // plain DOM key event. Both keys commit through blur so
+                    // there is a single save path.
+                    if (event.key === "Enter") {
+                        event.preventDefault();
+                        event.currentTarget.blur();
+                    } else if (event.key === "Escape") {
+                        // Without this every way out of an edit is a save.
+                        cancelled.current = true;
+                        event.currentTarget.blur();
+                    }
                 }}
             />
             {busy ? <Spinner size="small" /> : null}

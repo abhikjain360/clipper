@@ -32,7 +32,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -119,6 +119,10 @@ pub struct CollabRoom {
     /// its captured generation still matches, collapsing a burst of edits into
     /// one write and letting a disconnect cancel stale pending writes.
     persist_gen: AtomicU64,
+    /// Whether the room holds content the `collab_docs` row does not. Set when
+    /// an update is integrated, cleared by a successful write. A room only ever
+    /// read from stays clean, so closing a viewer writes nothing.
+    dirty: AtomicBool,
 }
 
 struct RoomInner {
@@ -151,6 +155,7 @@ impl CollabRoom {
             conn_count: AtomicUsize::new(0),
             next_conn_id: AtomicU64::new(0),
             persist_gen: AtomicU64::new(0),
+            dirty: AtomicBool::new(false),
         })
     }
 
@@ -216,6 +221,7 @@ impl CollabRoom {
         if is_empty_update(&delta) {
             return false;
         }
+        self.dirty.store(true, Ordering::SeqCst);
         let _ = self.relay.send(RelayFrame {
             origin: conn_id,
             data: encode_sync(SYNC_UPDATE, &delta).into(),
@@ -240,7 +246,12 @@ impl CollabRoom {
     }
 
     /// Write the current document state to `collab_docs.yjs_state`.
+    ///
+    /// Clears the dirty flag before snapshotting, so a change that lands during
+    /// the write sets it again rather than being swallowed; the cost is one
+    /// redundant later write, which is the safe direction to err in.
     async fn persist(&self, state: &AppState) {
+        self.dirty.store(false, Ordering::SeqCst);
         let update = {
             let inner = self.inner.lock().expect("collab room lock poisoned");
             inner
@@ -256,6 +267,8 @@ impl CollabRoom {
             .exec(state.db())
             .await;
         if let Err(error) = result {
+            // The row still lags the room; leave it dirty so a later flush retries.
+            self.dirty.store(true, Ordering::SeqCst);
             warn!(collab_doc_id = %self.collab_doc_id, %error, "Failed to persist collab doc state");
         }
     }
@@ -465,7 +478,14 @@ async fn handle_inbound(
 /// could otherwise clobber it with stale state.
 async fn finish_collab_socket(state: &AppState, room: &Arc<CollabRoom>) {
     room.persist_gen.fetch_add(1, Ordering::SeqCst);
-    room.persist(state).await;
+    // Only write when the room actually holds unpersisted content. A viewer that
+    // opened a document and closed it again has nothing to flush, and writing
+    // anyway would rewrite `yjs_state` byte-for-byte and restamp `updated_at` —
+    // making a read indistinguishable from an edit, and extending the retention
+    // sweep's window (see `cleanup`) on documents nobody touched.
+    if room.dirty.load(Ordering::SeqCst) {
+        room.persist(state).await;
+    }
     state.release_collab_room(room);
 }
 
@@ -566,6 +586,28 @@ mod tests {
         // Re-applying the same update integrates nothing: no relay, no persist.
         assert!(!room.apply_remote_update(7, &update));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn only_an_integrated_update_marks_the_room_dirty() {
+        // A room that is only ever read from must stay clean, so that closing a
+        // viewer does not rewrite `yjs_state` and restamp `updated_at`.
+        let seeded_state = text_update("hello");
+        let seeded = CollabRoom::new(Uuid::now_v7(), Some(seeded_state.clone()));
+        assert!(
+            !seeded.dirty.load(Ordering::SeqCst),
+            "loading persisted state is not an unpersisted change",
+        );
+
+        // Nor is re-sending state the room already holds — which is exactly what
+        // a read-only client's reply to the server's opening step1 amounts to.
+        assert!(!seeded.apply_remote_update(1, &seeded_state));
+        assert!(!seeded.dirty.load(Ordering::SeqCst));
+
+        // Integrating new content is.
+        let room = CollabRoom::new(Uuid::now_v7(), None);
+        assert!(room.apply_remote_update(1, &text_update("hello")));
+        assert!(room.dirty.load(Ordering::SeqCst));
     }
 
     #[test]

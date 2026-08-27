@@ -11,6 +11,8 @@
 //
 //   [varuint msgType, ...]
 //     msgType 0 = sync:      [varuint syncType, varUint8Array payload]
+//       syncType 0 = step1 (a state vector; carries no content)
+//       syncType 1 = step2, 2 = update (both carry content)
 //     msgType 1 = awareness  (cursors; ignored — this view has none to share)
 //
 // The server sends a sync step1 as an application-level keepalive every 15s and
@@ -23,6 +25,8 @@ import * as syncProtocol from "y-protocols/sync";
 import * as Y from "yjs";
 
 const MESSAGE_SYNC = 0;
+const SYNC_STEP2 = 1;
+const SYNC_UPDATE = 2;
 
 // Backoff between re-dial attempts: short enough that walking back into signal
 // recovers without reopening the doc, capped so a server that is down is not
@@ -99,10 +103,17 @@ export function subscribeToCollabDoc(options: CollabDocOptions): CollabDocHandle
       const decoder = decoding.createDecoder(new Uint8Array(event.data));
       if (decoding.readVarUint(decoder) !== MESSAGE_SYNC) return;
 
-      // Report "live" on the first frame that actually arrives, not on `open`:
-      // until the server answers there is nothing to show, and a doc mid-sync
-      // would otherwise render as an empty document rather than a spinner.
-      if (!synced) {
+      // Peek the sync type without consuming it, so `readSyncMessage` below
+      // still sees a decoder positioned where it expects.
+      const afterMessageType = decoder.pos;
+      const syncType = decoding.readVarUint(decoder);
+      decoder.pos = afterMessageType;
+
+      // Report "live" only once a frame that can carry content arrives. The
+      // server opens with its own step1 — a bare state vector — so treating any
+      // sync frame as the answer would show an empty document under a green
+      // "Live" for a round trip, which is precisely what the spinner is for.
+      if (!synced && (syncType === SYNC_STEP2 || syncType === SYNC_UPDATE)) {
         synced = true;
         failedHandshakes = 0;
         onStatus("live");
