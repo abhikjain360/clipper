@@ -289,7 +289,7 @@ mod inner {
                             }
                         }
                         Ok(DaemonLine::Event(DaemonEvent::StateChanged { state })) => {
-                            *shared.state.write().await = state;
+                            *shared.state.write().await = *state;
                             shared.version.fetch_add(1, Ordering::Relaxed);
                             shared.notify.notify_waiters();
                         }

@@ -348,7 +348,7 @@ pub enum DaemonLine {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum DaemonEvent {
     AuthChallenge { auth_challenge: AuthChallenge },
-    StateChanged { state: AppState },
+    StateChanged { state: Box<AppState> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,7 +365,9 @@ impl DaemonEvent {
     }
 
     pub fn state_changed(state: AppState) -> Self {
-        Self::StateChanged { state }
+        Self::StateChanged {
+            state: Box::new(state),
+        }
     }
 }
 

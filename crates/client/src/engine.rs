@@ -19,7 +19,7 @@ pub use clipper_schedule::{
     RruleEngine, ScheduleItem, ScheduleSpan, SourceId, SourceKind, Window,
 };
 use futures_util::{StreamExt, stream};
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{Mutex, RwLock, watch};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
@@ -51,6 +51,40 @@ const RECENT_CLIPBOARD_LIMIT: usize = 100;
 /// MIME type used for plain-text clipboard entries.
 pub const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
 const CLIPBOARD_HYDRATION_CONCURRENCY: usize = 8;
+
+/// A snapshot must move forward inside its fixed watermark. Validate the
+/// response before persisting anything, including pages whose items fail to
+/// decrypt, so an untrusted server cannot trap reconciliation on one page.
+fn validate_snapshot_page(
+    page: &ObjectListResponse,
+    after: Option<ObjectListCursor>,
+    watermark: i64,
+) -> Result<(), ClientError> {
+    let key = |cursor: ObjectListCursor| (cursor.created_seq, cursor.id.into_uuid());
+    let mut previous = after.map(key);
+    if page.items.len() > 100 {
+        return Err(ClientError::UnexpectedResponse(
+            "snapshot page exceeds requested limit".into(),
+        ));
+    }
+    for item in &page.items {
+        let current = (item.created_seq, item.id.into_uuid());
+        if item.created_seq > watermark || previous.is_some_and(|old| current <= old) {
+            return Err(ClientError::UnexpectedResponse(
+                "snapshot cursor did not advance within its watermark".into(),
+            ));
+        }
+        previous = Some(current);
+    }
+    if let Some(next) = page.next_after
+        && (page.items.is_empty() || Some(key(next)) != previous)
+    {
+        return Err(ClientError::UnexpectedResponse(
+            "snapshot continuation does not match its last item".into(),
+        ));
+    }
+    Ok(())
+}
 /// Largest clipboard payload (plaintext) the client will capture, upload, or
 /// accept on download. The server is untrusted for content, so the client must
 /// bound payload sizes independently of any server-supplied/server-signed
@@ -95,7 +129,9 @@ pub struct SyncEngine {
     state_version: std::sync::atomic::AtomicU64,
     ws_restart_tx: watch::Sender<u64>,
     ws_restart_rx: watch::Receiver<u64>,
-    suppressed_payload: RwLock<Option<([u8; 32], std::time::Instant)>>,
+    suppressed_payload: RwLock<Option<([u8; 32], web_time::Instant)>>,
+    /// Serialize this device's timer commands across UI/IPC callers.
+    actual_write: Mutex<()>,
 }
 
 /// Secrets a browser client needs to resume a session after a page reload
@@ -136,6 +172,7 @@ impl SyncEngine {
             ws_restart_tx,
             ws_restart_rx,
             suppressed_payload: RwLock::new(None),
+            actual_write: Mutex::new(()),
         }))
     }
 
@@ -436,7 +473,7 @@ impl SyncEngine {
         }
 
         // Start platform clipboard watcher where background reads are available.
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(all(not(test), any(target_os = "macos", target_os = "linux")))]
         {
             let engine = Arc::clone(self);
             crate::clipboard_watcher::start_clipboard_watcher(engine);
@@ -775,7 +812,7 @@ impl SyncEngine {
 
         *self.suppressed_payload.write().await = Some((
             clipboard_payload_digest(&item.mime_type, &bytes),
-            std::time::Instant::now(),
+            web_time::Instant::now(),
         ));
 
         Ok(ClipboardPayload {
@@ -809,7 +846,7 @@ impl SyncEngine {
 
         *self.suppressed_payload.write().await = Some((
             clipboard_payload_digest(&item.mime_type, &bytes),
-            std::time::Instant::now(),
+            web_time::Instant::now(),
         ));
         Ok(text)
     }
@@ -1115,13 +1152,14 @@ impl SyncEngine {
     /// is the delete. Reclaiming the blob is a separate purge, which nothing
     /// calls yet.
     pub async fn delete_file(&self, file_id: &str) -> Result<(), ClientError> {
-        let deleted_seq = self.write_tombstone(file_id, ObjectKind::File).await?;
+        let (deleted_seq, tombstone_head) = self.write_tombstone(file_id, ObjectKind::File).await?;
         let visible = self
             .local_store
-            .apply_local_delete(
+            .apply_local_tombstone(
                 ObjectKind::File,
                 file_id,
                 deleted_seq,
+                tombstone_head,
                 RECENT_CLIPBOARD_LIMIT,
             )
             .await?;
@@ -1197,6 +1235,12 @@ impl SyncEngine {
             encrypt_schedule_meta(&meta, &encryption_key, &aad_body)?;
         let (payload_nonce, encrypted_payload) =
             encrypt_schedule_payload(&record, &encryption_key, &aad_body, payload_id_typed)?;
+
+        if encrypted_payload.len() > MAX_SCHEDULE_PAYLOAD_CIPHERTEXT_BYTES as usize {
+            return Err(ClientError::InvalidArgument(
+                "schedule record exceeds the 256 KiB encrypted size limit".into(),
+            ));
+        }
 
         let payload_hash = crypto::sha256(&encrypted_payload).to_vec();
         let payload_size = encrypted_payload.len() as i64;
@@ -1295,7 +1339,11 @@ impl SyncEngine {
     /// envelope even though it says nothing — the column is not nullable, and
     /// an empty ciphertext would be a second shape the server's checks would
     /// have to know about.
-    async fn write_tombstone(&self, object_id: &str, kind: ObjectKind) -> Result<i64, ClientError> {
+    async fn write_tombstone(
+        &self,
+        object_id: &str,
+        kind: ObjectKind,
+    ) -> Result<(i64, LocalHead), ClientError> {
         let encryption_key = self.current_encryption_key().await?;
         let (_, device_id_typed, signing_key) = self.current_device_signing_context().await?;
         let object_uuid: uuid::Uuid =
@@ -1337,8 +1385,12 @@ impl SyncEngine {
                 body: envelope_body,
             },
         };
+        let tombstone_head = LocalHead {
+            revision: revise_req.envelope.body.revision,
+            parent_hash: crypto::object_envelope_parent_hash(&revise_req.envelope.body)?,
+        };
         match self.api.object_revise(object_id, &revise_req).await? {
-            ObjectInitResponse::Complete { created_seq } => Ok(created_seq),
+            ObjectInitResponse::Complete { created_seq } => Ok((created_seq, tombstone_head)),
             ObjectInitResponse::Pending { .. } => Err(ClientError::UnexpectedResponse(
                 "a tombstone carries no payloads and must complete immediately".into(),
             )),
@@ -1356,10 +1408,6 @@ impl SyncEngine {
     /// Only one timer runs at a time: starting a second stops the first, which
     /// is what a person means by starting something else.
     pub async fn start_actual(&self, against: Option<(&str, &str)>) -> Result<String, ClientError> {
-        if let Some(running) = self.running_actual().await {
-            self.stop_actual(&running.0).await?;
-        }
-
         let planned = match against {
             Some((item_id, occurrence_key)) => {
                 let item = item_id
@@ -1382,6 +1430,11 @@ impl SyncEngine {
             None => None,
         };
 
+        let _write = self.actual_write.lock().await;
+        if let Some(running) = self.running_actual().await {
+            self.stop_actual_inner(&running.0).await?;
+        }
+
         self.create_schedule_record(ScheduleRecord::Actual(Box::new(
             clipper_schedule::ActualRecord {
                 id: clipper_schedule::ActualId::new(),
@@ -1400,12 +1453,17 @@ impl SyncEngine {
     /// and replaced on stop. Persisting progress on a tick would turn an hour
     /// of work into sixty retained revisions.
     pub async fn stop_actual(&self, object_id: &str) -> Result<String, ClientError> {
-        let Some((_, record)) = self
+        let _write = self.actual_write.lock().await;
+        self.stop_actual_inner(object_id).await
+    }
+
+    async fn stop_actual_inner(&self, object_id: &str) -> Result<String, ClientError> {
+        let Some((_, record, head)) = self
             .local_store
-            .schedule_records_with_ids()
-            .await
+            .schedule_records_with_heads()
+            .await?
             .into_iter()
-            .find(|(id, record)| id == object_id && matches!(record, ScheduleRecord::Actual(_)))
+            .find(|(id, record, _)| id == object_id && matches!(record, ScheduleRecord::Actual(_)))
         else {
             return Err(ClientError::ItemNotFound {
                 id: object_id.to_string(),
@@ -1425,11 +1483,13 @@ impl SyncEngine {
             start: started,
             end: chrono::Utc::now().max(started),
         });
-        let replacement = self
-            .create_schedule_record(ScheduleRecord::Actual(Box::new(stopped)))
-            .await?;
-        self.delete_schedule_object(object_id).await?;
-        Ok(replacement)
+        self.write_schedule_record(
+            object_id,
+            ScheduleRecord::Actual(Box::new(stopped)),
+            EnvelopePlacement::Revise(head),
+        )
+        .await?;
+        Ok(object_id.to_string())
     }
 
     /// Records of time spent that overlap `[from, to)`, plus any running timer.
@@ -1440,6 +1500,7 @@ impl SyncEngine {
     ) -> Result<Vec<ActualView>, ClientError> {
         let from = parse_instant(from, "actuals window start")?;
         let to = parse_instant(to, "actuals window end")?;
+        Window::new(from, to).map_err(|error| ClientError::InvalidArgument(error.to_string()))?;
         let records = self.local_store.schedule_records_with_ids().await;
         let titles = self.series_titles(&records);
 
@@ -1460,7 +1521,12 @@ impl SyncEngine {
                 }
                 let title = actual
                     .planned
-                    .and_then(|planned| titles.get(&planned.item).cloned())
+                    .map(|planned| {
+                        titles
+                            .get(&planned.item)
+                            .cloned()
+                            .unwrap_or_else(|| "Unavailable block".into())
+                    })
                     .unwrap_or_else(|| UNPLANNED_TITLE.to_string());
                 Some(actual_view(object_id, actual, &title))
             })
@@ -1482,7 +1548,12 @@ impl SyncEngine {
             }
             let title = actual
                 .planned
-                .and_then(|planned| titles.get(&planned.item).cloned())
+                .map(|planned| {
+                    titles
+                        .get(&planned.item)
+                        .cloned()
+                        .unwrap_or_else(|| "Unavailable block".into())
+                })
                 .unwrap_or_else(|| UNPLANNED_TITLE.to_string());
             Some((object_id.clone(), actual_view(object_id, actual, &title)))
         })
@@ -1499,21 +1570,15 @@ impl SyncEngine {
     ) -> HashMap<clipper_schedule::ScheduleItemId, String> {
         records
             .iter()
-            .filter_map(|(_, record)| record.as_item())
-            .map(|item| (item.id, item.title.clone()))
+            .filter_map(|(_, record)| record.planned_title())
+            .map(|(id, title)| (id, title.to_string()))
             .collect()
     }
 
     /// Replace a schedule series with an edited version.
     ///
-    /// Objects are immutable, so an edit is a create followed by a delete until
-    /// the revision layer lands (D6). The new object is written *first*: if the
-    /// delete then fails, the result is a visible duplicate the owner can
-    /// remove, whereas deleting first would risk losing the block entirely.
-    ///
-    /// The series id inside the record is preserved even though the object id
-    /// changes. Overrides and time already logged point at the series, not at
-    /// the object carrying it, so an edit must not orphan them.
+    /// Append a revision while preserving both the object and series ids, so
+    /// overrides and logged time continue to refer to the same plan.
     pub async fn update_schedule_item(
         &self,
         object_id: &str,
@@ -1521,11 +1586,11 @@ impl SyncEngine {
     ) -> Result<String, ClientError> {
         let existing = self
             .local_store
-            .schedule_records_with_ids()
-            .await
+            .schedule_records_with_heads()
+            .await?
             .into_iter()
-            .find(|(id, record)| id == object_id && record.as_item().is_some());
-        let Some((_, previous)) = existing else {
+            .find(|(id, record, _)| id == object_id && record.as_item().is_some());
+        let Some((_, previous, head)) = existing else {
             return Err(ClientError::ItemNotFound {
                 id: object_id.to_string(),
             });
@@ -1540,7 +1605,6 @@ impl SyncEngine {
             ));
         }
 
-        let head = self.local_head(object_id).await?;
         self.write_schedule_record(
             object_id,
             ScheduleRecord::Item(Box::new(item)),
@@ -1577,21 +1641,7 @@ impl SyncEngine {
         let Some(head) = self.local_store.local_head(&object_id).await? else {
             return Ok(());
         };
-        if item.revision < head.revision {
-            return Err(object_envelope_error(format!(
-                "server served revision {} of {object_id} after this device saw {}",
-                item.revision, head.revision,
-            )));
-        }
-        if item.revision == head.revision + 1
-            && item.envelope.body.parent_hash != Some(head.parent_hash)
-        {
-            return Err(object_envelope_error(format!(
-                "revision {} of {object_id} does not chain to the revision this device holds",
-                item.revision,
-            )));
-        }
-        Ok(())
+        validate_revision_advance(item, head)
     }
 
     /// The chain position this client holds for an object, or a typed error.
@@ -1611,15 +1661,16 @@ impl SyncEngine {
     /// earlier one. Reclaiming the bytes is a separate purge, which nothing in
     /// the UI calls yet.
     pub async fn delete_schedule_object(&self, object_id: &str) -> Result<(), ClientError> {
-        let deleted_seq = self
+        let (deleted_seq, tombstone_head) = self
             .write_tombstone(object_id, ObjectKind::Schedule)
             .await?;
         let visible = self
             .local_store
-            .apply_local_delete(
+            .apply_local_tombstone(
                 ObjectKind::Schedule,
                 object_id,
                 deleted_seq,
+                tombstone_head,
                 RECENT_CLIPBOARD_LIMIT,
             )
             .await?;
@@ -1629,7 +1680,7 @@ impl SyncEngine {
     }
 
     /// Expand every cached series across `[from, to)` and return the
-    /// occurrences that land in it.
+    /// occurrences that overlap it, including blocks starting before `from`.
     ///
     /// Occurrences are computed here rather than stored (D7), and the window is
     /// the caller's choice rather than a fixed horizon (D4) — a grid asks for a
@@ -1672,19 +1723,34 @@ impl SyncEngine {
         for record in &records {
             // An owned block and an ingested event expand identically; only
             // their labelling differs.
-            let (series, label_source, cancelled) = match record {
-                ScheduleRecord::Item(item) => (Cow::Borrowed(&**item), None, false),
-                ScheduleRecord::Ingested(event) => (
-                    Cow::Owned(ingested_as_series(event)),
-                    source_names.get(&event.source).map(String::as_str),
-                    event.status == IngestedStatus::Cancelled,
-                ),
+            let (series, label_source, cancelled, provider_overrides) = match record {
+                ScheduleRecord::Item(item) => (Cow::Borrowed(&**item), None, false, &[][..]),
+                ScheduleRecord::Ingested(event) => {
+                    let Some(source_name) = source_names.get(&event.source) else {
+                        // Removing a source hides its events, while retaining
+                        // the records referenced by previously logged time.
+                        continue;
+                    };
+                    (
+                        Cow::Owned(ingested_as_series(event)),
+                        Some(source_name.as_str()),
+                        event.status == IngestedStatus::Cancelled,
+                        event.overrides.as_slice(),
+                    )
+                }
                 ScheduleRecord::Override(_)
                 | ScheduleRecord::Actual(_)
                 | ScheduleRecord::Source(_) => continue,
             };
             let all_day = matches!(series.span, ScheduleSpan::AllDay { .. });
-            match engine.occurrences(&series, &overrides, &expansion) {
+            // Provider exceptions belong to this upstream series. Explicit
+            // local overrides, when available, take precedence for the same key.
+            let effective_overrides: Vec<_> = provider_overrides
+                .iter()
+                .chain(&overrides)
+                .cloned()
+                .collect();
+            match engine.overlapping_occurrences(&series, &effective_overrides, &expansion) {
                 Ok(occurrences) => out.extend(occurrences.iter().map(|occurrence| {
                     occurrence_view(
                         occurrence,
@@ -1720,17 +1786,12 @@ impl SyncEngine {
         observer_zone: &str,
     ) -> Result<Vec<AlarmView>, ClientError> {
         let now = chrono::Utc::now();
-        // Expand from slightly before now so an alarm with a lead time that has
-        // started but not fired is still found.
-        let window = Window::new(
-            now - chrono::TimeDelta::hours(24),
-            now + chrono::TimeDelta::hours(i64::from(within_hours.max(1))),
-        )
-        .map_err(|error| ClientError::InvalidArgument(error.to_string()))?;
-        let expansion = Expansion {
-            window,
-            observer: zone_or_utc(observer_zone),
-        };
+        if within_hours > 24 * 366 {
+            return Err(ClientError::InvalidArgument(
+                "alarm horizon cannot exceed one year".into(),
+            ));
+        }
+        let until = now + chrono::TimeDelta::hours(i64::from(within_hours.max(1)));
 
         let records = self.local_store.schedule_records().await;
         let overrides: Vec<OccurrenceOverride> = records
@@ -1752,13 +1813,22 @@ impl SyncEngine {
             let Some(item) = record.as_item() else {
                 continue;
             };
-            if item.alarm.is_none() {
+            let Some(policy) = item.alarm else {
                 continue;
-            }
+            };
+            // Bound the window by fire time, not event time. For a two-hour
+            // lead, tomorrow's 01:00 event must be included in today's alarms.
+            let lead = chrono::TimeDelta::minutes(i64::from(policy.minutes_before));
+            let expansion = Expansion {
+                window: Window::new(now + lead, until + lead)
+                    .map_err(|error| ClientError::InvalidArgument(error.to_string()))?,
+                observer: zone_or_utc(observer_zone),
+            };
             match engine.occurrences(item, &overrides, &expansion) {
                 Ok(occurrences) => alarms.extend(
                     clipper_schedule::plan_alarms(item, &occurrences, now)
                         .iter()
+                        .filter(|planned| planned.fire_at < until)
                         .map(|planned| AlarmView {
                             item_id: planned.item.to_string(),
                             occurrence_key: occurrence_key(&planned.recurrence_id),
@@ -1780,7 +1850,7 @@ impl SyncEngine {
     pub async fn add_calendar_source(&self, name: &str, url: &str) -> Result<String, ClientError> {
         // Reject a URL the fetcher could never use, at the point the owner can
         // still fix the typo.
-        let parsed = url::Url::parse(url)
+        let mut parsed = url::Url::parse(url)
             .map_err(|error| ClientError::InvalidArgument(format!("calendar URL: {error}")))?;
         if !matches!(parsed.scheme(), "http" | "https" | "webcal") {
             return Err(ClientError::InvalidArgument(format!(
@@ -1788,13 +1858,24 @@ impl SyncEngine {
                 parsed.scheme()
             )));
         }
+        if parsed.host_str().is_none() {
+            return Err(ClientError::InvalidArgument(
+                "calendar URL needs a host".into(),
+            ));
+        }
+        if parsed.scheme() == "webcal" {
+            // `webcal` is not a special URL scheme, so Url::set_scheme cannot
+            // convert it directly into a special (HTTPS) URL.
+            parsed = url::Url::parse(&format!("https:{}", &parsed.as_str()[7..]))
+                .map_err(|error| ClientError::InvalidArgument(format!("calendar URL: {error}")))?;
+        }
         self.create_schedule_record(ScheduleRecord::Source(Box::new(CalendarSource {
             id: SourceId::new(),
             name: name.trim().to_string(),
             // `webcal:` is just `https:` wearing a hat; normalize it now so the
             // fetcher never has to know.
             kind: SourceKind::Ics {
-                url: url.replacen("webcal://", "https://", 1),
+                url: parsed.to_string(),
             },
             enabled: true,
         })))
@@ -1803,16 +1884,15 @@ impl SyncEngine {
 
     /// Fetch a calendar feed and reconcile it into ingested events.
     ///
-    /// Objects are immutable, so an event whose upstream fields changed is
-    /// replaced rather than edited — the same create-plus-delete an owner's edit
-    /// uses until the revision layer lands (D6). Nothing the owner wrote is at
-    /// risk: their plan and their logged time are separate records (D10).
+    /// Changed events append revisions of the same object. New events use their
+    /// source/UID-derived id as the object id too, so two devices cannot create
+    /// duplicate objects for the same provider event.
     pub async fn sync_calendar_source(&self, object_id: &str) -> Result<IngestReport, ClientError> {
-        let records = self.local_store.schedule_records_with_ids().await;
+        let records = self.local_store.schedule_records_with_heads().await?;
         let source = records
             .iter()
-            .find(|(id, record)| id == object_id && record.as_source().is_some())
-            .and_then(|(_, record)| record.as_source())
+            .find(|(id, record, _)| id == object_id && record.as_source().is_some())
+            .and_then(|(_, record, _)| record.as_source())
             .cloned()
             .ok_or_else(|| ClientError::ItemNotFound {
                 id: object_id.to_string(),
@@ -1824,13 +1904,13 @@ impl SyncEngine {
 
         // Everything this source currently holds locally, by the provider's own
         // event id — which is what makes a second pass an update, not a copy.
-        let existing: HashMap<uuid::Uuid, (String, IngestedEvent)> = records
+        let existing: HashMap<uuid::Uuid, (String, IngestedEvent, LocalHead)> = records
             .iter()
-            .filter_map(|(id, record)| {
+            .filter_map(|(id, record, head)| {
                 record
                     .as_ingested()
                     .filter(|event| event.source == source.id)
-                    .map(|event| (event.id, (id.clone(), event.clone())))
+                    .map(|event| (event.id, (id.clone(), event.clone(), *head)))
             })
             .collect();
 
@@ -1846,20 +1926,31 @@ impl SyncEngine {
             ..IngestReport::default()
         };
 
+        // An unreadable entry is still present upstream. Never infer a delete
+        // from a partial parse; a provider adding an unsupported field must
+        // not cancel previously imported meetings.
+        let allow_cancellations = outcome.skipped.is_empty();
         let mut seen = HashSet::new();
         for event in outcome.events {
             seen.insert(event.id);
             match existing.get(&event.id) {
-                Some((_, current)) if *current == event => report.unchanged += 1,
-                Some((old_object_id, _)) => {
-                    self.delete_schedule_object(old_object_id).await?;
-                    self.create_schedule_record(ScheduleRecord::Ingested(Box::new(event)))
-                        .await?;
+                Some((_, current, _)) if *current == event => report.unchanged += 1,
+                Some((old_object_id, _, head)) => {
+                    self.write_schedule_record(
+                        old_object_id,
+                        ScheduleRecord::Ingested(Box::new(event)),
+                        EnvelopePlacement::Revise(*head),
+                    )
+                    .await?;
                     report.updated += 1;
                 }
                 None => {
-                    self.create_schedule_record(ScheduleRecord::Ingested(Box::new(event)))
-                        .await?;
+                    self.write_schedule_record(
+                        &event.id.to_string(),
+                        ScheduleRecord::Ingested(Box::new(event)),
+                        EnvelopePlacement::Create,
+                    )
+                    .await?;
                     report.added += 1;
                 }
             }
@@ -1867,15 +1958,21 @@ impl SyncEngine {
 
         // Gone from the feed. Tombstone rather than erase (D10): a meeting the
         // organiser withdrew still happened to whatever time was logged on it.
-        for (event_id, (old_object_id, event)) in &existing {
-            if seen.contains(event_id) || event.status == IngestedStatus::Cancelled {
+        for (event_id, (old_object_id, event, head)) in &existing {
+            if !allow_cancellations
+                || seen.contains(event_id)
+                || event.status == IngestedStatus::Cancelled
+            {
                 continue;
             }
             let mut tombstone = event.clone();
             tombstone.status = IngestedStatus::Cancelled;
-            self.delete_schedule_object(old_object_id).await?;
-            self.create_schedule_record(ScheduleRecord::Ingested(Box::new(tombstone)))
-                .await?;
+            self.write_schedule_record(
+                old_object_id,
+                ScheduleRecord::Ingested(Box::new(tombstone)),
+                EnvelopePlacement::Revise(*head),
+            )
+            .await?;
             report.tombstoned += 1;
         }
 
@@ -1907,6 +2004,7 @@ impl SyncEngine {
                     after,
                 )
                 .await?;
+            validate_snapshot_page(&page, after, stream_start_seq)?;
             for item in page.items {
                 match self
                     .decrypt_schedule_object_item(api, &item, &encryption_key)
@@ -2259,7 +2357,9 @@ impl SyncEngine {
                     after,
                 )
                 .await?;
+            validate_snapshot_page(&page, after, stream_start_seq)?;
             for item in page.items {
+                self.check_revision_advance(&item).await?;
                 match decrypt_file_object_item(&item, &encryption_key) {
                     Ok(file) => {
                         self.persist_file_snapshot_item(
@@ -2352,6 +2452,7 @@ impl SyncEngine {
                     after,
                 )
                 .await?;
+            validate_snapshot_page(&page, after, stream_start_seq)?;
             let mut objects = stream::iter(page.items)
                 .map(|item| async move {
                     let created_seq = item.created_seq;
@@ -2703,6 +2804,7 @@ impl SyncEngine {
                     .await?;
             }
             ObjectKind::File => {
+                self.check_revision_advance(&item).await?;
                 let file = decrypt_file_object_item(&item, &encryption_key)?;
                 self.persist_file_snapshot_item(
                     &file,
@@ -3339,12 +3441,30 @@ const MAX_CALENDAR_FEED_BYTES: usize = 8 * 1024 * 1024;
 /// results like any other device.
 #[cfg(not(target_family = "wasm"))]
 async fn fetch_calendar_feed(url: &str) -> Result<String, ClientError> {
-    let response = reqwest::Client::new()
+    crate::ensure_crypto_provider();
+    let response = reqwest::Client::builder()
+        .use_preconfigured_tls(crate::api_client::default_tls_config())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many calendar feed redirects")
+            } else if attempt.url().scheme() != "https"
+                && attempt.previous().iter().any(|url| url.scheme() == "https")
+            {
+                attempt.error("calendar feed redirect would downgrade HTTPS")
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()?
         .get(url)
         .header("accept", "text/calendar, text/plain;q=0.9, */*;q=0.1")
         .send()
-        .await?
-        .error_for_status()?;
+        .await
+        .map_err(|error| ClientError::Http(error.without_url()))?
+        .error_for_status()
+        .map_err(|error| ClientError::Http(error.without_url()))?;
 
     if let Some(len) = response.content_length()
         && len > MAX_CALENDAR_FEED_BYTES as u64
@@ -3354,16 +3474,20 @@ async fn fetch_calendar_feed(url: &str) -> Result<String, ClientError> {
             limit: MAX_CALENDAR_FEED_BYTES as i64,
         });
     }
-    let bytes = response.bytes().await?;
-    if bytes.len() > MAX_CALENDAR_FEED_BYTES {
-        // A server may omit or lie about content-length, so re-check what
-        // actually arrived.
-        return Err(ClientError::PayloadTooLarge {
-            size: bytes.len() as i64,
-            limit: MAX_CALENDAR_FEED_BYTES as i64,
-        });
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| ClientError::Http(error.without_url()))?;
+        let size = bytes.len().saturating_add(chunk.len());
+        if size > MAX_CALENDAR_FEED_BYTES {
+            return Err(ClientError::PayloadTooLarge {
+                size: size as i64,
+                limit: MAX_CALENDAR_FEED_BYTES as i64,
+            });
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    String::from_utf8(bytes.to_vec())
+    String::from_utf8(bytes)
         .map_err(|error| ClientError::Other(format!("calendar feed is not UTF-8: {error}")))
 }
 
@@ -3681,6 +3805,32 @@ fn object_envelope_error(message: impl Into<String>) -> ClientError {
     ClientError::Crypto(crypto::CryptoError::Signature(message.into()))
 }
 
+fn validate_revision_advance(item: &ObjectListItem, head: LocalHead) -> Result<(), ClientError> {
+    if item.revision < head.revision {
+        return Err(object_envelope_error(format!(
+            "server served revision {} of {} after this device saw {}",
+            item.revision, item.id, head.revision,
+        )));
+    }
+    if item.revision == head.revision
+        && crypto::object_envelope_parent_hash(&item.envelope.body)? != head.parent_hash
+    {
+        return Err(object_envelope_error(format!(
+            "server changed the envelope of already-held revision {} of {}",
+            item.revision, item.id,
+        )));
+    }
+    if head.revision.checked_add(1) == Some(item.revision)
+        && item.envelope.body.parent_hash != Some(head.parent_hash)
+    {
+        return Err(object_envelope_error(format!(
+            "revision {} of {} does not chain to the revision this device holds",
+            item.revision, item.id,
+        )));
+    }
+    Ok(())
+}
+
 fn decrypt_file_object_item(
     item: &ObjectListItem,
     encryption_key: &[u8; 32],
@@ -3816,9 +3966,133 @@ fn hex_string(bytes: &[u8]) -> String {
     out
 }
 
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "schedule_integration_tests.rs"]
+mod schedule_integration_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_pages_must_advance_inside_the_watermark() {
+        let mut item = signed_item_with_payload_count(1);
+        item.created_seq = 10;
+        let cursor = ObjectListCursor {
+            created_seq: 10,
+            id: item.id,
+        };
+        let mut page = ObjectListResponse {
+            items: vec![item],
+            next_after: Some(cursor),
+        };
+        validate_snapshot_page(&page, None, 10).expect("valid first page");
+        assert!(validate_snapshot_page(&page, Some(cursor), 10).is_err());
+        assert!(validate_snapshot_page(&page, None, 9).is_err());
+        page.next_after = Some(ObjectListCursor {
+            created_seq: 9,
+            ..cursor
+        });
+        assert!(validate_snapshot_page(&page, None, 10).is_err());
+        page.items.clear();
+        assert!(validate_snapshot_page(&page, None, 10).is_err());
+        page.next_after = None;
+        validate_snapshot_page(&page, Some(cursor), 10).expect("empty last page");
+    }
+
+    #[test]
+    fn a_held_revision_cannot_be_replaced_by_a_different_envelope() {
+        let mut item = signed_item_with_payload_count(1);
+        let head = LocalHead {
+            revision: item.revision,
+            parent_hash: crypto::object_envelope_parent_hash(&item.envelope.body).expect("hash"),
+        };
+        validate_revision_advance(&item, head).expect("same head");
+        item.envelope.body.created_at = "2026-09-08T12:00:00Z".into();
+        assert!(validate_revision_advance(&item, head).is_err());
+        item.revision = 2;
+        item.envelope.body.revision = 2;
+        item.envelope.body.parent_hash = Some(head.parent_hash);
+        validate_revision_advance(&item, head).expect("valid successor");
+        item.envelope.body.parent_hash = Some([0; crypto::SHA256_BYTES]);
+        assert!(validate_revision_advance(&item, head).is_err());
+        assert!(
+            validate_revision_advance(
+                &item,
+                LocalHead {
+                    revision: 3,
+                    ..head
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn calendar_fetch_errors_do_not_expose_the_private_url() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listen");
+        let addr = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.expect("read") > 0);
+            socket
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("respond");
+        });
+        let error = fetch_calendar_feed(&format!(
+            "http://{addr}/private-calendar-token.ics?secret=bearer"
+        ))
+        .await
+        .expect_err("forbidden");
+        assert!(!error.to_string().contains("private-calendar-token"));
+        assert!(!format!("{error:?}").contains("bearer"));
+        server.await.expect("server");
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn calendar_fetch_bounds_chunked_bodies_before_reading_to_end() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listen");
+        let addr = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.expect("read") > 0);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .expect("header");
+            let chunk = vec![b'x'; 1024 * 1024];
+            for _ in 0..9 {
+                if socket.write_all(b"100000\r\n").await.is_err()
+                    || socket.write_all(&chunk).await.is_err()
+                    || socket.write_all(b"\r\n").await.is_err()
+                {
+                    return;
+                }
+            }
+            // Never finish the body. A check performed only after bytes()
+            // would wait forever instead of enforcing the bound.
+            std::future::pending::<()>().await;
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            fetch_calendar_feed(&format!("http://{addr}/feed.ics")),
+        )
+        .await
+        .expect("reject before EOF");
+        assert!(matches!(result, Err(ClientError::PayloadTooLarge { .. })));
+        server.abort();
+    }
 
     fn descriptor(id: ObjectPayloadId) -> ObjectPayloadDescriptor {
         ObjectPayloadDescriptor {
