@@ -10,7 +10,8 @@ use std::path::Path;
 use std::{collections::HashMap, path::PathBuf, sync::RwLock};
 
 use clipper_app_types::{
-    CalendarSourceView, CollabItem, DecryptedClipboardItem, DecryptedFileItem, ScheduleItemView,
+    ActualView, CalendarSourceView, CollabItem, DecryptedClipboardItem, DecryptedFileItem,
+    ScheduleItemView,
 };
 use clipper_core::{
     crypto,
@@ -24,7 +25,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     api_client::{decrypt_clipboard_meta, decrypt_clipboard_payload, decrypt_file_meta_bytes},
-    schedule::{ScheduleRecord, decrypt_schedule_payload, item_view, source_view},
+    schedule::{ScheduleRecord, actual_view, decrypt_schedule_payload, item_view, source_view},
 };
 
 const DEFAULT_PROFILE: &str = "default";
@@ -201,6 +202,7 @@ pub struct LocalVisibleState {
     pub collab_docs: Vec<CollabItem>,
     pub schedule_items: Vec<ScheduleItemView>,
     pub calendar_sources: Vec<CalendarSourceView>,
+    pub running_actual: Option<ActualView>,
 }
 
 #[derive(Debug, Default)]
@@ -1077,6 +1079,39 @@ impl LocalStore {
             .collect())
     }
 
+    /// The timer currently running, if any.
+    ///
+    /// Lives in visible state rather than behind a windowed call: a running
+    /// timer is relevant on every screen, and there is at most one.
+    async fn running_actual_inner(&self) -> Option<ActualView> {
+        let records = self.all_memory_records().await;
+        let titles: HashMap<clipper_schedule::ScheduleItemId, String> = records
+            .iter()
+            .filter_map(|record| match &record.data {
+                LocalObjectData::Schedule(schedule) => schedule.record.as_item(),
+                _ => None,
+            })
+            .map(|item| (item.id, item.title.clone()))
+            .collect();
+
+        records.iter().find_map(|record| {
+            let LocalObjectData::Schedule(schedule) = &record.data else {
+                return None;
+            };
+            let ScheduleRecord::Actual(actual) = &schedule.record else {
+                return None;
+            };
+            if !matches!(actual.span, clipper_schedule::ActualSpan::Running { .. }) {
+                return None;
+            }
+            let title = actual
+                .planned
+                .and_then(|planned| titles.get(&planned.item).cloned())
+                .unwrap_or_else(|| "Unplanned".to_string());
+            Some(actual_view(&record.id, actual, &title))
+        })
+    }
+
     /// Every schedule record with the object id that carries it.
     ///
     /// Ingest needs the object id, not just the record: replacing an event means
@@ -1213,6 +1248,7 @@ impl LocalStore {
             collab_docs: self.collab_items_inner().await?,
             schedule_items: self.schedule_items_inner().await?,
             calendar_sources: self.calendar_sources_inner().await?,
+            running_actual: self.running_actual_inner().await,
         })
     }
 

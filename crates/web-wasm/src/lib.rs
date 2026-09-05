@@ -404,6 +404,49 @@ pub fn expand_schedule(from: String, to: String, observer_zone: String) -> Promi
     })
 }
 
+/// Start the timer. Omit both arguments for unplanned work.
+///
+/// `Option<String>` rather than `String`: the shared backend contract makes
+/// these optional, and a bare `String` parameter rejects `undefined` at the
+/// wasm boundary before any Rust runs.
+#[wasm_bindgen(js_name = startActual)]
+pub fn start_actual(item_id: Option<String>, occurrence_key: Option<String>) -> Promise {
+    ok_promise(async move {
+        let item_id = item_id.unwrap_or_default();
+        let occurrence_key = occurrence_key.unwrap_or_default();
+        let against = (!item_id.is_empty() && !occurrence_key.is_empty())
+            .then_some((item_id.as_str(), occurrence_key.as_str()));
+        let object_id = engine_or_error()?
+            .start_actual(against)
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::from_str(&object_id))
+    })
+}
+
+#[wasm_bindgen(js_name = stopActual)]
+pub fn stop_actual(object_id: String) -> Promise {
+    ok_promise(async move {
+        let replacement = engine_or_error()?
+            .stop_actual(&object_id)
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::from_str(&replacement))
+    })
+}
+
+#[wasm_bindgen(js_name = actualsBetween)]
+pub fn actuals_between(from: String, to: String) -> Promise {
+    ok_promise(async move {
+        let actuals = engine_or_error()?
+            .actuals_between(&from, &to)
+            .await
+            .map_err(js_error)?;
+        let value = serde_wasm_bindgen::to_value(&actuals).map_err(js_error)?;
+        Ok(value)
+    })
+}
+
 #[wasm_bindgen(js_name = addCalendarSource)]
 pub fn add_calendar_source(name: String, url: String) -> Promise {
     ok_promise(async move {

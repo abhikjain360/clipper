@@ -459,6 +459,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                         <SchedulePanel
                             items={state.schedule_items}
                             sources={state.calendar_sources}
+                            running={state.running_actual ?? null}
                             onState={onState}
                             onError={setError}
                         />

@@ -4,8 +4,10 @@ import {
     ChevronLeft,
     ChevronRight,
     Pencil,
+    Play,
     Plus,
     RefreshCw,
+    Square,
     Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -23,6 +25,7 @@ import {
     type TamaguiElement,
 } from "tamagui";
 import type {
+    ActualView,
     AppState,
     CalendarSourceView,
     OccurrenceView,
@@ -68,17 +71,21 @@ function observerZone(): string {
 export function SchedulePanel({
     items,
     sources,
+    running,
     onState,
     onError,
 }: {
     items: ScheduleItemView[];
     sources: CalendarSourceView[];
+    /** The timer currently running, if any. */
+    running: ActualView | null;
     onState: (state: AppState) => void;
     onError: (error: string | null) => void;
 }) {
     const [editing, setEditing] = useState<ScheduleItemView | null>(null);
     const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()));
     const [occurrences, setOccurrences] = useState<OccurrenceView[]>([]);
+    const [actuals, setActuals] = useState<ActualView[]>([]);
     const [loading, setLoading] = useState(false);
 
     const weekEnd = useMemo(() => addDays(weekStart, 7), [weekStart]);
@@ -87,13 +94,16 @@ export function SchedulePanel({
         setLoading(true);
         try {
             const backend = await clipperBackend();
-            setOccurrences(
-                await backend.expandSchedule(
+            const [expanded, logged] = await Promise.all([
+                backend.expandSchedule(
                     weekStart.toISOString(),
                     weekEnd.toISOString(),
                     observerZone(),
                 ),
-            );
+                backend.actualsBetween(weekStart.toISOString(), weekEnd.toISOString()),
+            ]);
+            setOccurrences(expanded);
+            setActuals(logged);
         } catch (caught) {
             onError(formatBackendError(caught));
         } finally {
@@ -106,10 +116,12 @@ export function SchedulePanel({
     // state, which re-renders this panel with a new array.
     useEffect(() => {
         void loadWeek();
-    }, [loadWeek, items, sources]);
+    }, [loadWeek, items, sources, running]);
 
     return (
         <YStack gap="$3">
+            <RunningTimer running={running} onState={onState} onError={onError} />
+
             <ScheduleComposer
                 editing={editing}
                 onDone={() => setEditing(null)}
@@ -142,7 +154,21 @@ export function SchedulePanel({
                     </XStack>
                 </XStack>
 
-                <WeekGrid weekStart={weekStart} occurrences={occurrences} />
+                <WeekGrid
+                    weekStart={weekStart}
+                    occurrences={occurrences}
+                    actuals={actuals}
+                    onStart={async (occurrence) => {
+                        onError(null);
+                        try {
+                            const backend = await clipperBackend();
+                            await backend.startActual(occurrence.item_id, occurrence.occurrence_key);
+                            onState(await backend.getState());
+                        } catch (caught) {
+                            onError(formatBackendError(caught));
+                        }
+                    }}
+                />
             </Card>
 
             <SeriesList
@@ -159,9 +185,13 @@ export function SchedulePanel({
 function WeekGrid({
     weekStart,
     occurrences,
+    actuals,
+    onStart,
 }: {
     weekStart: Date;
     occurrences: OccurrenceView[];
+    actuals: ActualView[];
+    onStart: (occurrence: OccurrenceView) => void;
 }) {
     const days = useMemo(
         () => Array.from({ length: 7 }, (_, index) => addDays(weekStart, index)),
@@ -178,14 +208,21 @@ function WeekGrid({
     const [gutter, setGutter] = useState(0);
 
     // Open on the week's earliest block rather than at midnight, which is eight
-    // hours of empty grid before anything a person scheduled.
+    // hours of empty grid before anything a person scheduled. A running timer
+    // wins outright: it is the one thing happening right now, and scrolling to
+    // a 07:00 block would hide it below the fold.
+    const running = actuals.find((actual) => actual.running);
     const firstMinute = useMemo(() => {
+        if (running) {
+            const start = new Date(running.start);
+            return start.getHours() * 60 + start.getMinutes();
+        }
         const starts = timed.map((occurrence) => {
             const start = new Date(occurrence.start);
             return start.getHours() * 60 + start.getMinutes();
         });
         return starts.length > 0 ? Math.min(...starts) : 8 * 60;
-    }, [timed]);
+    }, [timed, running]);
 
     useEffect(() => {
         const node = scroller.current;
@@ -295,6 +332,16 @@ function WeekGrid({
                                         key={`${occurrence.item_id}-${occurrence.start}`}
                                         occurrence={occurrence}
                                         day={day}
+                                        onStart={onStart}
+                                    />
+                                ))}
+                            {actuals
+                                .filter((actual) => overlapsDay(actual, day))
+                                .map((actual) => (
+                                    <ActualBlock
+                                        key={actual.id}
+                                        actual={actual}
+                                        day={day}
                                     />
                                 ))}
                         </YStack>
@@ -305,16 +352,39 @@ function WeekGrid({
     );
 }
 
-function TimedBlock({ occurrence, day }: { occurrence: OccurrenceView; day: Date }) {
-    const dayStart = startOfDay(day).getTime();
-    const start = new Date(occurrence.start).getTime();
-    const end = new Date(occurrence.end).getTime();
-    // An occurrence can begin the previous day or run past midnight; clamp it to
-    // this column so a long block draws as a band rather than escaping the grid.
-    const fromMinutes = Math.max(0, (start - dayStart) / 60000);
-    const toMinutes = Math.min(DAY_MINUTES, (end - dayStart) / 60000);
-    const top = (fromMinutes / 60) * HOUR_HEIGHT;
-    const height = Math.max(14, ((toMinutes - fromMinutes) / 60) * HOUR_HEIGHT);
+/// Time actually spent, drawn as a narrow band down the right of the column.
+///
+/// Beside the plan rather than over it: the entire point of D2 is being able to
+/// see the difference, which a single merged block would hide.
+function ActualBlock({ actual, day }: { actual: ActualView; day: Date }) {
+    const { top, height } = bandGeometry(actual, day);
+    return (
+        <YStack
+            style={{
+                position: "absolute",
+                top,
+                height,
+                right: 2,
+                width: 6,
+                borderRadius: 3,
+                backgroundColor: actual.running ? "#d0a33a" : "#7bd88f",
+                opacity: 0.85,
+            }}
+            aria-label={`${actual.title}, actual${actual.running ? ", running" : ""}`}
+        />
+    );
+}
+
+function TimedBlock({
+    occurrence,
+    day,
+    onStart,
+}: {
+    occurrence: OccurrenceView;
+    day: Date;
+    onStart: (occurrence: OccurrenceView) => void;
+}) {
+    const { top, height } = bandGeometry(occurrence, day);
 
     return (
         <YStack
@@ -336,6 +406,8 @@ function TimedBlock({ occurrence, day }: { occurrence: OccurrenceView; day: Date
             aria-label={`${occurrence.title}, ${clockRange(occurrence)}${
                 occurrence.source ? `, from ${occurrence.source}` : ""
             }${occurrence.cancelled ? ", cancelled" : ""}`}
+            onPress={() => onStart(occurrence)}
+            cursor="pointer"
         >
             <Text
                 fontSize={11}
@@ -363,6 +435,113 @@ function blockColor(occurrence: OccurrenceView): { fill: string; accent: string 
     if (occurrence.overridden) return { fill: "#3d3320", accent: "#d0a33a" };
     if (occurrence.source) return { fill: "#1d3330", accent: "#4dbfa5" };
     return { fill: "#1f3350", accent: "#4d8fd6" };
+}
+
+/// Where a span sits in a day column.
+///
+/// Clamped to the column: a block can begin the previous day or run past
+/// midnight, and should draw as a band rather than escaping the grid.
+function bandGeometry(
+    span: { start: string; end: string },
+    day: Date,
+): { top: number; height: number } {
+    const dayStart = startOfDay(day).getTime();
+    const start = new Date(span.start).getTime();
+    // A running timer has no end yet; draw it up to now.
+    const end = span.end ? new Date(span.end).getTime() : Date.now();
+    const fromMinutes = Math.max(0, (start - dayStart) / 60000);
+    const toMinutes = Math.min(DAY_MINUTES, (end - dayStart) / 60000);
+    return {
+        top: (fromMinutes / 60) * HOUR_HEIGHT,
+        height: Math.max(6, ((toMinutes - fromMinutes) / 60) * HOUR_HEIGHT),
+    };
+}
+
+/// The running timer, with what it is against and how long it has been going.
+function RunningTimer({
+    running,
+    onState,
+    onError,
+}: {
+    running: ActualView | null;
+    onState: (state: AppState) => void;
+    onError: (error: string | null) => void;
+}) {
+    const [now, setNow] = useState(() => Date.now());
+    const [busy, setBusy] = useState(false);
+
+    // Ticks the *display* only. The record itself is written twice and no more
+    // — on start and on stop (D2) — because every write is a retained object.
+    useEffect(() => {
+        if (!running) return;
+        const timer = setInterval(() => setNow(Date.now()), 1000);
+        return () => clearInterval(timer);
+    }, [running]);
+
+    async function act(run: (backend: Awaited<ReturnType<typeof clipperBackend>>) => Promise<unknown>) {
+        setBusy(true);
+        onError(null);
+        try {
+            const backend = await clipperBackend();
+            await run(backend);
+            onState(await backend.getState());
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    if (!running) {
+        return (
+            <XStack gap="$2">
+                <Button
+                    icon={<Play size={16} />}
+                    disabled={busy}
+                    onPress={() => void act((backend) => backend.startActual())}
+                >
+                    Start untracked time
+                </Button>
+            </XStack>
+        );
+    }
+
+    const elapsed = Math.max(0, now - new Date(running.start).getTime());
+    return (
+        <Card
+            bg="#2a2416"
+            p="$3"
+            style={{ borderColor: "#d0a33a", borderWidth: 1 }}
+        >
+            <XStack items="center" justify="space-between" gap="$3" flexWrap="wrap">
+                <YStack>
+                    <Text>{running.title}</Text>
+                    <Text fontSize={12} color="#d0a33a">
+                        Running · {formatElapsed(elapsed)}
+                    </Text>
+                </YStack>
+                <Button
+                    theme="yellow"
+                    icon={busy ? <Spinner /> : <Square size={14} />}
+                    disabled={busy}
+                    onPress={() => void act((backend) => backend.stopActual(running.id))}
+                >
+                    Stop
+                </Button>
+            </XStack>
+        </Card>
+    );
+}
+
+function formatElapsed(ms: number): string {
+    const total = Math.floor(ms / 1000);
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = total % 60;
+    const pad = (value: number) => String(value).padStart(2, "0");
+    return hours > 0
+        ? `${hours}:${pad(minutes)}:${pad(seconds)}`
+        : `${minutes}:${pad(seconds)}`;
 }
 
 function OccurrenceChip({ occurrence }: { occurrence: OccurrenceView }) {
@@ -1039,11 +1218,14 @@ function addDays(date: Date, days: number): Date {
     return copy;
 }
 
-function overlapsDay(occurrence: OccurrenceView, day: Date): boolean {
+/// Whether a span touches a day column. Takes anything with a start and end, so
+/// planned occurrences and logged time share one rule.
+function overlapsDay(span: { start: string; end: string }, day: Date): boolean {
     const dayStart = startOfDay(day).getTime();
     const dayEnd = dayStart + DAY_MINUTES * 60000;
-    const start = new Date(occurrence.start).getTime();
-    const end = new Date(occurrence.end).getTime();
+    const start = new Date(span.start).getTime();
+    // A running timer has no end yet; treat it as running up to now.
+    const end = span.end ? new Date(span.end).getTime() : Date.now();
     // Half-open on both sides, so a block ending exactly at midnight belongs to
     // the day it started in and not to the next one.
     return start < dayEnd && end > dayStart;
