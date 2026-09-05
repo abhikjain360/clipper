@@ -89,7 +89,7 @@ const DatePickerImpl = (props: DatePickerProps) => {
 
     return (
         <DatePickerProvider config={config}>
-            <Popover ref={popoverRef} keepChildrenMounted size="$4" allowFlip {...rest}>
+            <Popover ref={popoverRef} size="$4" allowFlip {...rest}>
                 <Adapt when="maxSm">
                     <Sheet modal dismissOnSnapToBottom snapPointsMode="fit">
                         <Sheet.Frame p="$4" width="100%" items="center">
