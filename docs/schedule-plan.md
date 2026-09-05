@@ -1194,6 +1194,11 @@ remaining abnormalarm features (snooze, sounds/ramp, flashlight, skip-next and
 widget). Do not equate the implemented core model with these product surfaces.
 The broad kind registry and `AppState` redesign also remain out of scope.
 
+D6's retained revision anchors have a storage cost the JSON-file local store was
+never shaped for, and closing it is agreed but unstarted. See
+[`local-store-plan.md`](local-store-plan.md) for the findings and the decisions;
+it is a consequence of D6 rather than a defect in it.
+
 Reference docs produced alongside this plan, each with a provenance header
 stating what was verified by hand: [`object-kind-plumbing.md`](object-kind-plumbing.md),
 [`time-management-prior-art.md`](time-management-prior-art.md) (note its §4.8
