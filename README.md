@@ -262,3 +262,17 @@ other project under the AGPL. Only modifications to Clipper's own source code
 carry the AGPL's copyleft — including its network-use (SaaS) disclosure
 requirement — and must be released in source form. See [LICENSE](LICENSE) for
 the exact terms.
+
+### Standalone web hosting headers
+
+Vite dev and preview send these headers. Configure your production static host
+or reverse proxy to send them too, including on SPA fallback HTML responses:
+
+```http
+Content-Security-Policy: frame-ancestors 'none'
+X-Frame-Options: DENY
+```
+
+The remaining CSP restrictions are in `web/index.html`. The framing restriction
+must be an HTTP header: browsers ignore `frame-ancestors` in meta tags. A static
+build cannot set HTTP response headers by itself.

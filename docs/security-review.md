@@ -81,18 +81,15 @@ choice) and a recommendation.
    _Recommend:_ pass an explicit hardened `ksf` (e.g. ≥64 MiB / t≥3) in both
    finish calls; at minimum document the actual parameters in `docs/opaque.md`.
 
-4. **Standalone browser client ships CSP only via `<meta>`, so `frame-ancestors`
-   is ignored (no clickjacking protection).** `web/index.html`,
-   `web/vite.config.ts` · Browsers honor `frame-ancestors` only as an HTTP
-   response header; the declared `frame-ancestors 'none'` is silently dropped,
-   and the static host sends no CSP header and no `X-Frame-Options`, so the web
-   deployment is embeddable cross-origin (UI-redress against Logout/Delete/Remove-
-   device/Add-Clipboard). Does not break E2E confidentiality; the Tauri desktop
-   build is fine (CSP injected as a real header). _Decision:_ production fix is a
-   serving-layer choice (which host serves `web/dist` and how it emits headers);
-   there is an in-repo lever for dev/preview parity (a `headers` map in
-   `vite.config.ts`). _Recommend:_ serve `web/dist` with a real HTTP CSP +
-   `X-Frame-Options: DENY`; document the host header requirement.
+4. **Production static hosting must supply anti-framing headers.**
+   `web/index.html`, `web/vite.config.ts` · Fixed for Vite dev and preview on
+   2026-09-10: both send `Content-Security-Policy: frame-ancestors 'none'` and
+   `X-Frame-Options: DENY`. The ineffective meta directive was removed; other
+   meta CSP restrictions remain. These Vite settings do not configure an
+   independent production static host. Any host serving `web/dist` must send
+   the same headers on HTML responses, including SPA fallback routes. See the
+   hosting note in `README.md`. Production verification remains pending until
+   a host is selected.
 
 5. **Auth form fields lack autofill/credential-persistence suppression; web
    renders the one-time access key as a plaintext field.** `web/src/App.tsx`,
