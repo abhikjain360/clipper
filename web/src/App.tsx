@@ -1,5 +1,6 @@
 import {
     ArrowLeft,
+    CalendarClock,
     Clipboard,
     Copy,
     Download,
@@ -56,6 +57,7 @@ import {
 } from "./backend";
 import type { AppState, ClipboardItem, CollabItem, DeviceInfo, FileItem } from "@clipper/shared";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { SchedulePanel } from "./SchedulePanel";
 
 // Lazy-loaded so the heavy CodeMirror dependency (editor core, vim mode, and the
 // per-language packs) splits into its own chunk and stays off the initial load
@@ -416,6 +418,13 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                         Collab Docs
                     </Button>
                     <Button
+                        theme={location === "/schedule" ? "blue" : undefined}
+                        icon={<CalendarClock size={16} />}
+                        onPress={() => setLocation("/schedule")}
+                    >
+                        Schedule
+                    </Button>
+                    <Button
                         theme={location === "/devices" ? "blue" : undefined}
                         icon={<Smartphone size={16} />}
                         onPress={() => setLocation("/devices")}
@@ -442,6 +451,13 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                     <Route path="/collab">
                         <CollabPanel
                             collabDocs={state.collab_docs}
+                            onState={onState}
+                            onError={setError}
+                        />
+                    </Route>
+                    <Route path="/schedule">
+                        <SchedulePanel
+                            items={state.schedule_items}
                             onState={onState}
                             onError={setError}
                         />
