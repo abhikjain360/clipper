@@ -18,6 +18,84 @@ body {
         sans-serif;
 }
 
+.event-hover {
+    position: fixed;
+    z-index: 10000;
+    width: 320px;
+    max-width: calc(100vw - 16px);
+    max-height: 132px;
+    overflow: auto;
+    padding: 12px 16px;
+    border: 1px solid #526171;
+    border-radius: 8px;
+    background: #222a33;
+    color: #f2f5f7;
+    box-shadow: 0 6px 24px #0008;
+    font-size: 15px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    pointer-events: none;
+}
+.event-hover strong {
+    display: block;
+    font-size: 16px;
+}
+.event-hover div {
+    color: #bac7d5;
+}
+.month-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    min-width: 700px;
+}
+.month-heading {
+    padding: 8px;
+    text-align: center;
+    color: #8b949e;
+}
+.month-cell {
+    min-width: 0;
+    min-height: 120px;
+    padding: 6px;
+    border: 1px solid #252b31;
+}
+.month-cell[data-outside="true"] {
+    background: #101214;
+}
+.month-date,
+.month-event,
+.month-actual {
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+}
+.month-date {
+    padding: 4px 8px;
+    background: transparent;
+    border-radius: 4px;
+}
+.month-date[aria-current="date"] {
+    background: #245c92;
+}
+.month-event {
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border-radius: 3px;
+    margin-top: 3px;
+    padding: 4px;
+    font-size: 12px;
+}
+.month-actual {
+    background: transparent;
+    color: #7bd88f;
+    font-size: 12px;
+    margin-top: 6px;
+}
+
 button,
 input,
 textarea,
