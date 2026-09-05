@@ -249,6 +249,16 @@ document synced over a raw `y-websocket` `WebsocketProvider` to
   referrers) and persisted **plaintext at rest** in both the browser
   `localStorage` cache and the native `local_store` object cache. Blast radius is
   a single shared doc, and the at-rest read is same-user — hence Low.
+- **Note (2026-09-07):** the token is also the one server credential that
+  reaches **Tauri webview JS**. The desktop secrets invariant (Part II: no Tauri
+  command returns the bearer token, keys, or IPC HMAC secret) holds for the
+  session, but the collab editor's `CollabConfig` carries `shareToken` into
+  `WebsocketProvider` (`web/src/CodeEditor.tsx`), so webview script — which
+  otherwise holds no credentials and can only act as a confused deputy (A3) —
+  directly possesses a live read+write bearer capability for every collab doc
+  the user has opened. Blast radius stays collab-only (the share token cannot
+  reach the authenticated API), but it is a real exception to "the webview holds
+  no secrets" and should be weighed if webview-XSS exposure is ever reassessed.
 - **Recommendation:** Move the token out of the URL (WS subprotocol or
   first-frame handshake); add expiry + rotate/revoke + a read-only viewer token;
   AEAD-wrap the collab record (incl. token) at rest.

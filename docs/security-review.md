@@ -252,7 +252,16 @@ Known and acknowledged; not currently being fixed.
   growth is bounded (`limits.max_user_devices`, enforced in `issue_session`, now
   inside the login transaction so a failed session insert cannot orphan a device).
 - **WebSocket has no `Origin` check** (mitigated by non-cookie bearer tickets a
-  cross-origin page cannot obtain).
+  cross-origin page cannot obtain). Scope note: the ticket/subprotocol design
+  defeats only _cross-origin_ hijack (the browser never attaches the credential
+  ambiently, so a foreign origin must possess the ticket to authenticate). It
+  does nothing against _same-origin_ script: on the standalone web client XSS
+  reads the bearer token from the `clipper.session.v2` sessionStorage blob and
+  can mint tickets itself (`POST /api/ws-ticket`), and the collab share token
+  sits in JS memory / `localStorage` and in the WS URL query string. In-origin
+  script execution is already accepted as total account compromise (client audit
+  A1–A3, crypto review CR5); this notes that WS credentials are in scope of that
+  compromise, not behind any additional boundary.
 - **No global aggregate cap on live WebSocket connections.** Per-user concurrent
   connections are bounded (`limits.max_user_ws_connections`, default 32) and
   dead/idle connections are reaped by a server Ping every 30s with a 75s idle
