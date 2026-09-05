@@ -12,16 +12,18 @@ use tracing::{debug, error};
 use uuid::Uuid;
 
 use crate::{
-    entity::sessions,
+    entity::{devices, sessions},
     routes::{ApiError, error_response},
     state::AppState,
 };
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
-/// Refresh `sessions.last_seen_at` at most this often; updating it on every
-/// request would turn each authenticated call into a SQLite write.
-const LAST_SEEN_REFRESH_SECS: i64 = 60;
+/// Refresh `sessions.last_seen_at` / `devices.last_seen_at` at most this
+/// often; updating them on every request would turn each authenticated call
+/// into a SQLite write. Shared with `ws.rs`, which applies the same cadence
+/// to frames arriving on live connections.
+pub(crate) const LAST_SEEN_REFRESH_SECS: i64 = 60;
 
 pub fn hash_access_key(
     access_key: &str,
@@ -95,9 +97,19 @@ pub async fn auth_middleware(
         _ = sessions::Entity::update_many()
             .col_expr(
                 sessions::Column::LastSeenAt,
-                sea_orm::sea_query::Expr::value(now_str),
+                sea_orm::sea_query::Expr::value(now_str.clone()),
             )
             .filter(sessions::Column::Id.eq(sess.id))
+            .exec(state.db())
+            .await;
+        // The devices list surfaces `devices.last_seen_at` as device activity;
+        // keep it in step with the session so it reflects use, not just login.
+        _ = devices::Entity::update_many()
+            .col_expr(
+                devices::Column::LastSeenAt,
+                sea_orm::sea_query::Expr::value(now_str),
+            )
+            .filter(devices::Column::Id.eq(sess.device_id))
             .exec(state.db())
             .await;
     }

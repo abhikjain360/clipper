@@ -19,8 +19,8 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthInfo,
-    entity::{event_log, objects, sessions},
+    auth::{AuthInfo, LAST_SEEN_REFRESH_SECS},
+    entity::{devices, event_log, objects, sessions},
     rate_limit::rate_limited_error,
     routes::{Postcard, RouteResult, error_response},
     state::AppState,
@@ -63,6 +63,26 @@ const WS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// tighter than steady-state sends so a client that completes the hello and then
 /// stops reading cannot wedge the ack before the liveness loop is even entered.
 const WS_HELLO_ACK_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Refresh `devices.last_seen_at` from a live connection's inbound frames,
+/// throttled to the same cadence as the HTTP auth middleware so an active
+/// socket costs at most one write per device per minute. When the socket
+/// closes or idles out, the timestamp simply stops advancing — that is the
+/// "went away" signal, so no write is needed on close.
+async fn touch_device_last_seen(state: &AppState, device_id: Uuid, last_touch: &mut Instant) {
+    if last_touch.elapsed() < std::time::Duration::from_secs(LAST_SEEN_REFRESH_SECS as u64) {
+        return;
+    }
+    *last_touch = Instant::now();
+    _ = devices::Entity::update_many()
+        .col_expr(
+            devices::Column::LastSeenAt,
+            sea_orm::sea_query::Expr::value(Utc::now().to_rfc3339()),
+        )
+        .filter(devices::Column::Id.eq(device_id))
+        .exec(state.db())
+        .await;
+}
 
 /// A broadcast message sent to all connected WebSocket clients.
 #[derive(Clone, Debug)]
@@ -225,6 +245,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
     // rather than bursting a backlog of pings.
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_activity = Instant::now();
+    // The handshake already bumped last_seen via the auth middleware (or the
+    // ticket mint), so start the throttle clock here rather than writing again
+    // on the first inbound frame.
+    let mut last_seen_touch = Instant::now();
 
     loop {
         tokio::select! {
@@ -233,6 +257,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(data))) => {
                         last_activity = Instant::now();
+                        touch_device_last_seen(&state, auth.device_id, &mut last_seen_touch).await;
                         if !send_bounded(&mut socket, Message::Pong(data), WS_SEND_TIMEOUT).await {
                             break;
                         }
@@ -241,6 +266,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
                     // the peer is alive and resets the idle clock.
                     Some(Ok(_)) => {
                         last_activity = Instant::now();
+                        touch_device_last_seen(&state, auth.device_id, &mut last_seen_touch).await;
                     }
                     // A receive error means the stream is broken; stop rather
                     // than spin until the inevitable close/None.
