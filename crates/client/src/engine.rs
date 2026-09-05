@@ -1626,7 +1626,7 @@ impl SyncEngine {
             })?;
         let SourceKind::Ics { url } = &source.kind;
 
-        let text = fetch_calendar_feed(&url).await?;
+        let text = fetch_calendar_feed(url).await?;
         let outcome = parse_calendar_feed(&text, source.id)?;
 
         // Everything this source currently holds locally, by the provider's own
