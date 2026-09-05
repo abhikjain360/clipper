@@ -17,7 +17,7 @@ export type {
   MonthName,
   MonthlyRule,
   NthWeekday,
-  ObjectRef,
+  ObjectId,
   OccurrenceView,
   Recurrence,
   RecurrenceEnd,

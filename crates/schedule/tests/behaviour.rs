@@ -694,7 +694,7 @@ fn the_wire_format_is_self_describing() {
         recurrence: Recurrence::Every(Cadence::each(Frequency::Weekly {
             weekdays: WeekdaySet::weekdays(),
         })),
-        reference: None,
+        reference: Some(clipper_api_types::ObjectId::from(uuid::Uuid::new_v4())),
         alarm: None,
     };
 
@@ -711,6 +711,12 @@ fn the_wire_format_is_self_describing() {
         json["recurrence"]["frequency"]["weekdays"],
         serde_json::json!(["mon", "tue", "wed", "thu", "fri"]),
         "a weekday set travels as day names, never as its internal bitmask"
+    );
+
+    assert_eq!(
+        json["reference"],
+        item.reference.expect("reference").to_string(),
+        "a reference contains only the target UUID"
     );
 
     let back: ScheduleItem = serde_json::from_value(json).expect("round trip");

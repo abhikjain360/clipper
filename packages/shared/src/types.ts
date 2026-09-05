@@ -95,10 +95,8 @@ export type ScheduleSpan =
   // `start` is a date, "2026-03-29".
   | { kind: "all_day"; start: string; days: number };
 
-export type ObjectRef = {
-  kind: "clipboard" | "file" | "collab" | "schedule";
-  id: string;
-};
+/// UUID of a stored Clipper object; mirrors the Rust ObjectId wire format.
+export type ObjectId = string;
 
 /// A series definition. Stored once however often it repeats.
 /// When a block should raise an alarm. Absent means silent, which is the
@@ -113,7 +111,7 @@ export type ScheduleItem = {
   title: string;
   span: ScheduleSpan;
   recurrence: Recurrence;
-  reference?: ObjectRef | null;
+  reference?: ObjectId | null;
   alarm?: AlarmPolicy | null;
 };
 
