@@ -623,7 +623,7 @@ Changes to the design above:
   `range(min = 0)`), and `ObjectAadV1` gains the same field so a server cannot
   replay an old revision's ciphertext under the same identity — the AAD
   projection in `docs/object-envelopes.md` binds exactly the identity fields,
-  and revision is now one. Practically this is `ObjectEnvelopeBodyV2` /
+  and revision is now one. Practically this is `ObjectEnvelopeBody` /
   `object_version = 2` (postcard is positional; `Canon(body)` changes shape),
   and `validate_object_init_envelope` / `verify_object_list_item_envelope`
   accept v2. Repo policy ("do not preserve legacy schema… unless asked")

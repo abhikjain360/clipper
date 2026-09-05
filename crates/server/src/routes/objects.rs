@@ -10,7 +10,7 @@ use chrono::{Duration, Utc};
 use clipper_core::{
     crypto::{self, SHA256_BYTES},
     models::{
-        ApiErrorCode, OBJECT_ENVELOPE_VERSION_V2, ObjectCompleteRequest, ObjectCompleteResponse,
+        ApiErrorCode, OBJECT_ENVELOPE_VERSION, ObjectCompleteRequest, ObjectCompleteResponse,
         ObjectDeleteResponse, ObjectEnvelopeOperation, ObjectEventType, ObjectId,
         ObjectInitRequest, ObjectInitResponse, ObjectKind, ObjectListCursor, ObjectListItem,
         ObjectListResponse, ObjectPayloadDescriptor, ObjectPayloadInit, ObjectPayloadUpload,
@@ -951,7 +951,7 @@ pub async fn revise_object(
 
     let (kind, was_tombstoned, head) =
         head_revision_for_write(&state, auth.user_id, object_uuid).await?;
-    let head_body: clipper_core::models::ObjectEnvelopeV2 = postcard::from_bytes(&head.envelope)
+    let head_body: clipper_core::models::ObjectEnvelope = postcard::from_bytes(&head.envelope)
         .map_err(|e| {
             error!(
                 object_id = %object_uuid,
@@ -1825,8 +1825,8 @@ async fn object_list_items(
             );
             ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
-        let envelope: clipper_core::models::ObjectEnvelopeV2 =
-            postcard::from_bytes(&object.envelope).map_err(|e| {
+        let envelope: clipper_core::models::ObjectEnvelope = postcard::from_bytes(&object.envelope)
+            .map_err(|e| {
                 error!(
                     object_id = %object.id,
                     error = %e,
@@ -2237,7 +2237,7 @@ struct EnvelopeContext<'a> {
     meta_nonce: &'a [u8],
     meta_ciphertext: &'a [u8],
     payloads: &'a [ObjectPayloadInit],
-    envelope: &'a clipper_core::models::ObjectEnvelopeV2,
+    envelope: &'a clipper_core::models::ObjectEnvelope,
 }
 
 async fn validate_object_envelope(
@@ -2288,7 +2288,7 @@ async fn validate_object_envelope(
 
     if body.object_id.into_uuid() != object_id
         || body.object_type != ctx.kind
-        || body.envelope_version != OBJECT_ENVELOPE_VERSION_V2
+        || body.envelope_version != OBJECT_ENVELOPE_VERSION
         || body.source_device_id.into_uuid() != device_id
         || body.meta_nonce != ctx.meta_nonce
     {
@@ -2297,7 +2297,7 @@ async fn validate_object_envelope(
             device_id = %device_id,
             id_ok = body.object_id.into_uuid() == object_id,
             kind_ok = body.object_type == ctx.kind,
-            version_ok = body.envelope_version == OBJECT_ENVELOPE_VERSION_V2,
+            version_ok = body.envelope_version == OBJECT_ENVELOPE_VERSION,
             device_ok = body.source_device_id.into_uuid() == device_id,
             nonce_ok = body.meta_nonce == ctx.meta_nonce,
             "Rejected object write with envelope fields that do not match request context",
@@ -2404,7 +2404,7 @@ async fn validate_object_envelope(
 fn validate_envelope_payload(
     object_id: Uuid,
     payload: &ObjectPayloadInit,
-    envelope_payload: &clipper_core::models::ObjectEnvelopePayloadV2,
+    envelope_payload: &clipper_core::models::ObjectEnvelopePayload,
 ) -> Result<(), ApiError> {
     if envelope_payload.nonce != payload.nonce
         || envelope_payload.ciphertext_size != payload.ciphertext_size
@@ -3205,8 +3205,8 @@ mod tests {
     use clipper_core::{
         crypto::{self, XCHACHA20_NONCE_BYTES, sha256},
         models::{
-            ObjectEnvelopeBodyV2, ObjectEnvelopeOperation, ObjectEnvelopePayloadV2,
-            ObjectEnvelopeV2, ObjectPayloadComplete, ObjectPayloadInit,
+            ObjectEnvelope, ObjectEnvelopeBody, ObjectEnvelopeOperation, ObjectEnvelopePayload,
+            ObjectPayloadComplete, ObjectPayloadInit,
         },
     };
     use sea_orm::{ConnectionTrait, Database, PaginatorTrait};
@@ -3419,7 +3419,7 @@ mod tests {
             kind,
             meta_nonce.clone(),
             &meta_ciphertext,
-            vec![ObjectEnvelopePayloadV2 {
+            vec![ObjectEnvelopePayload {
                 id: payload_id.parse().expect("payload id"),
                 nonce: payload_nonce.clone(),
                 ciphertext_size: ciphertext.len() as i64,
@@ -3449,10 +3449,10 @@ mod tests {
         kind: ObjectKind,
         meta_nonce: Vec<u8>,
         meta_ciphertext: &[u8],
-        payloads: Vec<ObjectEnvelopePayloadV2>,
+        payloads: Vec<ObjectEnvelopePayload>,
         device_id: Uuid,
         signing_secret_key: &[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
-    ) -> ObjectEnvelopeV2 {
+    ) -> ObjectEnvelope {
         signed_envelope_at(
             object_id,
             kind,
@@ -3476,14 +3476,14 @@ mod tests {
         operation: ObjectEnvelopeOperation,
         meta_nonce: Vec<u8>,
         meta_ciphertext: &[u8],
-        payloads: Vec<ObjectEnvelopePayloadV2>,
+        payloads: Vec<ObjectEnvelopePayload>,
         device_id: Uuid,
         signing_secret_key: &[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
-    ) -> ObjectEnvelopeV2 {
-        let body = ObjectEnvelopeBodyV2 {
+    ) -> ObjectEnvelope {
+        let body = ObjectEnvelopeBody {
             object_id,
             object_type: kind,
-            envelope_version: OBJECT_ENVELOPE_VERSION_V2,
+            envelope_version: OBJECT_ENVELOPE_VERSION,
             revision,
             parent_hash,
             source_device_id: device_id.into(),
@@ -3493,7 +3493,7 @@ mod tests {
             sha256_meta_ciphertext: sha256(meta_ciphertext).to_vec(),
             payloads,
         };
-        ObjectEnvelopeV2 {
+        ObjectEnvelope {
             signature: crypto::sign_object_envelope_body(signing_secret_key, &body)
                 .expect("sign envelope"),
             body,
@@ -3514,7 +3514,7 @@ mod tests {
             .await
             .expect("query revision")
             .expect("head revision exists");
-        let envelope: ObjectEnvelopeV2 =
+        let envelope: ObjectEnvelope =
             postcard::from_bytes(&head.envelope).expect("decode head envelope");
         (
             head_revision as u64,
@@ -3588,7 +3588,7 @@ mod tests {
             ObjectEnvelopeOperation::Revise,
             meta_nonce.clone(),
             &meta_ciphertext,
-            vec![ObjectEnvelopePayloadV2 {
+            vec![ObjectEnvelopePayload {
                 id: payload_id,
                 nonce: payload_nonce.clone(),
                 ciphertext_size: ciphertext.len() as i64,
@@ -3643,7 +3643,7 @@ mod tests {
             ObjectEnvelopeOperation::Revise,
             meta_nonce.clone(),
             &meta_ciphertext,
-            vec![ObjectEnvelopePayloadV2 {
+            vec![ObjectEnvelopePayload {
                 id: payload_id,
                 nonce: payload_nonce.clone(),
                 ciphertext_size: ciphertext.len() as i64,
@@ -3891,7 +3891,7 @@ mod tests {
                 ObjectEnvelopeOperation::Revise,
                 meta_nonce.clone(),
                 &meta_ciphertext,
-                vec![ObjectEnvelopePayloadV2 {
+                vec![ObjectEnvelopePayload {
                     id: payload_id,
                     nonce: vec![5_u8; XCHACHA20_NONCE_BYTES],
                     ciphertext_size: ciphertext.len() as i64,
@@ -3956,7 +3956,7 @@ mod tests {
                 ObjectEnvelopeOperation::Revise,
                 meta_nonce.clone(),
                 &meta_ciphertext,
-                vec![ObjectEnvelopePayloadV2 {
+                vec![ObjectEnvelopePayload {
                     id: payload_id,
                     nonce: payload_nonce.clone(),
                     ciphertext_size: ciphertext.len() as i64,
@@ -4351,7 +4351,7 @@ mod tests {
         ];
         let envelope_payloads = payloads
             .iter()
-            .map(|(id, ciphertext)| ObjectEnvelopePayloadV2 {
+            .map(|(id, ciphertext)| ObjectEnvelopePayload {
                 id: (*id).into(),
                 nonce: vec![2_u8; XCHACHA20_NONCE_BYTES],
                 ciphertext_size: ciphertext.len() as i64,
@@ -4435,7 +4435,7 @@ mod tests {
             ObjectKind::File,
             meta_nonce.clone(),
             &meta_ciphertext,
-            vec![ObjectEnvelopePayloadV2 {
+            vec![ObjectEnvelopePayload {
                 id: payload_id.into(),
                 nonce: vec![2_u8; XCHACHA20_NONCE_BYTES],
                 ciphertext_size: ciphertext.len() as i64,

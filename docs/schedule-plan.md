@@ -1110,6 +1110,9 @@ overrides (the engine and record type support them, but nothing creates one yet
 — "skip today's gym" has no button), and undo, which D6 now makes possible
 without another format change but which has no button either.
 
+The historical `v2` format name below was subsequently normalized to initial
+format version 1 before release, without compatibility for development data.
+
 **D6 landed on 2026-09-08**, after the owner settled the retention question and
 asked for the parent link. It was deliberately skipped the night before, on the
 grounds that a wrong AAD projection fails silently — that premise no longer
@@ -1131,7 +1134,7 @@ holds, because the projection was made to fail loudly first. In order:
 5. `d6: fix what only a live run could show` — see below.
 
 **What the live run caught that nothing else did.** A shadowed
-`OBJECT_ENVELOPE_VERSION_V2` in the client, still holding 1 after the shared
+`OBJECT_ENVELOPE_VERSION` in the client, still holding 1 after the shared
 one became 2 — two constants, one name, two crates, and a compiler with no
 opinion. A listing that returned payloads from _every_ revision, because the
 query still filtered on object id alone. A WS handler that ignored `updated`

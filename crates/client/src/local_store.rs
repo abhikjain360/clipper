@@ -18,7 +18,7 @@ use clipper_app_types::{
 };
 use clipper_core::{
     crypto,
-    models::{ObjectEnvelopeBodyV2, ObjectEnvelopeV2, ObjectKind, ObjectPayloadDescriptor},
+    models::{ObjectEnvelope, ObjectEnvelopeBody, ObjectKind, ObjectPayloadDescriptor},
 };
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_family = "wasm"))]
@@ -115,7 +115,7 @@ pub struct EncryptedObject {
     pub payloads: Vec<ObjectPayloadDescriptor>,
     pub created_at: String,
     pub source_device_id: String,
-    pub envelope: ObjectEnvelopeV2,
+    pub envelope: ObjectEnvelope,
 }
 
 /// An encrypted object whose single payload is small enough to travel and be
@@ -2170,7 +2170,7 @@ fn present_revision_anchor(
 
 fn validate_revision_against_head(
     object_id: &str,
-    incoming: &ObjectEnvelopeBodyV2,
+    incoming: &ObjectEnvelopeBody,
     head: LocalHead,
     require_newer: bool,
 ) -> Result<(), LocalStoreError> {
@@ -2641,8 +2641,8 @@ pub enum LocalStoreError {
 #[cfg(test)]
 mod tests {
     use clipper_core::models::{
-        ClipboardMeta, OBJECT_ENVELOPE_SIGNATURE_BYTES, ObjectEnvelopeBodyV2,
-        ObjectEnvelopeOperation, ObjectEnvelopePayloadV2,
+        ClipboardMeta, OBJECT_ENVELOPE_SIGNATURE_BYTES, ObjectEnvelopeBody,
+        ObjectEnvelopeOperation, ObjectEnvelopePayload,
     };
 
     use super::*;
@@ -2676,10 +2676,10 @@ mod tests {
         let object_id = item.id.parse().expect("object id");
         let payload_id = uuid::Uuid::now_v7().into();
         let source_device_id = item.source_device_id.parse().expect("device id");
-        let aad_body = ObjectEnvelopeBodyV2 {
+        let aad_body = ObjectEnvelopeBody {
             object_id,
             object_type: ObjectKind::Clipboard,
-            envelope_version: crypto::OBJECT_ENVELOPE_VERSION_V2,
+            envelope_version: crypto::OBJECT_ENVELOPE_VERSION,
             revision,
             parent_hash,
             source_device_id,
@@ -2687,7 +2687,7 @@ mod tests {
             operation,
             meta_nonce: Vec::new(),
             sha256_meta_ciphertext: Vec::new(),
-            payloads: vec![ObjectEnvelopePayloadV2 {
+            payloads: vec![ObjectEnvelopePayload {
                 id: payload_id,
                 nonce: Vec::new(),
                 ciphertext_size: 0,
@@ -2703,13 +2703,13 @@ mod tests {
         let (payload_nonce, payload_ciphertext) =
             encrypt_clipboard_payload(payload, &TEST_KEY, &aad_body, payload_id)
                 .expect("payload encrypt");
-        let envelope_payload = ObjectEnvelopePayloadV2 {
+        let envelope_payload = ObjectEnvelopePayload {
             id: payload_id,
             nonce: payload_nonce.clone(),
             ciphertext_size: payload_ciphertext.len() as i64,
             sha256_ciphertext: crypto::sha256(&payload_ciphertext).to_vec(),
         };
-        let envelope_body = ObjectEnvelopeBodyV2 {
+        let envelope_body = ObjectEnvelopeBody {
             meta_nonce: meta_nonce.clone(),
             sha256_meta_ciphertext: crypto::sha256(&meta_ciphertext).to_vec(),
             payloads: vec![envelope_payload.clone()],
@@ -2727,7 +2727,7 @@ mod tests {
                 }],
                 created_at: item.created_at.clone(),
                 source_device_id: item.source_device_id.clone(),
-                envelope: ObjectEnvelopeV2 {
+                envelope: ObjectEnvelope {
                     body: envelope_body,
                     signature: vec![0; OBJECT_ENVELOPE_SIGNATURE_BYTES],
                 },

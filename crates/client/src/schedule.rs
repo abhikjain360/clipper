@@ -15,7 +15,7 @@ use clipper_app_types::{ActualView, CalendarSourceView, OccurrenceView, Schedule
 use clipper_core::{
     crypto,
     models::{
-        ObjectEnvelopeBodyV2, ObjectPayloadId, SCHEDULE_PAYLOAD_VERSION, ScheduleMeta,
+        ObjectEnvelopeBody, ObjectPayloadId, SCHEDULE_PAYLOAD_VERSION, ScheduleMeta,
         ScheduleRecordKind,
     },
 };
@@ -91,11 +91,11 @@ impl ScheduleRecord {
 pub fn encrypt_schedule_meta(
     meta: &ScheduleMeta,
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV2,
+    envelope_body: &ObjectEnvelopeBody,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
     let json = serde_json::to_vec(meta)
         .map_err(|e| crypto::CryptoError::Encrypt(format!("json: {}", e)))?;
-    let aad = crypto::object_meta_aad_v2(envelope_body)?;
+    let aad = crypto::object_meta_aad(envelope_body)?;
     let (nonce, ciphertext) = crypto::encrypt(encryption_key, &json, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
@@ -105,9 +105,9 @@ pub fn decrypt_schedule_meta(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV2,
+    envelope_body: &ObjectEnvelopeBody,
 ) -> Result<ScheduleMeta, crypto::CryptoError> {
-    let aad = crypto::object_meta_aad_v2(envelope_body)?;
+    let aad = crypto::object_meta_aad(envelope_body)?;
     let plaintext = crypto::decrypt(encryption_key, nonce, ciphertext, &aad)?;
     serde_json::from_slice(&plaintext)
         .map_err(|e| crypto::CryptoError::Decrypt(format!("json: {}", e)))
@@ -117,12 +117,12 @@ pub fn decrypt_schedule_meta(
 pub fn encrypt_schedule_payload(
     record: &ScheduleRecord,
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV2,
+    envelope_body: &ObjectEnvelopeBody,
     payload_id: ObjectPayloadId,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
     let json = serde_json::to_vec(record)
         .map_err(|e| crypto::CryptoError::Encrypt(format!("json: {}", e)))?;
-    let aad = crypto::object_payload_aad_v2(envelope_body, payload_id)?;
+    let aad = crypto::object_payload_aad(envelope_body, payload_id)?;
     let (nonce, ciphertext) = crypto::encrypt(encryption_key, &json, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
@@ -132,10 +132,10 @@ pub fn decrypt_schedule_payload(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV2,
+    envelope_body: &ObjectEnvelopeBody,
     payload_id: ObjectPayloadId,
 ) -> Result<ScheduleRecord, crypto::CryptoError> {
-    let aad = crypto::object_payload_aad_v2(envelope_body, payload_id)?;
+    let aad = crypto::object_payload_aad(envelope_body, payload_id)?;
     let plaintext = crypto::decrypt(encryption_key, nonce, ciphertext, &aad)?;
     serde_json::from_slice(&plaintext)
         .map_err(|e| crypto::CryptoError::Decrypt(format!("json: {}", e)))
