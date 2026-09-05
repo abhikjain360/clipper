@@ -3,6 +3,7 @@ packages:
   - packages/*
   - web
 overrides:
+  js-yaml: 4.3.2
   uuid: 11.1.1
   esbuild: 0.28.1
   esbuild-wasm: 0.28.1
