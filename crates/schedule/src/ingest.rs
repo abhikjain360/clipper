@@ -9,7 +9,7 @@
 //! belongs to whichever client holds the source (D4).
 
 #[cfg(not(target_family = "wasm"))]
-use std::num::NonZeroU32;
+use std::{collections::HashMap, num::NonZeroU32};
 
 #[cfg(not(target_family = "wasm"))]
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
@@ -19,13 +19,24 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[cfg(not(target_family = "wasm"))]
+use crate::item::{OverrideChange, OverrideId, RecurrenceId, ScheduleItemId};
+#[cfg(not(target_family = "wasm"))]
 use crate::recurrence::RawRule;
 #[cfg(not(target_family = "wasm"))]
 use crate::time::{BlockDuration, TimedStart};
 use crate::{
+    item::OccurrenceOverride,
     recurrence::{Recurrence, RecurrenceError},
     time::{ScheduleSpan, TimeError},
 };
+
+/// Bound parser work even when `parse_ics` is called outside the HTTP fetcher.
+#[cfg(not(target_family = "wasm"))]
+const MAX_ICS_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(not(target_family = "wasm"))]
+const MAX_COMPONENTS: usize = 50_000;
+#[cfg(not(target_family = "wasm"))]
+const MAX_PROPERTIES: usize = 500_000;
 
 /// Identifies a calendar source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -90,6 +101,11 @@ pub struct IngestedEvent {
     pub description: Option<String>,
     pub span: ScheduleSpan,
     pub recurrence: Recurrence,
+    /// Provider-owned exceptions to the recurrence set. IDs are derived from
+    /// the event and recurrence position, so refreshing an unchanged feed does
+    /// not manufacture a new revision.
+    #[serde(default)]
+    pub overrides: Vec<OccurrenceOverride>,
     pub status: IngestedStatus,
 }
 
@@ -143,16 +159,52 @@ pub struct SkippedEvent {
 pub fn parse_ics(text: &str, source: SourceId) -> Result<IngestOutcome, IngestError> {
     use calcard::icalendar::{ICalendar, ICalendarComponentType};
 
+    validate_calendar_envelope(text)?;
     let calendar =
         ICalendar::parse(text).map_err(|error| IngestError::Malformed(format!("{error:?}")))?;
+    if calendar.components.len() > MAX_COMPONENTS {
+        return Err(IngestError::LimitExceeded("too many calendar components"));
+    }
+    let property_count = calendar
+        .components
+        .iter()
+        .try_fold(0usize, |total, component| {
+            total.checked_add(component.entries.len())
+        })
+        .ok_or(IngestError::LimitExceeded("too many calendar properties"))?;
+    if property_count > MAX_PROPERTIES {
+        return Err(IngestError::LimitExceeded("too many calendar properties"));
+    }
+
     let mut outcome = IngestOutcome::default();
+    let mut masters = Vec::new();
+    let mut exceptions: HashMap<String, Vec<&calcard::icalendar::ICalendarComponent>> =
+        HashMap::new();
 
     for component in &calendar.components {
         if component.component_type != ICalendarComponentType::VEvent {
             continue;
         }
         let uid = text_property(component, "UID");
-        match event_from_component(component, source, uid.clone()) {
+        if property(component, "RECURRENCE-ID").is_some() {
+            match uid {
+                Some(uid) => exceptions.entry(uid).or_default().push(component),
+                None => outcome.skipped.push(SkippedEvent {
+                    uid: None,
+                    reason: IngestError::MissingUid.to_string(),
+                }),
+            }
+        } else {
+            masters.push((component, uid));
+        }
+    }
+
+    for (component, uid) in masters {
+        let matching = uid
+            .as_ref()
+            .and_then(|uid| exceptions.remove(uid))
+            .unwrap_or_default();
+        match event_from_component(component, &matching, source, uid.clone()) {
             Ok(event) => outcome.events.push(event),
             Err(reason) => outcome.skipped.push(SkippedEvent {
                 uid,
@@ -160,34 +212,71 @@ pub fn parse_ics(text: &str, source: SourceId) -> Result<IngestOutcome, IngestEr
             }),
         }
     }
+
+    for (uid, orphaned) in exceptions {
+        for _ in orphaned {
+            outcome.skipped.push(SkippedEvent {
+                uid: Some(uid.clone()),
+                reason: IngestError::MissingRecurringMaster.to_string(),
+            });
+        }
+    }
     Ok(outcome)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn validate_calendar_envelope(text: &str) -> Result<(), IngestError> {
+    if text.len() > MAX_ICS_BYTES {
+        return Err(IngestError::LimitExceeded("calendar exceeds 8 MiB"));
+    }
+    let mut nonempty = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = nonempty.next();
+    let last = nonempty.next_back();
+    let mut has_version = false;
+    for line in text.lines().map(str::trim) {
+        has_version |= line.eq_ignore_ascii_case("VERSION:2.0");
+    }
+    if !first.is_some_and(|line| line.eq_ignore_ascii_case("BEGIN:VCALENDAR"))
+        || !last.is_some_and(|line| line.eq_ignore_ascii_case("END:VCALENDAR"))
+        || !has_version
+    {
+        return Err(IngestError::Malformed(
+            "expected a complete VERSION:2.0 VCALENDAR".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(not(target_family = "wasm"))]
 fn event_from_component(
     component: &calcard::icalendar::ICalendarComponent,
+    exceptions: &[&calcard::icalendar::ICalendarComponent],
     source: SourceId,
     uid: Option<String>,
 ) -> Result<IngestedEvent, IngestError> {
     let uid = uid.ok_or(IngestError::MissingUid)?;
-    let start = date_time_property(component, "DTSTART").ok_or(IngestError::MissingStart)?;
-    let end = date_time_property(component, "DTEND");
+    let id = IngestedEvent::derive_id(source, &uid);
+    let start = date_time_property(component, "DTSTART")?.ok_or(IngestError::MissingStart)?;
+    let end = date_time_property(component, "DTEND")?;
+    let duration = duration_property(component)?;
 
-    let span = span_from(&start, end.as_ref())?;
+    let span = span_from(&start, end.as_ref(), duration.as_ref(), None)?;
     let recurrence = match rrule_text(component) {
         Some(rule) => Recurrence::Raw {
             rule: RawRule::new(rule)?,
         },
         None => Recurrence::Once,
     };
+    let overrides = recurrence_overrides(component, exceptions, id, &span)?;
 
     Ok(IngestedEvent {
-        id: IngestedEvent::derive_id(source, &uid),
+        id,
         source,
         title: text_property(component, "SUMMARY").unwrap_or_else(|| "(no title)".to_string()),
         description: text_property(component, "DESCRIPTION"),
         span,
         recurrence,
+        overrides,
         status: match text_property(component, "STATUS").as_deref() {
             Some("CANCELLED") => IngestedStatus::Cancelled,
             Some("TENTATIVE") => IngestedStatus::Tentative,
@@ -199,6 +288,7 @@ fn event_from_component(
 
 #[cfg(not(target_family = "wasm"))]
 /// A start as the feed expresses it, before it becomes a [`ScheduleSpan`].
+#[derive(Debug, Clone)]
 struct FeedTime {
     date: NaiveDate,
     /// `None` for a date-only value, which is what marks an all-day event.
@@ -208,46 +298,314 @@ struct FeedTime {
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn span_from(start: &FeedTime, end: Option<&FeedTime>) -> Result<ScheduleSpan, IngestError> {
-    let Some(clock) = start.time else {
-        // Date-only: an all-day event. DTEND is exclusive in RFC 5545, so a
-        // one-day event ends on the following date.
-        let days = end
-            .map(|end| (end.date - start.date).num_days())
-            .filter(|days| *days > 0)
-            .unwrap_or(1);
-        return Ok(ScheduleSpan::AllDay {
-            start: start.date,
-            days: NonZeroU32::new(days as u32).unwrap_or(NonZeroU32::MIN),
-        });
-    };
+impl FeedTime {
+    fn local(&self) -> Option<NaiveDateTime> {
+        self.time.map(|time| NaiveDateTime::new(self.date, time))
+    }
 
-    let local = NaiveDateTime::new(start.date, clock);
-    let minutes = match end.and_then(|end| end.time.map(|time| (end.date, time))) {
-        Some((end_date, end_time)) => {
-            let delta = NaiveDateTime::new(end_date, end_time) - local;
-            delta.num_minutes().max(1) as u32
-        }
-        // RFC 5545 says a VEVENT with no DTEND and no DURATION lasts a day when
-        // date-only, and is instantaneous otherwise. An instant cannot be drawn,
-        // so give it the shortest block the grid can show.
-        None => 5,
-    };
+    fn is_floating(&self) -> bool {
+        self.time.is_some() && self.zone.is_none() && !self.utc
+    }
 
-    Ok(ScheduleSpan::Timed {
-        start: match (start.zone, start.utc) {
+    fn timed_start(&self) -> Result<TimedStart, IngestError> {
+        let local = self.local().ok_or(IngestError::MismatchedDateType)?;
+        Ok(match (self.zone, self.utc) {
             (Some(zone), _) => TimedStart::Zoned { local, zone },
             (None, true) => TimedStart::Zoned {
                 local,
                 zone: Tz::UTC,
             },
-            // No TZID and no Z suffix is RFC 5545 floating time, and it means
-            // exactly what Clipper's floating means: this wall clock, wherever
-            // you are.
             (None, false) => TimedStart::Floating(local),
+        })
+    }
+
+    fn instant(&self) -> Result<chrono::DateTime<chrono::Utc>, IngestError> {
+        if self.is_floating() {
+            return Err(IngestError::MismatchedTimeZone);
+        }
+        Ok(self.timed_start()?.resolve(Tz::UTC)?)
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn span_from(
+    start: &FeedTime,
+    end: Option<&FeedTime>,
+    duration: Option<&calcard::icalendar::ICalendarDuration>,
+    inherited: Option<&ScheduleSpan>,
+) -> Result<ScheduleSpan, IngestError> {
+    if end.is_some() && duration.is_some() {
+        return Err(IngestError::ConflictingEnd);
+    }
+
+    let Some(clock) = start.time else {
+        if end.is_some_and(|end| end.time.is_some()) {
+            return Err(IngestError::MismatchedDateType);
+        }
+        // Date-only: an all-day event. DTEND is exclusive in RFC 5545, so a
+        // one-day event ends on the following date.
+        let days = if let Some(end) = end {
+            positive_days((end.date - start.date).num_days())?
+        } else if let Some(duration) = duration {
+            all_day_duration(duration)?
+        } else if let Some(ScheduleSpan::AllDay { days, .. }) = inherited {
+            days.get()
+        } else {
+            1
+        };
+        return Ok(ScheduleSpan::AllDay {
+            start: start.date,
+            days: NonZeroU32::new(days).expect("validated positive duration"),
+        });
+    };
+
+    let local = NaiveDateTime::new(start.date, clock);
+    let minutes = match end {
+        Some(end) => {
+            let end_local = end.local().ok_or(IngestError::MismatchedDateType)?;
+            let delta = if start.is_floating() && end.is_floating() {
+                end_local - local
+            } else if !start.is_floating() && !end.is_floating() {
+                end.instant()? - start.instant()?
+            } else {
+                return Err(IngestError::MismatchedTimeZone);
+            };
+            duration_minutes(delta.num_seconds())?
+        }
+        None if duration.is_some() => ical_duration_minutes(duration.expect("checked above"))?,
+        None => match inherited {
+            Some(ScheduleSpan::Timed { duration, .. }) => duration.minutes(),
+            _ => 5,
         },
+        // RFC 5545 says a VEVENT with no DTEND and no DURATION lasts a day when
+        // date-only, and is instantaneous otherwise. An instant cannot be drawn,
+        // so give it the shortest block the grid can show.
+    };
+
+    Ok(ScheduleSpan::Timed {
+        start: start.timed_start()?,
         duration: BlockDuration::from_minutes(minutes)?,
     })
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn positive_days(days: i64) -> Result<u32, IngestError> {
+    u32::try_from(days)
+        .ok()
+        .filter(|days| *days > 0)
+        .ok_or(IngestError::InvalidDuration)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn duration_minutes(seconds: i64) -> Result<u32, IngestError> {
+    if seconds <= 0 || seconds % 60 != 0 {
+        return Err(IngestError::InvalidDuration);
+    }
+    u32::try_from(seconds / 60).map_err(|_| IngestError::InvalidDuration)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn all_day_duration(duration: &calcard::icalendar::ICalendarDuration) -> Result<u32, IngestError> {
+    if duration.neg || duration.hours != 0 || duration.minutes != 0 || duration.seconds != 0 {
+        return Err(IngestError::InvalidDuration);
+    }
+    let days = u64::from(duration.weeks)
+        .checked_mul(7)
+        .and_then(|weeks| weeks.checked_add(u64::from(duration.days)))
+        .and_then(|days| u32::try_from(days).ok())
+        .ok_or(IngestError::InvalidDuration)?;
+    NonZeroU32::new(days)
+        .map(NonZeroU32::get)
+        .ok_or(IngestError::InvalidDuration)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn ical_duration_minutes(
+    duration: &calcard::icalendar::ICalendarDuration,
+) -> Result<u32, IngestError> {
+    if duration.neg {
+        return Err(IngestError::InvalidDuration);
+    }
+    let seconds = u64::from(duration.weeks)
+        .checked_mul(7 * 24 * 60 * 60)
+        .and_then(|value| value.checked_add(u64::from(duration.days) * 24 * 60 * 60))
+        .and_then(|value| value.checked_add(u64::from(duration.hours) * 60 * 60))
+        .and_then(|value| value.checked_add(u64::from(duration.minutes) * 60))
+        .and_then(|value| value.checked_add(u64::from(duration.seconds)))
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or(IngestError::InvalidDuration)?;
+    duration_minutes(seconds)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn duration_property(
+    component: &calcard::icalendar::ICalendarComponent,
+) -> Result<Option<calcard::icalendar::ICalendarDuration>, IngestError> {
+    use calcard::icalendar::ICalendarValue;
+
+    let Some(entry) = component
+        .entries
+        .iter()
+        .find(|entry| entry.name.as_str().eq_ignore_ascii_case("DURATION"))
+    else {
+        return Ok(None);
+    };
+    match entry.values.first() {
+        Some(ICalendarValue::Duration(duration)) => Ok(Some(duration.clone())),
+        _ => Err(IngestError::InvalidDuration),
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn recurrence_overrides(
+    master: &calcard::icalendar::ICalendarComponent,
+    exceptions: &[&calcard::icalendar::ICalendarComponent],
+    event_id: Uuid,
+    master_span: &ScheduleSpan,
+) -> Result<Vec<OccurrenceOverride>, IngestError> {
+    use std::collections::BTreeMap;
+
+    let item = ScheduleItemId(event_id);
+    let mut by_recurrence_id = BTreeMap::new();
+
+    for added in recurrence_times(master, "RDATE")? {
+        let recurrence_id = recurrence_id_for(master_span, &added)?;
+        let span = span_at(master_span, &added)?;
+        by_recurrence_id.insert(
+            recurrence_id,
+            make_override(
+                event_id,
+                item,
+                recurrence_id,
+                OverrideChange::Rescheduled(span),
+            ),
+        );
+    }
+
+    for exception in exceptions {
+        let recurrence_entry =
+            property(exception, "RECURRENCE-ID").ok_or(IngestError::MissingRecurrenceId)?;
+        if recurrence_entry.params.iter().any(|parameter| {
+            matches!(
+                parameter.name,
+                calcard::icalendar::ICalendarParameterName::Range
+            )
+        }) {
+            return Err(IngestError::UnsupportedRecurrenceRange);
+        }
+        let recurrence_time = feed_time_from_entry(recurrence_entry)?;
+        let recurrence_id = recurrence_id_for(master_span, &recurrence_time)?;
+        let change = if text_property(exception, "STATUS").as_deref() == Some("CANCELLED") {
+            OverrideChange::Cancelled
+        } else {
+            let start =
+                date_time_property(exception, "DTSTART")?.ok_or(IngestError::MissingStart)?;
+            let end = date_time_property(exception, "DTEND")?;
+            let duration = duration_property(exception)?;
+            OverrideChange::Rescheduled(span_from(
+                &start,
+                end.as_ref(),
+                duration.as_ref(),
+                Some(master_span),
+            )?)
+        };
+        by_recurrence_id.insert(
+            recurrence_id,
+            make_override(event_id, item, recurrence_id, change),
+        );
+    }
+
+    // RFC 5545 gives EXDATE precedence over inclusion dates. Apply it last so
+    // a duplicated RDATE, or a detached component for the same recurrence
+    // position, cannot accidentally resurrect an explicitly excluded date.
+    for excluded in recurrence_times(master, "EXDATE")? {
+        let recurrence_id = recurrence_id_for(master_span, &excluded)?;
+        by_recurrence_id.insert(
+            recurrence_id,
+            make_override(event_id, item, recurrence_id, OverrideChange::Cancelled),
+        );
+    }
+
+    Ok(by_recurrence_id.into_values().collect())
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn make_override(
+    event_id: Uuid,
+    item: ScheduleItemId,
+    recurrence_id: RecurrenceId,
+    change: OverrideChange,
+) -> OccurrenceOverride {
+    let stable_name = format!("{recurrence_id:?}");
+    OccurrenceOverride {
+        id: OverrideId(Uuid::new_v5(&event_id, stable_name.as_bytes())),
+        item,
+        recurrence_id,
+        change,
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn recurrence_id_for(
+    master_span: &ScheduleSpan,
+    time: &FeedTime,
+) -> Result<RecurrenceId, IngestError> {
+    match master_span {
+        ScheduleSpan::AllDay { .. } if time.time.is_none() => Ok(RecurrenceId::Date(time.date)),
+        ScheduleSpan::Timed {
+            start: TimedStart::Floating(_),
+            ..
+        } if time.is_floating() => Ok(RecurrenceId::Floating(
+            time.local().expect("floating times are timed"),
+        )),
+        ScheduleSpan::Timed {
+            start: TimedStart::Zoned { .. },
+            ..
+        } if time.time.is_some() && !time.is_floating() => {
+            Ok(RecurrenceId::Instant(time.instant()?))
+        }
+        _ => Err(IngestError::MismatchedDateType),
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn span_at(master_span: &ScheduleSpan, time: &FeedTime) -> Result<ScheduleSpan, IngestError> {
+    match master_span {
+        ScheduleSpan::Timed { duration, .. } if time.time.is_some() => Ok(ScheduleSpan::Timed {
+            start: time.timed_start()?,
+            duration: *duration,
+        }),
+        ScheduleSpan::AllDay { days, .. } if time.time.is_none() => Ok(ScheduleSpan::AllDay {
+            start: time.date,
+            days: *days,
+        }),
+        _ => Err(IngestError::MismatchedDateType),
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn recurrence_times(
+    component: &calcard::icalendar::ICalendarComponent,
+    name: &str,
+) -> Result<Vec<FeedTime>, IngestError> {
+    use calcard::icalendar::ICalendarValue;
+
+    let mut times = Vec::new();
+    for entry in component
+        .entries
+        .iter()
+        .filter(|entry| entry.name.as_str().eq_ignore_ascii_case(name))
+    {
+        for value in &entry.values {
+            match value {
+                ICalendarValue::PartialDateTime(partial) => {
+                    times.push(feed_time_from_partial(entry, partial)?);
+                }
+                _ => return Err(IngestError::UnsupportedRecurrenceDate),
+            }
+        }
+    }
+    Ok(times)
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -286,40 +644,88 @@ fn rrule_text(component: &calcard::icalendar::ICalendarComponent) -> Option<Stri
 fn date_time_property(
     component: &calcard::icalendar::ICalendarComponent,
     name: &str,
-) -> Option<FeedTime> {
-    use calcard::icalendar::{ICalendarParameterName, ICalendarParameterValue, ICalendarValue};
+) -> Result<Option<FeedTime>, IngestError> {
+    let Some(entry) = property(component, name) else {
+        return Ok(None);
+    };
+    feed_time_from_entry(entry).map(Some)
+}
 
-    let entry = component
+#[cfg(not(target_family = "wasm"))]
+fn property<'a>(
+    component: &'a calcard::icalendar::ICalendarComponent,
+    name: &str,
+) -> Option<&'a calcard::icalendar::ICalendarEntry> {
+    component
         .entries
         .iter()
-        .find(|entry| entry.name.as_str().eq_ignore_ascii_case(name))?;
-    let ICalendarValue::PartialDateTime(partial) = entry.values.first()? else {
-        return None;
+        .find(|entry| entry.name.as_str().eq_ignore_ascii_case(name))
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn feed_time_from_entry(
+    entry: &calcard::icalendar::ICalendarEntry,
+) -> Result<FeedTime, IngestError> {
+    use calcard::icalendar::ICalendarValue;
+
+    let Some(ICalendarValue::PartialDateTime(partial)) = entry.values.first() else {
+        return Err(IngestError::InvalidDateTime);
     };
+    feed_time_from_partial(entry, partial)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn feed_time_from_partial(
+    entry: &calcard::icalendar::ICalendarEntry,
+    partial: &calcard::common::PartialDateTime,
+) -> Result<FeedTime, IngestError> {
+    use calcard::icalendar::{ICalendarParameterName, ICalendarParameterValue};
 
     let date = NaiveDate::from_ymd_opt(
-        i32::from(partial.year?),
-        u32::from(partial.month?),
-        u32::from(partial.day?),
-    )?;
-    let time = partial.hour.and_then(|hour| {
-        NaiveTime::from_hms_opt(
-            u32::from(hour),
-            u32::from(partial.minute.unwrap_or(0)),
-            u32::from(partial.second.unwrap_or(0)),
-        )
-    });
+        i32::from(partial.year.ok_or(IngestError::InvalidDateTime)?),
+        u32::from(partial.month.ok_or(IngestError::InvalidDateTime)?),
+        u32::from(partial.day.ok_or(IngestError::InvalidDateTime)?),
+    )
+    .ok_or(IngestError::InvalidDateTime)?;
+    let time = partial
+        .hour
+        .map(|hour| {
+            NaiveTime::from_hms_opt(
+                u32::from(hour),
+                u32::from(partial.minute.unwrap_or(0)),
+                u32::from(partial.second.unwrap_or(0)),
+            )
+            .ok_or(IngestError::InvalidDateTime)
+        })
+        .transpose()?;
 
-    let zone = entry.params.iter().find_map(|param| {
-        matches!(param.name, ICalendarParameterName::Tzid)
-            .then(|| match &param.value {
-                ICalendarParameterValue::Text(name) => name.parse::<Tz>().ok(),
-                _ => None,
-            })
-            .flatten()
-    });
+    let zone = match entry
+        .params
+        .iter()
+        .find(|param| matches!(param.name, ICalendarParameterName::Tzid))
+    {
+        Some(param) => match &param.value {
+            ICalendarParameterValue::Text(name) => Some(
+                name.parse::<Tz>()
+                    .map_err(|_| IngestError::UnknownTimeZone(name.clone()))?,
+            ),
+            _ => return Err(IngestError::InvalidDateTime),
+        },
+        None => None,
+    };
+    if zone.is_some() && partial.tz_hour.is_some() {
+        return Err(IngestError::MismatchedTimeZone);
+    }
+    if partial.tz_hour.is_some()
+        && (partial.tz_hour != Some(0) || partial.tz_minute.unwrap_or(0) != 0)
+    {
+        // RFC 5545 DATE-TIME permits UTC (`Z`) or a TZID, not a numeric UTC
+        // offset. The domain model intentionally has no fixed-offset zone, so
+        // accepting one as UTC would move the event.
+        return Err(IngestError::UnsupportedUtcOffset);
+    }
 
-    Some(FeedTime {
+    Ok(FeedTime {
         date,
         time,
         zone,
@@ -332,10 +738,34 @@ fn date_time_property(
 pub enum IngestError {
     #[error("calendar feed could not be parsed: {0}")]
     Malformed(String),
+    #[error("calendar feed limit exceeded: {0}")]
+    LimitExceeded(&'static str),
     #[error("event has no UID, so it cannot be tracked across refreshes")]
     MissingUid,
     #[error("event has no DTSTART")]
     MissingStart,
+    #[error("recurrence exception has no RECURRENCE-ID")]
+    MissingRecurrenceId,
+    #[error("recurrence exception has no matching master event")]
+    MissingRecurringMaster,
+    #[error("event contains an invalid date or time")]
+    InvalidDateTime,
+    #[error("TZID {0:?} is not an IANA time zone known to this build")]
+    UnknownTimeZone(String),
+    #[error("DTSTART and DTEND use incompatible date or date-time values")]
+    MismatchedDateType,
+    #[error("DTSTART and DTEND mix floating and absolute time")]
+    MismatchedTimeZone,
+    #[error("numeric UTC offsets are not supported in iCalendar DATE-TIME values")]
+    UnsupportedUtcOffset,
+    #[error("event has both DTEND and DURATION")]
+    ConflictingEnd,
+    #[error("event duration must be positive, fit in minutes, and match its value type")]
+    InvalidDuration,
+    #[error("RDATE periods are not supported")]
+    UnsupportedRecurrenceDate,
+    #[error("RECURRENCE-ID;RANGE=THISANDFUTURE is not supported")]
+    UnsupportedRecurrenceRange,
     #[error(transparent)]
     Time(#[from] TimeError),
     #[error(transparent)]

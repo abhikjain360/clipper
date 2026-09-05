@@ -279,3 +279,231 @@ fn an_ingested_series_expands() {
         "2026-09-07 09:30",
     );
 }
+
+#[test]
+fn garbage_and_incomplete_calendars_are_rejected_but_an_empty_snapshot_is_valid() {
+    let source = SourceId(uuid_fixture());
+    for invalid in [
+        "this is not a calendar",
+        "<html><body>sign in</body></html>",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n",
+    ] {
+        assert!(
+            parse_ics(invalid, source).is_err(),
+            "must reject {invalid:?} instead of treating it as an empty snapshot"
+        );
+    }
+
+    let empty = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n";
+    let outcome = parse_ics(empty, source).expect("an explicit empty snapshot is valid");
+    assert!(outcome.events.is_empty());
+    assert!(outcome.skipped.is_empty());
+}
+
+#[test]
+fn parser_has_an_input_size_ceiling() {
+    let mut oversized = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n".to_string();
+    oversized.push_str(&" ".repeat(8 * 1024 * 1024));
+    assert!(parse_ics(&oversized, SourceId(uuid_fixture())).is_err());
+}
+
+#[test]
+fn an_unknown_tzid_skips_the_event_instead_of_becoming_floating() {
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:unknown-zone@example.com\r\nSUMMARY:Unknown zone\r\n\
+DTSTART;TZID=Mars/Olympus_Mons:20260908T090000\r\n\
+DTEND;TZID=Mars/Olympus_Mons:20260908T100000\r\n\
+END:VEVENT\r\nEND:VCALENDAR\r\n";
+    let outcome = parse_ics(feed, SourceId(uuid_fixture())).expect("the feed itself parses");
+    assert!(outcome.events.is_empty());
+    assert_eq!(outcome.skipped.len(), 1);
+    assert!(outcome.skipped[0].reason.contains("Mars/Olympus_Mons"));
+}
+
+#[test]
+fn durations_use_instants_across_zones_and_dst() {
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:mixed@example.com\r\nDTSTART;TZID=America/New_York:20260115T090000\r\n\
+DTEND:20260115T150000Z\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\n\
+UID:dst@example.com\r\nDTSTART;TZID=Europe/Berlin:20260329T013000\r\n\
+DTEND;TZID=Europe/Berlin:20260329T033000\r\nEND:VEVENT\r\n\
+END:VCALENDAR\r\n";
+    let outcome = parse_ics(feed, SourceId(uuid_fixture())).expect("feed parses");
+    assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+    for event in outcome.events {
+        let ScheduleSpan::Timed { duration, .. } = event.span else {
+            panic!("timed fixture");
+        };
+        assert_eq!(duration.minutes(), 60, "{} uses elapsed time", event.uid);
+    }
+}
+
+#[test]
+fn duration_properties_are_honoured_for_timed_and_all_day_events() {
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:timed-duration@example.com\r\nDTSTART:20260908T090000Z\r\n\
+DURATION:PT1H45M\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\n\
+UID:day-duration@example.com\r\nDTSTART;VALUE=DATE:20260908\r\n\
+DURATION:P2D\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let outcome = parse_ics(feed, SourceId(uuid_fixture())).expect("feed parses");
+    assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+
+    let timed = outcome
+        .events
+        .iter()
+        .find(|event| event.uid.starts_with("timed"))
+        .expect("timed event");
+    let ScheduleSpan::Timed { duration, .. } = timed.span else {
+        panic!("timed span");
+    };
+    assert_eq!(duration.minutes(), 105);
+
+    let all_day = outcome
+        .events
+        .iter()
+        .find(|event| event.uid.starts_with("day"))
+        .expect("all-day event");
+    let ScheduleSpan::AllDay { days, .. } = all_day.span else {
+        panic!("all-day span");
+    };
+    assert_eq!(days.get(), 2);
+}
+
+#[test]
+fn exdate_rdate_and_recurrence_id_components_become_overrides() {
+    use chrono::{TimeZone, Utc};
+    use clipper_schedule::{
+        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, Window,
+    };
+
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:series@example.com\r\nSUMMARY:Series\r\nDTSTART:20260901T090000Z\r\n\
+DTEND:20260901T100000Z\r\nRRULE:FREQ=DAILY;COUNT=4\r\n\
+EXDATE:20260902T090000Z\r\nRDATE:20260905T090000Z\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:series@example.com\r\nRECURRENCE-ID:20260903T090000Z\r\n\
+DTSTART:20260903T140000Z\r\nDTEND:20260903T150000Z\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:series@example.com\r\nRECURRENCE-ID:20260904T090000Z\r\n\
+STATUS:CANCELLED\r\nEND:VEVENT\r\n\
+END:VCALENDAR\r\n";
+    let source = SourceId(uuid_fixture());
+    let event = parse_ics(feed, source)
+        .expect("feed parses")
+        .events
+        .pop()
+        .expect("master event");
+    assert_eq!(event.overrides.len(), 4);
+    assert_eq!(
+        event,
+        parse_ics(feed, source)
+            .expect("second pass parses")
+            .events
+            .pop()
+            .expect("master event"),
+        "derived override ids must keep unchanged refreshes unchanged"
+    );
+
+    let series = ScheduleItem {
+        id: ScheduleItemId(event.id),
+        title: event.title,
+        span: event.span,
+        recurrence: event.recurrence,
+        reference: None,
+        alarm: None,
+    };
+    let from = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).single().unwrap();
+    let occurrences = RruleEngine::new()
+        .occurrences(
+            &series,
+            &event.overrides,
+            &Expansion {
+                window: Window::new(from, from + chrono::TimeDelta::days(7)).unwrap(),
+                observer: Tz::UTC,
+            },
+        )
+        .expect("exceptions expand");
+    let starts: Vec<_> = occurrences
+        .iter()
+        .map(|occurrence| occurrence.span.start.format("%Y-%m-%d %H:%M").to_string())
+        .collect();
+    assert_eq!(
+        starts,
+        ["2026-09-01 09:00", "2026-09-03 14:00", "2026-09-05 09:00"]
+    );
+}
+
+#[test]
+fn an_unsupported_range_exception_skips_its_whole_series() {
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:range@example.com\r\nDTSTART:20260901T090000Z\r\nRRULE:FREQ=DAILY\r\n\
+END:VEVENT\r\nBEGIN:VEVENT\r\nUID:range@example.com\r\n\
+RECURRENCE-ID;RANGE=THISANDFUTURE:20260903T090000Z\r\n\
+DTSTART:20260903T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let outcome = parse_ics(feed, SourceId(uuid_fixture())).expect("feed parses");
+    assert!(
+        outcome.events.is_empty(),
+        "the affected series is unsafe to show"
+    );
+    assert_eq!(outcome.skipped.len(), 1);
+    assert!(outcome.skipped[0].reason.contains("THISANDFUTURE"));
+}
+
+#[test]
+fn exdate_takes_precedence_over_the_same_rdate() {
+    use clipper_schedule::OverrideChange;
+
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:collision@example.com\r\nDTSTART:20260901T090000Z\r\n\
+RRULE:FREQ=DAILY;COUNT=2\r\nRDATE:20260905T090000Z\r\n\
+EXDATE:20260905T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let event = parse_ics(feed, SourceId(uuid_fixture()))
+        .expect("feed parses")
+        .events
+        .pop()
+        .expect("series parses");
+    assert_eq!(event.overrides.len(), 1);
+    assert_eq!(event.overrides[0].change, OverrideChange::Cancelled);
+}
+
+#[test]
+fn a_detached_instance_moved_across_the_window_boundary_still_overlaps() {
+    use chrono::{TimeZone, Utc};
+    use clipper_schedule::{
+        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, Window,
+    };
+
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:overnight-series@example.com\r\nDTSTART:20260901T090000Z\r\n\
+DTEND:20260901T093000Z\r\nRRULE:FREQ=DAILY;COUNT=2\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:overnight-series@example.com\r\n\
+RECURRENCE-ID:20260902T090000Z\r\nDTSTART:20260903T233000Z\r\n\
+DTEND:20260904T013000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let event = parse_ics(feed, SourceId(uuid_fixture()))
+        .expect("feed parses")
+        .events
+        .pop()
+        .expect("series parses");
+    let series = ScheduleItem {
+        id: ScheduleItemId(event.id),
+        title: event.title.clone(),
+        span: event.span.clone(),
+        recurrence: event.recurrence.clone(),
+        reference: None,
+        alarm: None,
+    };
+    let from = Utc.with_ymd_and_hms(2026, 9, 4, 0, 0, 0).single().unwrap();
+    let overlapping = RruleEngine::new()
+        .overlapping_occurrences(
+            &series,
+            &event.overrides,
+            &Expansion {
+                window: Window::new(from, from + chrono::TimeDelta::hours(1)).unwrap(),
+                observer: Tz::UTC,
+            },
+        )
+        .expect("detached occurrence expands");
+    assert_eq!(overlapping.len(), 1);
+    assert_eq!(
+        overlapping[0].span.end,
+        from + chrono::TimeDelta::minutes(90)
+    );
+}
