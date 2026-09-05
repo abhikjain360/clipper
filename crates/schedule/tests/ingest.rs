@@ -192,7 +192,7 @@ fn a_cancelled_event_is_tombstoned_not_dropped() {
 #[test]
 fn an_ingested_rule_is_carried_verbatim() {
     let standup = event("standup@example.com");
-    let Recurrence::Raw(rule) = &standup.recurrence else {
+    let Recurrence::Raw { rule } = &standup.recurrence else {
         panic!("an ingested rule stays raw rather than being remodelled");
     };
     let text = rule.as_str();

@@ -319,6 +319,13 @@ pub enum ScheduleRecordKind {
     Override,
     /// Time actually spent, as opposed to time planned (D2).
     Actual,
+    /// A calendar Clipper pulls events from. Holds the feed URL, which for an
+    /// iCalendar source *is* the credential — hence encrypted like everything
+    /// else (D4).
+    Source,
+    /// An event as a provider describes it: the upstream-owned layer of D10,
+    /// written only by the sync worker and read-only to the owner.
+    Ingested,
 }
 
 /// Encrypted metadata for a schedule object.

@@ -1,4 +1,4 @@
-import { CalendarClock, ChevronLeft, ChevronRight, Plus, Trash2 } from "lucide-react";
+import { CalendarClock, ChevronLeft, ChevronRight, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
     Button,
@@ -15,6 +15,7 @@ import {
 } from "tamagui";
 import type {
     AppState,
+    CalendarSourceView,
     OccurrenceView,
     Recurrence,
     ScheduleItem,
@@ -57,10 +58,12 @@ function observerZone(): string {
 
 export function SchedulePanel({
     items,
+    sources,
     onState,
     onError,
 }: {
     items: ScheduleItemView[];
+    sources: CalendarSourceView[];
     onState: (state: AppState) => void;
     onError: (error: string | null) => void;
 }) {
@@ -93,7 +96,7 @@ export function SchedulePanel({
     // state, which re-renders this panel with a new array.
     useEffect(() => {
         void loadWeek();
-    }, [loadWeek, items]);
+    }, [loadWeek, items, sources]);
 
     return (
         <YStack gap="$3">
@@ -128,6 +131,7 @@ export function SchedulePanel({
             </Card>
 
             <SeriesList items={items} onState={onState} onError={onError} />
+            <CalendarSources sources={sources} onState={onState} onError={onError} />
         </YStack>
     );
 }
@@ -147,6 +151,11 @@ function WeekGrid({
     const timed = occurrences.filter((occurrence) => !occurrence.all_day);
     const today = startOfDay(new Date()).getTime();
     const scroller = useRef<TamaguiElement | null>(null);
+    // The grid scrolls vertically and the rows above it do not, so on any
+    // platform with classic (non-overlay) scrollbars the grid is narrower than
+    // the header and every day column drifts. Measure the difference and
+    // reserve it above rather than guessing a width.
+    const [gutter, setGutter] = useState(0);
 
     // Open on the week's earliest block rather than at midnight, which is eight
     // hours of empty grid before anything a person scheduled.
@@ -164,14 +173,15 @@ function WeekGrid({
         // A little headroom above the first block so it does not sit flush
         // against the top edge.
         node.scrollTop = Math.max(0, ((firstMinute - 30) / 60) * HOUR_HEIGHT);
-    }, [firstMinute]);
+        setGutter(node.offsetWidth - node.clientWidth);
+    }, [firstMinute, occurrences.length]);
 
     return (
         // Horizontal scroll lives here rather than on the page: a seven-day grid
         // on a narrow window must not make the whole app scroll sideways.
         <YStack style={{ overflowX: "auto" }}>
             <YStack minW={720}>
-                <XStack>
+                <XStack pr={gutter}>
                     <YStack width={56} />
                     {days.map((day) => (
                         <YStack
@@ -195,7 +205,7 @@ function WeekGrid({
                 </XStack>
 
                 {allDay.length > 0 && (
-                    <XStack style={{ borderTopColor: "#252b31", borderTopWidth: 1 }}>
+                    <XStack pr={gutter} style={{ borderTopColor: "#252b31", borderTopWidth: 1 }}>
                         <YStack width={56} items="flex-end" pr="$2" py="$1">
                             <Text fontSize={11} color="#8b949e">
                                 all day
@@ -298,22 +308,41 @@ function TimedBlock({ occurrence, day }: { occurrence: OccurrenceView; day: Date
                 right: 2,
                 overflow: "hidden",
                 borderRadius: 4,
-                backgroundColor: occurrence.overridden ? "#3d3320" : "#1f3350",
-                borderLeftColor: occurrence.overridden ? "#d0a33a" : "#4d8fd6",
+                backgroundColor: blockColor(occurrence).fill,
+                borderLeftColor: blockColor(occurrence).accent,
                 borderLeftWidth: 3,
+                opacity: occurrence.cancelled ? 0.55 : 1,
             }}
-            aria-label={`${occurrence.title}, ${clockRange(occurrence)}`}
+            aria-label={`${occurrence.title}, ${clockRange(occurrence)}${
+                occurrence.source ? `, from ${occurrence.source}` : ""
+            }${occurrence.cancelled ? ", cancelled" : ""}`}
         >
-            <Text fontSize={11} lineHeight={13} numberOfLines={1}>
+            <Text
+                fontSize={11}
+                lineHeight={13}
+                numberOfLines={1}
+                textDecorationLine={occurrence.cancelled ? "line-through" : "none"}
+            >
                 {occurrence.title}
             </Text>
             {height >= 34 && (
                 <Text fontSize={10} lineHeight={12} color="#8b949e" numberOfLines={1}>
-                    {clockRange(occurrence)}
+                    {occurrence.source
+                        ? `${clockRange(occurrence)} · ${occurrence.source}`
+                        : clockRange(occurrence)}
                 </Text>
             )}
         </YStack>
     );
+}
+
+/// Owned blocks, ingested events and moved occurrences should be
+/// distinguishable at a glance, since only the first is editable.
+function blockColor(occurrence: OccurrenceView): { fill: string; accent: string } {
+    if (occurrence.cancelled) return { fill: "#2a2226", accent: "#8b6b6b" };
+    if (occurrence.overridden) return { fill: "#3d3320", accent: "#d0a33a" };
+    if (occurrence.source) return { fill: "#1d3330", accent: "#4dbfa5" };
+    return { fill: "#1f3350", accent: "#4d8fd6" };
 }
 
 function OccurrenceChip({ occurrence }: { occurrence: OccurrenceView }) {
@@ -330,6 +359,165 @@ function OccurrenceChip({ occurrence }: { occurrence: OccurrenceView }) {
                 {occurrence.title}
             </Text>
         </YStack>
+    );
+}
+
+function CalendarSources({
+    sources,
+    onState,
+    onError,
+}: {
+    sources: CalendarSourceView[];
+    onState: (state: AppState) => void;
+    onError: (error: string | null) => void;
+}) {
+    const [adding, setAdding] = useState(false);
+    const [name, setName] = useState("");
+    const [url, setUrl] = useState("");
+    const [busy, setBusy] = useState<string | null>(null);
+
+    async function add() {
+        onError(null);
+        setBusy("add");
+        try {
+            const backend = await clipperBackend();
+            await backend.addCalendarSource(name.trim() || "Calendar", url.trim());
+            onState(await backend.getState());
+            setName("");
+            setUrl("");
+            setAdding(false);
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        } finally {
+            setBusy(null);
+        }
+    }
+
+    async function sync(id: string) {
+        onError(null);
+        setBusy(id);
+        try {
+            const backend = await clipperBackend();
+            const report = await backend.syncCalendarSource(id);
+            onState(await backend.getState());
+            // Say what actually happened. A sync that silently does nothing is
+            // indistinguishable from one that failed.
+            const parts = [
+                report.added > 0 ? `${report.added} added` : null,
+                report.updated > 0 ? `${report.updated} updated` : null,
+                report.tombstoned > 0 ? `${report.tombstoned} cancelled` : null,
+                report.skipped.length > 0 ? `${report.skipped.length} unreadable` : null,
+            ].filter(Boolean);
+            onError(
+                parts.length > 0
+                    ? `Synced: ${parts.join(", ")}`
+                    : `Synced: no changes (${report.unchanged} events)`,
+            );
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        } finally {
+            setBusy(null);
+        }
+    }
+
+    async function remove(id: string) {
+        onError(null);
+        setBusy(id);
+        try {
+            const backend = await clipperBackend();
+            await backend.deleteScheduleObject(id);
+            onState(await backend.getState());
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        } finally {
+            setBusy(null);
+        }
+    }
+
+    return (
+        <Card bg="#171a1d" p="$3" gap="$3" style={{ borderColor: "#252b31", borderWidth: 1 }}>
+            <XStack items="center" justify="space-between" gap="$2">
+                <H2 size="$5">Calendars</H2>
+                {!adding && (
+                    <Button size="$2" icon={<Plus size={14} />} onPress={() => setAdding(true)}>
+                        Add feed
+                    </Button>
+                )}
+            </XStack>
+
+            {adding && (
+                <YStack gap="$2">
+                    <XStack gap="$2" flexWrap="wrap" items="flex-end">
+                        <Field label="Name">
+                            <Input value={name} onChangeText={setName} placeholder="Work" width={160} />
+                        </Field>
+                        <Field label="iCalendar URL (secret address)">
+                            <Input
+                                value={url}
+                                onChangeText={setUrl}
+                                placeholder="https://calendar.google.com/calendar/ical/…/basic.ics"
+                                width={380}
+                            />
+                        </Field>
+                    </XStack>
+                    <Paragraph fontSize={12} color="#8b949e">
+                        The URL is stored encrypted — the server never sees it. Anyone holding it
+                        can read the calendar, so treat it like a password. Feeds are pulled by the
+                        desktop and mobile apps; a browser cannot fetch them.
+                    </Paragraph>
+                    <XStack gap="$2">
+                        <Button
+                            theme="blue"
+                            disabled={busy === "add" || url.trim().length === 0}
+                            icon={busy === "add" ? <Spinner /> : undefined}
+                            onPress={() => void add()}
+                        >
+                            Add
+                        </Button>
+                        <Button onPress={() => setAdding(false)}>Cancel</Button>
+                    </XStack>
+                </YStack>
+            )}
+
+            {sources.length === 0 && !adding && (
+                <Paragraph color="#8b949e">No calendars connected</Paragraph>
+            )}
+
+            {sources.map((source) => (
+                <XStack
+                    key={source.id}
+                    items="center"
+                    justify="space-between"
+                    gap="$3"
+                    flexWrap="wrap"
+                >
+                    <YStack flex={1} minW={200}>
+                        <Text>{source.name}</Text>
+                        <Text fontSize={12} color="#8b949e">
+                            {source.protocol} · {source.location} · {source.event_count} events
+                        </Text>
+                    </YStack>
+                    <XStack gap="$2">
+                        <Button
+                            size="$2"
+                            icon={busy === source.id ? <Spinner /> : <RefreshCw size={14} />}
+                            disabled={busy === source.id}
+                            onPress={() => void sync(source.id)}
+                        >
+                            Sync
+                        </Button>
+                        <Button
+                            size="$2"
+                            icon={<Trash2 size={14} />}
+                            disabled={busy === source.id}
+                            onPress={() => void remove(source.id)}
+                        >
+                            Remove
+                        </Button>
+                    </XStack>
+                </XStack>
+            ))}
+        </Card>
     );
 }
 

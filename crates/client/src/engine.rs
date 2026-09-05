@@ -1,20 +1,22 @@
 //! Sync engine: manages client state, WebSocket connection, and clipboard/file operations.
 
 use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
 
 pub use clipper_app_types::{
-    AppState, AuthenticatedSession, ClipboardPayload, CollabItem, ConnectionStatus,
-    DecryptedClipboardItem, DecryptedFileItem, DeviceInfo, OccurrenceView, SavedProfile,
-    ScheduleItemView,
+    AppState, AuthenticatedSession, CalendarSourceView, ClipboardPayload, CollabItem,
+    ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem, DeviceInfo, IngestReport,
+    OccurrenceView, SavedProfile, ScheduleItemView,
 };
 use clipper_core::{crypto, models::*};
 pub use clipper_schedule::{
-    Expansion, OccurrenceOverride, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleSpan,
-    Window,
+    CalendarSource, Expansion, IngestedEvent, IngestedStatus, OccurrenceOverride, RecurrenceEngine,
+    RruleEngine, ScheduleItem, ScheduleSpan, SourceId, SourceKind, Window,
 };
 use futures_util::{StreamExt, stream};
 use tokio::sync::{RwLock, watch};
@@ -32,8 +34,9 @@ use crate::{
         LocalVisibleState, StoredObjectIdentity,
     },
     schedule::{
-        ScheduleRecord, decrypt_schedule_meta, decrypt_schedule_payload, encrypt_schedule_meta,
-        encrypt_schedule_payload, occurrence_view, zone_or_utc,
+        OccurrenceLabel, ScheduleRecord, decrypt_schedule_meta, decrypt_schedule_payload,
+        encrypt_schedule_meta, encrypt_schedule_payload, ingested_as_series, occurrence_view,
+        zone_or_utc,
     },
 };
 
@@ -1255,31 +1258,169 @@ impl SyncEngine {
             .iter()
             .filter_map(|record| match record {
                 ScheduleRecord::Override(entry) => Some((**entry).clone()),
-                ScheduleRecord::Item(_) | ScheduleRecord::Actual(_) => None,
+                ScheduleRecord::Item(_)
+                | ScheduleRecord::Actual(_)
+                | ScheduleRecord::Source(_)
+                | ScheduleRecord::Ingested(_) => None,
             })
+            .collect();
+        let source_names: HashMap<SourceId, String> = records
+            .iter()
+            .filter_map(|record| record.as_source())
+            .map(|source| (source.id, source.name.clone()))
             .collect();
 
         let engine = RruleEngine::new();
         let mut out = Vec::new();
+
         for record in &records {
-            let Some(item) = record.as_item() else {
-                continue;
-            };
-            let all_day = matches!(item.span, ScheduleSpan::AllDay { .. });
-            match engine.occurrences(item, &overrides, &expansion) {
-                Ok(occurrences) => out.extend(
-                    occurrences
-                        .iter()
-                        .map(|occurrence| occurrence_view(occurrence, &item.title, all_day)),
+            // An owned block and an ingested event expand identically; only
+            // their labelling differs.
+            let (series, label_source, cancelled) = match record {
+                ScheduleRecord::Item(item) => (Cow::Borrowed(&**item), None, false),
+                ScheduleRecord::Ingested(event) => (
+                    Cow::Owned(ingested_as_series(event)),
+                    source_names.get(&event.source).map(String::as_str),
+                    event.status == IngestedStatus::Cancelled,
                 ),
+                ScheduleRecord::Override(_)
+                | ScheduleRecord::Actual(_)
+                | ScheduleRecord::Source(_) => continue,
+            };
+            let all_day = matches!(series.span, ScheduleSpan::AllDay { .. });
+            match engine.occurrences(&series, &overrides, &expansion) {
+                Ok(occurrences) => out.extend(occurrences.iter().map(|occurrence| {
+                    occurrence_view(
+                        occurrence,
+                        OccurrenceLabel {
+                            title: &series.title,
+                            all_day,
+                            source: label_source,
+                            cancelled,
+                        },
+                    )
+                })),
                 // One malformed series must not blank the whole calendar.
                 Err(error) => {
-                    warn!(item = %item.id, "Failed to expand schedule series: {}", error)
+                    warn!(item = %series.id, "Failed to expand schedule series: {}", error)
                 }
             }
         }
         out.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| a.title.cmp(&b.title)));
         Ok(out)
+    }
+
+    /// Register a calendar to pull events from.
+    pub async fn add_calendar_source(&self, name: &str, url: &str) -> Result<String, ClientError> {
+        // Reject a URL the fetcher could never use, at the point the owner can
+        // still fix the typo.
+        let parsed = url::Url::parse(url)
+            .map_err(|error| ClientError::InvalidArgument(format!("calendar URL: {error}")))?;
+        if !matches!(parsed.scheme(), "http" | "https" | "webcal") {
+            return Err(ClientError::InvalidArgument(format!(
+                "calendar URL scheme {:?} is not supported",
+                parsed.scheme()
+            )));
+        }
+        self.create_schedule_record(ScheduleRecord::Source(Box::new(CalendarSource {
+            id: SourceId::new(),
+            name: name.trim().to_string(),
+            // `webcal:` is just `https:` wearing a hat; normalize it now so the
+            // fetcher never has to know.
+            kind: SourceKind::Ics {
+                url: url.replacen("webcal://", "https://", 1),
+            },
+            enabled: true,
+        })))
+        .await
+    }
+
+    /// Fetch a calendar feed and reconcile it into ingested events.
+    ///
+    /// Objects are immutable, so an event whose upstream fields changed is
+    /// replaced rather than edited — the same create-plus-delete an owner's edit
+    /// uses until the revision layer lands (D6). Nothing the owner wrote is at
+    /// risk: their plan and their logged time are separate records (D10).
+    pub async fn sync_calendar_source(&self, object_id: &str) -> Result<IngestReport, ClientError> {
+        let records = self.local_store.schedule_records_with_ids().await;
+        let source = records
+            .iter()
+            .find(|(id, record)| id == object_id && record.as_source().is_some())
+            .and_then(|(_, record)| record.as_source())
+            .cloned()
+            .ok_or_else(|| ClientError::ItemNotFound {
+                id: object_id.to_string(),
+            })?;
+        let SourceKind::Ics { url } = &source.kind;
+
+        let text = fetch_calendar_feed(&url).await?;
+        let outcome = parse_calendar_feed(&text, source.id)?;
+
+        // Everything this source currently holds locally, by the provider's own
+        // event id — which is what makes a second pass an update, not a copy.
+        let existing: HashMap<uuid::Uuid, (String, IngestedEvent)> = records
+            .iter()
+            .filter_map(|(id, record)| {
+                record
+                    .as_ingested()
+                    .filter(|event| event.source == source.id)
+                    .map(|event| (event.id, (id.clone(), event.clone())))
+            })
+            .collect();
+
+        let mut report = IngestReport {
+            skipped: outcome
+                .skipped
+                .iter()
+                .map(|skipped| match &skipped.uid {
+                    Some(uid) => format!("{uid}: {}", skipped.reason),
+                    None => skipped.reason.clone(),
+                })
+                .collect(),
+            ..IngestReport::default()
+        };
+
+        let mut seen = HashSet::new();
+        for event in outcome.events {
+            seen.insert(event.id);
+            match existing.get(&event.id) {
+                Some((_, current)) if *current == event => report.unchanged += 1,
+                Some((old_object_id, _)) => {
+                    self.delete_schedule_object(old_object_id).await?;
+                    self.create_schedule_record(ScheduleRecord::Ingested(Box::new(event)))
+                        .await?;
+                    report.updated += 1;
+                }
+                None => {
+                    self.create_schedule_record(ScheduleRecord::Ingested(Box::new(event)))
+                        .await?;
+                    report.added += 1;
+                }
+            }
+        }
+
+        // Gone from the feed. Tombstone rather than erase (D10): a meeting the
+        // organiser withdrew still happened to whatever time was logged on it.
+        for (event_id, (old_object_id, event)) in &existing {
+            if seen.contains(event_id) || event.status == IngestedStatus::Cancelled {
+                continue;
+            }
+            let mut tombstone = event.clone();
+            tombstone.status = IngestedStatus::Cancelled;
+            self.delete_schedule_object(old_object_id).await?;
+            self.create_schedule_record(ScheduleRecord::Ingested(Box::new(tombstone)))
+                .await?;
+            report.tombstoned += 1;
+        }
+
+        info!(
+            source = %source.id,
+            added = report.added,
+            updated = report.updated,
+            tombstoned = report.tombstoned,
+            "Calendar source synced",
+        );
+        Ok(report)
     }
 
     /// Reconcile every schedule object from the encrypted-object listing.
@@ -1501,6 +1642,7 @@ impl SyncEngine {
             state.files = visible.files;
             state.collab_docs = visible.collab_docs;
             state.schedule_items = visible.schedule_items;
+            state.calendar_sources = visible.calendar_sources;
         }
         self.bump_version();
     }
@@ -2629,6 +2771,82 @@ fn encrypted_clipboard_from_init(
         object: encrypted_object_from_init(init_req),
         payload_ciphertext,
     }
+}
+
+/// Parse a fetched feed.
+///
+/// Split out so the browser build can drop the iCalendar parser entirely: it
+/// can never fetch a feed anyway, and the parser pulls a transitive dependency
+/// that needs a wasm randomness backend this workspace does not configure.
+#[cfg(not(target_family = "wasm"))]
+fn parse_calendar_feed(
+    text: &str,
+    source: clipper_schedule::SourceId,
+) -> Result<clipper_schedule::IngestOutcome, ClientError> {
+    clipper_schedule::parse_ics(text, source)
+        .map_err(|error| ClientError::Other(format!("calendar feed: {error}")))
+}
+
+#[cfg(target_family = "wasm")]
+fn parse_calendar_feed(
+    _text: &str,
+    _source: clipper_schedule::SourceId,
+) -> Result<clipper_schedule::IngestOutcome, ClientError> {
+    // Unreachable: `fetch_calendar_feed` refuses first on this target.
+    Err(ClientError::Unsupported(
+        "Calendar feeds are parsed on the desktop and mobile apps".into(),
+    ))
+}
+
+/// Largest calendar feed the client will read. A feed is a remote document
+/// fetched on a timer; without a ceiling a hostile or broken one could make the
+/// client buffer arbitrarily many bytes.
+const MAX_CALENDAR_FEED_BYTES: usize = 8 * 1024 * 1024;
+
+/// Fetch a calendar feed over plain HTTP.
+///
+/// Not available in the browser: a page cannot read an arbitrary third-party URL
+/// without that server sending CORS headers, and calendar providers do not. This
+/// is fine under D4, where each client decides which sources it is responsible
+/// for — the desktop daemon and mobile can sync feeds, and the browser reads the
+/// results like any other device.
+#[cfg(not(target_family = "wasm"))]
+async fn fetch_calendar_feed(url: &str) -> Result<String, ClientError> {
+    let response = reqwest::Client::new()
+        .get(url)
+        .header("accept", "text/calendar, text/plain;q=0.9, */*;q=0.1")
+        .send()
+        .await?
+        .error_for_status()?;
+
+    if let Some(len) = response.content_length()
+        && len > MAX_CALENDAR_FEED_BYTES as u64
+    {
+        return Err(ClientError::PayloadTooLarge {
+            size: len as i64,
+            limit: MAX_CALENDAR_FEED_BYTES as i64,
+        });
+    }
+    let bytes = response.bytes().await?;
+    if bytes.len() > MAX_CALENDAR_FEED_BYTES {
+        // A server may omit or lie about content-length, so re-check what
+        // actually arrived.
+        return Err(ClientError::PayloadTooLarge {
+            size: bytes.len() as i64,
+            limit: MAX_CALENDAR_FEED_BYTES as i64,
+        });
+    }
+    String::from_utf8(bytes.to_vec())
+        .map_err(|error| ClientError::Other(format!("calendar feed is not UTF-8: {error}")))
+}
+
+#[cfg(target_family = "wasm")]
+async fn fetch_calendar_feed(_url: &str) -> Result<String, ClientError> {
+    Err(ClientError::Unsupported(
+        "Calendar feeds cannot be fetched from a browser: providers send no CORS \
+         headers. Sync this source from the desktop or mobile app instead."
+            .into(),
+    ))
 }
 
 /// Parse an RFC 3339 instant supplied by a UI shell.
