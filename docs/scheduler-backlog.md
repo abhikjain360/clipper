@@ -11,8 +11,8 @@ If code and these notes disagree, verify the code and correct the notes.
 
 ## Decisions and missing workflows
 
-- [ ] **Resolve exceptions when a schedule changes.** Decide what choices to
-  offer when timing or recurrence changes: discard exceptions, explicitly map
+- [ ] **Resolve overrides when a schedule changes.** Decide what choices to
+  offer when timing or recurrence changes: discard overrides, explicitly map
   them to the new definition, or preserve them with an older series. These are
   alternatives to discuss, not agreed behavior. Build the resolution UI and
   corresponding validated write operation. Today the Rust client blocks such
@@ -22,7 +22,7 @@ If code and these notes disagree, verify the code and correct the notes.
   alarms. There is **no resolution UI**, despite the error saying “Resolve them”.
   See [plans across edits](scheduler-review.md#plans-across-edits-and-historical-recordings),
   `SyncEngine::update_schedule_item` in `crates/client/src/engine.rs`, and
-  `effective_exceptions` in `crates/client/src/schedule_context.rs`.
+  `effective_overrides` in `crates/client/src/schedule_context.rs`.
 - [ ] **Edit this occurrence / this and future occurrences.** Single-occurrence
   editing has a domain model but no authoring UI. Define future-only edit
   semantics and series splitting; neither is implemented. Current expansion
@@ -41,10 +41,10 @@ If code and these notes disagree, verify the code and correct the notes.
   with pruning. Native anchor retention/expiry is a separate security tradeoff
   that also needs an explicit decision before any pruning.
 - [ ] **Connector-specific decisions.** Resolve cross-source duplicate primary
-  bindings, whether RSVP writes are supported, and provider recurrence/exception
+  bindings, whether RSVP writes are supported, and provider recurrence/override
   mapping before building connectors. See the
   [open sub-questions](schedule-plan.md#open-sub-questions). Embedded ICS provider
-  exceptions already share their imported object's revision.
+  overrides already share their imported object's revision.
 
 ## Deferred implementation
 

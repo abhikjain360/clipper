@@ -56,7 +56,7 @@ not become a surprise during QA.
   source/UID identities, and retain meetings when a feed is only partially parsed.
   Explicitly empty calendars still cancel upstream-deleted events. Removing a
   source hides its imported events while retaining history.
-- Added provider exceptions (`EXDATE`, `RDATE`, `RECURRENCE-ID`), timed/date-only
+- Added provider overrides (`EXDATE`, `RDATE`, `RECURRENCE-ID`), timed/date-only
   `DURATION`, absolute duration across time zones, and rejection of unknown zones.
   Fixed non-hour DST gaps and recurrence limits for old series. Malformed feeds,
   oversized responses, unsafe redirects and private URL leakage are bounded or
@@ -96,22 +96,22 @@ not become a surprise during QA.
 A series ID identifies the continuing schedule; an immutable object revision
 identifies the definition that gave one occurrence its meaning. `RecurrenceId`
 remains the original date/time, not a revision number. Occurrences are computed,
-but their identity is persisted in exceptions and linked actual records.
+but their identity is persisted in overrides and linked actual records.
 
-- A standalone `OccurrenceOverride` contains its pure `OccurrenceException`
+- A standalone `OccurrenceOverride` contains its pure `OccurrenceOverrideData`
   plus the exact base schedule reference: storage `ObjectId`, revision number,
   and signed envelope body hash. Before applying it to a newer definition, the
   client checks that the series identity, scheduled span and recurrence match.
-  Title, linked-object and alarm-setting edits preserve exceptions. Structural
-  edits with local exceptions are blocked pending an explicit exception-editing
+  Title, linked-object and alarm-setting edits preserve overrides. Structural
+  edits with local overrides are blocked pending an explicit override-editing
   workflow; silently retargeting an old occurrence is not supported. If a synced
   definition is incompatible, or the base revision cannot be loaded, expansion
   skips that series and publishes a warning in the Schedule UI. Other series
   continue to appear and generate alarms; affected alarms are omitted rather
   than guessed.
-- Provider exceptions are embedded in the imported event object. They have no
+- Provider overrides are embedded in the imported event object. They have no
   independent envelope revision. Pinning the imported object revision captures
-  its provider exceptions as well. Standalone local exceptions have their own
+  its provider overrides as well. Standalone local overrides have their own
   revisions and are treated separately.
 - A linked actual pins the schedule revision and the applied standalone override
   revision, if any, when recording starts. It also stores the original occurrence
@@ -130,7 +130,7 @@ but their identity is persisted in exceptions and linked actual records.
   Already-cached history may remain readable after server purge until the
   memory cache is cleared; purge does not retroactively erase client memory.
 - The Rust `recorded_plan(actual_id)` read returns the pinned definition, applied
-  exception and captured context. The history cache holds at most 64 entries and
+  override and captured context. The history cache holds at most 64 entries and
   is scoped to the authenticated session epoch. Routine state publication does
   not wait for historical network requests, so titles can initially show
   “Historical plan unavailable”; an explicit actuals-window read resolves them.
@@ -149,7 +149,7 @@ and 93 server tests), the isolated live server/client regression, workspace
 Clippy with warnings denied, wasm and mobile bridge checks, web type/lint/tests
 and standalone web build. Focused additions cover cosmetic versus structural
 edits, exact signed revision pins, stale timer selections preserving the running
-timer, captured floating bounds, provider exceptions, and reconstruction after
+timer, captured floating bounds, provider overrides, and reconstruction after
 edits and tombstones. History tests cover ownership, pending revisions, retention,
 purge, and preservation of the current sync head. This change has not received
 a new interactive Android or Tauri QA pass.
@@ -166,7 +166,7 @@ those tests. Rebuild native clients before testing the SQLite cutover.
 The live regression starts its own server, temporary database and three device
 caches. It exercises OPAQUE register/login, floating times in Berlin and Tokyo,
 timer start/stop, inline and streamed revisions, stale-write rejection, feed
-exceptions/update/deletion, file and schedule tombstones, restore, cold-device
+overrides/update/deletion, file and schedule tombstones, restore, cold-device
 sync, session resume and token revocation. Run it with:
 
 ```sh
@@ -265,7 +265,7 @@ old QA recordings/overrides before exercising the new historical comparisons.
    SQLite cutover discards the old object/payload cache and refetches content;
    allow the first sync to finish before judging missing data.
 4. In the desktop app, add a disposable ICS URL and sync it. Check recurrence
-   exceptions, an upstream edit and removal. The browser renders synced events;
+   overrides, an upstream edit and removal. The browser renders synced events;
    refreshing the external feed is a native operation.
 5. Sign in on Android, grant notification/exact-alarm/full-screen access, and create an
    alarm-enabled block from desktop/web a few minutes ahead. Verify mirror count,
@@ -285,7 +285,7 @@ old QA recordings/overrides before exercising the new historical comparisons.
 ## Remaining scope and limits
 
 The maintained checklist of open decisions, missing workflows and follow-up
-work is [scheduler-backlog.md](scheduler-backlog.md). In particular, exception
+work is [scheduler-backlog.md](scheduler-backlog.md). In particular, override
 resolution after a timing/recurrence edit has backend guards but no resolution UI.
 
 - No Google/Zoho OAuth connector or outward publishing. ICS refresh is manual

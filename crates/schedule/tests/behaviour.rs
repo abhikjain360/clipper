@@ -7,7 +7,7 @@ use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use clipper_schedule::{
     BlockDuration, Cadence, EngineError, Expansion, Frequency, MonthDay, NthWeekday, Occurrence,
-    OccurrenceException, OccurrenceOrigin, OverrideChange, OverrideId, RawRule, Recurrence,
+    OccurrenceOrigin, OccurrenceOverrideData, OverrideChange, OverrideId, RawRule, Recurrence,
     RecurrenceEngine, RecurrenceError, RecurrenceId, RruleEngine, ScheduleItem, ScheduleItemId,
     ScheduleSpan, TimeError, TimedStart, WeekdaySet, Window,
 };
@@ -38,7 +38,7 @@ fn daily_at(start: TimedStart) -> ScheduleItem {
 
 fn expand(
     item: &ScheduleItem,
-    overrides: &[OccurrenceException],
+    overrides: &[OccurrenceOverrideData],
     expansion: &Expansion,
 ) -> Vec<Occurrence> {
     RruleEngine::new()
@@ -142,7 +142,7 @@ fn zoned_stays_put_wherever_it_is_read() {
 fn a_floating_override_matches_in_any_zone() {
     let item = daily_at(TimedStart::Floating(local("20260601T070000")));
     // Recorded on a device in Berlin: skip the morning of the 10th.
-    let skipped = OccurrenceException {
+    let skipped = OccurrenceOverrideData {
         id: OverrideId::new(),
         item: item.id,
         recurrence_id: RecurrenceId::Floating(local("20260610T070000")),
@@ -185,7 +185,7 @@ fn cancelled_occurrence_is_skipped() {
         local: local("20260610T080000"),
         zone: Tz::UTC,
     });
-    let cancelled = OccurrenceException {
+    let cancelled = OccurrenceOverrideData {
         id: OverrideId::new(),
         item: item.id,
         recurrence_id: RecurrenceId::Instant(utc(2026, 6, 11, 8, 0)),
@@ -215,7 +215,7 @@ fn rescheduled_occurrence_reports_its_override() {
         local: local("20260610T080000"),
         zone: Tz::UTC,
     });
-    let moved = OccurrenceException {
+    let moved = OccurrenceOverrideData {
         id: OverrideId::new(),
         item: item.id,
         recurrence_id: RecurrenceId::Instant(utc(2026, 6, 11, 8, 0)),
@@ -258,7 +258,7 @@ fn override_can_move_an_occurrence_into_the_window() {
         local: local("20260601T080000"),
         zone: Tz::UTC,
     });
-    let pulled_forward = OccurrenceException {
+    let pulled_forward = OccurrenceOverrideData {
         id: OverrideId::new(),
         item: item.id,
         // The 11th, which the window below does not contain.
@@ -296,7 +296,7 @@ fn overrides_for_other_items_are_ignored() {
         local: local("20260610T080000"),
         zone: Tz::UTC,
     });
-    let someone_elses = OccurrenceException {
+    let someone_elses = OccurrenceOverrideData {
         id: OverrideId::new(),
         item: ScheduleItemId::new(),
         recurrence_id: RecurrenceId::Instant(utc(2026, 6, 10, 8, 0)),
@@ -552,7 +552,7 @@ fn a_longer_override_can_overlap_from_before_the_window() {
         local: local("20260601T080000"),
         zone: Tz::UTC,
     });
-    let moved = OccurrenceException {
+    let moved = OccurrenceOverrideData {
         id: OverrideId::new(),
         item: item.id,
         recurrence_id: RecurrenceId::Instant(utc(2026, 6, 9, 8, 0)),
@@ -789,17 +789,17 @@ fn a_raw_rule_cannot_smuggle_a_second_property() {
 }
 
 #[test]
-fn descriptive_edits_preserve_exception_applicability() {
+fn descriptive_edits_preserve_override_applicability() {
     let original = daily_at(TimedStart::Floating(local("20260915T070000")));
     let mut edited = original.clone();
     edited.title = "Renamed workout".to_owned();
     edited.reference = Some(clipper_api_types::ObjectId::from(uuid::Uuid::new_v4()));
     edited.alarm = Some(clipper_schedule::AlarmPolicy::minutes_before(10));
-    assert!(original.exceptions_compatible_with(&edited));
+    assert!(original.overrides_compatible_with(&edited));
 }
 
 #[test]
-fn structural_edits_require_reconsidering_exceptions() {
+fn structural_edits_require_reconsidering_overrides() {
     let original = daily_at(TimedStart::Floating(local("20260915T070000")));
     let mut changed_rule = original.clone();
     changed_rule.recurrence = Recurrence::Once;
@@ -830,7 +830,7 @@ fn structural_edits_require_reconsidering_exceptions() {
         changed_zone,
         different_series,
     ] {
-        assert!(!original.exceptions_compatible_with(&edited));
+        assert!(!original.overrides_compatible_with(&edited));
     }
 }
 

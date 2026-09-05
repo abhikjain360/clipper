@@ -79,10 +79,10 @@ pub struct ScheduleItem {
 }
 
 impl ScheduleItem {
-    /// Whether exceptions authored against this definition can apply unchanged
+    /// Whether overrides authored against this definition can apply unchanged
     /// to another definition. Cosmetic and alarm edits preserve the occurrence
     /// structure; changing the span or recurrence requires an explicit decision.
-    pub fn exceptions_compatible_with(&self, other: &Self) -> bool {
+    pub fn overrides_compatible_with(&self, other: &Self) -> bool {
         self.id == other.id && self.span == other.span && self.recurrence == other.recurrence
     }
 }
@@ -97,13 +97,13 @@ pub struct ObjectRevisionRef {
     pub body_hash: [u8; 32],
 }
 
-/// A separately stored exception, anchored to the definition it was authored
+/// A separately stored override, anchored to the definition it was authored
 /// against. Callers must check compatibility before applying it to a newer
-/// definition; the recurrence engine receives only validated exceptions.
+/// definition; the recurrence engine receives only validated overrides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OccurrenceOverride {
     pub base: ObjectRevisionRef,
-    pub exception: OccurrenceException,
+    pub override_data: OccurrenceOverrideData,
 }
 
 /// Which occurrence of a series something refers to.
@@ -124,14 +124,14 @@ pub enum RecurrenceId {
 /// One occurrence that deviates from its series.
 ///
 /// This is the pure expansion input, also embedded in imported calendar
-/// objects. Standalone persisted exceptions use [`OccurrenceOverride`] to
-/// retain their base revision; embedded provider exceptions share the imported
+/// objects. Standalone persisted overrides use [`OccurrenceOverride`] to
+/// retain their base revision; embedded provider overrides share the imported
 /// object’s revision.
 ///
 /// Exists only for occurrences that actually differ — the other 364 days of the
 /// year have no record at all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OccurrenceException {
+pub struct OccurrenceOverrideData {
     pub id: OverrideId,
     pub item: ScheduleItemId,
     /// The occurrence this replaces, identified by where the *rule* put it.
@@ -170,9 +170,9 @@ pub struct PlannedRef {
     pub item: ScheduleItemId,
     pub recurrence_id: RecurrenceId,
     /// Schedule definition accepted when recording began. For an imported
-    /// event, this also pins its embedded provider exceptions.
+    /// event, this also pins its embedded provider overrides.
     pub schedule: ObjectRevisionRef,
-    /// Present only when a standalone, locally authored exception applied.
+    /// Present only when a standalone, locally authored override applied.
     pub override_revision: Option<ObjectRevisionRef>,
     /// Floating and date-only plans depend on the observer's timezone.
     pub observer: Tz,
@@ -208,6 +208,6 @@ pub struct Occurrence {
 pub enum OccurrenceOrigin {
     /// Straight from the recurrence rule.
     Rule,
-    /// An exception supplied this span (including provider-added dates).
+    /// An override supplied this span (including provider-added dates).
     Overridden(OverrideId),
 }

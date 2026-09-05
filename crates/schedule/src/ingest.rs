@@ -25,7 +25,7 @@ use crate::recurrence::RawRule;
 #[cfg(not(target_family = "wasm"))]
 use crate::time::{BlockDuration, TimedStart};
 use crate::{
-    item::OccurrenceException,
+    item::OccurrenceOverrideData,
     recurrence::{Recurrence, RecurrenceError},
     time::{ScheduleSpan, TimeError},
 };
@@ -100,11 +100,11 @@ pub struct IngestedEvent {
     pub description: Option<String>,
     pub span: ScheduleSpan,
     pub recurrence: Recurrence,
-    /// Provider-owned exceptions to the recurrence set. IDs are derived from
+    /// Provider-owned overrides to the recurrence set. IDs are derived from
     /// the event and recurrence position, so refreshing an unchanged feed does
     /// not manufacture a new revision.
     #[serde(default)]
-    pub overrides: Vec<OccurrenceException>,
+    pub overrides: Vec<OccurrenceOverrideData>,
     pub status: IngestedStatus,
 }
 
@@ -177,7 +177,7 @@ pub fn parse_ics(text: &str, source: SourceId) -> Result<IngestOutcome, IngestEr
 
     let mut outcome = IngestOutcome::default();
     let mut masters = Vec::new();
-    let mut exceptions: HashMap<String, Vec<&calcard::icalendar::ICalendarComponent>> =
+    let mut overrides: HashMap<String, Vec<&calcard::icalendar::ICalendarComponent>> =
         HashMap::new();
 
     for component in &calendar.components {
@@ -187,7 +187,7 @@ pub fn parse_ics(text: &str, source: SourceId) -> Result<IngestOutcome, IngestEr
         let uid = text_property(component, "UID");
         if property(component, "RECURRENCE-ID").is_some() {
             match uid {
-                Some(uid) => exceptions.entry(uid).or_default().push(component),
+                Some(uid) => overrides.entry(uid).or_default().push(component),
                 None => outcome.skipped.push(SkippedEvent {
                     uid: None,
                     reason: IngestError::MissingUid.to_string(),
@@ -201,7 +201,7 @@ pub fn parse_ics(text: &str, source: SourceId) -> Result<IngestOutcome, IngestEr
     for (component, uid) in masters {
         let matching = uid
             .as_ref()
-            .and_then(|uid| exceptions.remove(uid))
+            .and_then(|uid| overrides.remove(uid))
             .unwrap_or_default();
         match event_from_component(component, &matching, source, uid.clone()) {
             Ok(event) => outcome.events.push(event),
@@ -212,7 +212,7 @@ pub fn parse_ics(text: &str, source: SourceId) -> Result<IngestOutcome, IngestEr
         }
     }
 
-    for (uid, orphaned) in exceptions {
+    for (uid, orphaned) in overrides {
         for _ in orphaned {
             outcome.skipped.push(SkippedEvent {
                 uid: Some(uid.clone()),
@@ -249,7 +249,7 @@ fn validate_calendar_envelope(text: &str) -> Result<(), IngestError> {
 #[cfg(not(target_family = "wasm"))]
 fn event_from_component(
     component: &calcard::icalendar::ICalendarComponent,
-    exceptions: &[&calcard::icalendar::ICalendarComponent],
+    overrides: &[&calcard::icalendar::ICalendarComponent],
     source: SourceId,
     uid: Option<String>,
 ) -> Result<IngestedEvent, IngestError> {
@@ -266,7 +266,7 @@ fn event_from_component(
         },
         None => Recurrence::Once,
     };
-    let overrides = recurrence_overrides(component, exceptions, id, &span)?;
+    let overrides = recurrence_overrides(component, overrides, id, &span)?;
 
     Ok(IngestedEvent {
         id,
@@ -458,10 +458,10 @@ fn duration_property(
 #[cfg(not(target_family = "wasm"))]
 fn recurrence_overrides(
     master: &calcard::icalendar::ICalendarComponent,
-    exceptions: &[&calcard::icalendar::ICalendarComponent],
+    overrides: &[&calcard::icalendar::ICalendarComponent],
     event_id: Uuid,
     master_span: &ScheduleSpan,
-) -> Result<Vec<OccurrenceException>, IngestError> {
+) -> Result<Vec<OccurrenceOverrideData>, IngestError> {
     use std::collections::BTreeMap;
 
     let item = ScheduleItemId(event_id);
@@ -481,9 +481,9 @@ fn recurrence_overrides(
         );
     }
 
-    for exception in exceptions {
+    for override_data in overrides {
         let recurrence_entry =
-            property(exception, "RECURRENCE-ID").ok_or(IngestError::MissingRecurrenceId)?;
+            property(override_data, "RECURRENCE-ID").ok_or(IngestError::MissingRecurrenceId)?;
         if recurrence_entry.params.iter().any(|parameter| {
             matches!(
                 parameter.name,
@@ -494,13 +494,13 @@ fn recurrence_overrides(
         }
         let recurrence_time = feed_time_from_entry(recurrence_entry)?;
         let recurrence_id = recurrence_id_for(master_span, &recurrence_time)?;
-        let change = if text_property(exception, "STATUS").as_deref() == Some("CANCELLED") {
+        let change = if text_property(override_data, "STATUS").as_deref() == Some("CANCELLED") {
             OverrideChange::Cancelled
         } else {
             let start =
-                date_time_property(exception, "DTSTART")?.ok_or(IngestError::MissingStart)?;
-            let end = date_time_property(exception, "DTEND")?;
-            let duration = duration_property(exception)?;
+                date_time_property(override_data, "DTSTART")?.ok_or(IngestError::MissingStart)?;
+            let end = date_time_property(override_data, "DTEND")?;
+            let duration = duration_property(override_data)?;
             OverrideChange::Rescheduled(span_from(
                 &start,
                 end.as_ref(),
@@ -534,9 +534,9 @@ fn make_override(
     item: ScheduleItemId,
     recurrence_id: RecurrenceId,
     change: OverrideChange,
-) -> OccurrenceException {
+) -> OccurrenceOverrideData {
     let stable_name = format!("{recurrence_id:?}");
-    OccurrenceException {
+    OccurrenceOverrideData {
         id: OverrideId(Uuid::new_v5(&event_id, stable_name.as_bytes())),
         item,
         recurrence_id,
@@ -743,9 +743,9 @@ pub enum IngestError {
     MissingUid,
     #[error("event has no DTSTART")]
     MissingStart,
-    #[error("recurrence exception has no RECURRENCE-ID")]
+    #[error("recurrence override has no RECURRENCE-ID")]
     MissingRecurrenceId,
-    #[error("recurrence exception has no matching master event")]
+    #[error("recurrence override has no matching master event")]
     MissingRecurringMaster,
     #[error("event contains an invalid date or time")]
     InvalidDateTime,

@@ -1,5 +1,5 @@
 //! Revision-aware schedule reads. Historical reads never advance a sync head.
-use clipper_schedule::{ObjectRevisionRef, OccurrenceException, PlannedRef};
+use clipper_schedule::{ObjectRevisionRef, OccurrenceOverrideData, PlannedRef};
 
 use super::*;
 
@@ -121,13 +121,13 @@ impl SyncEngine {
         Ok(record)
     }
 
-    pub(super) async fn effective_exceptions(
+    pub(super) async fn effective_overrides(
         &self,
         item: &ScheduleItem,
         pin: ObjectRevisionRef,
         record: &ScheduleRecord,
         records: &ScheduleSnapshot,
-    ) -> Result<Vec<(OccurrenceException, Option<ObjectRevisionRef>)>, ClientError> {
+    ) -> Result<Vec<(OccurrenceOverrideData, Option<ObjectRevisionRef>)>, ClientError> {
         let mut entries: Vec<_> = match record {
             ScheduleRecord::Ingested(event) => event
                 .overrides
@@ -145,26 +145,26 @@ impl SyncEngine {
             if entry.base.object_id != pin.object_id {
                 continue;
             }
-            if entry.exception.item != item.id {
+            if entry.override_data.item != item.id {
                 return Err(invalid(
                     "An override references a different schedule identity",
                 ));
             }
-            if !local_keys.insert(entry.exception.recurrence_id) {
+            if !local_keys.insert(entry.override_data.recurrence_id) {
                 return Err(invalid(
                     "Multiple local overrides target the same occurrence",
                 ));
             }
             if entry.base != pin {
                 let base = self.schedule_revision(entry.base).await?;
-                if !series(&base).is_some_and(|base| base.exceptions_compatible_with(item)) {
+                if !series(&base).is_some_and(|base| base.overrides_compatible_with(item)) {
                     return Err(invalid(
-                        "A schedule changed its timing or recurrence; its existing exceptions need review",
+                        "A schedule changed its timing or recurrence; its existing overrides need review",
                     ));
                 }
             }
-            entries.retain(|(old, _)| old.recurrence_id != entry.exception.recurrence_id);
-            entries.push((entry.exception.clone(), Some(revision_ref(id, *head)?)));
+            entries.retain(|(old, _)| old.recurrence_id != entry.override_data.recurrence_id);
+            entries.push((entry.override_data.clone(), Some(revision_ref(id, *head)?)));
         }
         Ok(entries)
     }
@@ -204,7 +204,7 @@ impl SyncEngine {
             return Err(invalid("The occurrence belongs to a different schedule"));
         }
         let effective = self
-            .effective_exceptions(&item, planned.schedule, record, records)
+            .effective_overrides(&item, planned.schedule, record, records)
             .await?;
         let applied = effective
             .iter()
@@ -214,14 +214,14 @@ impl SyncEngine {
                 "This occurrence's override changed; refresh the calendar",
             ));
         }
-        let exceptions: Vec<_> = effective.into_iter().map(|(entry, _)| entry).collect();
+        let overrides: Vec<_> = effective.into_iter().map(|(entry, _)| entry).collect();
         let expansion = Expansion {
             window: Window::new(planned.span.start, planned.span.end)
                 .map_err(|e| invalid(&e.to_string()))?,
             observer: planned.observer,
         };
         let occurrences = RruleEngine::new()
-            .occurrences(&item, &exceptions, &expansion)
+            .occurrences(&item, &overrides, &expansion)
             .map_err(|e| invalid(&e.to_string()))?;
         if !occurrences
             .iter()
@@ -251,7 +251,7 @@ impl SyncEngine {
         }
     }
 
-    /// Retrieve the immutable definition and exception for an actual. The
+    /// Retrieve the immutable definition and override for an actual. The
     /// captured resolved span remains authoritative across travel/tzdb changes.
     pub async fn recorded_plan(
         &self,
@@ -276,21 +276,21 @@ impl SyncEngine {
         if item.id != planned.item {
             return Err(invalid("Historical schedule identity mismatch"));
         }
-        let exception = if let Some(pin) = planned.override_revision {
+        let override_data = if let Some(pin) = planned.override_revision {
             let ScheduleRecord::Override(entry) = self.schedule_revision(pin).await? else {
                 return Err(invalid("Historical override reference is not an override"));
             };
             let base = self.schedule_revision(entry.base).await?;
             if entry.base.object_id != planned.schedule.object_id
-                || !series(&base).is_some_and(|base| base.exceptions_compatible_with(&item))
-                || entry.exception.item != planned.item
-                || entry.exception.recurrence_id != planned.recurrence_id
+                || !series(&base).is_some_and(|base| base.overrides_compatible_with(&item))
+                || entry.override_data.item != planned.item
+                || entry.override_data.recurrence_id != planned.recurrence_id
             {
                 return Err(invalid(
                     "Historical override does not apply to the recorded plan",
                 ));
             }
-            Some(entry.exception)
+            Some(entry.override_data)
         } else if let ScheduleRecord::Ingested(event) = record {
             event
                 .overrides
@@ -304,7 +304,7 @@ impl SyncEngine {
         }
         Ok(Some(crate::schedule::RecordedPlan {
             item,
-            exception,
+            override_data,
             context: planned,
         }))
     }

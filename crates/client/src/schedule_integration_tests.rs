@@ -371,11 +371,11 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
     first
         .sync_calendar_source(&source)
         .await
-        .expect("provider exceptions");
+        .expect("provider overrides");
     let imported_occurrences = first
         .expand_schedule(from, to, "UTC")
         .await
-        .expect("exceptions expand");
+        .expect("overrides expand");
     let starts: Vec<_> = imported_occurrences
         .iter()
         .filter(|event| event.source.as_deref() == Some("Work"))
@@ -425,7 +425,7 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
     assert_eq!(recorded_provider.context.schedule.revision, 2);
     assert!(recorded_provider.context.override_revision.is_none());
     assert!(
-        recorded_provider.exception.is_some(),
+        recorded_provider.override_data.is_some(),
         "RDATE captured inside imported revision"
     );
 
@@ -614,7 +614,7 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
 /// field assignment: edits, stale selections, overridden plans and deletion.
 async fn exercise_revision_aware_plans(engine: &SyncEngine) {
     use clipper_schedule::{
-        ActualSpan, ObjectRevisionRef, OccurrenceException, OccurrenceOverride, OverrideChange,
+        ActualSpan, ObjectRevisionRef, OccurrenceOverride, OccurrenceOverrideData, OverrideChange,
         OverrideId, PlannedRef, RecurrenceId,
     };
     let mut item = ScheduleItem {
@@ -706,9 +706,9 @@ async fn exercise_revision_aware_plans(engine: &SyncEngine) {
     );
 
     let base = revision_ref(&id, engine.local_head(&id).await.unwrap()).unwrap();
-    let mut exception = OccurrenceOverride {
+    let mut override_data = OccurrenceOverride {
         base,
-        exception: OccurrenceException {
+        override_data: OccurrenceOverrideData {
             id: OverrideId::new(),
             item: item.id,
             recurrence_id: original_context.recurrence_id,
@@ -719,7 +719,7 @@ async fn exercise_revision_aware_plans(engine: &SyncEngine) {
         },
     };
     let override_id = engine
-        .create_schedule_record(ScheduleRecord::Override(Box::new(exception.clone())))
+        .create_schedule_record(ScheduleRecord::Override(Box::new(override_data.clone())))
         .await
         .unwrap();
     let mut structural = item.clone();
@@ -732,7 +732,7 @@ async fn exercise_revision_aware_plans(engine: &SyncEngine) {
             .await
             .is_err()
     );
-    item.title = "Cosmetic edit keeps exception".into();
+    item.title = "Cosmetic edit keeps override".into();
     engine
         .update_schedule_item(&id, item.clone(), 2)
         .await
@@ -756,11 +756,11 @@ async fn exercise_revision_aware_plans(engine: &SyncEngine) {
         .await
         .unwrap();
     let override_head = engine.local_head(&override_id).await.unwrap();
-    exception.exception.change = OverrideChange::Cancelled;
+    override_data.override_data.change = OverrideChange::Cancelled;
     engine
         .write_schedule_record(
             &override_id,
-            ScheduleRecord::Override(Box::new(exception)),
+            ScheduleRecord::Override(Box::new(override_data)),
             EnvelopePlacement::Revise(override_head),
         )
         .await
@@ -777,7 +777,7 @@ async fn exercise_revision_aware_plans(engine: &SyncEngine) {
     );
     engine.stop_actual(&moved_actual).await.unwrap();
     // A structural edit received from an older/other writer is surfaced, never
-    // interpreted as an exception to a different rule or allowed to hide peers.
+    // interpreted as an override to a different rule or allowed to hide peers.
     let mut incompatible = item.clone();
     incompatible.recurrence = Recurrence::Every(clipper_schedule::Cadence::each(
         clipper_schedule::Frequency::Daily,
@@ -816,7 +816,7 @@ async fn exercise_revision_aware_plans(engine: &SyncEngine) {
     engine.schedule_history.lock().await.clear();
     let historical = engine.recorded_plan(&moved_actual).await.unwrap().unwrap();
     assert!(matches!(
-        historical.exception.unwrap().change,
+        historical.override_data.unwrap().change,
         OverrideChange::Rescheduled(_)
     ));
     assert_eq!(historical.context, moved_context);

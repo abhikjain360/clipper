@@ -19,7 +19,7 @@ use chrono_tz::Tz;
 
 use crate::{
     item::{
-        Occurrence, OccurrenceException, OccurrenceOrigin, OverrideChange, RecurrenceId,
+        Occurrence, OccurrenceOrigin, OccurrenceOverrideData, OverrideChange, RecurrenceId,
         ScheduleItem,
     },
     recurrence::{Cadence, Frequency, MonthlyRule, Recurrence, RecurrenceEnd},
@@ -71,7 +71,7 @@ pub trait RecurrenceEngine {
     fn occurrences(
         &self,
         item: &ScheduleItem,
-        overrides: &[OccurrenceException],
+        overrides: &[OccurrenceOverrideData],
         expansion: &Expansion,
     ) -> Result<Vec<Occurrence>, EngineError>;
 
@@ -84,7 +84,7 @@ pub trait RecurrenceEngine {
     fn overlapping_occurrences(
         &self,
         item: &ScheduleItem,
-        overrides: &[OccurrenceException],
+        overrides: &[OccurrenceOverrideData],
         expansion: &Expansion,
     ) -> Result<Vec<Occurrence>, EngineError> {
         let lookback = maximum_lookback(item, overrides)?;
@@ -113,7 +113,7 @@ pub trait RecurrenceEngine {
     fn next_after(
         &self,
         item: &ScheduleItem,
-        overrides: &[OccurrenceException],
+        overrides: &[OccurrenceOverrideData],
         after: DateTime<Utc>,
         within: TimeDelta,
         observer: Tz,
@@ -133,7 +133,7 @@ pub trait RecurrenceEngine {
 /// may start and still overlap it.
 fn maximum_lookback(
     item: &ScheduleItem,
-    overrides: &[OccurrenceException],
+    overrides: &[OccurrenceOverrideData],
 ) -> Result<TimeDelta, TimeError> {
     let mut lookback = span_lookback(&item.span)?;
     for entry in overrides.iter().filter(|entry| entry.item == item.id) {
@@ -273,10 +273,10 @@ impl RecurrenceEngine for RruleEngine {
     fn occurrences(
         &self,
         item: &ScheduleItem,
-        overrides: &[OccurrenceException],
+        overrides: &[OccurrenceOverrideData],
         expansion: &Expansion,
     ) -> Result<Vec<Occurrence>, EngineError> {
-        let relevant: HashMap<RecurrenceId, &OccurrenceException> = overrides
+        let relevant: HashMap<RecurrenceId, &OccurrenceOverrideData> = overrides
             .iter()
             .filter(|entry| entry.item == item.id)
             .map(|entry| (entry.recurrence_id, entry))

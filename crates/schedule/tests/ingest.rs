@@ -420,7 +420,7 @@ END:VCALENDAR\r\n";
                 observer: Tz::UTC,
             },
         )
-        .expect("exceptions expand");
+        .expect("overrides expand");
     let starts: Vec<_> = occurrences
         .iter()
         .map(|occurrence| occurrence.span.start.format("%Y-%m-%d %H:%M").to_string())
@@ -432,7 +432,7 @@ END:VCALENDAR\r\n";
 }
 
 #[test]
-fn an_unsupported_range_exception_skips_its_whole_series() {
+fn an_unsupported_range_override_skips_its_whole_series() {
     let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
 UID:range@example.com\r\nDTSTART:20260901T090000Z\r\nRRULE:FREQ=DAILY\r\n\
 END:VEVENT\r\nBEGIN:VEVENT\r\nUID:range@example.com\r\n\

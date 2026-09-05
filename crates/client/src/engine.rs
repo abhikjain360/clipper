@@ -1594,7 +1594,7 @@ impl SyncEngine {
         if !previous
             .as_item()
             .expect("series")
-            .exceptions_compatible_with(&item)
+            .overrides_compatible_with(&item)
             && records.iter().any(|(_, record, _)| {
                 matches!(record,
                 ScheduleRecord::Override(entry) if entry.base.object_id.to_string() == object_id)
@@ -1744,7 +1744,7 @@ impl SyncEngine {
             let all_day = matches!(series.span, ScheduleSpan::AllDay { .. });
             let pin = revision_ref(object_id, *head)?;
             let effective = match self
-                .effective_exceptions(&series, pin, record, &records)
+                .effective_overrides(&series, pin, record, &records)
                 .await
             {
                 Ok(entries) => entries,
@@ -1839,12 +1839,12 @@ impl SyncEngine {
                 observer: zone_or_utc(observer_zone),
             };
             let effective = match self
-                .effective_exceptions(item, revision_ref(object_id, *head)?, record, &records)
+                .effective_overrides(item, revision_ref(object_id, *head)?, record, &records)
                 .await
             {
                 Ok(entries) => entries,
                 Err(error) => {
-                    warn!(item = %item.id, %error, "Skipping alarms for a schedule with unresolved exceptions");
+                    warn!(item = %item.id, %error, "Skipping alarms for a schedule with unresolved overrides");
                     continue;
                 }
             };
