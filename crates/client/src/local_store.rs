@@ -15,7 +15,7 @@ use clipper_app_types::{
 };
 use clipper_core::{
     crypto,
-    models::{ObjectEnvelopeV2, ObjectKind, ObjectPayloadDescriptor},
+    models::{ObjectEnvelopeBodyV2, ObjectEnvelopeV2, ObjectKind, ObjectPayloadDescriptor},
 };
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_family = "wasm"))]
@@ -96,7 +96,7 @@ pub struct LocalCollabRecord {
 }
 
 /// The chain position of a locally-held object.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalHead {
     /// Which revision this client holds.
     pub revision: u64,
@@ -175,6 +175,33 @@ struct StoredSyncMarkerRecord {
     seen_generation: Option<u64>,
     event_seq: i64,
     created_seq: i64,
+    /// The newest signed chain position this device accepted before the object
+    /// became a marker. Keeping it here is what makes rollback protection
+    /// survive deletes, live-event materialization, and reconciliation sweeps.
+    #[serde(default)]
+    revision_anchor: Option<StoredRevisionAnchor>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct StoredRevisionAnchor {
+    head: LocalHead,
+    kind: StoredRevisionAnchorKind,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredRevisionAnchorKind {
+    /// The server omitted the object from a snapshot or returned 404. The same
+    /// accepted head may legitimately reappear; only older/different history
+    /// is forbidden.
+    #[default]
+    Absent,
+    /// A delete event arrived without its signed tombstone body. `head` is the
+    /// preceding visible revision, so a future live head must be at least two
+    /// revisions newer.
+    ObservedDelete,
+    /// `head` is the locally-created signed tombstone itself.
+    Tombstone,
 }
 
 impl StoredObjectRecord {
@@ -394,6 +421,8 @@ impl LocalStore {
         sync_meta: StoredObjectSyncMeta,
     ) -> Result<(), LocalStoreError> {
         let object_id = identity.object_id;
+        self.validate_encrypted_revision_advance(object_id, &encrypted.object)
+            .await?;
         // A delete that landed after this create wins: re-persisting would
         // resurrect a record the user already removed on another device.
         if let Some(StoredObjectRecord::Deleted(deleted)) =
@@ -633,8 +662,31 @@ impl LocalStore {
     ) -> Result<LocalVisibleState, LocalStoreError> {
         let object_id = validate_item_id(object_id)?;
         let sync = self.sync.lock().await;
-        self.apply_delete_inner(kind, &object_id, event_seq, sync.generation)
+        self.apply_delete_inner(kind, &object_id, event_seq, sync.generation, None)
             .await?;
+        self.visible_state_inner(visible_clipboard_limit).await
+    }
+
+    /// Apply a deletion initiated on this device while retaining the signed
+    /// tombstone as the newest durable chain anchor.
+    pub async fn apply_local_tombstone(
+        &self,
+        kind: ObjectKind,
+        object_id: &str,
+        event_seq: i64,
+        tombstone_head: LocalHead,
+        visible_clipboard_limit: usize,
+    ) -> Result<LocalVisibleState, LocalStoreError> {
+        let object_id = validate_item_id(object_id)?;
+        let sync = self.sync.lock().await;
+        self.apply_delete_inner(
+            kind,
+            &object_id,
+            event_seq,
+            sync.generation,
+            Some(tombstone_head),
+        )
+        .await?;
         self.visible_state_inner(visible_clipboard_limit).await
     }
 
@@ -651,7 +703,7 @@ impl LocalStore {
         if sync.generation != generation {
             return Ok(None);
         }
-        self.apply_delete_inner(kind, &object_id, event_seq, generation)
+        self.apply_delete_inner(kind, &object_id, event_seq, generation, None)
             .await?;
         self.visible_state_inner(visible_clipboard_limit)
             .await
@@ -687,7 +739,7 @@ impl LocalStore {
         if sync.generation != generation {
             return Ok(None);
         }
-        self.remove_object_inner(&object_id).await?;
+        self.mark_object_absent_inner(&object_id).await?;
         self.visible_state_inner(visible_clipboard_limit)
             .await
             .map(Some)
@@ -747,6 +799,8 @@ impl LocalStore {
         encrypted: &EncryptedInlineObject,
         sync_meta: StoredObjectSyncMeta,
     ) -> Result<(), LocalStoreError> {
+        self.validate_encrypted_revision_advance(item_id, &encrypted.object)
+            .await?;
         if let Some(StoredObjectRecord::Deleted(record)) =
             self.stored_object_record(item_id).await?
             && record.event_seq > sync_meta.event_seq
@@ -791,6 +845,8 @@ impl LocalStore {
         event_seq: i64,
         seen_generation: Option<u64>,
     ) -> Result<(), LocalStoreError> {
+        self.validate_encrypted_revision_advance(item_id, encrypted)
+            .await?;
         if let Some(StoredObjectRecord::Deleted(record)) =
             self.stored_object_record(item_id).await?
             && record.event_seq > event_seq
@@ -906,6 +962,18 @@ impl LocalStore {
                 }
                 Ok(true)
             }
+            Some(StoredObjectRecord::Deleted(record)) => {
+                let pending = StoredObjectRecord::PendingCreate(StoredSyncMarkerRecord {
+                    id: object_id.to_string(),
+                    kind,
+                    seen_generation: Some(generation),
+                    event_seq: created_seq,
+                    created_seq,
+                    revision_anchor: record.revision_anchor,
+                });
+                self.write_stored_object_record(&pending).await?;
+                Ok(true)
+            }
             _ => {
                 let record = StoredObjectRecord::PendingCreate(StoredSyncMarkerRecord {
                     id: object_id.to_string(),
@@ -913,6 +981,7 @@ impl LocalStore {
                     seen_generation: Some(generation),
                     event_seq: created_seq,
                     created_seq,
+                    revision_anchor: None,
                 });
                 self.write_stored_object_record(&record).await?;
                 Ok(true)
@@ -926,12 +995,47 @@ impl LocalStore {
         object_id: &str,
         event_seq: i64,
         generation: u64,
+        tombstone_head: Option<LocalHead>,
     ) -> Result<(), LocalStoreError> {
-        if let Some(record) = self.stored_object_record(object_id).await?
+        let existing = self.stored_object_record(object_id).await?;
+        if let Some(record) = existing.as_ref()
             && record.event_seq() >= event_seq
         {
+            if record.event_seq() == event_seq
+                && let Some(head) = tombstone_head
+                && matches!(record, StoredObjectRecord::Deleted(_))
+            {
+                let StoredObjectRecord::Deleted(mut marker) = record.clone() else {
+                    unreachable!();
+                };
+                let may_upgrade = marker
+                    .revision_anchor
+                    .is_none_or(|anchor| head.revision >= anchor.head.revision);
+                if may_upgrade {
+                    marker.revision_anchor = Some(StoredRevisionAnchor {
+                        head,
+                        kind: StoredRevisionAnchorKind::Tombstone,
+                    });
+                    self.write_stored_object_record(&StoredObjectRecord::Deleted(marker))
+                        .await?;
+                }
+            }
             return Ok(());
         }
+        let retained_anchor = match existing.as_ref() {
+            Some(record) => revision_anchor_for_record(record)?,
+            None => None,
+        };
+        let revision_anchor = match tombstone_head {
+            Some(head) => Some(StoredRevisionAnchor {
+                head,
+                kind: StoredRevisionAnchorKind::Tombstone,
+            }),
+            None => retained_anchor.map(|mut anchor| {
+                anchor.kind = StoredRevisionAnchorKind::ObservedDelete;
+                anchor
+            }),
+        };
         self.remove_payloads_for_object(kind, object_id).await?;
         self.remove_memory_record(object_id).await;
         let record = StoredObjectRecord::Deleted(StoredSyncMarkerRecord {
@@ -940,6 +1044,7 @@ impl LocalStore {
             seen_generation: Some(generation),
             event_seq,
             created_seq: event_seq,
+            revision_anchor,
         });
         self.write_stored_object_record(&record).await
     }
@@ -959,21 +1064,21 @@ impl LocalStore {
                     if stored.created_seq <= stream_start_seq
                         && stored.seen_generation != Some(generation) =>
                 {
-                    self.remove_stored_object_record_and_payloads(&record)
-                        .await?;
-                }
-                StoredObjectRecord::Deleted(stored)
-                    if stored.seen_generation != Some(generation) =>
-                {
-                    self.remove_stored_object_record_and_payloads(&record)
-                        .await?;
+                    self.mark_record_absent(&record).await?;
                 }
                 StoredObjectRecord::PendingCreate(stored)
                     if stored.created_seq <= stream_start_seq
                         && stored.seen_generation != Some(generation) =>
                 {
-                    self.remove_stored_object_record_and_payloads(&record)
+                    if stored.revision_anchor.is_some() {
+                        self.write_stored_object_record(&StoredObjectRecord::Deleted(
+                            stored.clone(),
+                        ))
                         .await?;
+                    } else {
+                        self.remove_stored_object_record_and_payloads(&record)
+                            .await?;
+                    }
                 }
                 _ => {}
             }
@@ -981,14 +1086,50 @@ impl LocalStore {
         Ok(())
     }
 
-    async fn remove_object_inner(&self, object_id: &str) -> Result<(), LocalStoreError> {
-        if let Some(record) = self.stored_object_record(object_id).await? {
-            self.remove_stored_object_record_and_payloads(&record)
-                .await?;
-        } else {
-            self.remove_memory_record(object_id).await;
+    async fn mark_record_absent(&self, record: &StoredObjectRecord) -> Result<(), LocalStoreError> {
+        let StoredObjectRecord::Present(present) = record else {
+            return Ok(());
+        };
+        if present.kind == ObjectKind::Collab {
+            return self.remove_stored_object_record_and_payloads(record).await;
         }
-        Ok(())
+        let anchor = StoredRevisionAnchor {
+            head: local_head_from_present(present)?,
+            kind: StoredRevisionAnchorKind::Absent,
+        };
+        self.remove_payloads_for_object(present.kind, &present.id)
+            .await?;
+        self.remove_memory_record(&present.id).await;
+        self.write_stored_object_record(&StoredObjectRecord::Deleted(StoredSyncMarkerRecord {
+            id: present.id.clone(),
+            kind: present.kind,
+            seen_generation: present.seen_generation,
+            event_seq: present.event_seq,
+            created_seq: present.created_seq,
+            revision_anchor: Some(anchor),
+        }))
+        .await
+    }
+
+    async fn mark_object_absent_inner(&self, object_id: &str) -> Result<(), LocalStoreError> {
+        let Some(record) = self.stored_object_record(object_id).await? else {
+            self.remove_memory_record(object_id).await;
+            return Ok(());
+        };
+        match &record {
+            StoredObjectRecord::Present(_) => self.mark_record_absent(&record).await,
+            StoredObjectRecord::PendingCreate(marker) if marker.revision_anchor.is_some() => {
+                self.remove_payloads_for_object(marker.kind, object_id)
+                    .await?;
+                self.remove_memory_record(object_id).await;
+                self.write_stored_object_record(&StoredObjectRecord::Deleted(marker.clone()))
+                    .await
+            }
+            StoredObjectRecord::Deleted(_) => Ok(()),
+            StoredObjectRecord::PendingCreate(_) => {
+                self.remove_stored_object_record_and_payloads(&record).await
+            }
+        }
     }
 
     async fn recent_clipboard_items_inner(
@@ -1140,12 +1281,12 @@ impl LocalStore {
         let titles: HashMap<clipper_schedule::ScheduleItemId, String> = records
             .iter()
             .filter_map(|record| match &record.data {
-                LocalObjectData::Schedule(schedule) => schedule.record.as_item(),
+                LocalObjectData::Schedule(schedule) => schedule.record.planned_title(),
                 LocalObjectData::Clipboard(_)
                 | LocalObjectData::File(_)
                 | LocalObjectData::Collab(_) => None,
             })
-            .map(|item| (item.id, item.title.clone()))
+            .map(|(id, title)| (id, title.to_string()))
             .collect();
 
         records.iter().find_map(|record| {
@@ -1158,18 +1299,17 @@ impl LocalStore {
             if !matches!(actual.span, clipper_schedule::ActualSpan::Running { .. }) {
                 return None;
             }
-            let title = actual
-                .planned
-                .and_then(|planned| titles.get(&planned.item).cloned())
-                .unwrap_or_else(|| "Unplanned".to_string());
+            let title = match actual.planned {
+                Some(planned) => titles
+                    .get(&planned.item)
+                    .cloned()
+                    .unwrap_or_else(|| "Unavailable block".to_string()),
+                None => "Unplanned".to_string(),
+            };
             Some(actual_view(&record.id, actual, &title))
         })
     }
 
-    /// Every schedule record with the object id that carries it.
-    ///
-    /// Ingest needs the object id, not just the record: replacing an event means
-    /// deleting the object it currently lives in.
     /// Where the local copy of an object sits in its chain.
     ///
     /// A new revision has to name the head it follows, and it has to be *this*
@@ -1181,17 +1321,66 @@ impl LocalStore {
     /// `None` means there is no local copy to follow, which is a caller error
     /// rather than a reason to fall back to asking the server.
     pub async fn local_head(&self, object_id: &str) -> Result<Option<LocalHead>, LocalStoreError> {
-        let Some(StoredObjectRecord::Present(record)) =
-            self.stored_object_record(object_id).await?
-        else {
-            return Ok(None);
+        match self.stored_object_record(object_id).await? {
+            Some(StoredObjectRecord::Present(record)) => local_head_from_present(&record).map(Some),
+            Some(StoredObjectRecord::Deleted(record)) => Ok(record
+                .revision_anchor
+                .filter(|anchor| matches!(anchor.kind, StoredRevisionAnchorKind::Tombstone))
+                .map(|anchor| anchor.head)),
+            Some(StoredObjectRecord::PendingCreate(_)) | None => Ok(None),
+        }
+    }
+
+    /// Re-check chain monotonicity while the caller holds the sync lock.
+    ///
+    /// Network materialization performs the same check before decrypting, but
+    /// another live event can land between that check and persistence. This
+    /// storage-boundary check closes that race and makes every encrypted write
+    /// obey the durable anchor, regardless of which engine path called it.
+    async fn validate_encrypted_revision_advance(
+        &self,
+        object_id: &str,
+        encrypted: &EncryptedObject,
+    ) -> Result<(), LocalStoreError> {
+        let Some(record) = self.stored_object_record(object_id).await? else {
+            return Ok(());
         };
-        let body = &present_encrypted_object(&record)?.envelope.body;
-        Ok(Some(LocalHead {
-            revision: body.revision,
-            parent_hash: crypto::object_envelope_parent_hash(body)
-                .map_err(|e| LocalStoreError::EncryptedCache(e.to_string()))?,
-        }))
+        let Some(anchor) = revision_anchor_for_record(&record)? else {
+            return Ok(());
+        };
+        let incoming = &encrypted.envelope.body;
+
+        if let StoredObjectRecord::Deleted(marker) | StoredObjectRecord::PendingCreate(marker) =
+            &record
+            && marker.revision_anchor.is_some_and(|stored| {
+                matches!(stored.kind, StoredRevisionAnchorKind::ObservedDelete)
+            })
+        {
+            // A remote delete event proves that at least one tombstone
+            // followed the last visible head, although the event does not
+            // carry that tombstone's signed body. A restored live object
+            // therefore has to be two or more revisions beyond that head.
+            let minimum = anchor.head.revision.checked_add(2).ok_or_else(|| {
+                LocalStoreError::EncryptedCache("object revision counter overflowed".into())
+            })?;
+            if incoming.revision < minimum {
+                return Err(revision_anchor_error(
+                    object_id,
+                    incoming.revision,
+                    "does not follow the retained delete marker",
+                ));
+            }
+            return Ok(());
+        }
+
+        let require_newer = matches!(
+            &record,
+            StoredObjectRecord::Deleted(marker) | StoredObjectRecord::PendingCreate(marker)
+                if marker.revision_anchor.is_some_and(|anchor| {
+                    matches!(anchor.kind, StoredRevisionAnchorKind::Tombstone)
+                })
+        );
+        validate_revision_against_head(object_id, incoming, anchor.head, require_newer)
     }
 
     pub async fn schedule_records_with_ids(&self) -> Vec<(String, ScheduleRecord)> {
@@ -1207,6 +1396,22 @@ impl LocalStore {
                 | LocalObjectData::Collab(_) => None,
             })
             .collect()
+    }
+
+    /// Read records and their revision heads under the same sync lock. A write
+    /// derived from a record must follow that record's head, even if live sync
+    /// receives another device's edit while the caller is working.
+    pub async fn schedule_records_with_heads(
+        &self,
+    ) -> Result<Vec<(String, ScheduleRecord, LocalHead)>, LocalStoreError> {
+        let _sync = self.sync.lock().await;
+        let mut records = Vec::new();
+        for (id, record) in self.schedule_records_with_ids().await {
+            if let Some(head) = self.local_head(&id).await? {
+                records.push((id, record, head));
+            }
+        }
+        Ok(records)
     }
 
     /// Every schedule record currently cached, in whatever form it takes.
@@ -1872,6 +2077,73 @@ fn present_encrypted_object(
     }
 }
 
+fn local_head_from_present(
+    record: &StoredPresentObjectRecord,
+) -> Result<LocalHead, LocalStoreError> {
+    let body = &present_encrypted_object(record)?.envelope.body;
+    Ok(LocalHead {
+        revision: body.revision,
+        parent_hash: crypto::object_envelope_parent_hash(body)
+            .map_err(|error| LocalStoreError::EncryptedCache(error.to_string()))?,
+    })
+}
+
+fn revision_anchor_for_record(
+    record: &StoredObjectRecord,
+) -> Result<Option<StoredRevisionAnchor>, LocalStoreError> {
+    match record {
+        StoredObjectRecord::Present(present) => Ok(Some(StoredRevisionAnchor {
+            head: local_head_from_present(present)?,
+            kind: StoredRevisionAnchorKind::Absent,
+        })),
+        StoredObjectRecord::PendingCreate(marker) | StoredObjectRecord::Deleted(marker) => {
+            Ok(marker.revision_anchor)
+        }
+    }
+}
+
+fn validate_revision_against_head(
+    object_id: &str,
+    incoming: &ObjectEnvelopeBodyV2,
+    head: LocalHead,
+    require_newer: bool,
+) -> Result<(), LocalStoreError> {
+    if incoming.revision < head.revision || (require_newer && incoming.revision == head.revision) {
+        return Err(revision_anchor_error(
+            object_id,
+            incoming.revision,
+            "rolls back the retained revision anchor",
+        ));
+    }
+    if incoming.revision == head.revision
+        && crypto::object_envelope_parent_hash(incoming)
+            .map_err(|error| LocalStoreError::EncryptedCache(error.to_string()))?
+            != head.parent_hash
+    {
+        return Err(revision_anchor_error(
+            object_id,
+            incoming.revision,
+            "changes the already accepted revision body",
+        ));
+    }
+    if head.revision.checked_add(1) == Some(incoming.revision)
+        && incoming.parent_hash != Some(head.parent_hash)
+    {
+        return Err(revision_anchor_error(
+            object_id,
+            incoming.revision,
+            "does not chain to the retained revision anchor",
+        ));
+    }
+    Ok(())
+}
+
+fn revision_anchor_error(object_id: &str, revision: u64, reason: &str) -> LocalStoreError {
+    LocalStoreError::EncryptedCache(format!(
+        "revision {revision} of object {object_id} {reason}",
+    ))
+}
+
 /// Rebuild a collab display record from a stored present record. Returns `None`
 /// for a non-collab content variant (a corrupt record), so a mismatched record
 /// is dropped rather than surfaced.
@@ -2322,6 +2594,16 @@ mod tests {
     }
 
     fn encrypted_clipboard(item: &DecryptedClipboardItem, payload: &[u8]) -> EncryptedInlineObject {
+        encrypted_clipboard_at(item, payload, 1, None, ObjectEnvelopeOperation::Create)
+    }
+
+    fn encrypted_clipboard_at(
+        item: &DecryptedClipboardItem,
+        payload: &[u8],
+        revision: u64,
+        parent_hash: Option<[u8; crypto::SHA256_BYTES]>,
+        operation: ObjectEnvelopeOperation,
+    ) -> EncryptedInlineObject {
         let object_id = item.id.parse().expect("object id");
         let payload_id = uuid::Uuid::now_v7().into();
         let source_device_id = item.source_device_id.parse().expect("device id");
@@ -2329,11 +2611,11 @@ mod tests {
             object_id,
             object_type: ObjectKind::Clipboard,
             envelope_version: crypto::OBJECT_ENVELOPE_VERSION_V2,
-            revision: 1,
-            parent_hash: None,
+            revision,
+            parent_hash,
             source_device_id,
             created_at: item.created_at.clone(),
-            operation: ObjectEnvelopeOperation::Create,
+            operation,
             meta_nonce: Vec::new(),
             sha256_meta_ciphertext: Vec::new(),
             payloads: vec![ObjectEnvelopePayloadV2 {
@@ -2883,5 +3165,174 @@ mod tests {
             .await
             .expect("payload lookup");
         assert!(payload.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_marker_keeps_revision_anchor_across_sweeps_and_restart() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let generation = store.start_generation().await;
+        let original = item(
+            "88888888-8888-4888-8888-888888888888",
+            "original",
+            "2026-01-08T00:00:00+00:00",
+        );
+        let encrypted = encrypted_clipboard(&original, original.text.as_bytes());
+        store
+            .persist_local_clipboard_present_encrypted(
+                &original,
+                original.text.as_bytes(),
+                &encrypted,
+                1,
+                1,
+                10,
+            )
+            .await
+            .expect("persist original");
+        store
+            .apply_live_delete(ObjectKind::Clipboard, &original.id, 2, generation, 10)
+            .await
+            .expect("delete")
+            .expect("current generation");
+
+        let next_generation = store.start_generation().await;
+        store
+            .sweep_kind(ObjectKind::Clipboard, next_generation, 10, 10)
+            .await
+            .expect("sweep")
+            .expect("current generation");
+
+        let restarted = LocalStore::new(tmp.path());
+        restarted.set_profile("profile-a".into());
+        let error = restarted
+            .persist_local_clipboard_present_encrypted(
+                &original,
+                original.text.as_bytes(),
+                &encrypted,
+                11,
+                11,
+                10,
+            )
+            .await
+            .expect_err("a pre-delete revision must not be replayed after restart");
+        assert!(
+            error.to_string().contains("retained delete marker"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_absence_retains_head_without_forcing_a_new_revision() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let item = item(
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "revision two",
+            "2026-01-10T00:00:00+00:00",
+        );
+        let revision_one = encrypted_clipboard(&item, b"revision one");
+        let parent_hash = crypto::object_envelope_parent_hash(&revision_one.object.envelope.body)
+            .expect("parent hash");
+        let revision_two = encrypted_clipboard_at(
+            &item,
+            item.text.as_bytes(),
+            2,
+            Some(parent_hash),
+            ObjectEnvelopeOperation::Revise,
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &item,
+                item.text.as_bytes(),
+                &revision_two,
+                2,
+                2,
+                10,
+            )
+            .await
+            .expect("persist revision two");
+
+        let generation = store.start_generation().await;
+        store
+            .sweep_kind(ObjectKind::Clipboard, generation, 10, 10)
+            .await
+            .expect("sweep")
+            .expect("current generation");
+
+        store
+            .persist_local_clipboard_present_encrypted(
+                &item,
+                b"revision one",
+                &revision_one,
+                11,
+                11,
+                10,
+            )
+            .await
+            .expect_err("sweep must not erase the accepted revision-two anchor");
+
+        store
+            .persist_local_clipboard_present_encrypted(
+                &item,
+                item.text.as_bytes(),
+                &revision_two,
+                12,
+                12,
+                10,
+            )
+            .await
+            .expect("the same accepted head may reappear after mere absence");
+    }
+
+    #[tokio::test]
+    async fn locally_signed_tombstone_is_a_durable_exact_head() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let original = item(
+            "99999999-9999-4999-8999-999999999999",
+            "original",
+            "2026-01-09T00:00:00+00:00",
+        );
+        let encrypted = encrypted_clipboard(&original, original.text.as_bytes());
+        store
+            .persist_local_clipboard_present_encrypted(
+                &original,
+                original.text.as_bytes(),
+                &encrypted,
+                1,
+                1,
+                10,
+            )
+            .await
+            .expect("persist original");
+        let tombstone = LocalHead {
+            revision: 2,
+            parent_hash: [42; crypto::SHA256_BYTES],
+        };
+        store
+            .apply_live_delete(ObjectKind::Clipboard, &original.id, 2, 0, 10)
+            .await
+            .expect("observe delete")
+            .expect("current generation");
+        store
+            .apply_local_tombstone(ObjectKind::Clipboard, &original.id, 2, tombstone, 10)
+            .await
+            .expect("equal-seq local tombstone upgrades the observed-delete anchor");
+
+        let generation = store.start_generation().await;
+        store
+            .sweep_kind(ObjectKind::Clipboard, generation, 10, 10)
+            .await
+            .expect("sweep")
+            .expect("current generation");
+        let restarted = LocalStore::new(tmp.path());
+        restarted.set_profile("profile-a".into());
+        assert_eq!(
+            restarted.local_head(&original.id).await.expect("head"),
+            Some(tombstone),
+        );
     }
 }

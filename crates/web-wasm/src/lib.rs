@@ -229,12 +229,12 @@ pub fn session_resume_material() -> Promise {
         Reflect::set(
             &object,
             &JsValue::from("dataKey"),
-            &JsValue::from(STANDARD.encode(&*material.data_key)),
+            &JsValue::from(STANDARD.encode(material.data_key.as_slice())),
         )?;
         Reflect::set(
             &object,
             &JsValue::from("wrappingKey"),
-            &JsValue::from(STANDARD.encode(&*material.device_identity_wrapping_key)),
+            &JsValue::from(STANDARD.encode(material.device_identity_wrapping_key.as_slice())),
         )?;
         Ok(object.into())
     })

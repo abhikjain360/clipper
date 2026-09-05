@@ -74,6 +74,17 @@ impl ScheduleRecord {
             Self::Item(_) | Self::Override(_) | Self::Actual(_) | Self::Source(_) => None,
         }
     }
+
+    /// Both owned blocks and imported meetings can be the plan for logged time.
+    pub fn planned_title(&self) -> Option<(clipper_schedule::ScheduleItemId, &str)> {
+        match self {
+            Self::Item(item) => Some((item.id, &item.title)),
+            Self::Ingested(event) => {
+                Some((clipper_schedule::ScheduleItemId(event.id), &event.title))
+            }
+            Self::Override(_) | Self::Actual(_) | Self::Source(_) => None,
+        }
+    }
 }
 
 /// Encrypt a schedule object's metadata.
@@ -195,7 +206,7 @@ pub fn actual_view(
 /// yields the same string.
 pub fn occurrence_key(recurrence_id: &clipper_schedule::RecurrenceId) -> String {
     match recurrence_id {
-        clipper_schedule::RecurrenceId::Floating(local) => format!("floating:{local}"),
+        clipper_schedule::RecurrenceId::Floating(local) => format!("floating:{local:?}"),
         clipper_schedule::RecurrenceId::Instant(instant) => {
             format!("instant:{}", instant.timestamp_millis())
         }
@@ -210,7 +221,8 @@ pub fn occurrence_key(recurrence_id: &clipper_schedule::RecurrenceId) -> String 
 pub fn parse_occurrence_key(key: &str) -> Option<clipper_schedule::RecurrenceId> {
     let (kind, value) = key.split_once(':')?;
     match kind {
-        "floating" => chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
+        "floating" => value
+            .parse()
             .ok()
             .map(clipper_schedule::RecurrenceId::Floating),
         "instant" => value
@@ -314,6 +326,14 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn floating_occurrence_keys_round_trip_including_fractional_seconds() {
+        for value in ["2026-09-08T07:00:00", "2026-09-08T07:00:00.123456"] {
+            let id = clipper_schedule::RecurrenceId::Floating(value.parse().expect("datetime"));
+            assert_eq!(parse_occurrence_key(&occurrence_key(&id)), Some(id));
+        }
+    }
 
     fn sample_item() -> ScheduleItem {
         ScheduleItem {
