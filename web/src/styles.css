@@ -344,3 +344,26 @@ select {
 .library-grid .library-card:hover {
     border-color: #44515c !important;
 }
+
+.nav-collapse-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    align-self: flex-start;
+    width: 44px;
+    height: 40px;
+    flex-shrink: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #9aa4ad;
+    cursor: pointer;
+}
+.nav-collapse-toggle:hover {
+    color: #f2f5f7;
+    background: #252b31;
+}
+.nav-collapse-toggle:focus-visible {
+    outline: 2px solid #8bbcff;
+}
