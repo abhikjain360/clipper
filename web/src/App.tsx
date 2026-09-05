@@ -12,6 +12,8 @@ import {
     Files,
     Folder,
     LogOut,
+    Menu,
+    PanelLeftClose,
     RefreshCw,
     Smartphone,
     Trash2,
@@ -363,131 +365,157 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
         }
     }
 
+    const [navExpanded, setNavExpanded] = useState(false);
+    const mobileNav = useRef<HTMLDialogElement>(null);
+    const destinations = [
+        { path: "/", label: "Clipboard", icon: Clipboard },
+        { path: "/files", label: "Files", icon: Folder },
+        { path: "/collab", label: "Collab Docs", icon: FileText },
+        { path: "/schedule", label: "Schedule", icon: CalendarClock },
+        { path: "/devices", label: "Devices", icon: Smartphone },
+    ];
+    const navigation = (expanded: boolean, mobile = false) => (
+        <>
+            <Button
+                aria-label={
+                    mobile
+                        ? "Close navigation"
+                        : navExpanded
+                          ? "Collapse navigation"
+                          : "Expand navigation"
+                }
+                icon={expanded ? <PanelLeftClose size={20} /> : <Menu size={20} />}
+                onPress={() => (mobile ? mobileNav.current?.close() : setNavExpanded(!navExpanded))}
+            >
+                {expanded ? "Close navigation" : null}
+            </Button>
+            <nav aria-label="Main navigation" className="nav-destinations">
+                {destinations.map(({ path, label, icon: Icon }) => (
+                    <Button
+                        key={path}
+                        aria-label={label}
+                        aria-current={
+                            (path === "/" ? location === path : location.startsWith(path))
+                                ? "page"
+                                : undefined
+                        }
+                        theme={
+                            (path === "/" ? location === path : location.startsWith(path))
+                                ? "blue"
+                                : undefined
+                        }
+                        icon={<Icon size={20} />}
+                        justify={expanded ? "flex-start" : "center"}
+                        onPress={() => {
+                            setLocation(path);
+                            if (mobile) mobileNav.current?.close();
+                        }}
+                    >
+                        {expanded ? label : null}
+                    </Button>
+                ))}
+            </nav>
+            <div className="nav-bottom">
+                <Button
+                    aria-label="Refresh"
+                    icon={busy ? <Spinner /> : <RefreshCw size={20} />}
+                    onPress={refresh}
+                    disabled={busy}
+                    justify={expanded ? "flex-start" : "center"}
+                >
+                    {expanded ? "Refresh" : null}
+                </Button>
+                <Button
+                    aria-label="Logout"
+                    icon={<LogOut size={20} />}
+                    onPress={logout}
+                    justify={expanded ? "flex-start" : "center"}
+                >
+                    {expanded ? "Logout" : null}
+                </Button>
+                <div className="nav-brand" aria-label={`Clipper: ${state.connection_status}`}>
+                    <Clipboard size={22} aria-hidden="true" />
+                    {expanded && <span>Clipper</span>}
+                </div>
+                {expanded && <ConnectionBadge status={state.connection_status} />}
+            </div>
+        </>
+    );
+
     return (
-        <YStack minH="100vh" bg="#101214">
-            <XStack
-                items="center"
-                justify="space-between"
-                gap="$3"
-                px="$4"
-                py="$3"
-                bg="#171a1d"
-                flexWrap="wrap"
-                style={{ borderBottomColor: "#252b31", borderBottomWidth: 1 }}
+        <div className={`app-shell${navExpanded ? " nav-expanded" : ""}`}>
+            <aside className="desktop-navigation">{navigation(navExpanded)}</aside>
+            <button
+                className="mobile-nav-toggle"
+                aria-label="Open navigation"
+                onClick={() => mobileNav.current?.showModal()}
             >
-                <XStack items="center" gap="$3">
-                    <H2 size="$7">Clipper</H2>
-                    <ConnectionBadge status={state.connection_status} />
-                </XStack>
-                <XStack gap="$2" flexWrap="wrap" minW={0} maxW="100%" aria-label="Main navigation">
-                    <Button
-                        size="$3"
-                        theme={location === "/" ? "blue" : undefined}
-                        icon={<Clipboard size={16} />}
-                        onPress={() => setLocation("/")}
-                    >
-                        Clipboard
-                    </Button>
-                    <Button
-                        size="$3"
-                        theme={location === "/files" ? "blue" : undefined}
-                        icon={<Folder size={16} />}
-                        onPress={() => setLocation("/files")}
-                    >
-                        Files
-                    </Button>
-                    <Button
-                        size="$3"
-                        theme={location.startsWith("/collab") ? "blue" : undefined}
-                        icon={<FileText size={16} />}
-                        onPress={() => setLocation("/collab")}
-                    >
-                        Collab Docs
-                    </Button>
-                    <Button
-                        size="$3"
-                        theme={location === "/schedule" ? "blue" : undefined}
-                        icon={<CalendarClock size={16} />}
-                        onPress={() => setLocation("/schedule")}
-                    >
-                        Schedule
-                    </Button>
-                    <Button
-                        size="$3"
-                        theme={location === "/devices" ? "blue" : undefined}
-                        icon={<Smartphone size={16} />}
-                        onPress={() => setLocation("/devices")}
-                    >
-                        Devices
-                    </Button>
-                </XStack>
-                <XStack items="center" gap="$2">
-                    <Button
-                        size="$3"
-                        icon={busy ? <Spinner /> : <RefreshCw size={16} />}
-                        onPress={refresh}
-                        disabled={busy}
-                    >
-                        Refresh
-                    </Button>
-                    <Button size="$3" icon={<LogOut size={16} />} onPress={logout}>
-                        Logout
-                    </Button>
-                </XStack>
-            </XStack>
-
-            <YStack
-                width="100%"
-                maxW={location === "/schedule" ? undefined : 1100}
-                self="center"
-                p="$3"
-                gap="$3"
-                flex={1}
+                <Menu size={22} />
+            </button>
+            <dialog
+                className="mobile-nav-dialog"
+                ref={mobileNav}
+                aria-label="Navigation"
+                onClick={(event) => {
+                    if (event.target === event.currentTarget) mobileNav.current?.close();
+                }}
             >
-                {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
+                <div className="mobile-navigation">{navigation(true, true)}</div>
+            </dialog>
+            <main className="app-main">
+                <YStack
+                    width="100%"
+                    maxW={location === "/schedule" ? undefined : 1100}
+                    self="center"
+                    p="$3"
+                    gap="$3"
+                    flex={1}
+                >
+                    {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
 
-                <Switch>
-                    <Route path="/files">
-                        <FilesPanel files={state.files} onState={onState} onError={setError} />
-                    </Route>
-                    <Route path="/collab/:id">
-                        {(params) => (
-                            <CollabDocView
-                                id={params.id}
-                                displayName={state.session?.username ?? "You"}
+                    <Switch>
+                        <Route path="/files">
+                            <FilesPanel files={state.files} onState={onState} onError={setError} />
+                        </Route>
+                        <Route path="/collab/:id">
+                            {(params) => (
+                                <CollabDocView
+                                    id={params.id}
+                                    displayName={state.session?.username ?? "You"}
+                                    onError={setError}
+                                />
+                            )}
+                        </Route>
+                        <Route path="/collab">
+                            <CollabPanel
+                                collabDocs={state.collab_docs}
+                                onState={onState}
                                 onError={setError}
                             />
-                        )}
-                    </Route>
-                    <Route path="/collab">
-                        <CollabPanel
-                            collabDocs={state.collab_docs}
-                            onState={onState}
-                            onError={setError}
-                        />
-                    </Route>
-                    <Route path="/schedule">
-                        <SchedulePanel
-                            items={state.schedule_items}
-                            sources={state.calendar_sources}
-                            running={state.running_actual ?? null}
-                            onState={onState}
-                            onError={setError}
-                        />
-                    </Route>
-                    <Route path="/devices">
-                        <DevicesPanel onError={setError} />
-                    </Route>
-                    <Route>
-                        <ClipboardPanel
-                            items={state.clipboard_items}
-                            onState={onState}
-                            onError={setError}
-                        />
-                    </Route>
-                </Switch>
-            </YStack>
-        </YStack>
+                        </Route>
+                        <Route path="/schedule">
+                            <SchedulePanel
+                                items={state.schedule_items}
+                                sources={state.calendar_sources}
+                                running={state.running_actual ?? null}
+                                onState={onState}
+                                onError={setError}
+                            />
+                        </Route>
+                        <Route path="/devices">
+                            <DevicesPanel onError={setError} />
+                        </Route>
+                        <Route>
+                            <ClipboardPanel
+                                items={state.clipboard_items}
+                                onState={onState}
+                                onError={setError}
+                            />
+                        </Route>
+                    </Switch>
+                </YStack>
+            </main>
+        </div>
     );
 }
 
