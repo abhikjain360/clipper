@@ -112,6 +112,9 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     syncCalendarSource: async () => {
       throw new Error("Syncing a calendar source is not available on mobile yet");
     },
+    updateScheduleItem: async () => {
+      throw new Error("Editing schedule items is not available on mobile yet");
+    },
     createScheduleItem: async () => {
       throw new Error("Creating schedule items is not available on mobile yet");
     },
@@ -209,6 +212,7 @@ function mapScheduleItemView(item: NativeScheduleItemView): ScheduleItemView {
   return {
     all_day: item.allDay,
     created_at: item.createdAt,
+    definition_json: item.definitionJson,
     id: item.id,
     recurrence: item.recurrence,
     time_summary: item.timeSummary,

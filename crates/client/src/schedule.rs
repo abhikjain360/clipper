@@ -131,14 +131,18 @@ pub fn decrypt_schedule_payload(
 }
 
 /// Render a series for a list.
-pub fn item_view(item: &ScheduleItem, created_at: &str) -> ScheduleItemView {
+pub fn item_view(item: &ScheduleItem, object_id: &str, created_at: &str) -> ScheduleItemView {
     ScheduleItemView {
-        id: item.id.to_string(),
+        // The *object* id, not the series id: this is what edits and deletes
+        // address. The series id lives inside `definition_json` and survives an
+        // edit, so overrides and logged time are not orphaned.
+        id: object_id.to_string(),
         title: item.title.clone(),
         recurrence: item.recurrence.summary(),
         time_summary: item.time_summary(),
         all_day: matches!(item.span, ScheduleSpan::AllDay { .. }),
         created_at: created_at.to_string(),
+        definition_json: serde_json::to_string(item).unwrap_or_default(),
     }
 }
 

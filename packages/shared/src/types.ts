@@ -115,12 +115,18 @@ export type ScheduleItem = {
 /// A series as rendered for a list. Built by the Rust side so every shell shows
 /// the same wording.
 export type ScheduleItemView = {
+  // The object id — what edits and deletes address. The series id is inside
+  // definition_json and survives an edit, so overrides and logged time keep
+  // pointing at the right series.
   id: string;
   title: string;
   recurrence: string;
   time_summary: string;
   all_day: boolean;
   created_at: string;
+  // The exact record, serialized. The formatted fields above cannot be turned
+  // back into one, and editing needs it. Parse with ScheduleItem.
+  definition_json: string;
 };
 
 /// One computed instance, ready to place on a grid. Never stored — the client
@@ -260,6 +266,9 @@ export type ClipperBackend = {
   downloadFileToDialog?: (fileId: string, defaultFilename: string) => Promise<boolean>;
   deleteFile: (fileId: string) => Promise<void>;
   createScheduleItem: (item: ScheduleItem) => Promise<string>;
+  // Replace a series. Returns the new object id; the series id inside `item`
+  // must be unchanged.
+  updateScheduleItem: (objectId: string, item: ScheduleItem) => Promise<string>;
   addCalendarSource: (name: string, url: string) => Promise<string>;
   // Rejects in the browser: no calendar provider sends CORS headers, so feeds
   // are pulled by the desktop or mobile app and reach the browser as objects.

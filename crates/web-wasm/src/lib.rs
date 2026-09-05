@@ -364,6 +364,19 @@ pub fn create_schedule_item(item: JsValue) -> Promise {
     })
 }
 
+/// Replace a series with an edited version. Returns the new object id.
+#[wasm_bindgen(js_name = updateScheduleItem)]
+pub fn update_schedule_item(object_id: String, item: JsValue) -> Promise {
+    ok_promise(async move {
+        let item: ScheduleItem = serde_wasm_bindgen::from_value(item).map_err(js_error)?;
+        let replacement = engine_or_error()?
+            .update_schedule_item(&object_id, item)
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::from_str(&replacement))
+    })
+}
+
 #[wasm_bindgen(js_name = deleteScheduleObject)]
 pub fn delete_schedule_object(object_id: String) -> Promise {
     ok_promise(async move {

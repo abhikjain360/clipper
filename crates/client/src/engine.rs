@@ -1212,6 +1212,48 @@ impl SyncEngine {
         Ok(object_id)
     }
 
+    /// Replace a schedule series with an edited version.
+    ///
+    /// Objects are immutable, so an edit is a create followed by a delete until
+    /// the revision layer lands (D6). The new object is written *first*: if the
+    /// delete then fails, the result is a visible duplicate the owner can
+    /// remove, whereas deleting first would risk losing the block entirely.
+    ///
+    /// The series id inside the record is preserved even though the object id
+    /// changes. Overrides and time already logged point at the series, not at
+    /// the object carrying it, so an edit must not orphan them.
+    pub async fn update_schedule_item(
+        &self,
+        object_id: &str,
+        item: ScheduleItem,
+    ) -> Result<String, ClientError> {
+        let existing = self
+            .local_store
+            .schedule_records_with_ids()
+            .await
+            .into_iter()
+            .find(|(id, record)| id == object_id && record.as_item().is_some());
+        let Some((_, previous)) = existing else {
+            return Err(ClientError::ItemNotFound {
+                id: object_id.to_string(),
+            });
+        };
+        let previous_series = previous
+            .as_item()
+            .expect("filtered to series records above")
+            .id;
+        if item.id != previous_series {
+            return Err(ClientError::InvalidArgument(
+                "an edit must keep the series id; overrides and logged time reference it".into(),
+            ));
+        }
+
+        let replacement = self.create_schedule_item(item).await?;
+        self.delete_schedule_object(object_id).await?;
+        info!(object_id = %object_id, replacement = %replacement, "Schedule item edited");
+        Ok(replacement)
+    }
+
     /// Delete a schedule object.
     ///
     /// Until the revision layer lands (D6), editing a series is a create
