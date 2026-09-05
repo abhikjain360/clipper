@@ -141,6 +141,7 @@ pub fn item_view(item: &ScheduleItem, object_id: &str, created_at: &str) -> Sche
         recurrence: item.recurrence.summary(),
         time_summary: item.time_summary(),
         all_day: matches!(item.span, ScheduleSpan::AllDay { .. }),
+        has_alarm: item.alarm.is_some(),
         created_at: created_at.to_string(),
         definition_json: serde_json::to_string(item).unwrap_or_default(),
     }

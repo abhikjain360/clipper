@@ -1544,7 +1544,12 @@ impl SyncEngine {
             .iter()
             .filter_map(|record| match record {
                 ScheduleRecord::Override(entry) => Some((**entry).clone()),
-                _ => None,
+                // Listed rather than wildcarded so a new record kind has to be
+                // considered here, which is the point of an exhaustive match.
+                ScheduleRecord::Item(_)
+                | ScheduleRecord::Actual(_)
+                | ScheduleRecord::Source(_)
+                | ScheduleRecord::Ingested(_) => None,
             })
             .collect();
 

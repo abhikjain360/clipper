@@ -1089,7 +1089,9 @@ impl LocalStore {
             .iter()
             .filter_map(|record| match &record.data {
                 LocalObjectData::Schedule(schedule) => schedule.record.as_item(),
-                _ => None,
+                LocalObjectData::Clipboard(_)
+                | LocalObjectData::File(_)
+                | LocalObjectData::Collab(_) => None,
             })
             .map(|item| (item.id, item.title.clone()))
             .collect();
