@@ -23,7 +23,7 @@ impl Recurrence {
             Self::Every(cadence) => cadence.summary(),
             // No attempt to render a rule Clipper does not model. A wrong
             // plain-English summary would be worse than an honest label.
-            Self::Raw { .. } => "Repeats (from calendar)".to_string(),
+            Self::Imported { .. } => "Repeats (from calendar)".to_string(),
         }
     }
 }

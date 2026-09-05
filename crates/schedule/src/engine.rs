@@ -12,17 +12,19 @@
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
+    sync::Arc,
 };
 
 use chrono::{DateTime, TimeDelta, Utc, Weekday};
 use chrono_tz::Tz;
+use clipper_api_types::ObjectId;
 
 use crate::{
     item::{
         Occurrence, OccurrenceOrigin, OccurrenceOverrideData, OverrideChange, RecurrenceId,
         ScheduleItem,
     },
-    recurrence::{Cadence, Frequency, MonthlyRule, Recurrence, RecurrenceEnd},
+    recurrence::{Cadence, Frequency, MonthlyRule, Recurrence, RecurrenceEnd, ValidatedRrule},
     time::{ScheduleSpan, TimeError, TimedStart},
 };
 
@@ -174,12 +176,14 @@ pub struct RruleEngine {
     /// a dense rule and a wide window producing unbounded work; exceeding it is
     /// an error rather than a silent truncation.
     max_candidates: usize,
+    imported_rules: Arc<ImportedRuleResolver>,
 }
 
 impl Default for RruleEngine {
     fn default() -> Self {
         Self {
             max_candidates: 10_000,
+            imported_rules: Arc::new(ImportedRuleResolver::default()),
         }
     }
 }
@@ -190,7 +194,20 @@ impl RruleEngine {
     }
 
     pub fn with_max_candidates(max_candidates: usize) -> Self {
-        Self { max_candidates }
+        Self {
+            max_candidates,
+            imported_rules: Arc::new(ImportedRuleResolver::default()),
+        }
+    }
+
+    /// Builds an engine over rules recovered from one or more raw import
+    /// snapshots. The resolver is owned so the same engine can be cached and
+    /// reused for every event in those snapshots.
+    pub fn with_imported_rules(imported_rules: ImportedRuleResolver) -> Self {
+        Self {
+            imported_rules: Arc::new(imported_rules),
+            ..Self::default()
+        }
     }
 
     /// Rule-generated spans whose start lies in the window, before overrides.
@@ -213,9 +230,15 @@ impl RruleEngine {
                 });
             }
             Recurrence::Every(cadence) => rrule_line(cadence),
-            // Passed through byte-for-byte: this is a rule Clipper deliberately
-            // does not model, so re-serializing it would risk changing it.
-            Recurrence::Raw { rule } => rule.as_str().to_string(),
+            Recurrence::Imported { import, uid } => self
+                .imported_rules
+                .lookup(*import, uid)
+                .ok_or_else(|| EngineError::MissingImportedRule {
+                    import: *import,
+                    uid: uid.clone(),
+                })?
+                .as_str()
+                .to_string(),
         };
 
         let zone = effective_zone(item, expansion.observer);
@@ -266,6 +289,47 @@ impl RruleEngine {
             ));
         }
         Ok(spans)
+    }
+}
+
+/// Validated opaque recurrence rules recovered from immutable import files.
+///
+/// This map is deliberately runtime-only. [`Recurrence::Imported`] persists a
+/// snapshot reference and provider UID; the rule text is parsed from that
+/// snapshot when a client prepares an expansion engine.
+#[derive(Debug, Clone, Default)]
+pub struct ImportedRuleResolver {
+    rules: HashMap<(ObjectId, String), ValidatedRrule>,
+}
+
+impl ImportedRuleResolver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Validates and adds one provider rule.
+    pub fn insert(
+        &mut self,
+        import: ObjectId,
+        uid: impl Into<String>,
+        rule: impl Into<String>,
+    ) -> Result<(), crate::recurrence::RecurrenceError> {
+        self.rules
+            .insert((import, uid.into()), ValidatedRrule::new(rule)?);
+        Ok(())
+    }
+
+    /// Adds all rules from another parsed snapshot set.
+    pub fn merge(&mut self, other: Self) {
+        self.rules.extend(other.rules);
+    }
+
+    pub fn lookup(&self, import: ObjectId, uid: &str) -> Option<&ValidatedRrule> {
+        self.rules.get(&(import, uid.to_owned()))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
     }
 }
 
@@ -466,6 +530,8 @@ pub enum EngineError {
     },
     #[error("recurrence rule was rejected by the expansion library: {0}")]
     RuleRejected(String),
+    #[error("imported recurrence rule {uid:?} is unavailable in snapshot {import}")]
+    MissingImportedRule { import: ObjectId, uid: String },
     #[error("expansion produced more than {limit} candidates; narrow the window")]
     ExpansionLimitExceeded { limit: usize },
     #[error("recurrence expansion scanned more than {limit} historical candidates")]

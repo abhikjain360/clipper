@@ -6,10 +6,10 @@ use std::num::NonZeroU32;
 use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use clipper_schedule::{
-    BlockDuration, Cadence, EngineError, Expansion, Frequency, MonthDay, NthWeekday, Occurrence,
-    OccurrenceOrigin, OccurrenceOverrideData, OverrideChange, OverrideId, RawRule, Recurrence,
-    RecurrenceEngine, RecurrenceError, RecurrenceId, RruleEngine, ScheduleItem, ScheduleItemId,
-    ScheduleSpan, TimeError, TimedStart, WeekdaySet, Window,
+    BlockDuration, Cadence, EngineError, Expansion, Frequency, ImportedRuleResolver, MonthDay,
+    NthWeekday, Occurrence, OccurrenceOrigin, OccurrenceOverrideData, OverrideChange, OverrideId,
+    Recurrence, RecurrenceEngine, RecurrenceError, RecurrenceId, RruleEngine, ScheduleItem,
+    ScheduleItemId, ScheduleSpan, TimeError, TimedStart, ValidatedRrule, WeekdaySet, Window,
 };
 
 fn local(text: &str) -> NaiveDateTime {
@@ -441,11 +441,16 @@ fn a_dense_old_rule_hits_the_history_scan_bound() {
         local: local("20260101T000000"),
         zone: Tz::UTC,
     });
-    item.recurrence = Recurrence::Raw {
-        rule: RawRule::new("FREQ=MINUTELY").expect("valid raw rule"),
+    let import = clipper_api_types::ObjectId::from(uuid::Uuid::new_v4());
+    let uid = "dense@example.com";
+    item.recurrence = Recurrence::Imported {
+        import,
+        uid: uid.into(),
     };
+    let mut rules = ImportedRuleResolver::new();
+    rules.insert(import, uid, "FREQ=MINUTELY").unwrap();
 
-    let result = RruleEngine::new().occurrences(
+    let result = RruleEngine::with_imported_rules(rules).occurrences(
         &item,
         &[],
         &Expansion {
@@ -465,12 +470,18 @@ fn an_impossible_finite_raw_rule_is_empty() {
         local: local("20260101T000000"),
         zone: Tz::UTC,
     });
-    item.recurrence = Recurrence::Raw {
-        rule: RawRule::new("FREQ=YEARLY;COUNT=2;BYMONTH=2;BYMONTHDAY=30")
-            .expect("syntactically valid raw rule"),
+    let import = clipper_api_types::ObjectId::from(uuid::Uuid::new_v4());
+    let uid = "impossible@example.com";
+    item.recurrence = Recurrence::Imported {
+        import,
+        uid: uid.into(),
     };
+    let mut rules = ImportedRuleResolver::new();
+    rules
+        .insert(import, uid, "FREQ=YEARLY;COUNT=2;BYMONTH=2;BYMONTHDAY=30")
+        .unwrap();
 
-    let occurrences = RruleEngine::new()
+    let occurrences = RruleEngine::with_imported_rules(rules)
         .occurrences(
             &item,
             &[],
@@ -723,30 +734,61 @@ fn the_wire_format_is_self_describing() {
     assert_eq!(back, item);
 }
 
-/// The raw variant is the one a feed produces, and it broke serialization the
-/// first time it was tried for real: serde cannot internally tag a newtype
-/// wrapping a string. Pin its shape alongside the typed cadence.
+/// An unsupported imported rule persists only the immutable snapshot and UID.
+/// The opaque provider syntax belongs exclusively to the runtime resolver.
 #[test]
-fn a_raw_rule_serializes_under_the_same_tag() {
-    use clipper_schedule::RawRule;
-
-    let recurrence = Recurrence::Raw {
-        rule: RawRule::new("FREQ=WEEKLY;BYDAY=MO,WE").expect("valid rule"),
+fn an_imported_rule_serializes_only_its_reference() {
+    let import = clipper_api_types::ObjectId::from(uuid::Uuid::new_v4());
+    let recurrence = Recurrence::Imported {
+        import,
+        uid: "meeting@example.com".into(),
     };
     let json = serde_json::to_value(&recurrence).expect("serialize");
-    assert_eq!(json["kind"], "raw");
-    assert_eq!(json["rule"], "FREQ=WEEKLY;BYDAY=MO,WE");
+    assert_eq!(json["kind"], "imported");
+    assert_eq!(json["import"], import.to_string());
+    assert_eq!(json["uid"], "meeting@example.com");
+    assert!(json.get("rule").is_none());
+    assert!(!json.to_string().contains("FREQ="));
 
     let back: Recurrence = serde_json::from_value(json).expect("round trip");
     assert_eq!(back, recurrence);
 
-    // Validation runs on the way back in, not only at construction.
     assert!(
         serde_json::from_value::<Recurrence>(
-            serde_json::json!({"kind": "raw", "rule": "NOT A RULE"})
+            serde_json::json!({"kind": "raw", "rule": "FREQ=DAILY"})
         )
         .is_err(),
-        "an unparseable rule must be rejected on deserialize too"
+        "the obsolete rule-bearing wire shape must be rejected"
+    );
+}
+
+#[test]
+fn an_imported_rule_without_its_snapshot_fails_clearly() {
+    let import = clipper_api_types::ObjectId::from(uuid::Uuid::new_v4());
+    let uid = "missing@example.com";
+    let mut item = daily_at(TimedStart::Zoned {
+        local: local("20260101T080000"),
+        zone: Tz::UTC,
+    });
+    item.recurrence = Recurrence::Imported {
+        import,
+        uid: uid.into(),
+    };
+
+    let result = RruleEngine::new().occurrences(
+        &item,
+        &[],
+        &Expansion {
+            window: window(utc(2026, 1, 1, 0, 0), utc(2026, 1, 2, 0, 0)),
+            observer: Tz::UTC,
+        },
+    );
+    assert_eq!(
+        result,
+        Err(EngineError::MissingImportedRule {
+            import,
+            uid: uid.into(),
+        })
     );
 }
 
@@ -758,30 +800,21 @@ fn a_raw_rule_serializes_under_the_same_tag() {
 /// `EXDATE` silently deletes occurrences, a second `RRULE` silently adds them.
 #[test]
 fn a_raw_rule_cannot_smuggle_a_second_property() {
-    use clipper_schedule::RawRule;
-
     for smuggled in [
         "FREQ=DAILY;COUNT=10\nEXDATE:20240102T090000Z",
         "FREQ=DAILY;COUNT=2\nRRULE:FREQ=MONTHLY;COUNT=5",
         "FREQ=DAILY;COUNT=2\rEXDATE:20240102T090000Z",
     ] {
         assert!(
-            RawRule::new(smuggled).is_err(),
+            ValidatedRrule::new(smuggled).is_err(),
             "a folded line must not validate: {smuggled:?}"
-        );
-        assert!(
-            serde_json::from_value::<Recurrence>(
-                serde_json::json!({"kind": "raw", "rule": smuggled})
-            )
-            .is_err(),
-            "a synced record must not carry a folded line either: {smuggled:?}"
         );
     }
 
     // The legitimate value is unaffected: only control characters are refused,
     // and surrounding whitespace is still trimmed rather than rejected.
     assert_eq!(
-        RawRule::new("  RRULE:FREQ=DAILY;COUNT=2  ")
+        ValidatedRrule::new("  RRULE:FREQ=DAILY;COUNT=2  ")
             .expect("a padded rule stays valid")
             .as_str(),
         "FREQ=DAILY;COUNT=2"

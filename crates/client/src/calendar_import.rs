@@ -5,6 +5,123 @@ use super::*;
 
 type Records = [(String, ScheduleRecord, LocalHead)];
 
+pub(super) struct CachedImportRules {
+    epoch: u64,
+    import: ObjectId,
+    head: LocalHead,
+    engine: RruleEngine,
+}
+
+const MAX_IMPORT_BYTES: i64 = 8 * 1024 * 1024;
+
+impl SyncEngine {
+    /// Resolve unsupported rules from their complete authenticated snapshot.
+    /// Check live metadata even on a cache hit: a deleted file is not a resolver.
+    pub(super) async fn recurrence_engine(
+        &self,
+        recurrence: &clipper_schedule::Recurrence,
+    ) -> Result<RruleEngine, ClientError> {
+        let clipper_schedule::Recurrence::Imported { import, .. } = recurrence else {
+            return Ok(RruleEngine::new());
+        };
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
+        let id = import.to_string();
+        let object = self.local_store.import_file_object(&id).await?.ok_or_else(|| {
+            ClientError::InvalidArgument(
+                "Original calendar import unavailable; unsupported recurrence cannot be expanded".into(),
+            )
+        })?;
+        let head = LocalHead {
+            revision: object.envelope.body.revision,
+            parent_hash: crypto::object_envelope_parent_hash(&object.envelope.body)?,
+        };
+        if head.revision != 1 {
+            return Err(ClientError::InvalidArgument(
+                "The original calendar import was modified; refusing to reinterpret its events"
+                    .into(),
+            ));
+        }
+        {
+            let cache = self.import_rules.lock().await;
+            if let Some(entry) = cache
+                .iter()
+                .find(|entry| entry.epoch == epoch && entry.import == *import && entry.head == head)
+            {
+                if self.history_epoch.load(Ordering::SeqCst) != epoch {
+                    return Err(ClientError::NotAuthenticated);
+                }
+                return Ok(entry.engine.clone());
+            }
+        }
+        let [payload] = object.payloads.as_slice() else {
+            return Err(ClientError::InvalidArgument(
+                "Import must have one payload".into(),
+            ));
+        };
+        check_payload_ciphertext_size(payload, MAX_IMPORT_BYTES + 16)?;
+        #[cfg(not(target_family = "wasm"))]
+        let cached = self.local_store.import_file_ciphertext(&id, head).await?;
+        #[cfg(target_family = "wasm")]
+        let cached: Option<Vec<u8>> = None;
+        let ciphertext = match cached {
+            Some(bytes) if verify_payload_hash(payload, &bytes).is_ok() => bytes,
+            _ => {
+                self.api
+                    .download_object_payload(&id, &payload.id.to_string(), payload.ciphertext_size)
+                    .await?
+            }
+        };
+        verify_payload_hash(payload, &ciphertext)?;
+        // Hold the key read lock through cache writes so authentication cannot
+        // switch the local profile while this import is being resolved.
+        let key_guard = self.encryption_key.read().await;
+        if self.history_epoch.load(Ordering::SeqCst) != epoch {
+            return Err(ClientError::NotAuthenticated);
+        }
+        let key = key_guard.as_ref().ok_or(ClientError::NotAuthenticated)?;
+        let plaintext = decrypt_file_blob_bytes(
+            &payload.nonce,
+            &ciphertext,
+            key,
+            &object.envelope.body,
+            payload.id,
+        )?;
+        let text = std::str::from_utf8(&plaintext)
+            .map_err(|_| ClientError::InvalidArgument("Original import is not UTF-8".into()))?;
+        let rules = clipper_schedule::parse_imported_recurrence_rules(text, *import)
+            .map_err(|error| ClientError::InvalidArgument(format!("Original import: {error}")))?;
+        let engine = RruleEngine::with_imported_rules(rules);
+        #[cfg(not(target_family = "wasm"))]
+        self.local_store
+            .cache_import_file_ciphertext(&id, head, &ciphertext)
+            .await?;
+        let current = self
+            .local_store
+            .import_file_object(&id)
+            .await?
+            .ok_or_else(|| {
+                ClientError::InvalidArgument("Original calendar import was deleted".into())
+            })?;
+        if crypto::object_envelope_parent_hash(&current.envelope.body)? != head.parent_hash {
+            return Err(ClientError::InvalidArgument(
+                "Original calendar import changed during resolution".into(),
+            ));
+        }
+        let mut cache = self.import_rules.lock().await;
+        cache.retain(|entry| entry.epoch == epoch && entry.import != *import);
+        while cache.len() >= 4 {
+            cache.pop_front();
+        }
+        cache.push_back(CachedImportRules {
+            epoch,
+            import: *import,
+            head,
+            engine: engine.clone(),
+        });
+        Ok(engine)
+    }
+}
+
 /// A source becomes visible only once every event named by its manifest is local.
 /// Sync may deliver the source revision before some of the batch's events.
 pub(super) fn ready_sources(records: &Records) -> HashSet<SourceId> {
@@ -21,7 +138,7 @@ pub(super) fn ready_sources(records: &Records) -> HashSet<SourceId> {
                 batch.events.iter().all(|id| {
                     seen.insert(*id)
                         && events.get(id.to_string().as_str()).is_some_and(|event| {
-                            event.source == source.id && event.import == Some(batch.object_id)
+                            event.source == source.id && event.belongs_to_import(batch.object_id)
                         })
                 })
             })
@@ -83,7 +200,8 @@ impl SyncEngine {
             let SourceKind::Ics { url } = &source.kind;
             fetch_calendar_feed(url).await?
         };
-        let outcome = parse_calendar_feed(&text, source.id)?;
+        let probe_id: ObjectId = uuid::Uuid::nil().into();
+        let outcome = parse_calendar_feed(&text, source.id, probe_id)?;
         let mut uids = HashSet::new();
         if !outcome.events.iter().all(|event| uids.insert(&event.uid)) {
             return Err(ClientError::InvalidArgument(
@@ -113,7 +231,6 @@ impl SyncEngine {
         }
         // Check both event records and the largest source manifest before upload.
         // The snapshot id is fixed-width, so a probe id gives the same size bound.
-        let probe_id: ObjectId = uuid::Uuid::nil().into();
         for event in &outcome.events {
             let mut event = event.clone();
             event.import = Some(probe_id);
@@ -180,6 +297,10 @@ impl SyncEngine {
             .into_iter()
             .map(|mut event| {
                 event.import = Some(snapshot_id);
+                if let clipper_schedule::Recurrence::Imported { import, .. } = &mut event.recurrence
+                {
+                    *import = snapshot_id;
+                }
                 let id: ObjectId = uuid::Uuid::new_v5(&snapshot_uuid, event.uid.as_bytes()).into();
                 (id, event)
             })
@@ -235,6 +356,16 @@ impl SyncEngine {
         }
         if self.history_epoch.load(Ordering::SeqCst) != epoch {
             return Err(ClientError::NotAuthenticated);
+        }
+        // Download and cache the complete snapshot before publishing a batch
+        // whose unsupported rules depend on it. One resolver serves the batch.
+        if let Some((_, event)) = events.iter().find(|(_, event)| {
+            matches!(
+                event.recurrence,
+                clipper_schedule::Recurrence::Imported { .. }
+            )
+        }) {
+            self.recurrence_engine(&event.recurrence).await?;
         }
         source.pending_import = None;
         let previous = source.active_import.replace(batch);

@@ -16,9 +16,19 @@ the same meeting or feed imported through two sources is intentionally duplicate
   override is further identified by its original recurrence ID. Fields not
   normalized remain in the snapshot, rather than being individually duplicated.
 - Supported RRULEs become typed `Cadence` values only when conversion preserves
-  every clause. Unsupported rules retain a validated `RawRule` for expansion.
-  This is derived working data; the snapshot is the full original source.
-  Imported events remain read-only even when their cadence is understood.
+  every clause. An unsupported recurrence is persisted only as the import and
+  provider UID; at runtime the client resolves its rule from that import's raw
+  ICS file. This keeps the snapshot as the full original source without
+  persisting a recurrence string. A missing raw file never falls back to a
+  one-off: the affected event is omitted and a warning is shown. Imported
+  events remain read-only even when their cadence is understood.
+  The recurrence reference must match its event's import and UID. Snapshot
+  resolution accepts only the original file revision, so editing a file cannot
+  silently reinterpret the events that reference it.
+- Native clients cache complete encrypted raw files needed for rule resolution
+  in the local SQLite store, allowing offline expansion after hydration.
+  The browser keeps only a bounded in-memory cache and may need to download the
+  file again after a reload.
 - `CalendarSource.active_import` contains the raw File ID, fetch time and parsed
   event object IDs. A new batch uses new storage IDs derived from the snapshot ID
   and UID. Domain event IDs remain source/UID-derived. Old revision references
@@ -61,9 +71,11 @@ bounded manifest, not an unlimited calendar database.
 
 The calendar UI explains consequences and asks for confirmation:
 
-- **Delete original feed:** permanently purges only the active raw File. Parsed
-  events, usable recurrence rules and recordings remain. The source and event
-  references are unchanged; the UI reports that the original import is unavailable.
+- **Delete original feed:** permanently purges only the active raw File. One-off
+  events, events with a stored `Cadence`, and recordings remain. Events whose
+  unsupported recurrence needs the raw file are omitted and the UI reports a
+  warning; they are never treated as one-off events. The source and event
+  references are unchanged.
 - **Replace import:** permanently purges the previous batch's raw file and parsed
   event objects after the replacement is active.
 - **Remove calendar:** purges that source's imported batches, then tombstones the

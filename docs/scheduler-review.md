@@ -54,6 +54,7 @@ not become a surprise during QA.
   Snapshot pages must advance in order within their watermark.
 - Calendar import storage now uses complete encrypted raw-feed snapshots and
   staged batch replacement. Supported imported rules normalize to `Cadence`;
+  unsupported recurrences resolve from the raw snapshot at runtime, and
   recordings survive irreversible old-import cleanup. See
   [calendar-imports.md](calendar-imports.md) for behavior and recovery limits.
 - Added provider overrides (`EXDATE`, `RDATE`, `RECURRENCE-ID`), timed/date-only
@@ -164,6 +165,16 @@ The original development API was still serving the older envelope format, so the
 UI check used a separate rebuilt local server rather than changing that process.
 See [calendar-imports.md](calendar-imports.md) for the new deletion policy and
 remaining recovery limits.
+
+Reference-backed recurrence validation passes the Rust workspace tests, 81
+schedule-domain tests, the live two-device integration test and workspace Clippy.
+The live test checks unsupported-rule expansion and timer start/stop, native
+encrypted-cache resolution with no API token and an empty parsed-rule cache,
+then raw-file deletion while the parsed cache is populated. The affected event
+is omitted with a warning; stored cadences and recordings remain. Domain tests
+check reference-only serialization, missing resolution and ambiguous input.
+Browser wasm build/check, web checks and 13 tests, and mobile checks pass.
+Manual browser reload/redownload and installed Android QA remain outstanding.
 
 ## Validation
 
@@ -347,9 +358,8 @@ resolution after a timing/recurrence edit has backend guards but no resolution U
   SQLite removes the deleted-file scan cost, but native anchor rows still grow
   with accepted object history. Hydration still loads all held objects; bounded
   display queries and anchor-size measurements remain follow-ups.
-- The shared TypeScript recurrence union still omits Rust's Raw variant.
-  Aligning that contract remains a follow-up; the composer safeguards do not
-  resolve the type mismatch.
+- The shared TypeScript recurrence contract includes import references; the
+  composer labels those recurrences as custom and preserves them when unchanged.
 - Recurrence expansion has a 65,535 generated-history ceiling and a 10,000
   in-window ceiling. This accommodates decades of daily recurrence while
   rejecting very dense old rules. The upstream `rrule` library also bounds empty

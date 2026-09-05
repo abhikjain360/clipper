@@ -119,8 +119,8 @@ pub struct EncryptedObject {
 }
 
 /// An encrypted object whose single payload is small enough to travel and be
-/// cached inline. Clipboard and schedule both work this way; files do not,
-/// because a blob does not belong in a local record.
+/// cached inline. Clipboard and schedule both work this way. Calendar import
+/// files use a separate native ciphertext cache for offline rule resolution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedInlineObject {
     pub object: EncryptedObject,
@@ -462,6 +462,73 @@ impl LocalStore {
         self.write_stored_object_record_with_payload(&stored_record, &encrypted.payload_ciphertext)
             .await?;
         self.write_memory_record(local_record).await
+    }
+
+    /// Read only a live file's accepted metadata. Deleted anchors cannot resolve imports.
+    pub(crate) async fn import_file_object(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<EncryptedObject>, LocalStoreError> {
+        let _sync = self.sync.lock().await;
+        let Some(StoredObjectRecord::Present(record)) =
+            self.stored_object_record(object_id).await?
+        else {
+            return Ok(None);
+        };
+        if record.kind != ObjectKind::File {
+            return Ok(None);
+        }
+        match &record.content {
+            StoredPresentContent::Encrypted(object) => Ok(Some(object.clone())),
+            _ => Ok(None),
+        }
+    }
+
+    /// Whole encrypted imports remain available offline on native clients.
+    /// The expected head prevents a concurrent replacement/deletion from reusing bytes.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) async fn import_file_ciphertext(
+        &self,
+        object_id: &str,
+        expected: LocalHead,
+    ) -> Result<Option<Vec<u8>>, LocalStoreError> {
+        let _sync = self.sync.lock().await;
+        let Some(StoredObjectRecord::Present(record)) =
+            self.stored_object_record(object_id).await?
+        else {
+            return Ok(None);
+        };
+        if record.kind != ObjectKind::File || local_head_from_present(&record)? != expected {
+            return Ok(None);
+        }
+        self.stored_object_payload_ciphertext(object_id).await
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) async fn cache_import_file_ciphertext(
+        &self,
+        object_id: &str,
+        expected: LocalHead,
+        ciphertext: &[u8],
+    ) -> Result<(), LocalStoreError> {
+        let _sync = self.sync.lock().await;
+        let Some(StoredObjectRecord::Present(record)) =
+            self.stored_object_record(object_id).await?
+        else {
+            return Ok(());
+        };
+        if record.kind != ObjectKind::File || local_head_from_present(&record)? != expected {
+            return Ok(());
+        }
+        let StoredPresentContent::Encrypted(object) = &record.content else {
+            return Ok(());
+        };
+        verify_payload_ciphertext(single_payload(object)?, ciphertext)?;
+        self.write_stored_object_record_with_payload(
+            &StoredObjectRecord::Present(record),
+            ciphertext,
+        )
+        .await
     }
 
     pub async fn persist_local_file_present_encrypted(

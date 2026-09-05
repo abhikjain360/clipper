@@ -223,7 +223,9 @@ impl SyncEngine {
                 .map_err(|e| invalid(&e.to_string()))?,
             observer: planned.observer,
         };
-        let occurrences = RruleEngine::new()
+        let occurrences = self
+            .recurrence_engine(&item.recurrence)
+            .await?
             .occurrences(&item, &overrides, &expansion)
             .map_err(|e| invalid(&e.to_string()))?;
         if !occurrences
