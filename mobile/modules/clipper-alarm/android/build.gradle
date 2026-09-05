@@ -1,0 +1,20 @@
+// Mirrors the shape every published Expo module uses. The gradle plugin owns
+// the Kotlin version, the compile SDK, and the expo-modules-core dependency —
+// setting any of those by hand desynchronises this module from the runtime it
+// is inlined against, and the module then fails at load with a reified-generic
+// error rather than at compile time.
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.clipper.alarm'
+version = '0.1.0'
+
+android {
+  namespace "com.clipper.alarm"
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+}

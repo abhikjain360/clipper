@@ -1,0 +1,7 @@
+{
+  "name": "clipper-alarm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Exact alarms, Direct Boot survival, and the ring screen for Clipper on Android",
+  "main": "index.ts"
+}

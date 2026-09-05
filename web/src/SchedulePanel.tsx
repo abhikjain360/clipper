@@ -1,4 +1,12 @@
-import { CalendarClock, ChevronLeft, ChevronRight, Plus, RefreshCw, Trash2 } from "lucide-react";
+import {
+    AlarmClock,
+    CalendarClock,
+    ChevronLeft,
+    ChevronRight,
+    Plus,
+    RefreshCw,
+    Trash2,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
     Button,
@@ -610,6 +618,8 @@ function ScheduleComposer({
     const [allDay, setAllDay] = useState(false);
     const [floating, setFloating] = useState(false);
     const [repeat, setRepeat] = useState<RepeatChoice>("once");
+    const [alarm, setAlarm] = useState(false);
+    const [alarmLead, setAlarmLead] = useState("0");
     const [days, setDays] = useState<Weekday[]>(["mon", "wed", "fri"]);
 
     async function submit() {
@@ -643,6 +653,9 @@ function ScheduleComposer({
                       },
                 recurrence: buildRecurrence(repeat, days, date),
                 reference: null,
+                alarm: alarm
+                    ? { minutes_before: Math.max(0, Number.parseInt(alarmLead, 10) || 0) }
+                    : null,
             };
             const backend = await clipperBackend();
             await backend.createScheduleItem(item);
@@ -697,6 +710,26 @@ function ScheduleComposer({
                     </>
                 )}
             </XStack>
+
+            <XStack gap="$2" flexWrap="wrap" items="flex-end">
+                <Toggle on={alarm} onPress={() => setAlarm(!alarm)}>
+                    <XStack items="center" gap="$2">
+                        <AlarmClock size={14} />
+                        <Text>Alarm</Text>
+                    </XStack>
+                </Toggle>
+                {alarm && (
+                    <Field label="Minutes before">
+                        <Input value={alarmLead} onChangeText={setAlarmLead} width={110} />
+                    </Field>
+                )}
+            </XStack>
+            {alarm && (
+                <Paragraph fontSize={12} color="#8b949e">
+                    Alarms ring on Android only, where an exact alarm can survive a reboot and
+                    sound through Do Not Disturb. Other devices show the block without ringing.
+                </Paragraph>
+            )}
 
             <XStack gap="$2" flexWrap="wrap">
                 <Toggle on={allDay} onPress={() => setAllDay(!allDay)}>
