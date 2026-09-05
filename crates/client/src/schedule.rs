@@ -293,6 +293,7 @@ pub fn source_view(
     object_id: &str,
     source: &clipper_schedule::CalendarSource,
     event_count: u32,
+    raw_import_available: bool,
 ) -> CalendarSourceView {
     let (protocol, location) = match &source.kind {
         clipper_schedule::SourceKind::Ics { url } => ("ics", redact_url(url)),
@@ -304,6 +305,11 @@ pub fn source_view(
         location,
         enabled: source.enabled,
         event_count,
+        raw_import_file_id: source
+            .active_import
+            .as_ref()
+            .map(|batch| batch.object_id.to_string()),
+        raw_import_available,
     }
 }
 

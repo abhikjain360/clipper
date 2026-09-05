@@ -40,6 +40,8 @@ use crate::{
     },
 };
 
+#[path = "calendar_import.rs"]
+mod calendar_import;
 #[path = "schedule_context.rs"]
 mod schedule_context;
 use schedule_context::revision_ref;
@@ -136,6 +138,7 @@ pub struct SyncEngine {
     suppressed_payload: RwLock<Option<([u8; 32], web_time::Instant)>>,
     /// Serialize this device's timer commands across UI/IPC callers.
     actual_write: Mutex<()>,
+    calendar_write: Mutex<()>,
     schedule_history: Mutex<HashMap<(u64, clipper_schedule::ObjectRevisionRef), ScheduleRecord>>,
     history_epoch: std::sync::atomic::AtomicU64,
 }
@@ -179,6 +182,7 @@ impl SyncEngine {
             ws_restart_rx,
             suppressed_payload: RwLock::new(None),
             actual_write: Mutex::new(()),
+            calendar_write: Mutex::new(()),
             schedule_history: Mutex::new(HashMap::new()),
             history_epoch: std::sync::atomic::AtomicU64::new(0),
         }))
@@ -237,6 +241,7 @@ impl SyncEngine {
         device_name: &str,
         platform: &str,
     ) -> Result<(), ClientError> {
+        let _calendar = self.calendar_write.lock().await;
         let prepared = self.api.login_prepare(passphrase, username).await?;
         // The encryption key from `prepare` is the same value `finish_auth`
         // later hashes into the profile id, so the device identity is keyed to
@@ -299,6 +304,7 @@ impl SyncEngine {
         device_name: &str,
         platform: &str,
     ) -> Result<String, ClientError> {
+        let _calendar = self.calendar_write.lock().await;
         let prepared = self
             .api
             .register_prepare(access_key, username, passphrase)
@@ -375,6 +381,7 @@ impl SyncEngine {
         username: &str,
         device_name: &str,
     ) -> Result<(), ClientError> {
+        let _calendar = self.calendar_write.lock().await;
         self.api.restore_token(token);
         if let Err(error) = self.api.validate_session().await {
             // Never leave a dead token resident; force a clean re-login instead.
@@ -525,6 +532,7 @@ impl SyncEngine {
     }
 
     pub async fn logout(&self) -> Result<(), ClientError> {
+        let _calendar = self.calendar_write.lock().await;
         // Best-effort server-side revocation: an offline or failed call must not
         // leave key material resident, so tear down local state unconditionally.
         if let Err(error) = self.api.logout().await {
@@ -578,6 +586,7 @@ impl SyncEngine {
     /// this session server-side, so we tear down local auth state the way
     /// `logout` does and let the UI return to the login screen.
     pub async fn remove_device(&self, device_id: &str) -> Result<(), ClientError> {
+        let _calendar = self.calendar_write.lock().await;
         let current_device_id = self.current_device_id().await?;
         let is_current = device_id == current_device_id;
         let result = self.api.remove_device(device_id).await;
@@ -1177,6 +1186,25 @@ impl SyncEngine {
     /// is the delete. Reclaiming the blob is a separate purge, which nothing
     /// calls yet.
     pub async fn delete_file(&self, file_id: &str) -> Result<(), ClientError> {
+        let _write = self.calendar_write.lock().await;
+        if self
+            .local_store
+            .schedule_records_with_ids()
+            .await
+            .iter()
+            .filter_map(|(_, record)| record.as_source())
+            .any(|source| {
+                source
+                    .pending_import
+                    .as_ref()
+                    .is_some_and(|batch| batch.object_id.to_string() == file_id)
+            })
+        {
+            return Err(ClientError::InvalidArgument(
+                "This feed is needed to finish a pending import; refresh the calendar first".into(),
+            ));
+        }
+        let is_import = self.is_import_file(file_id).await?;
         let (deleted_seq, tombstone_head) = self.write_tombstone(file_id, ObjectKind::File).await?;
         let visible = self
             .local_store
@@ -1189,6 +1217,12 @@ impl SyncEngine {
             )
             .await?;
         self.publish_visible_state(visible).await;
+        if is_import {
+            match self.api.delete_object(file_id).await {
+                Ok(_) | Err(ClientError::Api { status: 404, .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
         info!(file_id = %file_id, "File deleted");
         Ok(())
     }
@@ -1669,6 +1703,12 @@ impl SyncEngine {
     /// earlier one. Reclaiming the bytes is a separate purge, which nothing in
     /// the UI calls yet.
     pub async fn delete_schedule_object(&self, object_id: &str) -> Result<(), ClientError> {
+        let _write = self.calendar_write.lock().await;
+        self.remove_calendar_imports(object_id).await?;
+        self.tombstone_schedule_object(object_id).await
+    }
+
+    async fn tombstone_schedule_object(&self, object_id: &str) -> Result<(), ClientError> {
         let (deleted_seq, tombstone_head) = self
             .write_tombstone(object_id, ObjectKind::Schedule)
             .await?;
@@ -1710,16 +1750,25 @@ impl SyncEngine {
         };
 
         let records = self.local_store.schedule_records_with_heads().await?;
-        let source_names: HashMap<SourceId, String> = records
+        let source_names: HashMap<SourceId, &CalendarSource> = records
             .iter()
             .filter_map(|(_, record, _)| record.as_source())
-            .map(|source| (source.id, source.name.clone()))
+            .map(|source| (source.id, source))
             .collect();
 
         let engine = RruleEngine::new();
         let mut out = Vec::new();
         let mut warnings = Vec::new();
 
+        let ready_sources = calendar_import::ready_sources(&records);
+        for source in source_names.values() {
+            if source.active_import.is_some() && !ready_sources.contains(&source.id) {
+                warnings.push(format!(
+                    "{}: waiting for the complete imported calendar",
+                    source.name
+                ));
+            }
+        }
         for (object_id, record, head) in &records {
             // An owned block and an ingested event expand identically; only
             // their labelling differs.
@@ -1731,9 +1780,14 @@ impl SyncEngine {
                         // the records referenced by previously logged time.
                         continue;
                     };
+                    if !ready_sources.contains(&event.source)
+                        || !source_name.contains_event(object_id, event)
+                    {
+                        continue;
+                    }
                     (
                         Cow::Owned(ingested_as_series(event)),
-                        Some(source_name.as_str()),
+                        Some(source_name.name.as_str()),
                         event.status == IngestedStatus::Cancelled,
                     )
                 }
@@ -1903,112 +1957,11 @@ impl SyncEngine {
                 url: parsed.to_string(),
             },
             enabled: true,
+            active_import: None,
+            pending_import: None,
+            retired_imports: Vec::new(),
         })))
         .await
-    }
-
-    /// Fetch a calendar feed and reconcile it into ingested events.
-    ///
-    /// Changed events append revisions of the same object. New events use their
-    /// source/UID-derived id as the object id too, so two devices cannot create
-    /// duplicate objects for the same provider event.
-    pub async fn sync_calendar_source(&self, object_id: &str) -> Result<IngestReport, ClientError> {
-        let records = self.local_store.schedule_records_with_heads().await?;
-        let source = records
-            .iter()
-            .find(|(id, record, _)| id == object_id && record.as_source().is_some())
-            .and_then(|(_, record, _)| record.as_source())
-            .cloned()
-            .ok_or_else(|| ClientError::ItemNotFound {
-                id: object_id.to_string(),
-            })?;
-        let SourceKind::Ics { url } = &source.kind;
-
-        let text = fetch_calendar_feed(url).await?;
-        let outcome = parse_calendar_feed(&text, source.id)?;
-
-        // Everything this source currently holds locally, by the provider's own
-        // event id — which is what makes a second pass an update, not a copy.
-        let existing: HashMap<uuid::Uuid, (String, IngestedEvent, LocalHead)> = records
-            .iter()
-            .filter_map(|(id, record, head)| {
-                record
-                    .as_ingested()
-                    .filter(|event| event.source == source.id)
-                    .map(|event| (event.id, (id.clone(), event.clone(), *head)))
-            })
-            .collect();
-
-        let mut report = IngestReport {
-            skipped: outcome
-                .skipped
-                .iter()
-                .map(|skipped| match &skipped.uid {
-                    Some(uid) => format!("{uid}: {}", skipped.reason),
-                    None => skipped.reason.clone(),
-                })
-                .collect(),
-            ..IngestReport::default()
-        };
-
-        // An unreadable entry is still present upstream. Never infer a delete
-        // from a partial parse; a provider adding an unsupported field must
-        // not cancel previously imported meetings.
-        let allow_cancellations = outcome.skipped.is_empty();
-        let mut seen = HashSet::new();
-        for event in outcome.events {
-            seen.insert(event.id);
-            match existing.get(&event.id) {
-                Some((_, current, _)) if *current == event => report.unchanged += 1,
-                Some((old_object_id, _, head)) => {
-                    self.write_schedule_record(
-                        old_object_id,
-                        ScheduleRecord::Ingested(Box::new(event)),
-                        EnvelopePlacement::Revise(*head),
-                    )
-                    .await?;
-                    report.updated += 1;
-                }
-                None => {
-                    self.write_schedule_record(
-                        &event.id.to_string(),
-                        ScheduleRecord::Ingested(Box::new(event)),
-                        EnvelopePlacement::Create,
-                    )
-                    .await?;
-                    report.added += 1;
-                }
-            }
-        }
-
-        // Gone from the feed. Tombstone rather than erase: a meeting the
-        // organiser withdrew still happened to whatever time was logged on it.
-        for (event_id, (old_object_id, event, head)) in &existing {
-            if !allow_cancellations
-                || seen.contains(event_id)
-                || event.status == IngestedStatus::Cancelled
-            {
-                continue;
-            }
-            let mut tombstone = event.clone();
-            tombstone.status = IngestedStatus::Cancelled;
-            self.write_schedule_record(
-                old_object_id,
-                ScheduleRecord::Ingested(Box::new(tombstone)),
-                EnvelopePlacement::Revise(*head),
-            )
-            .await?;
-            report.tombstoned += 1;
-        }
-
-        info!(
-            source = %source.id,
-            added = report.added,
-            updated = report.updated,
-            tombstoned = report.tombstoned,
-            "Calendar source synced",
-        );
-        Ok(report)
     }
 
     /// Reconcile every schedule object from the encrypted-object listing.
