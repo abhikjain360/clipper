@@ -46,7 +46,7 @@ fn next_after(item: &ScheduleItem, after: (i32, u32, u32, u32, u32)) -> Option<S
     RruleEngine::new()
         .next_after(item, &[], after, TimeDelta::days(LOOKAHEAD_DAYS), Tz::UTC)
         .expect("expansion succeeds")
-        .map(|occurrence| occurrence.span.start.format("%Y-%m-%dT%H:%M").to_string())
+        .map(|occurrence| occurrence.span.start().format("%Y-%m-%dT%H:%M").to_string())
 }
 
 fn daily(interval: u32) -> Recurrence {
@@ -318,7 +318,7 @@ fn dst_gap_shifts_forward_like_java() {
 
     assert_eq!(
         next.span
-            .start
+            .start()
             .with_timezone(&Tz::Europe__Berlin)
             .format("%Y-%m-%dT%H:%M")
             .to_string(),

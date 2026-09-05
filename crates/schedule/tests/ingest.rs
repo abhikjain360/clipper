@@ -260,7 +260,7 @@ fn ids_are_stable_across_passes_and_distinct_per_source() {
 fn an_ingested_series_expands() {
     use chrono::{TimeZone, Utc};
     use clipper_schedule::{
-        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, Window,
+        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, TimeRange,
     };
 
     let standup = event("standup@example.com");
@@ -282,7 +282,7 @@ fn an_ingested_series_expands() {
             &item,
             &[],
             &Expansion {
-                window: Window::new(from, from + chrono::TimeDelta::days(7)).expect("window"),
+                window: TimeRange::new(from, from + chrono::TimeDelta::days(7)).expect("window"),
                 observer: Tz::Europe__Berlin,
             },
         )
@@ -292,7 +292,7 @@ fn an_ingested_series_expands() {
     assert_eq!(
         occurrences[0]
             .span
-            .start
+            .start()
             .with_timezone(&Tz::Europe__Berlin)
             .format("%Y-%m-%d %H:%M")
             .to_string(),
@@ -395,7 +395,7 @@ DURATION:P2D\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 fn exdate_rdate_and_recurrence_id_components_become_overrides() {
     use chrono::{TimeZone, Utc};
     use clipper_schedule::{
-        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, Window,
+        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, TimeRange,
     };
 
     let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
@@ -438,14 +438,14 @@ END:VCALENDAR\r\n";
             &series,
             &event.overrides,
             &Expansion {
-                window: Window::new(from, from + chrono::TimeDelta::days(7)).unwrap(),
+                window: TimeRange::new(from, from + chrono::TimeDelta::days(7)).unwrap(),
                 observer: Tz::UTC,
             },
         )
         .expect("overrides expand");
     let starts: Vec<_> = occurrences
         .iter()
-        .map(|occurrence| occurrence.span.start.format("%Y-%m-%d %H:%M").to_string())
+        .map(|occurrence| occurrence.span.start().format("%Y-%m-%d %H:%M").to_string())
         .collect();
     assert_eq!(
         starts,
@@ -490,7 +490,7 @@ EXDATE:20260905T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 fn a_detached_instance_moved_across_the_window_boundary_still_overlaps() {
     use chrono::{TimeZone, Utc};
     use clipper_schedule::{
-        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, Window,
+        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, TimeRange,
     };
 
     let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
@@ -518,14 +518,14 @@ DTEND:20260904T013000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
             &series,
             &event.overrides,
             &Expansion {
-                window: Window::new(from, from + chrono::TimeDelta::hours(1)).unwrap(),
+                window: TimeRange::new(from, from + chrono::TimeDelta::hours(1)).unwrap(),
                 observer: Tz::UTC,
             },
         )
         .expect("detached occurrence expands");
     assert_eq!(overlapping.len(), 1);
     assert_eq!(
-        overlapping[0].span.end,
+        overlapping[0].span.end(),
         from + chrono::TimeDelta::minutes(90)
     );
 }
@@ -534,7 +534,7 @@ DTEND:20260904T013000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 fn an_unsupported_rule_is_resolved_from_the_referenced_snapshot() {
     use chrono::{TimeZone, Utc};
     use clipper_schedule::{
-        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, Window,
+        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, TimeRange,
     };
 
     let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
@@ -577,7 +577,7 @@ END:VEVENT\r\nEND:VCALENDAR\r\n";
             &item,
             &[],
             &Expansion {
-                window: Window::new(
+                window: TimeRange::new(
                     Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
                     Utc.with_ymd_and_hms(2026, 1, 4, 0, 0, 0).unwrap(),
                 )

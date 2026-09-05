@@ -188,7 +188,7 @@ pub fn actual_view(
             (to_rfc3339(started), String::new(), true)
         }
         clipper_schedule::ActualSpan::Complete(span) => {
-            (to_rfc3339(span.start), to_rfc3339(span.end), false)
+            (to_rfc3339(span.start()), to_rfc3339(span.end()), false)
         }
     };
     ActualView {
@@ -255,8 +255,8 @@ pub fn occurrence_view(
         occurrence_key: occurrence_key(&occurrence.recurrence_id),
         plan_context: serde_json::to_string(context).expect("plan context is serializable"),
         title: label.title.to_string(),
-        start: to_rfc3339(occurrence.span.start),
-        end: to_rfc3339(occurrence.span.end),
+        start: to_rfc3339(occurrence.span.start()),
+        end: to_rfc3339(occurrence.span.end()),
         all_day: label.all_day,
         overridden: matches!(occurrence.origin, OccurrenceOrigin::Overridden(_)),
         source: label.source.map(str::to_string),

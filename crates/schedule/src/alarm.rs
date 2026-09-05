@@ -76,7 +76,7 @@ pub fn plan_alarms(
         .iter()
         .filter(|occurrence| occurrence.item == item.id)
         .filter_map(|occurrence| {
-            let fire_at = occurrence.span.start - policy.lead();
+            let fire_at = occurrence.span.start() - policy.lead();
             // An alarm whose moment has passed is not rescheduled. Ringing late
             // for something that already started is noise, not a reminder.
             (fire_at > now).then_some(PlannedAlarm {
@@ -84,7 +84,7 @@ pub fn plan_alarms(
                 recurrence_id: occurrence.recurrence_id,
                 label: item.title.clone(),
                 fire_at,
-                occurrence_start: occurrence.span.start,
+                occurrence_start: occurrence.span.start(),
             })
         })
         .collect();
@@ -99,7 +99,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        engine::{Expansion, RecurrenceEngine, RruleEngine, Window},
+        TimeRange,
+        engine::{Expansion, RecurrenceEngine, RruleEngine},
         recurrence::{Cadence, Frequency, Recurrence, WeekdaySet},
         time::{BlockDuration, ScheduleSpan, TimedStart},
     };
@@ -135,7 +136,7 @@ mod tests {
                 item,
                 &[],
                 &Expansion {
-                    window: Window::new(utc(2026, 9, 7, 0, 0), utc(2026, 9, 14, 0, 0))
+                    window: TimeRange::new(utc(2026, 9, 7, 0, 0), utc(2026, 9, 14, 0, 0))
                         .expect("window"),
                     observer: Tz::UTC,
                 },
