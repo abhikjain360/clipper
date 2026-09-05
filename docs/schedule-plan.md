@@ -960,6 +960,10 @@ Branch `schedule-module`, started 2026-09-08. Commits, in order:
    — plus a self-describing wire format, pinned by a test.
 5. `web: add the schedule grid` — week view, composer, series list.
 6. `server: fix a second hardcoded delete kind, and test both`.
+7. `schedule: parse iCalendar feeds` — ingest, starting with ICS because it
+   needs no OAuth.
+8. `schedule: pull calendar feeds and show them on the grid` — **milestone 1
+   complete**.
 
 **Verified against a live local server**, not just in unit tests: the migration
 applied cleanly to the existing dev database (collab docs survived); a cold
@@ -970,7 +974,7 @@ D5 exists to protect. The web UI was driven headlessly through CDP (the laptop
 display was asleep, so screenshots had to bypass it): login, create, render,
 delete.
 
-Three things the build changed about the plan:
+Five things the build changed about the plan:
 
 - **`RecurrenceId` cannot be an instant.** A floating series has to be
   identified by wall-clock time or an override recorded in one zone silently
@@ -981,9 +985,26 @@ Three things the build changed about the plan:
 - **The serialized form is three contracts at once** — TypeScript, IPC, and the
   ciphertext at rest — so it is tagged and self-describing rather than
   positional, with a test pinning the shape.
+- **Ingested rules needed a variant, not a loophole.** `Recurrence::Raw` carries
+  a provider's RFC 5545 rule verbatim: validated on the way in, expanded as-is,
+  never editable. Modelling ingested rules as typed cadences would have implied
+  an editability D10 does not offer. The type now says which rules Clipper
+  understands and which it merely passes through.
+- **Ingest is native-only, and that is not a limitation to fix.** A browser
+  cannot fetch a third-party calendar — no provider sends CORS headers — so the
+  wasm build drops the parser entirely. This is D4 working as designed: the
+  desktop and mobile clients pull feeds, and every other device sees the results
+  through ordinary object sync. Verified: a native client ingested a feed and
+  the browser rendered it without ever touching the feed URL.
 
-Not started: ingest (D11 step 4), the D6 revision layer, mobile UI, alarm
-absorption, publish.
+**Milestone 1 is done.** What remains, in D11's order: the D6 revision layer,
+mobile UI, alarm absorption (D8), and publish (D10).
+
+Two things milestone 1 deliberately does not have, so their absence is not a
+gap to be surprised by: editing a block (an edit is delete-then-create until
+D6 lands), and any Google or Zoho connector beyond a plain ICS URL — that one
+waits on the owner's OAuth consent screen, and D9 already treats ICS as the
+supported fallback.
 
 ## Next Steps
 
