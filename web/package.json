@@ -8,6 +8,7 @@
         "dev": "vite --host 127.0.0.1",
         "prebuild": "pnpm run wasm",
         "build": "vite build",
+        "build:tauri": "pnpm run wasm && vite build --outDir dist-tauri",
         "preview": "vite preview --host 127.0.0.1",
         "tauri": "tauri",
         "tauri:dev": "tauri dev",
