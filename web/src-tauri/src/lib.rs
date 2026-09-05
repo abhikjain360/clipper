@@ -4,13 +4,14 @@ mod ipc_secret;
 
 use std::{path::PathBuf, sync::OnceLock};
 
-use clipper_app_types::{AppState, CollabItem, DeviceInfo, OccurrenceView};
+use clipper_app_types::{AppState, CollabItem, DeviceInfo, IngestReport, OccurrenceView};
 use clipper_daemon_types::{
-    ClipboardPayloadParams, ClipboardPayloadResult, CreateScheduleItemParams, DaemonCommand,
-    DeleteCollabDocParams, DeleteFileParams, DeleteScheduleObjectParams, DeviceListResult,
-    DownloadFileParams, ExpandScheduleParams, GetCollabDocMetaParams, LoginParams, RegisterParams,
-    RegisterResult, RemoveDeviceParams, RenameCollabDocParams, SendClipboardPayloadParams,
-    UploadFileParams, UploadFileResult,
+    AddCalendarSourceParams, ClipboardPayloadParams, ClipboardPayloadResult,
+    CreateScheduleItemParams, DaemonCommand, DeleteCollabDocParams, DeleteFileParams,
+    DeleteScheduleObjectParams, DeviceListResult, DownloadFileParams, ExpandScheduleParams,
+    GetCollabDocMetaParams, LoginParams, RegisterParams, RegisterResult, RemoveDeviceParams,
+    RenameCollabDocParams, SendClipboardPayloadParams, SyncCalendarSourceParams, UploadFileParams,
+    UploadFileResult,
 };
 use clipper_schedule::ScheduleItem;
 use daemon_client::{DaemonClient, DaemonClientError};
@@ -136,6 +137,8 @@ pub fn run() {
             create_schedule_item,
             delete_schedule_object,
             expand_schedule,
+            add_calendar_source,
+            sync_calendar_source,
             rename_collab_doc,
             get_collab_doc_meta,
             list_devices,
@@ -483,6 +486,34 @@ async fn expand_schedule(
             to,
             observer_zone,
         }))
+        .await?)
+}
+
+#[tauri::command]
+async fn add_calendar_source(
+    backend: State<'_, DesktopBackend>,
+    name: String,
+    url: String,
+) -> CommandResult<String> {
+    Ok(backend
+        .daemon
+        .send_result::<String>(DaemonCommand::AddCalendarSource(AddCalendarSourceParams {
+            name,
+            url,
+        }))
+        .await?)
+}
+
+#[tauri::command]
+async fn sync_calendar_source(
+    backend: State<'_, DesktopBackend>,
+    object_id: String,
+) -> CommandResult<IngestReport> {
+    Ok(backend
+        .daemon
+        .send_result::<IngestReport>(DaemonCommand::SyncCalendarSource(
+            SyncCalendarSourceParams { object_id },
+        ))
         .await?)
 }
 

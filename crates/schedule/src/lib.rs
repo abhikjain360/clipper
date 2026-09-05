@@ -22,9 +22,11 @@ pub mod summary;
 pub mod time;
 
 pub use engine::{EngineError, Expansion, RecurrenceEngine, RruleEngine, Window};
+#[cfg(not(target_family = "wasm"))]
+pub use ingest::parse_ics;
 pub use ingest::{
     CalendarSource, IngestError, IngestOutcome, IngestedEvent, IngestedStatus, SkippedEvent,
-    SourceId, SourceKind, parse_ics,
+    SourceId, SourceKind,
 };
 pub use item::{
     ActualId, ActualRecord, ActualSpan, ObjectRef, Occurrence, OccurrenceOrigin,

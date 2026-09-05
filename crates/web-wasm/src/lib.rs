@@ -391,6 +391,34 @@ pub fn expand_schedule(from: String, to: String, observer_zone: String) -> Promi
     })
 }
 
+#[wasm_bindgen(js_name = addCalendarSource)]
+pub fn add_calendar_source(name: String, url: String) -> Promise {
+    ok_promise(async move {
+        let object_id = engine_or_error()?
+            .add_calendar_source(&name, &url)
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::from_str(&object_id))
+    })
+}
+
+/// Pull a calendar feed and reconcile it.
+///
+/// Rejects in the browser: a page cannot read a third-party calendar URL
+/// without CORS headers no provider sends. Sources sync from the desktop or
+/// mobile app, and their events reach the browser through normal object sync.
+#[wasm_bindgen(js_name = syncCalendarSource)]
+pub fn sync_calendar_source(object_id: String) -> Promise {
+    ok_promise(async move {
+        let report = engine_or_error()?
+            .sync_calendar_source(&object_id)
+            .await
+            .map_err(js_error)?;
+        let value = serde_wasm_bindgen::to_value(&report).map_err(js_error)?;
+        Ok(value)
+    })
+}
+
 #[wasm_bindgen(js_name = createCollabDoc)]
 pub fn create_collab_doc() -> Promise {
     ok_promise(async {

@@ -8,6 +8,7 @@ import {
   type DecryptedClipboardItem,
   type DecryptedFileItem,
   type DeviceInfo as NativeDeviceInfo,
+  type CalendarSourceView as NativeCalendarSourceView,
   type ScheduleItemView as NativeScheduleItemView,
 } from "./generated/clipper_app_types";
 import {
@@ -22,6 +23,7 @@ import type {
   CollabItem,
   ConnectionStatus,
   DeviceInfo,
+  CalendarSourceView,
   FileItem,
   ScheduleItemView,
 } from "@clipper/shared";
@@ -100,6 +102,12 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     // strings. Series still *sync* to this device and appear in
     // `state.scheduleItems` — only creating and expanding are missing. These
     // throw rather than silently no-op so a premature caller is obvious.
+    addCalendarSource: async () => {
+      throw new Error("Adding a calendar source is not available on mobile yet");
+    },
+    syncCalendarSource: async () => {
+      throw new Error("Syncing a calendar source is not available on mobile yet");
+    },
     createScheduleItem: async () => {
       throw new Error("Creating schedule items is not available on mobile yet");
     },
@@ -140,6 +148,7 @@ function mapAppState(state: NativeAppState): AppState {
     connection_status: mapConnectionStatus(state.connectionStatus),
     error: state.error ?? null,
     files: state.files.map(mapFileItem),
+    calendar_sources: state.calendarSources.map(mapCalendarSourceView),
     schedule_items: state.scheduleItems.map(mapScheduleItemView),
     saved_profile: state.savedProfile
       ? {
@@ -166,6 +175,17 @@ function mapCollabItem(item: NativeCollabItem): CollabItem {
     share_url: item.shareUrl ?? null,
     title: item.title,
     updated_at: item.updatedAt,
+  };
+}
+
+function mapCalendarSourceView(source: NativeCalendarSourceView): CalendarSourceView {
+  return {
+    enabled: source.enabled,
+    event_count: source.eventCount,
+    id: source.id,
+    location: source.location,
+    name: source.name,
+    protocol: source.protocol,
   };
 }
 
