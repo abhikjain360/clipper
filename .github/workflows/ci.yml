@@ -120,7 +120,7 @@ jobs:
             target
           key: cargo-${{ runner.os }}-udeps-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-udeps-
-      - run: nix run .#udeps
+      - run: nix develop --command nix run .#udeps
 
   audit:
     needs: gate
