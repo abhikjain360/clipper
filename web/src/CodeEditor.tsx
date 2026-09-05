@@ -216,7 +216,11 @@ export function CodeEditor({ content = "", lang, collab }: CodeEditorProps) {
     }, [content, vimMode, isCollab, collabRuntime]);
 
     // ── Language compartment ──
-    // Load the selected grammar's chunk on demand and slot it in.
+    // Load the selected grammar's chunk on demand and slot it in. The deps
+    // mirror the construction effect's (`content` / `vimMode` / `isCollab` /
+    // `collabRuntime`): any of those rebuild the EditorView with an empty
+    // language compartment, so the grammar must be re-applied to the fresh
+    // view — without this, toggling Vim silently drops syntax highlighting.
     useEffect(() => {
         let cancelled = false;
         void loadLanguageExtension(languageId).then((extension) => {
@@ -229,7 +233,7 @@ export function CodeEditor({ content = "", lang, collab }: CodeEditorProps) {
         return () => {
             cancelled = true;
         };
-    }, [languageId, collabRuntime]);
+    }, [languageId, content, vimMode, isCollab, collabRuntime]);
 
     function onLanguageChange(id: string) {
         setLanguageId(id);
