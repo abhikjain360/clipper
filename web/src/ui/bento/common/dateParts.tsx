@@ -19,7 +19,7 @@ import {
     withStaticProperties,
 } from "tamagui";
 
-import { type ReactNode, useEffect, useRef } from "react";
+import { Fragment, type ReactNode, useEffect, useRef } from "react";
 import { useDateAnimation } from "./useDateAnimation";
 
 type DatePickerProps = PopoverProps & {
@@ -119,7 +119,7 @@ const DatePickerContent = styled(Popover.Content, {
                 padding: 12,
                 borderWidth: 1,
                 borderColor: "$borderColor",
-                elevate: true,
+                boxShadow: "0px 8px 24px rgba(0, 0, 0, 0.25)",
             },
         },
     } as const,
@@ -359,9 +359,11 @@ export const WeekView = ({ weekDays, ...props }: { weekDays: string[]; props?: V
     return (
         <View width="100%" flexDirection="row" gap="$1" {...props}>
             {weekDays.map((day) => (
-                <SizableText flex={1} theme="alt1" key={day} text="center" width="100%" size="$4">
-                    {day}
-                </SizableText>
+                <Fragment key={day}>
+                    <SizableText flex={1} theme="alt1" text="center" width="100%" size="$4">
+                        {day}
+                    </SizableText>
+                </Fragment>
             ))}
         </View>
     );

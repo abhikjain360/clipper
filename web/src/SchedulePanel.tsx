@@ -218,6 +218,8 @@ export function SchedulePanel({
                                 <XStack>
                                     {(["day", "week", "month"] as const).map((mode) => (
                                         <ToggleGroup.Item
+                                            // The child Button theme supplies the selected styling.
+                                            activeStyle={{}}
                                             asChild
                                             key={mode}
                                             value={mode}
