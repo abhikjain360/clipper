@@ -988,6 +988,9 @@ Branch `schedule-module`, started 2026-09-08. Commits, in order:
    needs no OAuth.
 8. `schedule: pull calendar feeds and show them on the grid` — **milestone 1
    complete**.
+9. `schedule: plan alarms from occurrences` — the Rust half of D8.
+10. `mobile: absorb abnormalarm's alarm layer` — the Android half, verified on
+    an emulator.
 
 **Verified against a live local server**, not just in unit tests: the migration
 applied cleanly to the existing dev database (collab docs survived); a cold
@@ -1021,8 +1024,36 @@ Five things the build changed about the plan:
   through ordinary object sync. Verified: a native client ingested a feed and
   the browser rendered it without ever touching the feed URL.
 
-**Milestone 1 is done.** What remains, in D11's order: the D6 revision layer,
-mobile UI, alarm absorption (D8), and publish (D10).
+**Milestone 1 is done, and D8's alarm absorption with it.** An alarm planned in
+Rust from a recurrence rule fired on an Android 16 emulator at 23:33:19.571 for
+a 23:33:19 instant, showed its ring screen, and stopped on dismiss.
+`LOCKED_BOOT_COMPLETED` was observed re-arming from the device-protected mirror.
+
+Three things only the device could have told us:
+
+- **A hand-written `build.gradle` breaks the module at runtime, not at compile
+  time.** Setting the Kotlin version, compile SDK or core dependency by hand
+  desynchronises the module from the `expo-modules-core` its inline functions
+  were compiled against, and it fails on load with "this function has a reified
+  type parameter and thus can only be inlined". Use the published-module plugin
+  shape (`id 'expo-module-gradle-plugin'`) and set nothing else.
+- **Expo's typed-record marshalling does not survive a list parameter**, failing
+  the same way. The alarm plan crosses as JSON, which it already was on both
+  sides.
+- **Android 15's foreground-service restriction is satisfied.** This was flagged
+  as unverified. `dumpsys` shows the `mediaPlayback` start admitted with
+  `reasonCode: ALARM_MANAGER_ALARM_CLOCK` — granted precisely because it came
+  from an exact alarm.
+
+Still untested and still the real risk: whether this survives overnight on the
+POCO under HyperOS. An emulator says nothing about a vendor that kills
+background processes, and no code substitutes for Autostart and
+battery-optimisation exemptions set by hand.
+
+What remains, in D11's order: the D6 revision layer, the mobile schedule UI,
+and publish (D10). Of abnormalarm, these are not ported: snooze, per-alarm sound
+and volume ramp, the flashlight, the upcoming-notification lead window,
+skip-next, timers, and the clock widget. abnormalarm stays installed.
 
 Two things milestone 1 deliberately does not have, so their absence is not a
 gap to be surprised by: editing a block (an edit is delete-then-create until
