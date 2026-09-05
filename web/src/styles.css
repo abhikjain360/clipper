@@ -380,6 +380,10 @@ select {
     padding: 6px 0;
 }
 .date-picker-day {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
     height: 34px;
     padding: 0;
     background: transparent;
