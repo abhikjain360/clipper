@@ -1,0 +1,167 @@
+//! The stored schedule entities.
+//!
+//! Three record types, following D2 and D7: a series definition, an override
+//! for the occurrences that deviate from it, and an actual for what really
+//! happened. They are separate because they have different writers and
+//! different lifetimes — an actual outlives the meeting it was logged against.
+
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use clipper_api_types::ObjectKind;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::{
+    recurrence::Recurrence,
+    time::{ResolvedSpan, ScheduleSpan},
+};
+
+macro_rules! id_type {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        pub struct $name(pub Uuid);
+
+        impl $name {
+            pub fn new() -> Self {
+                Self(Uuid::new_v4())
+            }
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    };
+}
+
+id_type!(
+    /// Identifies a series definition.
+    ScheduleItemId
+);
+id_type!(
+    /// Identifies a single-occurrence override.
+    OverrideId
+);
+id_type!(
+    /// Identifies a record of time actually spent.
+    ActualId
+);
+
+/// A planned block, and the rule for how it repeats.
+///
+/// One record per *series*, not per occurrence (D7). A daily alarm for a year
+/// is this struct once, not 365 times.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleItem {
+    pub id: ScheduleItemId,
+    pub title: String,
+    /// The span of the first occurrence. Later occurrences take their start
+    /// from the recurrence rule and their length from here.
+    pub span: ScheduleSpan,
+    pub recurrence: Recurrence,
+    /// D2: a block may point at another Clipper object, or be bare labelled
+    /// time. Optional so that no task subsystem is required for the schedule to
+    /// be useful.
+    pub reference: Option<ObjectRef>,
+}
+
+/// A pointer to another Clipper object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectRef {
+    pub kind: ObjectKind,
+    pub id: Uuid,
+}
+
+/// Which occurrence of a series something refers to.
+///
+/// RFC 5545's `RECURRENCE-ID`, and deliberately not a bare instant. A floating
+/// series is identified by wall-clock time because that is what is stable when
+/// the observer moves; a zoned series by its absolute instant. Using an instant
+/// for both would make an override recorded in Berlin fail to match the same
+/// occurrence expanded in Tokyo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum RecurrenceId {
+    Floating(NaiveDateTime),
+    Instant(DateTime<Utc>),
+    Date(NaiveDate),
+}
+
+/// One occurrence that deviates from its series.
+///
+/// Exists only for occurrences that actually differ — the other 364 days of the
+/// year have no record at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OccurrenceOverride {
+    pub id: OverrideId,
+    pub item: ScheduleItemId,
+    /// The occurrence this replaces, identified by where the *rule* put it.
+    /// Stays fixed when the override moves the occurrence, which is what lets
+    /// the two be matched back up.
+    pub recurrence_id: RecurrenceId,
+    pub change: OverrideChange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OverrideChange {
+    /// This occurrence does not happen. RFC 5545's `EXDATE`.
+    Cancelled,
+    /// This occurrence happens, with a different span.
+    Rescheduled(ScheduleSpan),
+}
+
+/// Time actually spent, as opposed to time planned (D2).
+///
+/// Always a concrete one-off, never a rule. Separate from the plan so that
+/// logged time survives the meeting being cancelled, and so that a plan can be
+/// edited without rewriting history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActualRecord {
+    pub id: ActualId,
+    /// What this was time *against*, if anything. Unplanned work is still worth
+    /// recording, so this is optional.
+    pub planned: Option<PlannedRef>,
+    pub span: ActualSpan,
+}
+
+/// The occurrence an actual was logged against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedRef {
+    pub item: ScheduleItemId,
+    pub recurrence_id: RecurrenceId,
+}
+
+/// A timer writes twice and only twice: once on start, once on stop (D2).
+///
+/// Persisting progress on a tick would multiply retained revisions by the
+/// minute. Elapsed time for a running timer is derived from `started`, not
+/// stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActualSpan {
+    Running { started: DateTime<Utc> },
+    Complete(ResolvedSpan),
+}
+
+/// A computed instance of a series. Never stored — clients expand what they
+/// need for the window they are showing (D4, D7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Occurrence {
+    pub item: ScheduleItemId,
+    pub recurrence_id: RecurrenceId,
+    pub span: ResolvedSpan,
+    pub origin: OccurrenceOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OccurrenceOrigin {
+    /// Straight from the recurrence rule.
+    Rule,
+    /// The rule placed it; an override moved it.
+    Overridden(OverrideId),
+}
