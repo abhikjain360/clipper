@@ -1,0 +1,18 @@
+[package]
+name = "clipper-schedule"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+
+[dependencies]
+clipper-api-types.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+rrule.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid = { workspace = true, features = ["serde", "v4"] }
+
+[dev-dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
