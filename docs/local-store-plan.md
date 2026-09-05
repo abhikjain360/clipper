@@ -4,11 +4,12 @@ Design notes for replacing the client's on-disk local store on native
 platforms, and for saying honestly what the browser's store does and does not
 guarantee.
 
-**Status: decided, not started.** No code has been written against this plan.
-Everything under [Decision Log](#decision-log) is agreed and can be executed
-without re-litigating it; everything under [Open questions](#open-questions)
-still needs an answer, but none of it blocks starting. This came out of
-reviewing the D6 revision work on `schedule-module` (see
+**Status: built.** S1 through S7 are implemented on `schedule-module`; the
+[Build order](#build-order) records what each step turned into and the
+[Open questions](#open-questions) section says which are now answered and which
+are still open. The [Decision Log](#decision-log) is the reasoning, kept as
+written so a later change has to argue with it rather than rediscover it. This
+came out of reviewing the D6 revision work on `schedule-module` (see
 [`schedule-plan.md`](schedule-plan.md) D6 and
 [`object-envelopes.md`](object-envelopes.md)) and is a consequence of it, not a
 criticism of it: D6 closed a real rollback hole, and the cost of closing it is
@@ -226,46 +227,93 @@ Until then it is a live way to lose one.
 
 ## Build order
 
-Roughly dependency order; each step should be independently verifiable.
+What each step became. Kept in dependency order, since a later change is
+likely to want the same sequence.
 
-1. **S7 first, standalone.** Stop hydration from deleting anchors on decrypt
-   failure. Small, safe, and valuable whether or not the rest lands.
-2. **Schema.** Two tables, cached content and anchors, with the indexes the
-   real queries need — at minimum by kind, and by whatever ordering the
-   clipboard list and the schedule expander actually ask for.
-3. **Storage layer behind the existing interface.** The local store already has
-   a native/browser split; the native side becomes SQLite while the browser
-   side is untouched. Keep the public surface stable so the engine does not
-   change in this step.
-4. **Fold the writes into transactions.** Delete, revise and reconcile each
-   become one transaction rather than a sequence of filesystem operations.
-5. **Make the sweeps queries.** Reconciliation should be a statement over an
-   index, not a read-and-parse of everything.
-6. **Cutover.** Delete the old directory on first run of the new store.
-7. **Docs.** S4's rewording, plus a note in `object-envelopes.md` that anchors
-   are durable on native and best-effort in the browser.
+1. **S7, standalone.** An unreadable cache entry is downgraded to an anchor
+   instead of being deleted. Committed on its own, before any of the rest, so
+   it would have landed even if the migration had not.
+2. **Schema.** Three tables: `objects`, `object_payloads` hanging off it by
+   foreign key, and `object_anchors` standing alone. Objects are indexed by
+   kind and creation order, which is what reconciliation and the lists ask for.
+3. **Storage layer behind the existing interface.** The native half of the
+   store's existing native/browser split became SQLite; the browser half was
+   left alone. `StoredObjectRecord` stayed the boundary type, so nothing above
+   the store changed.
+4. **Transactions.** A record and its payload are written together, and a
+   delete is one statement pair. The states in between — a record whose payload
+   never landed, a payload with no record — stopped being reachable, so the
+   orphan sweep that used to look for them was deleted rather than ported.
+5. **Sweeps became queries.** Reconciliation asks for the ids of one kind that
+   a pass did not account for, and fetches only those. It no longer reads and
+   parses every object to find out.
+6. **Cutover.** Opening the database deletes the old `objects/` and
+   `clipboard/` directories. Data loss by design, and better than leaving
+   ciphertext behind that nothing will ever read or reclaim.
+7. **Docs.** This file, plus `object-envelopes.md` (the browser paragraph) and
+   `local-at-rest-encryption.md` (the storage medium, the file modes, and what
+   a failed decrypt now costs).
+
+Two things changed shape while being built, both worth knowing about:
+
+- **Held objects get an anchor row too**, not just departed ones. The plan
+  assumed a live object's envelope was anchor enough, since it carries the
+  revision and hashes to the parent. But that puts the anchor back inside the
+  cache entry it is supposed to outlive, which is the exact inversion S2
+  exists to correct — and it would have meant a cache wipe silently forfeiting
+  the accepted revision of everything still held. Writing the anchor out as
+  the content lands also makes reading a head an indexed lookup rather than a
+  parse and a hash.
+- **A delete used to leak the payload of every kind but clipboard.** Payload
+  removal was guarded by an object-kind check that predated schedule objects
+  caching a payload, so deleting one left its ciphertext behind with nothing
+  to reclaim it. The payload row is tied to the object row now, so there is no
+  kind-specific step left to get wrong.
 
 ## Open questions
 
-None of these block starting; they need answering along the way.
+### Answered while building
 
-- What exactly an anchor row holds. At minimum the object id, the accepted
-  revision, the parent hash, and which of the three anchor kinds it is
-  (locally-written tombstone, delete observed without a body, absent from a
-  snapshot) — since those carry different minimum-next-revision rules. Whether
-  it also needs the kind, for a future per-kind retention policy, is undecided.
+- **What an anchor row holds.** The object id, the accepted revision, the
+  parent hash, and which of the three anchor kinds it is — plus the object
+  kind and the sequence bookkeeping, which turned out to be required rather
+  than speculative: an anchor row is also the ordering guard that stops a late
+  create event resurrecting a deleted object, and that guard needs the
+  `event_seq` the delete carried. So the kind is there, and a future per-kind
+  retention policy has what it needs for free.
+- **Mobile.** The bundled SQLite cross-compiles for `aarch64-linux-android`
+  through the existing NDK setup, with no cargo configuration beyond the
+  dependency. Work, not risk, as expected.
+- **The reconciliation generation counter.** Still per-record, and now more
+  clearly right than before: the sweep's query filters on it directly, against
+  the index.
+
+### Still open
+
 - Whether the schedule and clipboard previews should degrade instead of
   failing when cached payload bytes are missing, so a missing cache entry
-  surfaces as "not loaded" rather than an error. Related to S7 but separable.
+  surfaces as "not loaded" rather than as an absent row. S7 made this
+  survivable — the object drops out of the visible list and is refetched — but
+  it is still not visible to the person looking at the list.
 - Whether to encrypt the database itself (SQLCipher or equivalent), or keep the
-  current boundary where content is application-encrypted and metadata is
-  plaintext in a permission-restricted file. The current boundary is the
-  default; changing it is a separate decision with its own threat model.
-- Mobile build implications of bundling SQLite through the UniFFI layer for
-  Android. The workspace already builds C dependencies, so this is expected to
-  be work rather than risk, but it has not been checked.
-- Whether the reconciliation generation counter still needs to be per-record
-  once sweeps are queries.
+  current boundary where content is application-encrypted and the database's
+  own metadata is plaintext in a permission-restricted file. The current
+  boundary is the default; changing it is a separate decision with its own
+  threat model.
+- **Bounded reads for display.** Hydration still loads every held object into
+  memory and every list reads from there, so the indexes the schema now has
+  are used by reconciliation but not yet by the lists. This is much less
+  pressing than it was — what made the old store's reads grow without limit
+  was the deleted markers, and those are gone — but the newest-N clipboard
+  query and the calendar's date range are both things the database could
+  answer directly.
+- **Schema changes recreate the database**, anchors included. Acceptable while
+  this is a development-time event; a change that ships to someone who has
+  been running the client needs to carry `object_anchors` across instead.
+- **The rusqlite version is pinned** to the line that shares
+  `libsqlite3-sys` with sqlx, because only one package in the workspace may
+  claim the `sqlite3` links key and the server resolves sqlx through sea-orm.
+  Bumping either means bumping both.
 
 ## Related open findings not covered here
 
@@ -285,8 +333,8 @@ From the same review, unresolved and unrelated to storage:
 ## Provenance
 
 Written 2026-09-09, after a review of the twelve commits that followed D6 on
-`schedule-module`. The findings were verified against the code at that point.
-Two fixes from the same review are already committed on that branch: raw-rule
-injection hardening in the schedule crate, and the recurrence-flattening bug in
-the web composer. The storage work described here was deliberately not started,
-so that it could be agreed first.
+`schedule-module`, and implemented the same day once the decisions were agreed.
+The findings were verified against the code at that point. Two unrelated fixes
+from the same review are committed on the same branch: raw-rule injection
+hardening in the schedule crate, and the recurrence-flattening bug in the web
+composer.

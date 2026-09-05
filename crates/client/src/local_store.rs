@@ -6,6 +6,9 @@
 //! record only for the operation that needs them.
 
 #[cfg(not(target_family = "wasm"))]
+mod sqlite;
+
+#[cfg(not(target_family = "wasm"))]
 use std::path::Path;
 use std::{collections::HashMap, path::PathBuf, sync::RwLock};
 
@@ -212,13 +215,6 @@ impl StoredObjectRecord {
         }
     }
 
-    fn kind(&self) -> ObjectKind {
-        match self {
-            Self::Present(record) => record.kind,
-            Self::PendingCreate(record) | Self::Deleted(record) => record.kind,
-        }
-    }
-
     fn event_seq(&self) -> i64 {
         match self {
             Self::Present(record) => record.event_seq,
@@ -271,6 +267,17 @@ pub struct LocalStore {
     profile_id: RwLock<Option<String>>,
     sync: Mutex<LocalSyncControl>,
     memory: Mutex<MemoryState>,
+    /// Opened on first use, because the database lives under the profile
+    /// directory and the profile is not known when the store is constructed.
+    #[cfg(not(target_family = "wasm"))]
+    database: Mutex<Option<OpenDatabase>>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug)]
+struct OpenDatabase {
+    profile_id: String,
+    connection: rusqlite::Connection,
 }
 
 impl LocalStore {
@@ -280,6 +287,8 @@ impl LocalStore {
             profile_id: RwLock::new(None),
             sync: Mutex::new(LocalSyncControl::default()),
             memory: Mutex::new(MemoryState::default()),
+            #[cfg(not(target_family = "wasm"))]
+            database: Mutex::new(None),
         }
     }
 
@@ -449,9 +458,8 @@ impl LocalStore {
             created_seq: sync_meta.created_seq,
             content: StoredPresentContent::Encrypted(encrypted.object.clone()),
         }));
-        self.write_stored_object_payload(object_id, &encrypted.payload_ciphertext)
+        self.write_stored_object_record_with_payload(&stored_record, &encrypted.payload_ciphertext)
             .await?;
-        self.write_stored_object_record(&stored_record).await?;
         self.write_memory_record(local_record).await
     }
 
@@ -565,12 +573,9 @@ impl LocalStore {
         visible_clipboard_limit: usize,
     ) -> Result<LocalVisibleState, LocalStoreError> {
         #[cfg(not(target_family = "wasm"))]
-        {
-            self.sweep_orphaned_temp_files().await;
-            self.sweep_orphaned_clipboard_payloads().await;
-        }
+        self.sweep_orphaned_temp_files().await;
         let mut memory = MemoryState::default();
-        for record in self.all_stored_object_records().await? {
+        for record in self.live_stored_object_records().await? {
             match self
                 .decrypt_stored_object_record_preview(&record, encryption_key)
                 .await
@@ -829,9 +834,8 @@ impl LocalStore {
             created_seq: sync_meta.created_seq,
             content: StoredPresentContent::Encrypted(encrypted.object.clone()),
         }));
-        self.write_stored_object_payload(item_id, &encrypted.payload_ciphertext)
+        self.write_stored_object_record_with_payload(&stored_record, &encrypted.payload_ciphertext)
             .await?;
-        self.write_stored_object_record(&stored_record).await?;
         self.write_memory_record(local_record).await
     }
 
@@ -1035,7 +1039,7 @@ impl LocalStore {
                 anchor
             }),
         };
-        self.remove_payloads_for_object(kind, object_id).await?;
+        self.remove_payloads_for_object(object_id).await?;
         self.remove_memory_record(object_id).await;
         let record = StoredObjectRecord::Deleted(StoredSyncMarkerRecord {
             id: object_id.to_string(),
@@ -1054,21 +1058,16 @@ impl LocalStore {
         generation: u64,
         stream_start_seq: i64,
     ) -> Result<(), LocalStoreError> {
-        for record in self.all_stored_object_records().await? {
-            if record.kind() != kind {
+        for object_id in self
+            .stale_stored_object_ids(kind, generation, stream_start_seq)
+            .await?
+        {
+            let Some(record) = self.stored_object_record(&object_id).await? else {
                 continue;
-            }
+            };
             match &record {
-                StoredObjectRecord::Present(stored)
-                    if stored.created_seq <= stream_start_seq
-                        && stored.seen_generation != Some(generation) =>
-                {
-                    self.mark_record_absent(&record).await?;
-                }
-                StoredObjectRecord::PendingCreate(stored)
-                    if stored.created_seq <= stream_start_seq
-                        && stored.seen_generation != Some(generation) =>
-                {
+                StoredObjectRecord::Present(_) => self.mark_record_absent(&record).await?,
+                StoredObjectRecord::PendingCreate(stored) => {
                     if stored.revision_anchor.is_some() {
                         self.write_stored_object_record(&StoredObjectRecord::Deleted(
                             stored.clone(),
@@ -1079,7 +1078,8 @@ impl LocalStore {
                             .await?;
                     }
                 }
-                _ => {}
+                // Nothing that is already gone can be swept.
+                StoredObjectRecord::Deleted(_) => {}
             }
         }
         Ok(())
@@ -1096,8 +1096,7 @@ impl LocalStore {
             head: local_head_from_present(present)?,
             kind: StoredRevisionAnchorKind::Absent,
         };
-        self.remove_payloads_for_object(present.kind, &present.id)
-            .await?;
+        self.remove_payloads_for_object(&present.id).await?;
         self.remove_memory_record(&present.id).await;
         self.write_stored_object_record(&StoredObjectRecord::Deleted(StoredSyncMarkerRecord {
             id: present.id.clone(),
@@ -1145,8 +1144,7 @@ impl LocalStore {
         match &record {
             StoredObjectRecord::Present(_) => self.mark_record_absent(&record).await,
             StoredObjectRecord::PendingCreate(marker) if marker.revision_anchor.is_some() => {
-                self.remove_payloads_for_object(marker.kind, object_id)
-                    .await?;
+                self.remove_payloads_for_object(object_id).await?;
                 self.remove_memory_record(object_id).await;
                 self.write_stored_object_record(&StoredObjectRecord::Deleted(marker.clone()))
                     .await
@@ -1641,46 +1639,66 @@ impl LocalStore {
         write_private_file_atomic(&self.device_identity_path(profile_id), &bytes).await
     }
 
-    /// Best-effort removal of orphaned atomic-write temp files across every
-    /// directory `write_private_file_atomic` targets, so a crash/IO error
-    /// mid-write cannot leak ciphertext temps that accumulate unboundedly.
+    /// Best-effort removal of orphaned atomic-write temp files beside the
+    /// device identity, so a crash or I/O error mid-write cannot leak
+    /// ciphertext temps that accumulate unboundedly. The identity is the last
+    /// thing here still written as a file; everything else is a database row.
     async fn sweep_orphaned_temp_files(&self) {
         sweep_orphaned_temp_files(&self.base_dir).await;
-        sweep_orphaned_temp_files(&self.object_dir()).await;
-        sweep_orphaned_temp_files(&self.clipboard_dir()).await;
     }
 
-    /// Remove clipboard payload sidecars whose object record is gone. The sidecar
-    /// is written alongside its record (see
-    /// `persist_clipboard_present_encrypted_inner`), so a crash or IO error
-    /// between the two writes can leave a committed `{id}.payload.ciphertext` with
-    /// no `{id}.json` record. Nothing else reclaims it: `all_stored_object_records`
-    /// reads only `object_dir`, and the temp sweep matches only `*.tmp`. Runs once
-    /// at hydrate.
-    async fn sweep_orphaned_clipboard_payloads(&self) {
-        let mut record_ids = std::collections::HashSet::new();
-        if let Ok(mut read_dir) = tokio::fs::read_dir(self.object_dir()).await {
-            while let Ok(Some(entry)) = read_dir.next_entry().await {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("json")
-                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                {
-                    record_ids.insert(stem.to_string());
-                }
-            }
+    /// The store database for the current profile, opening it if needed.
+    ///
+    /// The profile can change within one process (a second user logging in on
+    /// the same machine), and each profile has its own database, so the slot
+    /// is re-opened rather than assumed.
+    async fn with_database<T>(
+        &self,
+        operation: impl FnOnce(&mut rusqlite::Connection) -> Result<T, LocalStoreError>,
+    ) -> Result<T, LocalStoreError> {
+        let profile_id = self.profile_id();
+        let mut slot = self.database.lock().await;
+        if slot
+            .as_ref()
+            .is_none_or(|open| open.profile_id != profile_id)
+        {
+            let connection = self.open_database().await?;
+            *slot = Some(OpenDatabase {
+                profile_id,
+                connection,
+            });
         }
-        let Ok(mut read_dir) = tokio::fs::read_dir(self.clipboard_dir()).await else {
-            return;
-        };
-        while let Ok(Some(entry)) = read_dir.next_entry().await {
-            let path = entry.path();
-            if let Some(object_id) = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.strip_suffix(".payload.ciphertext"))
-                && !record_ids.contains(object_id)
-            {
-                _ = tokio::fs::remove_file(&path).await;
+        let open = slot.as_mut().expect("database opened above");
+        operation(&mut open.connection)
+    }
+
+    async fn open_database(&self) -> Result<rusqlite::Connection, LocalStoreError> {
+        ensure_private_dir(&self.profile_root()).await?;
+        let connection = sqlite::open(&self.database_path())?;
+        self.discard_legacy_file_store().await;
+        Ok(connection)
+    }
+
+    /// Delete the directory-of-JSON-files store this database replaces.
+    ///
+    /// A cutover, not a migration: the project keeps no local compatibility,
+    /// and everything those files held is either a cache the server can serve
+    /// again or an anchor whose loss costs one round of rollback protection on
+    /// objects that predate the change. Leaving them would be worse — the
+    /// ciphertext would sit there unreferenced and unswept forever.
+    async fn discard_legacy_file_store(&self) {
+        for directory in [self.legacy_object_dir(), self.legacy_clipboard_dir()] {
+            match tokio::fs::remove_dir_all(&directory).await {
+                Ok(()) => tracing::info!(
+                    directory = %directory.display(),
+                    "Discarded the legacy file-based local store"
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(
+                    directory = %directory.display(),
+                    "Failed to discard the legacy local store: {}",
+                    error
+                ),
             }
         }
     }
@@ -1689,98 +1707,70 @@ impl LocalStore {
         &self,
         object_id: &str,
     ) -> Result<Option<StoredObjectRecord>, LocalStoreError> {
-        let path = self.object_record_path(object_id);
-        match tokio::fs::read(&path).await {
-            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        self.with_database(|connection| sqlite::read_record(connection, object_id))
+            .await
     }
 
     async fn write_stored_object_record(
         &self,
         record: &StoredObjectRecord,
     ) -> Result<(), LocalStoreError> {
-        ensure_private_dir(&self.object_dir()).await?;
-        let bytes = serde_json::to_vec_pretty(record)?;
-        write_private_file_atomic(&self.object_record_path(record.id()), &bytes).await
+        self.with_database(|connection| sqlite::write_record(connection, record, None))
+            .await
     }
 
-    async fn write_stored_object_payload(
+    /// Persist a record together with the payload ciphertext it describes.
+    ///
+    /// One call rather than two because the two are one fact: a record whose
+    /// payload never landed is content this device cannot read, and the old
+    /// store could produce exactly that by crashing between the writes.
+    async fn write_stored_object_record_with_payload(
         &self,
-        object_id: &str,
+        record: &StoredObjectRecord,
         ciphertext: &[u8],
     ) -> Result<(), LocalStoreError> {
-        ensure_private_dir(&self.clipboard_dir()).await?;
-        write_private_file_atomic(&self.object_payload_ciphertext_path(object_id), ciphertext).await
+        self.with_database(|connection| sqlite::write_record(connection, record, Some(ciphertext)))
+            .await
     }
 
     async fn stored_object_payload_ciphertext(
         &self,
         object_id: &str,
     ) -> Result<Option<Vec<u8>>, LocalStoreError> {
-        match tokio::fs::read(self.object_payload_ciphertext_path(object_id)).await {
-            Ok(ciphertext) => Ok(Some(ciphertext)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        self.with_database(|connection| sqlite::read_payload(connection, object_id))
+            .await
     }
 
-    async fn all_stored_object_records(&self) -> Result<Vec<StoredObjectRecord>, LocalStoreError> {
-        let dir = self.object_dir();
-        let mut read_dir = match tokio::fs::read_dir(&dir).await {
-            Ok(read_dir) => read_dir,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
-        };
-
-        let mut records = Vec::new();
-        while let Some(entry) = read_dir.next_entry().await? {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            match tokio::fs::read(&path)
-                .await
-                .map_err(LocalStoreError::from)
-                .and_then(|bytes| {
-                    serde_json::from_slice::<StoredObjectRecord>(&bytes).map_err(Into::into)
-                }) {
-                Ok(record) => records.push(record),
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), "Failed to read local object record: {}", e)
-                }
-            }
-        }
-        Ok(records)
+    async fn live_stored_object_records(&self) -> Result<Vec<StoredObjectRecord>, LocalStoreError> {
+        self.with_database(|connection| sqlite::live_records(connection))
+            .await
     }
 
-    async fn remove_payloads_for_object(
+    async fn stale_stored_object_ids(
         &self,
         kind: ObjectKind,
-        object_id: &str,
-    ) -> Result<(), LocalStoreError> {
-        if kind == ObjectKind::Clipboard {
-            _ = tokio::fs::remove_file(self.object_payload_ciphertext_path(object_id)).await;
-            _ = tokio::fs::remove_file(self.clipboard_dir().join(format!("{object_id}.payload")))
-                .await;
-            _ = tokio::fs::remove_file(self.clipboard_dir().join(format!("{object_id}.txt"))).await;
-        }
-        Ok(())
+        generation: u64,
+        stream_start_seq: i64,
+    ) -> Result<Vec<String>, LocalStoreError> {
+        self.with_database(|connection| {
+            sqlite::stale_object_ids(connection, kind, generation, stream_start_seq)
+        })
+        .await
+    }
+
+    async fn remove_payloads_for_object(&self, object_id: &str) -> Result<(), LocalStoreError> {
+        self.with_database(|connection| sqlite::delete_payload(connection, object_id))
+            .await
     }
 
     async fn remove_stored_object_record_and_payloads(
         &self,
         record: &StoredObjectRecord,
     ) -> Result<(), LocalStoreError> {
-        self.remove_payloads_for_object(record.kind(), record.id())
+        let object_id = record.id();
+        self.with_database(|connection| sqlite::forget_object(connection, object_id))
             .await?;
-        match tokio::fs::remove_file(self.object_record_path(record.id())).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
-        self.remove_memory_record(record.id()).await;
+        self.remove_memory_record(object_id).await;
         Ok(())
     }
 
@@ -1788,21 +1778,18 @@ impl LocalStore {
         self.base_dir.join(self.profile_id())
     }
 
-    fn clipboard_dir(&self) -> PathBuf {
-        self.profile_root().join("clipboard")
+    fn database_path(&self) -> PathBuf {
+        self.profile_root().join("store.sqlite3")
     }
 
-    fn object_dir(&self) -> PathBuf {
+    /// Where the pre-SQLite store kept its records and payload sidecars. Only
+    /// `discard_legacy_file_store` has any use for these.
+    fn legacy_object_dir(&self) -> PathBuf {
         self.profile_root().join("objects")
     }
 
-    fn object_record_path(&self, object_id: &str) -> PathBuf {
-        self.object_dir().join(format!("{object_id}.json"))
-    }
-
-    fn object_payload_ciphertext_path(&self, object_id: &str) -> PathBuf {
-        self.clipboard_dir()
-            .join(format!("{object_id}.payload.ciphertext"))
+    fn legacy_clipboard_dir(&self) -> PathBuf {
+        self.profile_root().join("clipboard")
     }
 
     /// The device signing identity is AEAD-wrapped with a per-user key, so its
@@ -1933,17 +1920,20 @@ impl LocalStore {
         Ok(())
     }
 
-    async fn write_stored_object_payload(
+    /// The browser has no transaction to put these in, so this is still two
+    /// writes; the record goes last so a failure between them leaves an
+    /// unreferenced payload rather than a record that cannot be read.
+    async fn write_stored_object_record_with_payload(
         &self,
-        object_id: &str,
+        record: &StoredObjectRecord,
         ciphertext: &[u8],
     ) -> Result<(), LocalStoreError> {
         let storage = browser_storage()?;
         let json = serde_json::to_string(ciphertext)?;
         storage
-            .set_item(&self.object_payload_ciphertext_key(object_id), &json)
+            .set_item(&self.object_payload_ciphertext_key(record.id()), &json)
             .map_err(storage_error)?;
-        Ok(())
+        self.write_stored_object_record(record).await
     }
 
     async fn stored_object_payload_ciphertext(
@@ -1958,13 +1948,16 @@ impl LocalStore {
             .transpose()
     }
 
-    async fn all_stored_object_records(&self) -> Result<Vec<StoredObjectRecord>, LocalStoreError> {
+    /// Every object still held or still being fetched. Delete markers are
+    /// filtered out to match the native store, where they are not records at
+    /// all; no caller has ever wanted one.
+    async fn live_stored_object_records(&self) -> Result<Vec<StoredObjectRecord>, LocalStoreError> {
         let storage = browser_storage()?;
         let mut records = Vec::new();
         for object_id in self.read_object_index(&storage)? {
             match self.stored_object_record_from_storage(&storage, &object_id) {
+                Ok(Some(StoredObjectRecord::Deleted(_))) | Ok(None) => {}
                 Ok(Some(record)) => records.push(record),
-                Ok(None) => {}
                 Err(e) => {
                     tracing::warn!(object_id = %object_id, "Failed to read local object record: {}", e)
                 }
@@ -1973,20 +1966,54 @@ impl LocalStore {
         Ok(records)
     }
 
-    async fn remove_payloads_for_object(
+    /// No index to query, so this is the same scan the sweep used to do
+    /// inline. The browser store is capped, which is why that is tolerable
+    /// here and was not on native.
+    async fn stale_stored_object_ids(
         &self,
         kind: ObjectKind,
-        object_id: &str,
-    ) -> Result<(), LocalStoreError> {
-        if kind == ObjectKind::Clipboard {
-            let storage = browser_storage()?;
-            storage
-                .remove_item(&self.object_payload_ciphertext_key(object_id))
-                .map_err(storage_error)?;
-            storage
-                .remove_item(&self.legacy_clipboard_payload_key(object_id))
-                .map_err(storage_error)?;
-        }
+        generation: u64,
+        stream_start_seq: i64,
+    ) -> Result<Vec<String>, LocalStoreError> {
+        Ok(self
+            .live_stored_object_records()
+            .await?
+            .into_iter()
+            .filter_map(|record| {
+                let stored = match &record {
+                    StoredObjectRecord::Present(stored) => (
+                        stored.kind,
+                        stored.created_seq,
+                        stored.seen_generation,
+                        &stored.id,
+                    ),
+                    StoredObjectRecord::PendingCreate(stored) => (
+                        stored.kind,
+                        stored.created_seq,
+                        stored.seen_generation,
+                        &stored.id,
+                    ),
+                    StoredObjectRecord::Deleted(_) => return None,
+                };
+                let (record_kind, created_seq, seen_generation, id) = stored;
+                (record_kind == kind
+                    && created_seq <= stream_start_seq
+                    && seen_generation != Some(generation))
+                .then(|| id.clone())
+            })
+            .collect())
+    }
+
+    /// Removal is by id and not by kind on purpose: schedule objects cache a
+    /// payload too, and a kind check here used to leave theirs behind for good.
+    async fn remove_payloads_for_object(&self, object_id: &str) -> Result<(), LocalStoreError> {
+        let storage = browser_storage()?;
+        storage
+            .remove_item(&self.object_payload_ciphertext_key(object_id))
+            .map_err(storage_error)?;
+        storage
+            .remove_item(&self.legacy_clipboard_payload_key(object_id))
+            .map_err(storage_error)?;
         Ok(())
     }
 
@@ -1995,8 +2022,7 @@ impl LocalStore {
         record: &StoredObjectRecord,
     ) -> Result<(), LocalStoreError> {
         let storage = browser_storage()?;
-        self.remove_payloads_for_object(record.kind(), record.id())
-            .await?;
+        self.remove_payloads_for_object(record.id()).await?;
         storage
             .remove_item(&self.object_record_key(record.id()))
             .map_err(storage_error)?;
@@ -2118,13 +2144,27 @@ fn revision_anchor_for_record(
     record: &StoredObjectRecord,
 ) -> Result<Option<StoredRevisionAnchor>, LocalStoreError> {
     match record {
-        StoredObjectRecord::Present(present) => Ok(Some(StoredRevisionAnchor {
-            head: local_head_from_present(present)?,
-            kind: StoredRevisionAnchorKind::Absent,
-        })),
+        StoredObjectRecord::Present(present) => present_revision_anchor(present),
         StoredObjectRecord::PendingCreate(marker) | StoredObjectRecord::Deleted(marker) => {
             Ok(marker.revision_anchor)
         }
+    }
+}
+
+/// The chain position a held object proves.
+///
+/// `None` for a kind that has no chain: collab docs are server-visible and
+/// carry no signed envelope, so there is nothing for a later revision to
+/// contradict.
+fn present_revision_anchor(
+    record: &StoredPresentObjectRecord,
+) -> Result<Option<StoredRevisionAnchor>, LocalStoreError> {
+    match &record.content {
+        StoredPresentContent::Encrypted(_) => Ok(Some(StoredRevisionAnchor {
+            head: local_head_from_present(record)?,
+            kind: StoredRevisionAnchorKind::Absent,
+        })),
+        StoredPresentContent::Collab(_) => Ok(None),
     }
 }
 
@@ -2573,6 +2613,9 @@ pub enum LocalStoreError {
     Io(#[from] std::io::Error),
     #[error("local store JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[cfg(not(target_family = "wasm"))]
+    #[error("local store database error: {0}")]
+    Database(#[from] rusqlite::Error),
     #[error("local clipboard payload is not UTF-8: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
     #[error("local clipboard payload decode failed: {0}")]
@@ -2843,15 +2886,54 @@ mod tests {
         let store = LocalStore::new(tmp.path());
         store.set_profile("profile-a".into());
 
-        // Persist one item so the object/clipboard dirs exist, then drop a
-        // leftover atomic-write temp file (the shape `write_private_file_atomic`
-        // leaves behind on a crash) into each private dir.
+        // The device identity is the last thing written as a file, so its
+        // atomic-write temp is the only one left that can be orphaned.
+        let base_tmp = tmp
+            .path()
+            .join(format!("device_identity.json.{}.tmp", uuid::Uuid::now_v7()));
+        tokio::fs::write(&base_tmp, b"orphaned ciphertext")
+            .await
+            .expect("write temp file");
+
+        store
+            .hydrate_ciphertext_cache(&TEST_KEY, 10)
+            .await
+            .expect("hydrate");
+
+        assert!(
+            !tokio::fs::try_exists(&base_tmp)
+                .await
+                .expect("exists check"),
+            "stale temp file should have been swept",
+        );
+    }
+
+    /// The cutover. Nothing reads the old directories any more, so leaving
+    /// them would strand their ciphertext where no sweep can ever reach it.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn opening_the_store_discards_the_file_based_one_it_replaces() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+
+        let legacy_objects = store.legacy_object_dir();
+        let legacy_clipboard = store.legacy_clipboard_dir();
+        for directory in [&legacy_objects, &legacy_clipboard] {
+            tokio::fs::create_dir_all(directory)
+                .await
+                .expect("legacy dir");
+            tokio::fs::write(directory.join("leftover"), b"old ciphertext")
+                .await
+                .expect("legacy file");
+        }
+
         let only = item(
             "33333333-3333-4333-8333-333333333333",
             "only",
             "2026-01-01T00:00:00+00:00",
         );
-        store
+        let visible = store
             .persist_local_clipboard_present_encrypted(
                 &only,
                 only.text.as_bytes(),
@@ -2862,38 +2944,15 @@ mod tests {
             )
             .await
             .expect("persist");
+        assert_eq!(visible.clipboard_items.len(), 1);
 
-        let object_tmp = store.object_dir().join(format!(
-            "44444444-4444-4444-8444-444444444444.json.{}.tmp",
-            uuid::Uuid::now_v7()
-        ));
-        let clipboard_tmp = store.clipboard_dir().join(format!(
-            "55555555.payload.ciphertext.{}.tmp",
-            uuid::Uuid::now_v7()
-        ));
-        let base_tmp = tmp
-            .path()
-            .join(format!("device_identity.json.{}.tmp", uuid::Uuid::now_v7()));
-        for path in [&object_tmp, &clipboard_tmp, &base_tmp] {
-            tokio::fs::write(path, b"orphaned ciphertext")
-                .await
-                .expect("write temp file");
-        }
-
-        let restored_store = LocalStore::new(tmp.path());
-        restored_store.set_profile("profile-a".into());
-        let restored = restored_store
-            .hydrate_ciphertext_cache(&TEST_KEY, 10)
-            .await
-            .expect("hydrate");
-
-        // The committed record survives; the orphaned temps are reclaimed.
-        assert_eq!(restored.clipboard_items.len(), 1);
-        for path in [&object_tmp, &clipboard_tmp, &base_tmp] {
+        for directory in [&legacy_objects, &legacy_clipboard] {
             assert!(
-                !tokio::fs::try_exists(path).await.expect("exists check"),
-                "stale temp file {} should have been swept",
-                path.display()
+                !tokio::fs::try_exists(directory)
+                    .await
+                    .expect("exists check"),
+                "{} should have been discarded",
+                directory.display(),
             );
         }
     }
@@ -3079,57 +3138,47 @@ mod tests {
             .await
             .expect("persist");
 
-        let object_dir = store.object_dir();
-        let object_dir_mode = tokio::fs::metadata(&object_dir)
+        let profile_mode = tokio::fs::metadata(store.profile_root())
             .await
-            .expect("object dir metadata")
+            .expect("profile dir metadata")
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(object_dir_mode, 0o700, "object dir should be 0700");
+        assert_eq!(profile_mode, 0o700, "profile dir should be 0700");
 
-        let clipboard_dir = store.clipboard_dir();
-        let clipboard_dir_mode = tokio::fs::metadata(&clipboard_dir)
-            .await
-            .expect("clipboard dir metadata")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(clipboard_dir_mode, 0o700, "clipboard dir should be 0700");
-
-        let record_path = object_dir.join("44444444-4444-4444-8444-444444444444.json");
-        let record_metadata = tokio::fs::metadata(&record_path)
-            .await
-            .expect("record metadata");
-        assert_eq!(
-            record_metadata.permissions().mode() & 0o777,
-            0o600,
-            "object record should be 0600"
-        );
-        let record_bytes = tokio::fs::read(&record_path).await.expect("record bytes");
-        let record_text = String::from_utf8_lossy(&record_bytes);
-        assert!(!record_text.contains("super-secret"));
-        assert!(!record_text.contains("\"text\""));
-        assert!(!record_text.contains("payload_ciphertext"));
-
-        let payload_path =
-            store.object_payload_ciphertext_path("44444444-4444-4444-8444-444444444444");
-        let payload_metadata = tokio::fs::metadata(&payload_path)
-            .await
-            .expect("payload metadata");
-        assert_eq!(
-            payload_metadata.permissions().mode() & 0o777,
-            0o600,
-            "payload ciphertext file should be 0600"
-        );
-        let payload_bytes = tokio::fs::read(&payload_path)
-            .await
-            .expect("payload ciphertext");
+        // The write-ahead log holds the same rows as the database until a
+        // checkpoint, so both files have to be private and both have to be
+        // searched for the plaintext.
+        let database = store.database_path();
+        let write_ahead_log = database.with_extension("sqlite3-wal");
         assert!(
-            !payload_bytes
-                .windows(secret.text.len())
-                .any(|window| window == secret.text.as_bytes())
+            tokio::fs::try_exists(&write_ahead_log)
+                .await
+                .expect("wal exists check"),
+            "expected a write-ahead log beside the database",
         );
+
+        let mut stored = Vec::new();
+        for path in [&database, &write_ahead_log] {
+            let metadata = tokio::fs::metadata(path).await.expect("metadata");
+            assert_eq!(
+                metadata.permissions().mode() & 0o777,
+                0o600,
+                "{} should be 0600",
+                path.display(),
+            );
+            stored.extend(tokio::fs::read(path).await.expect("stored bytes"));
+        }
+
+        let secret_bytes = secret.text.as_bytes();
+        assert!(
+            !stored
+                .windows(secret_bytes.len())
+                .any(|window| window == secret_bytes),
+            "the clipboard payload must never be stored in the clear",
+        );
+        // The preview is derived from the payload, so it must not leak either.
+        assert!(!String::from_utf8_lossy(&stored).contains("super-secret"));
     }
 
     #[tokio::test]
@@ -3398,9 +3447,11 @@ mod tests {
             .await
             .expect("persist revision two");
 
-        // The crash window during a delete leaves exactly this shape: the
-        // record and its envelope intact, the payload sidecar gone.
-        tokio::fs::remove_file(store.object_payload_ciphertext_path(&item.id))
+        // Whatever the cause — a half-applied delete under the old store, a
+        // restored backup, a cleaner — this is the shape it leaves: the record
+        // and its envelope intact, the cached payload gone.
+        store
+            .remove_payloads_for_object(&item.id)
             .await
             .expect("remove cached payload");
 
@@ -3416,7 +3467,14 @@ mod tests {
         );
 
         restarted
-            .persist_local_clipboard_present_encrypted(&item, b"revision one", &revision_one, 11, 11, 10)
+            .persist_local_clipboard_present_encrypted(
+                &item,
+                b"revision one",
+                &revision_one,
+                11,
+                11,
+                10,
+            )
             .await
             .expect_err("an unreadable cache entry must not forfeit the accepted revision");
 
@@ -3431,5 +3489,189 @@ mod tests {
             )
             .await
             .expect("the refetched head is the one the anchor already accepted");
+    }
+
+    /// S2's whole claim, as a test: the anchors are not in the cache, so the
+    /// one operation that is always safe — throw the cache away — cannot
+    /// perform the one that never is.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn wiping_the_cache_leaves_every_anchor_standing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+
+        // One object still held, at its second revision.
+        let held = item(
+            "cccccccc-1111-4111-8111-111111111111",
+            "revision two",
+            "2026-01-12T00:00:00+00:00",
+        );
+        let revision_one = encrypted_clipboard(&held, b"revision one");
+        let parent_hash = crypto::object_envelope_parent_hash(&revision_one.object.envelope.body)
+            .expect("parent hash");
+        let revision_two = encrypted_clipboard_at(
+            &held,
+            held.text.as_bytes(),
+            2,
+            Some(parent_hash),
+            ObjectEnvelopeOperation::Revise,
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &held,
+                held.text.as_bytes(),
+                &revision_two,
+                2,
+                2,
+                10,
+            )
+            .await
+            .expect("persist revision two");
+
+        // One object deleted here, with a locally signed tombstone.
+        let removed = item(
+            "cccccccc-2222-4222-8222-222222222222",
+            "removed",
+            "2026-01-12T00:00:00+00:00",
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &removed,
+                removed.text.as_bytes(),
+                &encrypted_clipboard(&removed, removed.text.as_bytes()),
+                3,
+                3,
+                10,
+            )
+            .await
+            .expect("persist removed");
+        let tombstone = LocalHead {
+            revision: 2,
+            parent_hash: [9; crypto::SHA256_BYTES],
+        };
+        store
+            .apply_local_tombstone(ObjectKind::Clipboard, &removed.id, 4, tombstone, 10)
+            .await
+            .expect("tombstone");
+
+        // Everything the cache holds, gone in one statement.
+        store
+            .with_database(|connection| {
+                connection.execute("DELETE FROM objects", [])?;
+                Ok(())
+            })
+            .await
+            .expect("wipe the cache");
+
+        assert_eq!(
+            store.local_head(&removed.id).await.expect("tombstone head"),
+            Some(tombstone),
+            "a signed tombstone must survive a cache wipe",
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &held,
+                b"revision one",
+                &revision_one,
+                11,
+                11,
+                10,
+            )
+            .await
+            .expect_err("a wiped cache must not forfeit the revision it had accepted");
+    }
+
+    /// The read-amplification fix. A deleted object used to be indistinguishable
+    /// from a live one until it had been opened and parsed, so every hydration
+    /// paid for every object ever deleted.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn a_deleted_object_leaves_nothing_for_hydration_to_read() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let gone = item(
+            "cccccccc-3333-4333-8333-333333333333",
+            "gone",
+            "2026-01-13T00:00:00+00:00",
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &gone,
+                gone.text.as_bytes(),
+                &encrypted_clipboard(&gone, gone.text.as_bytes()),
+                1,
+                1,
+                10,
+            )
+            .await
+            .expect("persist");
+        store
+            .apply_local_delete(ObjectKind::Clipboard, &gone.id, 2, 10)
+            .await
+            .expect("delete");
+
+        assert!(
+            store
+                .live_stored_object_records()
+                .await
+                .expect("live records")
+                .is_empty(),
+            "a deleted object must not be enumerated as live",
+        );
+        // The memory of it is still there for anyone who asks by id.
+        assert!(matches!(
+            store.stored_object_record(&gone.id).await.expect("record"),
+            Some(StoredObjectRecord::Deleted(_)),
+        ));
+    }
+
+    /// The payload used to be a sidecar removed by a separate, kind-conditional
+    /// step, which reclaimed clipboard bytes and silently kept schedule ones
+    /// forever. It hangs off the object row now, so nothing has to remember.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn dropping_an_object_reclaims_its_cached_payload() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let entry = item(
+            "cccccccc-4444-4444-8444-444444444444",
+            "payload",
+            "2026-01-14T00:00:00+00:00",
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &entry,
+                entry.text.as_bytes(),
+                &encrypted_clipboard(&entry, entry.text.as_bytes()),
+                1,
+                1,
+                10,
+            )
+            .await
+            .expect("persist");
+        assert!(
+            store
+                .stored_object_payload_ciphertext(&entry.id)
+                .await
+                .expect("payload lookup")
+                .is_some()
+        );
+
+        store
+            .apply_local_delete(ObjectKind::Clipboard, &entry.id, 2, 10)
+            .await
+            .expect("delete");
+
+        assert!(
+            store
+                .stored_object_payload_ciphertext(&entry.id)
+                .await
+                .expect("payload lookup")
+                .is_none(),
+            "the cached ciphertext should go with the object row",
+        );
     }
 }

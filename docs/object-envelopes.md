@@ -112,9 +112,22 @@ created tombstones are retained as exact signed anchors. A delete learned only
 from the event stream has no tombstone body, so the client retains the preceding
 signed head and requires any later visible revision to be at least two steps
 newer. Snapshot absence retains the accepted head but permits that same head to
-reappear. Delete and absence markers survive reconciliation sweeps and process
-restarts while retained by the local cache; the browser cache's bounded
-capacity can evict old records and their anchors.
+reappear.
+
+How durable those anchors are differs by platform, and the difference is not
+one of degree. On native the anchors are rows in the client's database, kept
+apart from the cached content they outlive: they survive deletes,
+reconciliation sweeps, process restarts, and a cache that has been discarded or
+could not be decrypted. In the browser they live in the same bounded store as
+everything else, which evicts oldest-first, so the check is made against
+whatever local history happens to remain and no durability is promised. The
+structural reason matters more than the cap: a page cannot defend itself
+against the origin that serves it, and an operator who controls both the API
+and the web origin can ship a bundle without the check rather than defeat it.
+That is not the same as the check being pointless there — the web client takes
+the API base URL as user-entered input, so an honestly served client pointed at
+a separately operated API is a supported configuration, and the remaining
+checks do real work in it.
 
 These checks do not provide global transparency. A new installation has no
 anchor. If the server jumps forward by more than one revision, the client does
