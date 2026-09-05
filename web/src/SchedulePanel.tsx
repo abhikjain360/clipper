@@ -10,7 +10,17 @@ import {
     Square,
     Trash2,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+    cloneElement,
+    isValidElement,
+    useCallback,
+    useEffect,
+    useId,
+    useMemo,
+    useRef,
+    useState,
+    type ReactNode,
+} from "react";
 import {
     Button,
     Card,
@@ -34,7 +44,8 @@ import type {
     ScheduleItemView,
     Weekday,
 } from "@clipper/shared";
-import { clipperBackend, formatBackendError } from "./backend";
+import { clipperBackend, formatBackendError, isTauriRuntime } from "./backend";
+import { layoutDay, overlapsDay, spanMinutes } from "./schedule-layout";
 
 // The grid is a view, not the storage format: blocks are stored as an interval
 // and rasterized here (docs/schedule-plan.md, D5). SLOT_MINUTES is the snap the
@@ -87,10 +98,13 @@ export function SchedulePanel({
     const [occurrences, setOccurrences] = useState<OccurrenceView[]>([]);
     const [actuals, setActuals] = useState<ActualView[]>([]);
     const [loading, setLoading] = useState(false);
+    const loadGeneration = useRef(0);
+    const [starting, setStarting] = useState(false);
 
     const weekEnd = useMemo(() => addDays(weekStart, 7), [weekStart]);
 
     const loadWeek = useCallback(async () => {
+        const generation = ++loadGeneration.current;
         setLoading(true);
         try {
             const backend = await clipperBackend();
@@ -102,12 +116,14 @@ export function SchedulePanel({
                 ),
                 backend.actualsBetween(weekStart.toISOString(), weekEnd.toISOString()),
             ]);
-            setOccurrences(expanded);
-            setActuals(logged);
+            if (generation === loadGeneration.current) {
+                setOccurrences(expanded);
+                setActuals(logged);
+            }
         } catch (caught) {
-            onError(formatBackendError(caught));
+            if (generation === loadGeneration.current) onError(formatBackendError(caught));
         } finally {
-            setLoading(false);
+            if (generation === loadGeneration.current) setLoading(false);
         }
     }, [weekStart, weekEnd, onError]);
 
@@ -116,6 +132,9 @@ export function SchedulePanel({
     // state, which re-renders this panel with a new array.
     useEffect(() => {
         void loadWeek();
+        return () => {
+            loadGeneration.current += 1;
+        };
     }, [loadWeek, items, sources, running]);
 
     return (
@@ -159,24 +178,26 @@ export function SchedulePanel({
                     occurrences={occurrences}
                     actuals={actuals}
                     onStart={async (occurrence) => {
+                        if (starting) return;
+                        setStarting(true);
                         onError(null);
                         try {
                             const backend = await clipperBackend();
-                            await backend.startActual(occurrence.item_id, occurrence.occurrence_key);
+                            await backend.startActual(
+                                occurrence.item_id,
+                                occurrence.occurrence_key,
+                            );
                             onState(await backend.getState());
                         } catch (caught) {
                             onError(formatBackendError(caught));
+                        } finally {
+                            setStarting(false);
                         }
                     }}
                 />
             </Card>
 
-            <SeriesList
-                items={items}
-                onEdit={setEditing}
-                onState={onState}
-                onError={onError}
-            />
+            <SeriesList items={items} onEdit={setEditing} onState={onState} onError={onError} />
             <CalendarSources sources={sources} onState={onState} onError={onError} />
         </YStack>
     );
@@ -212,6 +233,12 @@ function WeekGrid({
     // wins outright: it is the one thing happening right now, and scrolling to
     // a 07:00 block would hide it below the fold.
     const running = actuals.find((actual) => actual.running);
+    const [, tick] = useState(0);
+    useEffect(() => {
+        if (!running) return;
+        const timer = setInterval(() => tick((value) => value + 1), 1000);
+        return () => clearInterval(timer);
+    }, [running]);
     const firstMinute = useMemo(() => {
         if (running) {
             const start = new Date(running.start);
@@ -325,24 +352,20 @@ function WeekGrid({
                                     style={{ borderTopColor: "#1c2126", borderTopWidth: 1 }}
                                 />
                             ))}
-                            {timed
-                                .filter((occurrence) => overlapsDay(occurrence, day))
-                                .map((occurrence) => (
-                                    <TimedBlock
-                                        key={`${occurrence.item_id}-${occurrence.start}`}
-                                        occurrence={occurrence}
-                                        day={day}
-                                        onStart={onStart}
-                                    />
-                                ))}
+                            {layoutDay(timed, day).map(({ span: occurrence, lane, lanes }) => (
+                                <TimedBlock
+                                    key={`${occurrence.item_id}-${occurrence.start}`}
+                                    occurrence={occurrence}
+                                    day={day}
+                                    onStart={onStart}
+                                    lane={lane}
+                                    lanes={lanes}
+                                />
+                            ))}
                             {actuals
                                 .filter((actual) => overlapsDay(actual, day))
                                 .map((actual) => (
-                                    <ActualBlock
-                                        key={actual.id}
-                                        actual={actual}
-                                        day={day}
-                                    />
+                                    <ActualBlock key={actual.id} actual={actual} day={day} />
                                 ))}
                         </YStack>
                     ))}
@@ -379,10 +402,14 @@ function TimedBlock({
     occurrence,
     day,
     onStart,
+    lane,
+    lanes,
 }: {
     occurrence: OccurrenceView;
     day: Date;
     onStart: (occurrence: OccurrenceView) => void;
+    lane: number;
+    lanes: number;
 }) {
     const { top, height } = bandGeometry(occurrence, day);
 
@@ -394,8 +421,8 @@ function TimedBlock({
                 position: "absolute",
                 top,
                 height,
-                left: 2,
-                right: 2,
+                left: `calc(${(lane / lanes) * 100}% + 2px)`,
+                width: `calc(${100 / lanes}% - 4px)`,
                 overflow: "hidden",
                 borderRadius: 4,
                 backgroundColor: blockColor(occurrence).fill,
@@ -445,12 +472,7 @@ function bandGeometry(
     span: { start: string; end: string },
     day: Date,
 ): { top: number; height: number } {
-    const dayStart = startOfDay(day).getTime();
-    const start = new Date(span.start).getTime();
-    // A running timer has no end yet; draw it up to now.
-    const end = span.end ? new Date(span.end).getTime() : Date.now();
-    const fromMinutes = Math.max(0, (start - dayStart) / 60000);
-    const toMinutes = Math.min(DAY_MINUTES, (end - dayStart) / 60000);
+    const [fromMinutes, toMinutes] = spanMinutes(span, day);
     return {
         top: (fromMinutes / 60) * HOUR_HEIGHT,
         height: Math.max(6, ((toMinutes - fromMinutes) / 60) * HOUR_HEIGHT),
@@ -478,7 +500,9 @@ function RunningTimer({
         return () => clearInterval(timer);
     }, [running]);
 
-    async function act(run: (backend: Awaited<ReturnType<typeof clipperBackend>>) => Promise<unknown>) {
+    async function act(
+        run: (backend: Awaited<ReturnType<typeof clipperBackend>>) => Promise<unknown>,
+    ) {
         setBusy(true);
         onError(null);
         try {
@@ -508,11 +532,7 @@ function RunningTimer({
 
     const elapsed = Math.max(0, now - new Date(running.start).getTime());
     return (
-        <Card
-            bg="#2a2416"
-            p="$3"
-            style={{ borderColor: "#d0a33a", borderWidth: 1 }}
-        >
+        <Card bg="#2a2416" p="$3" style={{ borderColor: "#d0a33a", borderWidth: 1 }}>
             <XStack items="center" justify="space-between" gap="$3" flexWrap="wrap">
                 <YStack>
                     <Text>{running.title}</Text>
@@ -538,10 +558,11 @@ function formatElapsed(ms: number): string {
     const hours = Math.floor(total / 3600);
     const minutes = Math.floor((total % 3600) / 60);
     const seconds = total % 60;
-    const pad = (value: number) => String(value).padStart(2, "0");
-    return hours > 0
-        ? `${hours}:${pad(minutes)}:${pad(seconds)}`
-        : `${minutes}:${pad(seconds)}`;
+    return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`;
+}
+
+function pad(value: number): string {
+    return String(value).padStart(2, "0");
 }
 
 function OccurrenceChip({ occurrence }: { occurrence: OccurrenceView }) {
@@ -574,6 +595,7 @@ function CalendarSources({
     const [name, setName] = useState("");
     const [url, setUrl] = useState("");
     const [busy, setBusy] = useState<string | null>(null);
+    const canSync = isTauriRuntime();
 
     async function add() {
         onError(null);
@@ -648,7 +670,12 @@ function CalendarSources({
                 <YStack gap="$2">
                     <XStack gap="$2" flexWrap="wrap" items="flex-end">
                         <Field label="Name">
-                            <Input value={name} onChangeText={setName} placeholder="Work" width={160} />
+                            <Input
+                                value={name}
+                                onChangeText={setName}
+                                placeholder="Work"
+                                width={160}
+                            />
                         </Field>
                         <Field label="iCalendar URL (secret address)">
                             <Input
@@ -661,8 +688,8 @@ function CalendarSources({
                     </XStack>
                     <Paragraph fontSize={12} color="#8b949e">
                         The URL is stored encrypted — the server never sees it. Anyone holding it
-                        can read the calendar, so treat it like a password. Feeds are pulled by the
-                        desktop and mobile apps; a browser cannot fetch them.
+                        can read the calendar, so treat it like a password. Feed refresh runs in the
+                        desktop app.
                     </Paragraph>
                     <XStack gap="$2">
                         <Button
@@ -680,6 +707,11 @@ function CalendarSources({
 
             {sources.length === 0 && !adding && (
                 <Paragraph color="#8b949e">No calendars connected</Paragraph>
+            )}
+            {sources.length > 0 && !canSync && (
+                <Paragraph fontSize={12} color="#8b949e">
+                    Open the desktop app to refresh calendar feeds.
+                </Paragraph>
             )}
 
             {sources.map((source) => (
@@ -700,7 +732,7 @@ function CalendarSources({
                         <Button
                             size="$2"
                             icon={busy === source.id ? <Spinner /> : <RefreshCw size={14} />}
-                            disabled={busy === source.id}
+                            disabled={!canSync || busy === source.id}
                             onPress={() => void sync(source.id)}
                         >
                             Sync
@@ -782,7 +814,11 @@ function SeriesList({
                             </XStack>
                         </YStack>
                         <XStack gap="$2">
-                            <Button size="$2" icon={<Pencil size={14} />} onPress={() => onEdit(item)}>
+                            <Button
+                                size="$2"
+                                icon={<Pencil size={14} />}
+                                onPress={() => onEdit(item)}
+                            >
                                 Edit
                             </Button>
                             <Button
@@ -827,6 +863,11 @@ function ScheduleComposer({
     // The series id is preserved across an edit so overrides and logged time
     // keep pointing at the same series; only the object carrying it changes.
     const [seriesId, setSeriesId] = useState<string | null>(null);
+    const original = useRef<ScheduleItem | null>(null);
+    const [spanChanged, setSpanChanged] = useState(false);
+    const [recurrenceChanged, setRecurrenceChanged] = useState(false);
+    const [allDayDays, setAllDayDays] = useState("1");
+    const [zone, setZone] = useState(observerZone);
 
     // Load an existing block into the form, once per block.
     //
@@ -850,6 +891,14 @@ function ScheduleComposer({
             return;
         }
         setSeriesId(parsed.id);
+        original.current = parsed;
+        setSpanChanged(false);
+        setRecurrenceChanged(false);
+        setZone(
+            parsed.span.kind === "timed" && parsed.span.start.kind === "zoned"
+                ? parsed.span.start.at.zone
+                : observerZone(),
+        );
         setTitle(parsed.title);
         setAlarm(parsed.alarm != null);
         setAlarmLead(String(parsed.alarm?.minutes_before ?? 0));
@@ -858,12 +907,14 @@ function ScheduleComposer({
         if (parsed.span.kind === "all_day") {
             setAllDay(true);
             setDate(parsed.span.start);
+            setAllDayDays(String(parsed.span.days));
         } else {
             setAllDay(false);
             setFloating(parsed.span.start.kind === "floating");
-            const local = parsed.span.start.kind === "floating"
-                ? parsed.span.start.at
-                : parsed.span.start.at.local;
+            const local =
+                parsed.span.start.kind === "floating"
+                    ? parsed.span.start.at
+                    : parsed.span.start.at.local;
             setDate(local.slice(0, 10));
             setTime(local.slice(11, 16));
             setDuration(String(parsed.span.duration));
@@ -883,32 +934,50 @@ function ScheduleComposer({
             onError("Pick at least one weekday");
             return;
         }
+        if (allDay && (!/^\d+$/.test(allDayDays) || Number(allDayDays) < 1)) {
+            onError("All-day duration must be at least one whole day");
+            return;
+        }
 
         setBusy(true);
         try {
             const item: ScheduleItem = {
                 id: seriesId ?? crypto.randomUUID(),
                 title: title.trim() || "Untitled",
-                span: allDay
-                    ? { kind: "all_day", start: date, days: 1 }
-                    : {
-                          kind: "timed",
-                          start: floating
-                              ? { kind: "floating", at: `${date}T${time}:00` }
-                              : {
-                                    kind: "zoned",
-                                    at: { local: `${date}T${time}:00`, zone: observerZone() },
-                                },
-                          duration: snapMinutes(minutes),
-                      },
-                recurrence: buildRecurrence(repeat, days, date),
-                reference: null,
+                span:
+                    original.current && !spanChanged
+                        ? original.current.span
+                        : allDay
+                          ? { kind: "all_day", start: date, days: Number(allDayDays) }
+                          : {
+                                kind: "timed",
+                                start: floating
+                                    ? { kind: "floating", at: `${date}T${time}:00` }
+                                    : {
+                                          kind: "zoned",
+                                          at: { local: `${date}T${time}:00`, zone },
+                                      },
+                                duration: snapMinutes(minutes),
+                            },
+                recurrence:
+                    original.current && !recurrenceChanged
+                        ? original.current.recurrence
+                        : buildRecurrence(repeat, days, date),
+                reference: original.current?.reference ?? null,
                 alarm: alarm
                     ? { minutes_before: Math.max(0, Number.parseInt(alarmLead, 10) || 0) }
                     : null,
             };
             const backend = await clipperBackend();
             if (editing) {
+                const current = (await backend.getState()).schedule_items.find(
+                    (entry) => entry.id === editing.id,
+                );
+                if (!current || current.definition_json !== editing.definition_json) {
+                    throw new Error(
+                        "This block changed on another device. Cancel and reopen it before saving.",
+                    );
+                }
                 await backend.updateScheduleItem(editing.id, item);
             } else {
                 await backend.createScheduleItem(item);
@@ -925,6 +994,11 @@ function ScheduleComposer({
     function reset() {
         setTitle("");
         setSeriesId(null);
+        original.current = null;
+        setSpanChanged(false);
+        setRecurrenceChanged(false);
+        setZone(observerZone());
+        setAllDayDays("1");
         setOpen(false);
         onDone();
     }
@@ -952,22 +1026,51 @@ function ScheduleComposer({
                     />
                 </Field>
                 <Field label="Date">
-                    <Input value={date} onChangeText={setDate} width={150} />
+                    <Input
+                        value={date}
+                        onChangeText={(value) => {
+                            setDate(value);
+                            setSpanChanged(true);
+                        }}
+                        width={150}
+                    />
                 </Field>
                 {!allDay && (
                     <>
                         <Field label="Start">
-                            <Input value={time} onChangeText={setTime} width={100} />
+                            <Input
+                                value={time}
+                                onChangeText={(value) => {
+                                    setTime(value);
+                                    setSpanChanged(true);
+                                }}
+                                width={100}
+                            />
                         </Field>
                         <Field label={`Minutes (snaps to ${SLOT_MINUTES})`}>
                             <Input
                                 value={duration}
-                                onChangeText={setDuration}
+                                onChangeText={(value) => {
+                                    setDuration(value);
+                                    setSpanChanged(true);
+                                }}
                                 width={110}
                                 keyboardType="numeric"
                             />
                         </Field>
                     </>
+                )}
+                {allDay && (
+                    <Field label="Days">
+                        <Input
+                            value={allDayDays}
+                            onChangeText={(value) => {
+                                setAllDayDays(value);
+                                setSpanChanged(true);
+                            }}
+                            width={100}
+                        />
+                    </Field>
                 )}
             </XStack>
 
@@ -986,17 +1089,29 @@ function ScheduleComposer({
             </XStack>
             {alarm && (
                 <Paragraph fontSize={12} color="#8b949e">
-                    Alarms ring on Android only, where an exact alarm can survive a reboot and
-                    sound through Do Not Disturb. Other devices show the block without ringing.
+                    Alarms ring on Android only, where an exact alarm can survive a reboot and sound
+                    through Do Not Disturb. Other devices show the block without ringing.
                 </Paragraph>
             )}
 
             <XStack gap="$2" flexWrap="wrap">
-                <Toggle on={allDay} onPress={() => setAllDay(!allDay)}>
+                <Toggle
+                    on={allDay}
+                    onPress={() => {
+                        setAllDay(!allDay);
+                        setSpanChanged(true);
+                    }}
+                >
                     All day
                 </Toggle>
                 {!allDay && (
-                    <Toggle on={floating} onPress={() => setFloating(!floating)}>
+                    <Toggle
+                        on={floating}
+                        onPress={() => {
+                            setFloating(!floating);
+                            setSpanChanged(true);
+                        }}
+                    >
                         Floating time
                     </Toggle>
                 )}
@@ -1004,7 +1119,18 @@ function ScheduleComposer({
             {floating && !allDay && (
                 <Paragraph fontSize={12} color="#8b949e">
                     A floating block keeps its wall-clock time when you travel — 07:00 stays 07:00.
-                    A zoned one stays pinned to {observerZone()}.
+                    A zoned one stays pinned to {zone}.
+                </Paragraph>
+            )}
+            {!floating && !allDay && (
+                <Paragraph fontSize={12} color="#8b949e">
+                    Times use {zone}.
+                </Paragraph>
+            )}
+            {editing && !recurrenceChanged && (
+                <Paragraph fontSize={12} color="#8b949e">
+                    Saved recurrence: {editing.recurrence}. Kept unless you change repeat settings
+                    below.
                 </Paragraph>
             )}
 
@@ -1014,7 +1140,10 @@ function ScheduleComposer({
                         <Toggle
                             key={choice}
                             on={repeat === choice}
-                            onPress={() => setRepeat(choice)}
+                            onPress={() => {
+                                setRepeat(choice);
+                                setRecurrenceChanged(true);
+                            }}
                         >
                             {repeatLabel(choice)}
                         </Toggle>
@@ -1028,13 +1157,14 @@ function ScheduleComposer({
                         <Toggle
                             key={day}
                             on={days.includes(day)}
-                            onPress={() =>
+                            onPress={() => {
+                                setRecurrenceChanged(true);
                                 setDays(
                                     days.includes(day)
                                         ? days.filter((existing) => existing !== day)
                                         : [...days, day],
-                                )
-                            }
+                                );
+                            }}
                         >
                             {WEEKDAY_LABELS[day]}
                         </Toggle>
@@ -1076,12 +1206,13 @@ function Toggle({
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
+    const id = useId();
     return (
         <YStack gap="$1">
-            <Label fontSize={12} color="#8b949e">
+            <Label htmlFor={id} fontSize={12} color="#8b949e">
                 {label}
             </Label>
-            {children}
+            {isValidElement<{ id?: string }>(children) ? cloneElement(children, { id }) : children}
         </YStack>
     );
 }
@@ -1101,8 +1232,8 @@ function parseDefinition(json: string): ScheduleItem | null {
 /// Map a stored recurrence back onto the form's coarser choices.
 ///
 /// The form offers a handful of common cadences while the record can express
-/// more, so anything outside them opens as "once" and the owner is told rather
-/// than silently downgraded on save.
+/// more. The original recurrence is retained until repeat settings are changed;
+/// the composer also shows its full stored summary.
 function repeatChoiceOf(recurrence: Recurrence): RepeatChoice {
     if (recurrence.kind !== "every" || recurrence.interval !== 1) return "once";
     switch (recurrence.frequency.unit) {
@@ -1219,19 +1350,6 @@ function addDays(date: Date, days: number): Date {
     const copy = new Date(date);
     copy.setDate(copy.getDate() + days);
     return copy;
-}
-
-/// Whether a span touches a day column. Takes anything with a start and end, so
-/// planned occurrences and logged time share one rule.
-function overlapsDay(span: { start: string; end: string }, day: Date): boolean {
-    const dayStart = startOfDay(day).getTime();
-    const dayEnd = dayStart + DAY_MINUTES * 60000;
-    const start = new Date(span.start).getTime();
-    // A running timer has no end yet; treat it as running up to now.
-    const end = span.end ? new Date(span.end).getTime() : Date.now();
-    // Half-open on both sides, so a block ending exactly at midnight belongs to
-    // the day it started in and not to the next one.
-    return start < dayEnd && end > dayStart;
 }
 
 function clockRange(occurrence: OccurrenceView): string {
