@@ -1,11 +1,17 @@
 # Signed Object Envelopes
 
-Encrypted clipboard, file, and schedule objects use envelope version 2. An
+Encrypted clipboard, file, and schedule objects use envelope version 1. An
 object has a stable id and an append-only chain of immutable revisions. The
-wire types are `ObjectEnvelopeBodyV2`, `ObjectEnvelopePayloadV2`, and
-`ObjectEnvelopeV2` in `crates/api-types`; cryptographic construction lives in
+wire types are `ObjectEnvelopeBody`, `ObjectEnvelopePayload`, and
+`ObjectEnvelope` in `crates/api-types`; cryptographic construction lives in
 `crates/core/src/crypto.rs`; the client creates and verifies envelopes; the
 server validates placement and stores the chain.
+
+Version 1 is the initial supported format, including revision chains. Unsupported
+versions are rejected. Abandoned development formats are not supported; existing
+QA objects from those formats must be regenerated. Future incompatible format
+changes must increment the version. Object revision numbers are independent of
+this format version.
 
 ## Keys and primitives
 
@@ -18,7 +24,7 @@ server validates placement and stores the chain.
 
 The server never learns the OPAQUE export key or `K`.
 
-## Version 2 body and chain
+## Version 1 body and chain
 
 In serialization order, each signed body contains:
 
@@ -26,7 +32,7 @@ In serialization order, each signed body contains:
 body = (
   object_id,
   object_type,
-  envelope_version = 2,
+  envelope_version = 1,
   revision,                    // 1, 2, 3, ...
   parent_hash,                 // None at 1; H(Canon(parent body)) afterward
   source_device_id,
@@ -58,7 +64,7 @@ The AAD projection binds ciphertext to the full revision identity:
 
 ```text
 A_meta = Canon((
-  "clipper:object-meta-aad:v2",
+  "clipper:object-meta-aad:v1",
   object_id, object_type, envelope_version,
   revision, parent_hash,
   source_device_id, created_at, operation,
@@ -103,7 +109,7 @@ For a listed or fetched live head, the client checks that the clear response and
 signed body agree on id, kind, revision, source device, timestamp, metadata, and
 payload descriptors. It verifies the signature when the source device public
 key is still available, checks downloaded payload hashes, and then decrypts
-with the version 2 AAD.
+with the version 1 AAD.
 
 The client persists the newest accepted revision body hash as a local anchor.
 It rejects a served revision below that anchor, rejects a different body at the
