@@ -196,9 +196,12 @@ pub async fn init_object(
                 .map(|expires| expires.to_rfc3339())
         }
         // Collab objects are created via `POST /api/collab-docs`, never this
-        // encrypted-object init path (they carry no signed envelope), so this
+        // encrypted-object init path (they carry no signed envelope), so that
         // arm is unreachable in practice; like files they would have no TTL.
-        ObjectKind::File | ObjectKind::Collab => None,
+        //
+        // Schedule objects never expire. A plan for next year is not stale data,
+        // and an actual is a permanent record of time spent.
+        ObjectKind::File | ObjectKind::Collab | ObjectKind::Schedule => None,
     };
     // Response data derived from the request, computed before the request is
     // moved into the transaction closure.
@@ -1435,15 +1438,23 @@ pub async fn delete_object(
         ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
-    if kind != ObjectKind::File {
+    // Which kinds this route may delete. Clipboard is excluded because it
+    // expires passively on a TTL and never emits a `deleted` event; collab is
+    // excluded because it is deleted through its own route, which has a
+    // plaintext row and a Y-sync session to tear down as well.
+    let deletable = match kind {
+        ObjectKind::File | ObjectKind::Schedule => true,
+        ObjectKind::Clipboard | ObjectKind::Collab => false,
+    };
+    if !deletable {
         debug!(
             object_id = %object_uuid,
             kind = kind.as_ref(),
-            "Rejected delete_object for non-file object",
+            "Rejected delete_object for a kind this route cannot delete",
         );
         return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectDeleteUnsupported,
-            "Only file objects can be deleted",
+            "Only file and schedule objects can be deleted",
         ));
     }
 
@@ -1536,7 +1547,7 @@ pub async fn delete_object(
         seq: Set(state.next_event_seq()),
         user_id: Set(auth.user_id),
         event_type: Set(ObjectEventType::Deleted.to_string()),
-        object_kind: Set("file".into()),
+        object_kind: Set(kind.to_string()),
         object_id: Set(object_uuid),
         created_at: Set(now.clone()),
     };
