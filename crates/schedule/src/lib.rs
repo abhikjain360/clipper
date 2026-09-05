@@ -14,6 +14,7 @@
 //! Occurrences are computed, never stored, and always within a caller-supplied
 //! window (D4).
 
+pub mod alarm;
 pub mod engine;
 pub mod ingest;
 pub mod item;
@@ -21,6 +22,7 @@ pub mod recurrence;
 pub mod summary;
 pub mod time;
 
+pub use alarm::{AlarmPolicy, PlannedAlarm, plan_alarms};
 pub use engine::{EngineError, Expansion, RecurrenceEngine, RruleEngine, Window};
 #[cfg(not(target_family = "wasm"))]
 pub use ingest::parse_ics;

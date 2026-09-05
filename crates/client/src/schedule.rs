@@ -179,6 +179,7 @@ pub fn ingested_as_series(event: &clipper_schedule::IngestedEvent) -> ScheduleIt
         span: event.span.clone(),
         recurrence: event.recurrence.clone(),
         reference: None,
+        alarm: None,
     }
 }
 
@@ -252,6 +253,7 @@ mod tests {
             },
             recurrence: Recurrence::Every(Cadence::each(Frequency::Daily)),
             reference: None,
+            alarm: None,
         }
     }
 
