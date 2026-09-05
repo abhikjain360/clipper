@@ -3,6 +3,7 @@
 Review of PR #1 (`schedule-module`), September 2026. Read this first for the
 current state; `schedule-plan.md` preserves the longer product discussion and
 implementation history. Owner QA comes before the code walkthrough and merge.
+Updated after the follow-up review and native SQLite cutover through `2db2b4b`.
 
 ## Assessment
 
@@ -22,6 +23,13 @@ design, even though individual crates and existing tests passed. D6 deserves its
 own careful reading within this PR: it affects files and sync as well as schedule.
 The broad kind registry refactor can remain deferred; more abstraction would not
 have prevented these bugs.
+
+The follow-up review also replaced native JSON object files with SQLite, keeping
+durable revision anchors separate from disposable cached content. This addresses
+the accumulating deleted-marker files and their startup read cost, and makes
+record/payload writes transactional. It is a substantial client-storage change
+alongside D6, so native restart, resync and deletion need another QA pass on the
+new build. See [local-store-plan.md](local-store-plan.md) for the design and limits.
 
 This is a useful first scheduler, not the entire original calendar/alarm wish
 list. In particular, richer recurrence exists in the domain and feed parser than
@@ -69,8 +77,28 @@ not become a surprise during QA.
   web check. Mobile checks now generate their ignored bridge inputs from a host
   Rust library, so they work on a fresh checkout without an Android SDK. Updated
   the envelope and security documentation to match the code.
+- Follow-up recurrence fixes display unsupported cadences as Custom, make
+  clicking the selected cadence a no-op, and preserve recurrence end conditions
+  and week start when changing repeat settings. The interval is preserved when
+  the recurrence unit stays the same. Raw rules now reject control characters
+  that could inject another calendar property.
+- Follow-up native storage fixes preserve anchors when cached content cannot be
+  read, and move objects, payloads and anchors into SQLite. Deleted objects leave
+  an anchor row rather than a marker file; hydration skips departed objects,
+  reconciliation uses indexed queries, and deleting cached objects also reclaims
+  their payloads. Anchors are retained indefinitely. The browser keeps its
+  bounded localStorage backend and best-effort history checks.
 
 ## Validation
+
+The broad build and UI results below describe the earlier review build, before
+the follow-up recurrence and SQLite changes. They are useful baseline evidence,
+not a claim that the current branch received the same end-to-end QA again.
+The follow-up commits report recurrence regression tests and a browser check of
+editing a fortnightly series, native storage regression coverage, a passing live
+server integration test, and SQLite cross-compilation for Android. This document
+update checked the changes and recorded evidence; it did not independently rerun
+those tests. Rebuild native clients before testing the SQLite cutover.
 
 The live regression starts its own server, temporary database and three device
 caches. It exercises OPAQUE register/login, floating times in Berlin and Tokyo,
@@ -111,6 +139,8 @@ delivery before the first unlock at 23:49:33 CEST on September 8. The native rin
 screen appeared and MediaPlayer was actively looping the bundled APK sound on
 the alarm audio stream. This verifies the playback path; it is not a physical
 device loudness or overnight reliability test.
+That alarm fired more than four minutes after the boot receiver ran; this did
+not test the immediate post-boot foreground-service restriction described below.
 
 The Tauri bundle starts, but logged-in native Tauri UI flows were not exercised:
 the computer-use harness lacked macOS screen/control permissions. The emulator
@@ -123,16 +153,26 @@ resume and revoked-token rejection are covered by the live regression.
 1. Open the Schedule tab. Create a floating morning routine, a zoned meeting, and
    a three-day all-day block. Move between weeks; check titles, times and overlap.
    Rename each, then explicitly change time or recurrence and verify the result.
+   For an existing custom/finite series, check that Custom is shown when needed,
+   clicking the selected cadence changes nothing, and editing weekdays retains
+   the end condition and the interval when the recurrence unit is unchanged.
 2. Start a timer from a block, stop it, then start untracked time. Check the
    actual-time lane. Reload and verify stopped/running state is retained.
 3. Open a second client with the same account. Check create/edit/delete live
    propagation. Open an edit on both clients; save one, then try saving the other.
+   On rebuilt native clients, restart and verify schedule and clipboard content
+   returns, deleted objects stay deleted, and file downloads still work. The
+   SQLite cutover discards the old object/payload cache and refetches content;
+   allow the first sync to finish before judging missing data.
 4. In the desktop app, add a disposable ICS URL and sync it. Check recurrence
    exceptions, an upstream edit and removal. The browser renders synced events;
    refreshing the external feed is a native operation.
 5. Sign in on Android, grant notification/exact-alarm/full-screen access, and create an
    alarm-enabled block from desktop/web a few minutes ahead. Verify mirror count,
    ringing, label and dismiss. Repeat after backgrounding and rebooting.
+   Separately test an alarm due immediately after reboot, before first unlock,
+   and one shortly after unlock. A later post-reboot success does not cover the
+   known foreground-service attribution issue; capture logs for a missed alarm.
 6. Before relying on this as the morning alarm, repeat overnight on the POCO with
    HyperOS settings configured. Keep abnormalarm available during this acceptance.
 
@@ -146,14 +186,35 @@ resume and revoked-token rejection are covered by the live regression.
 - Android receives a seven-day plan. An app that never refreshes eventually runs
   out of planned alarms. Emulator checks do not establish POCO/HyperOS overnight
   reliability or behavior across every Android version and permission state.
+- The Android post-boot ringing failure remains unresolved. A media-playback
+  foreground service can be refused when Android attributes its start to
+  `BOOT_COMPLETED`, including a reported exact-alarm delivery during that
+  temporary attribution window. There is no reliable recovery in the current
+  ring path. The window is not a universal 45-second rule, and the behavior for
+  `LOCKED_BOOT_COMPLETED` still needs testing. See
+  [rn-alarm-absorption.md](rn-alarm-absorption.md). Treat this as an open alarm
+  reliability finding before relying on the app for wake-up alarms.
 - Revision anchors protect a device's accepted history. Fresh installs cannot
   detect a server presenting an older valid history, and skipping multiple
   revisions does not verify every intermediate parent. Remote deletion events
   do not supply a signed tombstone body. See `object-envelopes.md` for the precise
   guarantees; this is not a server-transparency protocol.
+- Native anchors now survive cache eviction in their own SQLite table, but
+  deleting or recreating the database loses them. The development cutover does
+  not migrate old anchors, and schema-version changes currently recreate the
+  database. The browser offers no durable accepted-history guarantee: eviction
+  can lose anchors, and a hostile web origin can replace the checking code.
+  Retained browser checks still help when an honest web client uses a separately
+  operated API.
 - Whole-feed ingest and retained history still need a storage/retention policy.
   The browser's localStorage quota is small. Feed and record bounds avoid
   unbounded single responses; they do not solve lifetime accumulation.
+  SQLite removes the deleted-file scan cost, but native anchor rows still grow
+  with accepted object history. Hydration still loads all held objects; bounded
+  display queries and anchor-size measurements remain follow-ups.
+- The shared TypeScript recurrence union still omits Rust's Raw variant.
+  Aligning that contract remains a follow-up; the composer safeguards do not
+  resolve the type mismatch.
 - Recurrence expansion has a 65,535 generated-history ceiling and a 10,000
   in-window ceiling. This accommodates decades of daily recurrence while
   rejecting very dense old rules. The upstream `rrule` library also bounds empty
