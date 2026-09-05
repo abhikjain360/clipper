@@ -8,9 +8,14 @@ use std::{
 
 pub use clipper_app_types::{
     AppState, AuthenticatedSession, ClipboardPayload, CollabItem, ConnectionStatus,
-    DecryptedClipboardItem, DecryptedFileItem, DeviceInfo, SavedProfile,
+    DecryptedClipboardItem, DecryptedFileItem, DeviceInfo, OccurrenceView, SavedProfile,
+    ScheduleItemView,
 };
 use clipper_core::{crypto, models::*};
+pub use clipper_schedule::{
+    Expansion, OccurrenceOverride, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleSpan,
+    Window,
+};
 use futures_util::{StreamExt, stream};
 use tokio::sync::{RwLock, watch};
 use tracing::{debug, info, warn};
@@ -23,12 +28,20 @@ use crate::{
         encrypt_clipboard_payload, encrypt_file_blob_bytes, encrypt_file_meta_bytes,
     },
     local_store::{
-        DeviceSigningIdentity, EncryptedClipboardObject, EncryptedObject, LocalStore,
-        LocalVisibleState,
+        DeviceSigningIdentity, EncryptedInlineObject, EncryptedObject, LocalStore,
+        LocalVisibleState, StoredObjectIdentity,
+    },
+    schedule::{
+        ScheduleRecord, decrypt_schedule_meta, decrypt_schedule_payload, encrypt_schedule_meta,
+        encrypt_schedule_payload, occurrence_view, zone_or_utc,
     },
 };
 
 const INLINE_OBJECT_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
+/// Ceiling on a schedule payload's ciphertext. A series definition is a few
+/// hundred bytes; this leaves room for a long title and a heavily overridden
+/// series while still refusing a hostile server's unbounded download.
+const MAX_SCHEDULE_PAYLOAD_CIPHERTEXT_BYTES: i64 = 256 * 1024;
 const RECENT_CLIPBOARD_LIMIT: usize = 100;
 /// MIME type used for plain-text clipboard entries.
 pub const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
@@ -57,7 +70,7 @@ const WS_TICKET_PROTOCOL: &str = "clipper-ticket";
 struct DecryptedClipboardObject {
     item: DecryptedClipboardItem,
     payload: Vec<u8>,
-    encrypted: EncryptedClipboardObject,
+    encrypted: EncryptedInlineObject,
 }
 
 /// The sync engine that owns all client state.
@@ -1084,6 +1097,309 @@ impl SyncEngine {
         Ok(())
     }
 
+    // ── Schedule ──
+
+    /// Create a schedule series.
+    pub async fn create_schedule_item(&self, item: ScheduleItem) -> Result<String, ClientError> {
+        self.create_schedule_record(ScheduleRecord::Item(Box::new(item)))
+            .await
+    }
+
+    /// Seal a schedule record into an object and publish it.
+    ///
+    /// Mirrors the clipboard path: a small encrypted meta plus one inline
+    /// payload, so `object_init` completes the object without a second
+    /// round-trip. The meta says only which kind of record this is; the record
+    /// itself is in the payload.
+    pub async fn create_schedule_record(
+        &self,
+        record: ScheduleRecord,
+    ) -> Result<String, ClientError> {
+        let encryption_key = self.current_encryption_key().await?;
+        let (device_id, device_id_typed, signing_key) =
+            self.current_device_signing_context().await?;
+
+        let object_uuid = uuid::Uuid::now_v7();
+        let payload_uuid = uuid::Uuid::now_v7();
+        let object_id = object_uuid.to_string();
+        let payload_id = payload_uuid.to_string();
+        let object_id_typed: ObjectId = object_uuid.into();
+        let payload_id_typed: ObjectPayloadId = payload_uuid.into();
+        let created_at = chrono::Utc::now().to_rfc3339();
+
+        let aad_body = create_object_envelope_body_for_aad(
+            object_id_typed,
+            ObjectKind::Schedule,
+            device_id_typed,
+            created_at.clone(),
+            vec![payload_id_typed],
+        );
+        let meta = record.meta();
+        let (meta_nonce, meta_ciphertext) =
+            encrypt_schedule_meta(&meta, &encryption_key, &aad_body)?;
+        let (payload_nonce, encrypted_payload) =
+            encrypt_schedule_payload(&record, &encryption_key, &aad_body, payload_id_typed)?;
+
+        let payload_hash = crypto::sha256(&encrypted_payload).to_vec();
+        let payload_size = encrypted_payload.len() as i64;
+        let envelope_body = create_object_envelope_body(
+            object_id_typed,
+            ObjectKind::Schedule,
+            device_id_typed,
+            created_at.clone(),
+            meta_nonce.clone(),
+            crypto::sha256(&meta_ciphertext).to_vec(),
+            vec![ObjectEnvelopePayloadV1 {
+                id: payload_id_typed,
+                nonce: payload_nonce.clone(),
+                ciphertext_size: payload_size,
+                sha256_ciphertext: payload_hash.clone(),
+            }],
+        );
+        let init_req = ObjectInitRequest {
+            id: object_id_typed,
+            kind: ObjectKind::Schedule,
+            meta_nonce,
+            meta_ciphertext,
+            payloads: vec![ObjectPayloadInit {
+                id: payload_id_typed,
+                nonce: payload_nonce,
+                ciphertext_size: payload_size,
+                sha256_ciphertext: payload_hash.clone(),
+                inline_ciphertext: inline_ciphertext(&encrypted_payload),
+            }],
+            envelope: ObjectEnvelopeV1 {
+                signature: crypto::sign_object_envelope_body(&signing_key, &envelope_body)?,
+                body: envelope_body,
+            },
+        };
+        let encrypted = EncryptedInlineObject {
+            object: encrypted_object_from_init(&init_req),
+            payload_ciphertext: encrypted_payload.clone(),
+        };
+
+        let created_seq = self
+            .submit_single_payload_object(
+                &object_id,
+                &payload_id,
+                &init_req,
+                encrypted_payload,
+                payload_size,
+                payload_hash,
+            )
+            .await?;
+
+        let visible = self
+            .local_store
+            .persist_local_schedule_present_encrypted(
+                StoredObjectIdentity {
+                    object_id: &object_id,
+                    created_at: &created_at,
+                    source_device_id: &device_id,
+                },
+                record,
+                &encrypted,
+                created_seq,
+                created_seq,
+                RECENT_CLIPBOARD_LIMIT,
+            )
+            .await?;
+        self.publish_visible_state(visible).await;
+        info!(object_id = %object_id, "Schedule record created");
+        Ok(object_id)
+    }
+
+    /// Delete a schedule object.
+    ///
+    /// Until the revision layer lands (D6), editing a series is a create
+    /// followed by one of these.
+    pub async fn delete_schedule_object(&self, object_id: &str) -> Result<(), ClientError> {
+        let delete_resp = self.api.delete_object(object_id).await?;
+        let visible = self
+            .local_store
+            .apply_local_delete(
+                ObjectKind::Schedule,
+                object_id,
+                delete_resp.deleted_seq,
+                RECENT_CLIPBOARD_LIMIT,
+            )
+            .await?;
+        self.publish_visible_state(visible).await;
+        info!(object_id = %object_id, "Schedule record deleted");
+        Ok(())
+    }
+
+    /// Expand every cached series across `[from, to)` and return the
+    /// occurrences that land in it.
+    ///
+    /// Occurrences are computed here rather than stored (D7), and the window is
+    /// the caller's choice rather than a fixed horizon (D4) — a grid asks for a
+    /// week, an alarm scheduler asks for the next day.
+    pub async fn expand_schedule(
+        &self,
+        from: &str,
+        to: &str,
+        observer_zone: &str,
+    ) -> Result<Vec<OccurrenceView>, ClientError> {
+        let from = parse_instant(from, "expansion window start")?;
+        let to = parse_instant(to, "expansion window end")?;
+        let window = Window::new(from, to)
+            .map_err(|error| ClientError::InvalidArgument(error.to_string()))?;
+        let expansion = Expansion {
+            window,
+            observer: zone_or_utc(observer_zone),
+        };
+
+        let records = self.local_store.schedule_records().await;
+        let overrides: Vec<OccurrenceOverride> = records
+            .iter()
+            .filter_map(|record| match record {
+                ScheduleRecord::Override(entry) => Some((**entry).clone()),
+                ScheduleRecord::Item(_) | ScheduleRecord::Actual(_) => None,
+            })
+            .collect();
+
+        let engine = RruleEngine::new();
+        let mut out = Vec::new();
+        for record in &records {
+            let Some(item) = record.as_item() else {
+                continue;
+            };
+            let all_day = matches!(item.span, ScheduleSpan::AllDay { .. });
+            match engine.occurrences(item, &overrides, &expansion) {
+                Ok(occurrences) => out.extend(
+                    occurrences
+                        .iter()
+                        .map(|occurrence| occurrence_view(occurrence, &item.title, all_day)),
+                ),
+                // One malformed series must not blank the whole calendar.
+                Err(error) => {
+                    warn!(item = %item.id, "Failed to expand schedule series: {}", error)
+                }
+            }
+        }
+        out.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| a.title.cmp(&b.title)));
+        Ok(out)
+    }
+
+    /// Reconcile every schedule object from the encrypted-object listing.
+    async fn snapshot_schedule(
+        self: &Arc<Self>,
+        generation: u64,
+        stream_start_seq: i64,
+    ) -> Result<(), ClientError> {
+        let api = &self.api;
+        let encryption_key = self.current_encryption_key().await?;
+        let mut after = None;
+        loop {
+            let page = api
+                .list_objects(
+                    Some(ObjectKind::Schedule),
+                    Some(100),
+                    Some(stream_start_seq),
+                    after,
+                )
+                .await?;
+            for item in page.items {
+                match self
+                    .decrypt_schedule_object_item(api, &item, &encryption_key)
+                    .await
+                {
+                    Ok((record, encrypted)) => {
+                        if let Some(visible) = self
+                            .local_store
+                            .persist_snapshot_schedule_present_encrypted(
+                                StoredObjectIdentity {
+                                    object_id: &item.id.to_string(),
+                                    created_at: &item.created_at,
+                                    source_device_id: &item.source_device_id.to_string(),
+                                },
+                                record,
+                                &encrypted,
+                                item.created_seq,
+                                generation,
+                                RECENT_CLIPBOARD_LIMIT,
+                            )
+                            .await?
+                        {
+                            self.publish_visible_state(visible).await;
+                        }
+                    }
+                    Err(error) => {
+                        warn!(id = %item.id, "Failed to decrypt schedule object: {}", error)
+                    }
+                }
+            }
+            match page.next_after {
+                Some(cursor) => after = Some(cursor),
+                None => break,
+            }
+        }
+
+        if let Some(visible) = self
+            .local_store
+            .sweep_kind(
+                ObjectKind::Schedule,
+                generation,
+                stream_start_seq,
+                RECENT_CLIPBOARD_LIMIT,
+            )
+            .await?
+        {
+            self.publish_visible_state(visible).await;
+        }
+        Ok(())
+    }
+
+    async fn decrypt_schedule_object_item(
+        &self,
+        api: &ApiClient,
+        item: &ObjectListItem,
+        encryption_key: &[u8; 32],
+    ) -> Result<(ScheduleRecord, EncryptedInlineObject), ClientError> {
+        verify_object_list_item_envelope(item)?;
+        // The meta is decrypted for its own sake: it authenticates that this
+        // object really is a schedule record of the kind the payload claims.
+        let meta = decrypt_schedule_meta(
+            &item.meta_nonce,
+            &item.meta_ciphertext,
+            encryption_key,
+            &item.envelope.body,
+        )?;
+        let payload = single_payload(item)?;
+        check_payload_ciphertext_size(payload, MAX_SCHEDULE_PAYLOAD_CIPHERTEXT_BYTES)?;
+        let encrypted_payload = api
+            .download_object_payload(
+                &item.id.to_string(),
+                &payload.id.to_string(),
+                payload.ciphertext_size,
+            )
+            .await?;
+        verify_payload_hash(payload, &encrypted_payload)?;
+        let record = decrypt_schedule_payload(
+            &payload.nonce,
+            &encrypted_payload,
+            encryption_key,
+            &item.envelope.body,
+            payload.id,
+        )?;
+        if record.kind() != meta.record {
+            return Err(ClientError::UnexpectedResponse(format!(
+                "schedule object {} has a {} meta but a {} payload",
+                item.id,
+                meta.record,
+                record.kind()
+            )));
+        }
+        Ok((
+            record,
+            EncryptedInlineObject {
+                object: encrypted_object_from_list_item(item),
+                payload_ciphertext: encrypted_payload,
+            },
+        ))
+    }
+
     // ── Collab docs ──
 
     /// Create a collab doc. The server suppresses the originating device's own
@@ -1184,6 +1500,7 @@ impl SyncEngine {
             state.clipboard_items = visible.clipboard_items;
             state.files = visible.files;
             state.collab_docs = visible.collab_docs;
+            state.schedule_items = visible.schedule_items;
         }
         self.bump_version();
     }
@@ -1216,6 +1533,16 @@ impl SyncEngine {
                 .await
             {
                 warn!("Collab doc snapshot failed: {}", error);
+            }
+        });
+
+        let schedule_engine = Arc::clone(self);
+        spawn_background(async move {
+            if let Err(error) = schedule_engine
+                .snapshot_schedule(generation, stream_start_seq)
+                .await
+            {
+                warn!("Schedule snapshot failed: {}", error);
             }
         });
     }
@@ -1562,7 +1889,7 @@ impl SyncEngine {
         let text = clipboard_display_text(&meta.mime_type, &plaintext);
 
         Ok(DecryptedClipboardObject {
-            encrypted: EncryptedClipboardObject {
+            encrypted: EncryptedInlineObject {
                 object: encrypted_object_from_list_item(item),
                 payload_ciphertext: encrypted_payload,
             },
@@ -1719,6 +2046,29 @@ impl SyncEngine {
                     generation,
                 )
                 .await?;
+            }
+            ObjectKind::Schedule => {
+                let (record, encrypted) = self
+                    .decrypt_schedule_object_item(api, &item, &encryption_key)
+                    .await?;
+                if let Some(visible) = self
+                    .local_store
+                    .persist_snapshot_schedule_present_encrypted(
+                        StoredObjectIdentity {
+                            object_id: &object_id_text,
+                            created_at: &item.created_at,
+                            source_device_id: &item.source_device_id.to_string(),
+                        },
+                        record,
+                        &encrypted,
+                        item.created_seq,
+                        generation,
+                        RECENT_CLIPBOARD_LIMIT,
+                    )
+                    .await?
+                {
+                    self.publish_visible_state(visible).await;
+                }
             }
             // Routed to `materialize_collab` above before any network call; an
             // explicit arm keeps the match total without re-handling it.
@@ -2274,11 +2624,24 @@ fn single_payload(item: &ObjectListItem) -> Result<&ObjectPayloadDescriptor, Cli
 fn encrypted_clipboard_from_init(
     init_req: &ObjectInitRequest,
     payload_ciphertext: Vec<u8>,
-) -> EncryptedClipboardObject {
-    EncryptedClipboardObject {
+) -> EncryptedInlineObject {
+    EncryptedInlineObject {
         object: encrypted_object_from_init(init_req),
         payload_ciphertext,
     }
+}
+
+/// Parse an RFC 3339 instant supplied by a UI shell.
+///
+/// Shells pass timestamps as strings across the IPC, wasm and UniFFI
+/// boundaries, so this is where a malformed one is caught and named.
+fn parse_instant(
+    text: &str,
+    what: &'static str,
+) -> Result<chrono::DateTime<chrono::Utc>, ClientError> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .map(|instant| instant.with_timezone(&chrono::Utc))
+        .map_err(|error| ClientError::InvalidArgument(format!("{what}: {error}")))
 }
 
 fn encrypted_object_from_init(init_req: &ObjectInitRequest) -> EncryptedObject {
