@@ -11,7 +11,10 @@
 //! `object_revisions`. Payloads hang off a revision rather than an object,
 //! because two revisions of the same file are two different ciphertexts.
 //!
-//! **This migration destroys every object.** There is no copy step: the
+//! **This migration destroys every encrypted object.** Collab documents
+//! survive — see the note beside their re-insert below.
+//!
+//! For everything else: There is no copy step: the
 //! envelope format changed in the same breath (v1 to v2 — the body gained
 //! `revision` and `parent_hash`, and postcard encodes positionally), so no
 //! existing row can be read back by the new client anyway. Rewriting them was
@@ -113,6 +116,41 @@ impl MigrationTrait for Migration {
                     FOREIGN KEY (source_device_id) REFERENCES devices (id)
                     ON DELETE SET NULL ON UPDATE CASCADE
             )",
+        )
+        .await?;
+
+        // Collab documents are the one kind the envelope break does not touch —
+        // their content is a server-visible Y-doc, not ciphertext — so throwing
+        // them away with everything else would be gratuitous. They keep their
+        // rows and get fresh identity rows here.
+        //
+        // Fresh, because the original object ids only ever existed in the table
+        // just dropped: `collab_docs` never stored one, and the `event_log`
+        // rows that mention them cannot be matched back to a document. Clients
+        // will see new ids, which costs nothing when every client is resyncing
+        // from scratch anyway. `published_seq` is derived from the document's
+        // creation time in the same microsecond space the allocator uses, plus
+        // the rowid so two documents created in the same second cannot collide.
+        db.execute_unprepared(
+            "INSERT INTO objects (
+                id, user_id, kind, created_at, updated_at, expires_at,
+                head_revision, published_seq, deleted_at, collab_doc_id
+            )
+            SELECT
+                lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4'
+                    || substr(lower(hex(randomblob(2))), 2) || '-a'
+                    || substr(lower(hex(randomblob(2))), 2) || '-'
+                    || lower(hex(randomblob(6))),
+                owner_user_id,
+                'collab',
+                created_at,
+                updated_at,
+                NULL,
+                NULL,
+                CAST(strftime('%s', created_at) AS INTEGER) * 1000000 + rowid,
+                NULL,
+                id
+            FROM collab_docs",
         )
         .await?;
 

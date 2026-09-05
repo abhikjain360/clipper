@@ -27,6 +27,15 @@ pub const OBJECT_ENVELOPE_SIGNATURE_BYTES: usize = 64;
 /// computed over — encodes positionally, so v1 bytes cannot be read as v2.
 /// There is deliberately no v1 compatibility path; see `docs/schedule-plan.md`.
 pub const OBJECT_ENVELOPE_VERSION_V2: u64 = 2;
+
+/// The plaintext sealed as the meta of a tombstone revision.
+///
+/// A tombstone has no content — that is what it means — but the meta column is
+/// not nullable and every ciphertext has to be bound to its envelope, so
+/// something must be sealed. It is deliberately the same for every object kind:
+/// nothing reads it, because a tombstoned object is never listed, and a
+/// per-kind version would only be a shape each kind's decoder had to learn.
+pub const TOMBSTONE_META_PLAINTEXT: &[u8] = br#"{"tombstone":true}"#;
 /// Maximum payload entries one object may declare. Clients currently send
 /// exactly one; the cap bounds the batched insert a single init request can
 /// force under the server's write lock.
@@ -330,13 +339,6 @@ pub enum ScheduleRecordKind {
     /// iCalendar source *is* the credential — hence encrypted like everything
     /// else (D4).
     Source,
-    /// The meta of a tombstone revision, which carries no payload.
-    ///
-    /// It exists only because the meta column is not nullable and every
-    /// ciphertext is bound to its envelope; nothing reads it, because a
-    /// tombstoned object is never listed. Naming it beats writing an
-    /// undecodable blob and hoping nobody ever tries.
-    Tombstone,
     /// An event as a provider describes it: the upstream-owned layer of D10,
     /// written only by the sync worker and read-only to the owner.
     Ingested,
