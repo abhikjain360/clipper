@@ -1,11 +1,13 @@
 import { calendarWindow, movePeriod, periodStart, type CalendarView } from "./calendar-view";
 import { EventHover } from "./EventHover";
+import { nextStarts, orderByNextStart } from "./schedule-order";
 import {
     AlarmClock,
     CalendarClock,
     ChevronLeft,
     ChevronRight,
-    Pencil,
+    Check,
+    ChevronDown,
     Play,
     Plus,
     RefreshCw,
@@ -26,6 +28,8 @@ import {
 import {
     Button,
     Card,
+    Dialog,
+    Select,
     H2,
     Input,
     Label,
@@ -254,7 +258,7 @@ export function SchedulePanel({
 
                 <aside className="schedule-sidebar" aria-label="Schedule events">
                     <ScheduleComposer
-                        editing={editing}
+                        editing={null}
                         onDone={() => setEditing(null)}
                         onState={onState}
                         onError={onError}
@@ -269,6 +273,37 @@ export function SchedulePanel({
                     <CalendarSources sources={sources} onState={onState} onError={onError} />
                 </aside>
             </div>
+            <Dialog
+                modal
+                open={editing !== null}
+                onOpenChange={(open) => {
+                    if (!open) setEditing(null);
+                }}
+            >
+                <Dialog.Portal>
+                    <Dialog.Overlay key="overlay" bg="rgba(0,0,0,0.65)" />
+                    <Dialog.Content
+                        key="content"
+                        width="90vw"
+                        maxW={640}
+                        maxH="90vh"
+                        p="$3"
+                        style={{ overflowY: "auto" }}
+                    >
+                        <Dialog.Title fontSize={24}>Edit event</Dialog.Title>
+                        <Dialog.Description>Update this scheduled event.</Dialog.Description>
+                        {editing && (
+                            <ScheduleComposer
+                                key={editing.id}
+                                editing={editing}
+                                onDone={() => setEditing(null)}
+                                onState={onState}
+                                onError={onError}
+                            />
+                        )}
+                    </Dialog.Content>
+                </Dialog.Portal>
+            </Dialog>
         </YStack>
     );
 }
@@ -366,7 +401,17 @@ function WeekGrid({
     );
     const allDay = occurrences.filter((occurrence) => occurrence.all_day);
     const timed = occurrences.filter((occurrence) => !occurrence.all_day);
-    const today = startOfDay(new Date()).getTime();
+    const [currentTime, setClock] = useState(() => new Date());
+    useEffect(() => {
+        const update = () => setClock(new Date());
+        const timer = setInterval(update, 15_000);
+        document.addEventListener("visibilitychange", update);
+        return () => {
+            clearInterval(timer);
+            document.removeEventListener("visibilitychange", update);
+        };
+    }, []);
+    const today = startOfDay(currentTime).getTime();
     const scroller = useRef<TamaguiElement | null>(null);
     // The grid scrolls vertically and the rows above it do not, so on any
     // platform with classic (non-overlay) scrollbars the grid is narrower than
@@ -529,6 +574,20 @@ function WeekGrid({
                                     lanes={lanes}
                                 />
                             ))}
+                            {day.getTime() === today && (
+                                <div
+                                    className="calendar-now"
+                                    aria-label={`Current time ${currentTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}
+                                    style={{
+                                        top:
+                                            ((currentTime.getHours() * 60 +
+                                                currentTime.getMinutes() +
+                                                currentTime.getSeconds() / 60) /
+                                                60) *
+                                            HOUR_HEIGHT,
+                                    }}
+                                />
+                            )}
                             {actuals
                                 .filter((actual) => overlapsDay(actual, day))
                                 .map((actual) => (
@@ -951,6 +1010,66 @@ function SeriesList({
     onError: (error: string | null) => void;
 }) {
     const [deleting, setDeleting] = useState<string | null>(null);
+    const [order, setOrder] = useState("created");
+    const [upcoming, setUpcoming] = useState<OccurrenceView[]>([]);
+    const [sorting, setSorting] = useState(false);
+    const [sortError, setSortError] = useState<string | null>(null);
+    const [now, setNow] = useState(Date.now);
+
+    useEffect(() => {
+        if (order !== "next") return;
+        setNow(Date.now());
+        const timer = setInterval(() => setNow(Date.now()), 30_000);
+        const foreground = () => {
+            if (!document.hidden) setNow(Date.now());
+        };
+        document.addEventListener("visibilitychange", foreground);
+        return () => {
+            clearInterval(timer);
+            document.removeEventListener("visibilitychange", foreground);
+        };
+    }, [order]);
+
+    // Separate from the displayed calendar window: browsing last month must
+    // not change what counts as this series' next occurrence.
+    useEffect(() => {
+        if (order !== "next") return;
+        let cancelled = false;
+        setSorting(true);
+        setSortError(null);
+        void (async () => {
+            try {
+                const from = new Date(now);
+                const to = new Date(now + 366 * 24 * 60 * 60 * 1000);
+                const backend = await clipperBackend();
+                const expanded = await backend.expandSchedule(
+                    from.toISOString(),
+                    to.toISOString(),
+                    observerZone(),
+                );
+                if (!cancelled) setUpcoming(expanded);
+            } catch (error) {
+                if (!cancelled) setSortError(formatBackendError(error));
+            } finally {
+                if (!cancelled) setSorting(false);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [order, items, now]);
+
+    const starts = useMemo(() => {
+        const seriesStarts = nextStarts(upcoming, now);
+        const objectStarts = new Map<string, number>();
+        for (const item of items) {
+            const definition = parseDefinition(item.definition_json);
+            const start = definition ? seriesStarts.get(definition.id) : undefined;
+            if (start !== undefined) objectStarts.set(item.id, start);
+        }
+        return objectStarts;
+    }, [upcoming, now, items]);
+    const ordered = order === "next" && !sortError ? orderByNextStart(items, starts) : items;
 
     async function remove(id: string) {
         setDeleting(id);
@@ -983,16 +1102,79 @@ function SeriesList({
 
     return (
         <YStack gap="$2">
-            {items.map((item) => (
+            <YStack gap="$1">
+                <Label htmlFor="event-order" fontSize={12} color="#8b949e">
+                    Order events by
+                </Label>
+                <Select value={order} onValueChange={setOrder}>
+                    <Select.Trigger
+                        id="event-order"
+                        aria-label="Order events by"
+                        iconAfter={<ChevronDown size={16} />}
+                    >
+                        <Select.Value />
+                    </Select.Trigger>
+                    <Select.Content>
+                        <Select.Viewport>
+                            <Select.Group>
+                                <Select.Label>Order events by</Select.Label>
+                                {(
+                                    [
+                                        ["created", "Newest created"],
+                                        ["next", "Next occurrence"],
+                                    ] as const
+                                ).map(([value, label], index) => (
+                                    <Select.Item key={value} index={index} value={value}>
+                                        <Select.ItemText>{label}</Select.ItemText>
+                                        <Select.ItemIndicator marginLeft="auto">
+                                            <Check size={16} />
+                                        </Select.ItemIndicator>
+                                    </Select.Item>
+                                ))}
+                            </Select.Group>
+                        </Select.Viewport>
+                    </Select.Content>
+                </Select>
+            </YStack>
+            {order === "next" && (
+                <Paragraph fontSize={12} color="#8b949e">
+                    Upcoming starts within the next year. Refreshes every 30 seconds.
+                    {sorting ? " Updating…" : ""}
+                </Paragraph>
+            )}
+            {sortError && (
+                <Paragraph color="#ff7b7b">
+                    Could not order by next occurrence: {sortError}. Showing newest created.
+                </Paragraph>
+            )}
+            {ordered.map((item) => (
                 <Card
                     key={item.id}
+                    className="event-card"
+                    onClick={() => onEdit(item)}
                     bg="#171a1d"
                     p="$3"
                     style={{ borderColor: "#252b31", borderWidth: 1 }}
                 >
                     <XStack items="center" justify="space-between" gap="$3" flexWrap="wrap">
                         <YStack flex={1} minW={200}>
-                            <Text>{item.title || "Untitled"}</Text>
+                            <button
+                                className="event-card-title"
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    onEdit(item);
+                                }}
+                                aria-label={`Edit ${item.title || "Untitled"}`}
+                            >
+                                {item.title || "Untitled"}
+                            </button>
+                            {order === "next" && !sortError && !sorting && (
+                                <Text fontSize={12} color="#a9c8e6">
+                                    {starts.has(item.id)
+                                        ? `Next: ${new Date(starts.get(item.id)!).toLocaleString()}`
+                                        : "No upcoming start found within the next year"}
+                                </Text>
+                            )}
                             <XStack items="center" gap="$2">
                                 <Text fontSize={12} color="#8b949e">
                                     {item.recurrence} · {item.time_summary}
@@ -1003,16 +1185,12 @@ function SeriesList({
                         <XStack gap="$2">
                             <Button
                                 size="$2"
-                                icon={<Pencil size={14} />}
-                                onPress={() => onEdit(item)}
-                            >
-                                Edit
-                            </Button>
-                            <Button
-                                size="$2"
                                 icon={deleting === item.id ? <Spinner /> : <Trash2 size={14} />}
                                 disabled={deleting === item.id}
-                                onPress={() => void remove(item.id)}
+                                onPress={(event) => {
+                                    event.stopPropagation();
+                                    void remove(item.id);
+                                }}
                             >
                                 Delete
                             </Button>
