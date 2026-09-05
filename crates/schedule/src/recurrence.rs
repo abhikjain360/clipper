@@ -55,6 +55,18 @@ impl RawRule {
         if trimmed.is_empty() {
             return Err(RecurrenceError::UnparseableRule("empty rule".into()));
         }
+        // One property, not a document. The probe below parses a whole
+        // `RRuleSet`, so a value carrying its own line break would validate as
+        // the probe's DTSTART plus an extra property — and expansion splices
+        // the stored value verbatim after `RRULE:`, against the *real* DTSTART
+        // and zone. That turns a smuggled `\nEXDATE:` or second `\nRRULE:` into
+        // live content this check never saw. Refuse the whole control range so
+        // a bare CR or a NUL cannot fold lines either.
+        if trimmed.contains(|character: char| character.is_control()) {
+            return Err(RecurrenceError::UnparseableRule(
+                "rule contains a control character".into(),
+            ));
+        }
         let probe = format!("{}\nRRULE:{trimmed}", Self::PROBE_DTSTART);
         rrule::RRuleSet::from_str(&probe)
             .map_err(|error| RecurrenceError::UnparseableRule(error.to_string()))?;
