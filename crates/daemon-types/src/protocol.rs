@@ -94,6 +94,9 @@ pub enum DaemonCommand {
     ExpandSchedule(ExpandScheduleParams),
     AddCalendarSource(AddCalendarSourceParams),
     SyncCalendarSource(SyncCalendarSourceParams),
+    StartActual(StartActualParams),
+    StopActual(StopActualParams),
+    ActualsBetween(ActualsBetweenParams),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +250,24 @@ pub struct AddCalendarSourceParams {
     /// The feed URL. For an iCalendar source this *is* the credential, which is
     /// why the object holding it is encrypted like everything else.
     pub url: String,
+}
+
+/// Start the timer. Both fields absent means unplanned work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartActualParams {
+    pub item_id: Option<String>,
+    pub occurrence_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StopActualParams {
+    pub object_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActualsBetweenParams {
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

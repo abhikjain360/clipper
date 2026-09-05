@@ -9,9 +9,9 @@ use std::{
 };
 
 pub use clipper_app_types::{
-    AlarmView, AppState, AuthenticatedSession, CalendarSourceView, ClipboardPayload, CollabItem,
-    ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem, DeviceInfo, IngestReport,
-    OccurrenceView, SavedProfile, ScheduleItemView,
+    ActualView, AlarmView, AppState, AuthenticatedSession, CalendarSourceView, ClipboardPayload,
+    CollabItem, ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem, DeviceInfo,
+    IngestReport, OccurrenceView, SavedProfile, ScheduleItemView,
 };
 use clipper_core::{crypto, models::*};
 pub use clipper_schedule::{
@@ -34,13 +34,15 @@ use crate::{
         LocalVisibleState, StoredObjectIdentity,
     },
     schedule::{
-        OccurrenceLabel, ScheduleRecord, decrypt_schedule_meta, decrypt_schedule_payload,
-        encrypt_schedule_meta, encrypt_schedule_payload, ingested_as_series, occurrence_view,
-        zone_or_utc,
+        OccurrenceLabel, ScheduleRecord, actual_view, decrypt_schedule_meta,
+        decrypt_schedule_payload, encrypt_schedule_meta, encrypt_schedule_payload,
+        ingested_as_series, occurrence_key, occurrence_view, parse_occurrence_key, zone_or_utc,
     },
 };
 
 const INLINE_OBJECT_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
+/// Shown for time logged against nothing planned.
+const UNPLANNED_TITLE: &str = "Unplanned";
 /// Ceiling on a schedule payload's ciphertext. A series definition is a few
 /// hundred bytes; this leaves room for a long title and a heavily overridden
 /// series while still refusing a hostile server's unbounded download.
@@ -1212,6 +1214,165 @@ impl SyncEngine {
         Ok(object_id)
     }
 
+    // ── Actuals (D2) ──
+
+    /// Start the timer.
+    ///
+    /// `against` names the occurrence this is time for, as `(item id,
+    /// occurrence key)`. Omit it for unplanned work — that is worth recording
+    /// too, and is exactly the case a planner tends to lose.
+    ///
+    /// Only one timer runs at a time: starting a second stops the first, which
+    /// is what a person means by starting something else.
+    pub async fn start_actual(&self, against: Option<(&str, &str)>) -> Result<String, ClientError> {
+        if let Some(running) = self.running_actual().await {
+            self.stop_actual(&running.0).await?;
+        }
+
+        let planned = match against {
+            Some((item_id, occurrence_key)) => {
+                let item = item_id
+                    .parse::<uuid::Uuid>()
+                    .map(clipper_schedule::ScheduleItemId)
+                    .map_err(|source| ClientError::InvalidId {
+                        kind: "schedule item id",
+                        source,
+                    })?;
+                let recurrence_id = parse_occurrence_key(occurrence_key).ok_or_else(|| {
+                    ClientError::InvalidArgument(format!(
+                        "occurrence key {occurrence_key:?} is not recognised"
+                    ))
+                })?;
+                Some(clipper_schedule::PlannedRef {
+                    item,
+                    recurrence_id,
+                })
+            }
+            None => None,
+        };
+
+        self.create_schedule_record(ScheduleRecord::Actual(Box::new(
+            clipper_schedule::ActualRecord {
+                id: clipper_schedule::ActualId::new(),
+                planned,
+                span: clipper_schedule::ActualSpan::Running {
+                    started: chrono::Utc::now(),
+                },
+            },
+        )))
+        .await
+    }
+
+    /// Stop the timer, closing the record at now.
+    ///
+    /// Two writes per session and no more (D2): the record is created on start
+    /// and replaced on stop. Persisting progress on a tick would turn an hour
+    /// of work into sixty retained revisions.
+    pub async fn stop_actual(&self, object_id: &str) -> Result<String, ClientError> {
+        let Some((_, record)) = self
+            .local_store
+            .schedule_records_with_ids()
+            .await
+            .into_iter()
+            .find(|(id, record)| id == object_id && matches!(record, ScheduleRecord::Actual(_)))
+        else {
+            return Err(ClientError::ItemNotFound {
+                id: object_id.to_string(),
+            });
+        };
+        let ScheduleRecord::Actual(actual) = record else {
+            unreachable!("filtered to actual records above");
+        };
+        let clipper_schedule::ActualSpan::Running { started } = actual.span else {
+            return Err(ClientError::InvalidArgument(
+                "that timer has already been stopped".into(),
+            ));
+        };
+
+        let mut stopped = *actual;
+        stopped.span = clipper_schedule::ActualSpan::Complete(clipper_schedule::ResolvedSpan {
+            start: started,
+            end: chrono::Utc::now().max(started),
+        });
+        let replacement = self
+            .create_schedule_record(ScheduleRecord::Actual(Box::new(stopped)))
+            .await?;
+        self.delete_schedule_object(object_id).await?;
+        Ok(replacement)
+    }
+
+    /// Records of time spent that overlap `[from, to)`, plus any running timer.
+    pub async fn actuals_between(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<ActualView>, ClientError> {
+        let from = parse_instant(from, "actuals window start")?;
+        let to = parse_instant(to, "actuals window end")?;
+        let records = self.local_store.schedule_records_with_ids().await;
+        let titles = self.series_titles(&records);
+
+        let mut out: Vec<ActualView> = records
+            .iter()
+            .filter_map(|(object_id, record)| {
+                let ScheduleRecord::Actual(actual) = record else {
+                    return None;
+                };
+                let (start, end) = match actual.span {
+                    clipper_schedule::ActualSpan::Running { started } => {
+                        (started, chrono::Utc::now())
+                    }
+                    clipper_schedule::ActualSpan::Complete(span) => (span.start, span.end),
+                };
+                if start >= to || end <= from {
+                    return None;
+                }
+                let title = actual
+                    .planned
+                    .and_then(|planned| titles.get(&planned.item).cloned())
+                    .unwrap_or_else(|| UNPLANNED_TITLE.to_string());
+                Some(actual_view(object_id, actual, &title))
+            })
+            .collect();
+        out.sort_by(|a, b| a.start.cmp(&b.start));
+        Ok(out)
+    }
+
+    /// The running timer as `(object id, view)`, if one is running.
+    async fn running_actual(&self) -> Option<(String, ActualView)> {
+        let records = self.local_store.schedule_records_with_ids().await;
+        let titles = self.series_titles(&records);
+        records.iter().find_map(|(object_id, record)| {
+            let ScheduleRecord::Actual(actual) = record else {
+                return None;
+            };
+            if !matches!(actual.span, clipper_schedule::ActualSpan::Running { .. }) {
+                return None;
+            }
+            let title = actual
+                .planned
+                .and_then(|planned| titles.get(&planned.item).cloned())
+                .unwrap_or_else(|| UNPLANNED_TITLE.to_string());
+            Some((object_id.clone(), actual_view(object_id, actual, &title)))
+        })
+    }
+
+    /// Series titles by series id.
+    ///
+    /// An actual stores a reference rather than a copy of the title, so that
+    /// renaming a block does not rewrite what history says about it — the name
+    /// is resolved fresh at render time.
+    fn series_titles(
+        &self,
+        records: &[(String, ScheduleRecord)],
+    ) -> HashMap<clipper_schedule::ScheduleItemId, String> {
+        records
+            .iter()
+            .filter_map(|(_, record)| record.as_item())
+            .map(|item| (item.id, item.title.clone()))
+            .collect()
+    }
+
     /// Replace a schedule series with an edited version.
     ///
     /// Objects are immutable, so an edit is a create followed by a delete until
@@ -1750,6 +1911,7 @@ impl SyncEngine {
             state.collab_docs = visible.collab_docs;
             state.schedule_items = visible.schedule_items;
             state.calendar_sources = visible.calendar_sources;
+            state.running_actual = visible.running_actual;
         }
         self.bump_version();
     }
@@ -2877,21 +3039,6 @@ fn encrypted_clipboard_from_init(
     EncryptedInlineObject {
         object: encrypted_object_from_init(init_req),
         payload_ciphertext,
-    }
-}
-
-/// A stable string for one occurrence of a series.
-///
-/// The platform side needs a key it can put in an intent extra and compare
-/// later; it has no reason to understand the three ways an occurrence can be
-/// identified, only that the same occurrence yields the same string.
-fn occurrence_key(recurrence_id: &clipper_schedule::RecurrenceId) -> String {
-    match recurrence_id {
-        clipper_schedule::RecurrenceId::Floating(local) => format!("floating:{local}"),
-        clipper_schedule::RecurrenceId::Instant(instant) => {
-            format!("instant:{}", instant.timestamp_millis())
-        }
-        clipper_schedule::RecurrenceId::Date(date) => format!("date:{date}"),
     }
 }
 

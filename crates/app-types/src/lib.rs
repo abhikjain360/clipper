@@ -123,6 +123,10 @@ pub struct ScheduleItemView {
 pub struct OccurrenceView {
     /// The series this came from.
     pub item_id: String,
+    /// Identifies this occurrence within the series, so time can be logged
+    /// against the right one. Opaque to every layer above the engine.
+    #[serde(default)]
+    pub occurrence_key: String,
     pub title: String,
     /// Absolute start, RFC 3339 in UTC.
     pub start: String,
@@ -142,6 +146,27 @@ pub struct OccurrenceView {
     /// logged against it survives the cancellation.
     #[serde(default)]
     pub cancelled: bool,
+}
+
+/// Time actually spent, rendered for a grid.
+///
+/// Kept apart from [`OccurrenceView`] rather than folded into it, because the
+/// whole point of D2 is that the plan and the record of what happened are
+/// different things that can disagree.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ActualView {
+    /// The object id, which is what stopping and deleting address.
+    pub id: String,
+    /// What this was time against, if anything. Unplanned work is worth
+    /// recording too, so this can be empty.
+    pub item_id: String,
+    pub title: String,
+    /// RFC 3339 UTC.
+    pub start: String,
+    /// RFC 3339 UTC, or empty while the timer is still running.
+    pub end: String,
+    pub running: bool,
 }
 
 /// One alarm the platform should register.
@@ -217,6 +242,10 @@ pub struct AppState {
     /// Calendar feeds this account pulls from.
     #[serde(default)]
     pub calendar_sources: Vec<CalendarSourceView>,
+    /// The timer currently running, if any. In state rather than behind a
+    /// windowed call because a running timer is relevant on every screen.
+    #[serde(default)]
+    pub running_actual: Option<ActualView>,
     pub error: Option<String>,
 }
 
