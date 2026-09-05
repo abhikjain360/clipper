@@ -582,6 +582,48 @@ impl LocalStore {
             .await
     }
 
+    /// Mark an object as needing a refetch because a new revision is its head.
+    ///
+    /// The difference from `mark_pending_create` is the one case that matters:
+    /// an object already held locally. A create event for one of those is a
+    /// duplicate and is ignored, which was right while objects were immutable.
+    /// An update event for one means the content changed underneath the same
+    /// id, so it has to be fetched again (D6).
+    pub async fn mark_pending_update(
+        &self,
+        kind: ObjectKind,
+        object_id: &str,
+        event_seq: i64,
+        generation: u64,
+    ) -> Result<bool, LocalStoreError> {
+        let object_id = validate_item_id(object_id)?;
+        let sync = self.sync.lock().await;
+        if sync.generation != generation {
+            return Ok(false);
+        }
+        match self.stored_object_record(&object_id).await? {
+            // A delete that landed after this update wins, exactly as for a
+            // create: re-fetching would resurrect a removed object.
+            Some(StoredObjectRecord::Deleted(record)) if record.event_seq > event_seq => Ok(false),
+            // Already at or past this revision; nothing to do.
+            Some(StoredObjectRecord::Present(record)) if record.event_seq >= event_seq => Ok(false),
+            Some(StoredObjectRecord::Present(mut record)) => {
+                record.event_seq = event_seq;
+                record.created_seq = event_seq;
+                record.seen_generation = Some(generation);
+                self.write_stored_object_record(&StoredObjectRecord::Present(record))
+                    .await?;
+                Ok(true)
+            }
+            // Never seen, or seen only as a marker: the create path already
+            // does the right thing for both.
+            _ => {
+                self.mark_pending_create_inner(kind, &object_id, event_seq, generation)
+                    .await
+            }
+        }
+    }
+
     pub async fn apply_local_delete(
         &self,
         kind: ObjectKind,

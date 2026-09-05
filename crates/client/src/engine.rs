@@ -68,7 +68,6 @@ const MAX_CLIPBOARD_PAYLOAD_CIPHERTEXT_BYTES: i64 = (MAX_CLIPBOARD_PAYLOAD_BYTES
 /// server's default `max_file_blob_bytes` so a hostile server cannot advertise
 /// a multi-GiB size and OOM the client during a download.
 const MAX_FILE_PAYLOAD_CIPHERTEXT_BYTES: i64 = 512 * 1024 * 1024;
-const OBJECT_ENVELOPE_VERSION_V2: u64 = 1;
 #[cfg(target_family = "wasm")]
 const WS_TICKET_PROTOCOL: &str = "clipper-ticket";
 
@@ -1109,17 +1108,20 @@ impl SyncEngine {
         ))
     }
 
+    /// Delete a file by appending a tombstone revision.
+    ///
+    /// `DELETE /api/objects/{id}` is now purge and refuses an object that has
+    /// not been tombstoned, so this is not another route to the same thing — it
+    /// is the delete. Reclaiming the blob is a separate purge, which nothing
+    /// calls yet.
     pub async fn delete_file(&self, file_id: &str) -> Result<(), ClientError> {
-        let delete_resp = {
-            let api = &self.api;
-            api.delete_object(file_id).await?
-        };
+        let deleted_seq = self.write_tombstone(file_id, ObjectKind::File).await?;
         let visible = self
             .local_store
             .apply_local_delete(
                 ObjectKind::File,
                 file_id,
-                delete_resp.deleted_seq,
+                deleted_seq,
                 RECENT_CLIPBOARD_LIMIT,
             )
             .await?;
@@ -1147,7 +1149,7 @@ impl SyncEngine {
         record: ScheduleRecord,
     ) -> Result<String, ClientError> {
         let object_id = uuid::Uuid::now_v7().to_string();
-        self.write_schedule_record(&object_id, Some(record), EnvelopePlacement::Create)
+        self.write_schedule_record(&object_id, record, EnvelopePlacement::Create)
             .await?;
         info!(object_id = %object_id, "Schedule record created");
         Ok(object_id)
@@ -1158,12 +1160,12 @@ impl SyncEngine {
     /// Genesis and revise differ only in the placement they are given and the
     /// route that starts the write — everything about sealing, and the fact
     /// that a small record rides inline and so completes without a second
-    /// round-trip, is the same. `record` is `None` for a tombstone, which
-    /// carries no payload at all.
+    /// round-trip, is the same. Deleting is not routed through here: a tombstone
+    /// carries no payload, so it shares nothing with this beyond the envelope.
     async fn write_schedule_record(
         &self,
         object_id: &str,
-        record: Option<ScheduleRecord>,
+        record: ScheduleRecord,
         placement: EnvelopePlacement,
     ) -> Result<i64, ClientError> {
         let encryption_key = self.current_encryption_key().await?;
@@ -1177,20 +1179,6 @@ impl SyncEngine {
             })?;
         let object_id_typed: ObjectId = object_uuid.into();
         let created_at = chrono::Utc::now().to_rfc3339();
-
-        let Some(record) = record else {
-            return self
-                .write_schedule_tombstone(
-                    object_id,
-                    object_id_typed,
-                    placement,
-                    &encryption_key,
-                    device_id_typed,
-                    &signing_key,
-                    created_at,
-                )
-                .await;
-        };
 
         let payload_uuid = uuid::Uuid::now_v7();
         let payload_id = payload_uuid.to_string();
@@ -1300,36 +1288,39 @@ impl SyncEngine {
         Ok(created_seq)
     }
 
-    /// The tombstone half: a revision with no payloads.
+    /// Append a tombstone: a signed revision with no payloads.
     ///
-    /// Its meta is still encrypted and still bound to the envelope, even though
-    /// there is nothing left to say — an empty ciphertext would be a second
-    /// shape for the meta column to have, and the server's checks would have to
-    /// know about it.
-    #[allow(clippy::too_many_arguments)]
-    async fn write_schedule_tombstone(
-        &self,
-        object_id: &str,
-        object_id_typed: ObjectId,
-        placement: EnvelopePlacement,
-        encryption_key: &zeroize::Zeroizing<[u8; 32]>,
-        device_id_typed: DeviceId,
-        signing_key: &[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
-        created_at: String,
-    ) -> Result<i64, ClientError> {
+    /// Shared by every deletable kind, because a tombstone is the same object
+    /// in all of them. Its meta is still encrypted and still bound to the
+    /// envelope even though it says nothing — the column is not nullable, and
+    /// an empty ciphertext would be a second shape the server's checks would
+    /// have to know about.
+    async fn write_tombstone(&self, object_id: &str, kind: ObjectKind) -> Result<i64, ClientError> {
+        let encryption_key = self.current_encryption_key().await?;
+        let (_, device_id_typed, signing_key) = self.current_device_signing_context().await?;
+        let object_uuid: uuid::Uuid =
+            object_id.parse().map_err(|source| ClientError::InvalidId {
+                kind: "object id",
+                source,
+            })?;
+        let object_id_typed: ObjectId = object_uuid.into();
+        let placement = EnvelopePlacement::Delete(self.local_head(object_id).await?);
+        let created_at = chrono::Utc::now().to_rfc3339();
+
         let aad_body = object_envelope_body_for_aad(
             object_id_typed,
-            ObjectKind::Schedule,
+            kind,
             placement,
             device_id_typed,
             created_at.clone(),
             Vec::new(),
         );
+        let aad = crypto::object_meta_aad_v2(&aad_body)?;
         let (meta_nonce, meta_ciphertext) =
-            encrypt_schedule_meta(&ScheduleRecord::tombstone_meta(), encryption_key, &aad_body)?;
+            crypto::encrypt(&encryption_key, TOMBSTONE_META_PLAINTEXT, &aad)?;
         let envelope_body = object_envelope_body(
             object_id_typed,
-            ObjectKind::Schedule,
+            kind,
             placement,
             device_id_typed,
             created_at,
@@ -1342,7 +1333,7 @@ impl SyncEngine {
             meta_ciphertext,
             payloads: Vec::new(),
             envelope: ObjectEnvelopeV2 {
-                signature: crypto::sign_object_envelope_body(signing_key, &envelope_body)?,
+                signature: crypto::sign_object_envelope_body(&signing_key, &envelope_body)?,
                 body: envelope_body,
             },
         };
@@ -1552,7 +1543,7 @@ impl SyncEngine {
         let head = self.local_head(object_id).await?;
         self.write_schedule_record(
             object_id,
-            Some(ScheduleRecord::Item(Box::new(item))),
+            ScheduleRecord::Item(Box::new(item)),
             EnvelopePlacement::Revise(head),
         )
         .await?;
@@ -1620,9 +1611,8 @@ impl SyncEngine {
     /// earlier one. Reclaiming the bytes is a separate purge, which nothing in
     /// the UI calls yet.
     pub async fn delete_schedule_object(&self, object_id: &str) -> Result<(), ClientError> {
-        let head = self.local_head(object_id).await?;
         let deleted_seq = self
-            .write_schedule_record(object_id, None, EnvelopePlacement::Delete(head))
+            .write_tombstone(object_id, ObjectKind::Schedule)
             .await?;
         let visible = self
             .local_store
@@ -2192,11 +2182,25 @@ impl SyncEngine {
                         self.handle_created_event(generation, object_kind, object_id, seq)
                             .await?;
                     }
-                    // Only collab docs mutate in place (a rename); encrypted
-                    // objects are immutable once created.
+                    // A collab doc mutates in place, and only its plaintext
+                    // metadata does, so it has its own handler.
                     ObjectEventType::Updated if object_kind == ObjectKind::Collab => {
                         self.handle_updated_collab_event(generation, object_id, seq);
                     }
+                    // For every other kind an update means a new revision is
+                    // the head (D6). The ciphertext is still immutable; which
+                    // ciphertext is current has moved, so the answer is the
+                    // same as for a creation — fetch the object and replace the
+                    // local copy with what comes back.
+                    ObjectEventType::Updated
+                        if object_kind == ObjectKind::File
+                            || object_kind == ObjectKind::Schedule =>
+                    {
+                        self.handle_updated_object_event(generation, object_kind, object_id, seq)
+                            .await?;
+                    }
+                    // Clipboard is the exception: it is replaced rather than
+                    // revised, so an update for it is a server bug, not an edit.
                     ObjectEventType::Updated => {
                         warn!(
                             seq,
@@ -2204,10 +2208,12 @@ impl SyncEngine {
                             "Ignoring unsupported WS update event for object kind",
                         );
                     }
-                    // Files and collab docs are the deletable object kinds.
+                    // File, collab and schedule are the deletable kinds.
                     // Clipboard items expire passively and never emit deletes.
                     ObjectEventType::Deleted
-                        if object_kind == ObjectKind::File || object_kind == ObjectKind::Collab =>
+                        if object_kind == ObjectKind::File
+                            || object_kind == ObjectKind::Collab
+                            || object_kind == ObjectKind::Schedule =>
                     {
                         self.handle_deleted_event(generation, object_kind, object_id, seq)
                             .await?;
@@ -2556,6 +2562,44 @@ impl SyncEngine {
             });
         }
 
+        Ok(())
+    }
+
+    /// Refetch an object whose head moved to a new revision.
+    ///
+    /// Same materialisation as a creation — the object is pulled and the local
+    /// copy replaced — but reached through `mark_pending_update`, because the
+    /// create path deliberately ignores an object it already holds.
+    async fn handle_updated_object_event(
+        self: &Arc<Self>,
+        generation: u64,
+        kind: ObjectKind,
+        object_id: ObjectId,
+        event_seq: i64,
+    ) -> Result<(), ClientError> {
+        let object_id_text = object_id.to_string();
+        let should_materialize = self
+            .local_store
+            .mark_pending_update(kind, &object_id_text, event_seq, generation)
+            .await?;
+        if !should_materialize {
+            return Ok(());
+        }
+
+        let engine = Arc::clone(self);
+        spawn_background(async move {
+            if let Err(error) = engine
+                .materialize_object(generation, kind, object_id, event_seq)
+                .await
+            {
+                warn!(
+                    object_id = %object_id,
+                    event_seq,
+                    "Failed to materialize revised object: {}",
+                    error,
+                );
+            }
+        });
         Ok(())
     }
 
@@ -3530,7 +3574,7 @@ fn object_envelope_body(
     ObjectEnvelopeBodyV2 {
         object_id,
         object_type: kind,
-        envelope_version: OBJECT_ENVELOPE_VERSION_V2,
+        envelope_version: crypto::OBJECT_ENVELOPE_VERSION_V2,
         revision: placement.revision(),
         parent_hash: placement.parent_hash(),
         source_device_id,
@@ -3559,7 +3603,7 @@ fn verify_object_list_item_envelope(item: &ObjectListItem) -> Result<(), ClientE
     let meta_hash = crypto::sha256(&item.meta_ciphertext);
     if body.object_id != item.id
         || body.object_type != item.kind
-        || body.envelope_version != OBJECT_ENVELOPE_VERSION_V2
+        || body.envelope_version != crypto::OBJECT_ENVELOPE_VERSION_V2
         // The revision is signed and also stated in the clear beside it; they
         // must agree, or the server could relabel which revision this is while
         // serving a genuinely signed body.
@@ -3808,7 +3852,7 @@ mod tests {
         let body = ObjectEnvelopeBodyV2 {
             object_id,
             object_type: ObjectKind::Clipboard,
-            envelope_version: OBJECT_ENVELOPE_VERSION_V2,
+            envelope_version: crypto::OBJECT_ENVELOPE_VERSION_V2,
             revision: 1,
             parent_hash: None,
             source_device_id: device_id,
