@@ -1,3 +1,4 @@
+import { CalendarDatePicker } from "./CalendarDatePicker";
 import { calendarWindow, movePeriod, periodStart, type CalendarView } from "./calendar-view";
 import { EventHover } from "./EventHover";
 import { nextStarts, orderByNextStart } from "./schedule-order";
@@ -220,7 +221,7 @@ export function SchedulePanel({
                                 onPress={() => setSelectedDate(movePeriod(selectedDate, view, -1))}
                                 aria-label={`Previous ${view}`}
                             />
-                            <Text aria-live="polite" fontSize={14}>
+                            <CalendarDatePicker value={selectedDate} onChange={setSelectedDate}>
                                 {view === "week"
                                     ? weekLabel(weekStart)
                                     : selectedDate.toLocaleDateString(
@@ -234,7 +235,7 @@ export function SchedulePanel({
                                                     year: "numeric",
                                                 },
                                       )}
-                            </Text>
+                            </CalendarDatePicker>
                             <Button
                                 size="$2"
                                 icon={<ChevronRight size={16} />}
