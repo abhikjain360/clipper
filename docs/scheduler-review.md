@@ -142,6 +142,14 @@ calendar. “Change this and all future occurrences” and effective-date series
 splits remain unimplemented. Actual manual entry, reassociation, correction and
 historical-detail UI also remain future work.
 
+## Browser login recovery (2026-09-10)
+
+The browser releases its engine on logout and can replace a logged-out engine
+when a failed login is retried against another server. Authentication requests
+are serialized, and state watchers wake across replacement. Chrome QA verified
+logout, failed login to an unavailable local port, and successful login to the
+correct server without reloading. Wasm check/build, Clippy and the web build passed.
+
 ## Import snapshot validation (2026-09-10)
 
 Workspace tests and Clippy with warnings denied passed. The rebuilt-server live

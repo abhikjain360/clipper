@@ -5,7 +5,7 @@ use clipper_client::engine::{
     AppState, ClipboardPayload, ScheduleItem, SyncEngine, TEXT_CLIPBOARD_MIME_TYPE,
 };
 use js_sys::{Object, Promise, Reflect, Uint8Array};
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 use zeroize::{Zeroize, Zeroizing};
@@ -14,46 +14,58 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_DEVICE_NAME: &str = "Web";
 const PLATFORM: &str = "web";
 
-/// Holds the single [`SyncEngine`] for the page's lifetime.
-///
-/// Unlike the daemon — a long-lived process that rebuilds its engine across many
-/// login sessions — the browser client lives for one page load, so it builds the
-/// engine once, lazily, on the first login/register using the server URL that
-/// request carries (the login form sources it from `VITE_SERVER_URL`). This
-/// mirrors the mobile UniFFI client, which is constructed with a runtime base
-/// URL rather than a compile-time constant; `DEFAULT_BASE_URL` is only the
-/// dev/localhost fallback when no URL is supplied. Once built, the engine's URL
-/// is fixed (see [`ensure_requested_base_url`]); a page reload starts fresh.
+/// Holds the engine for the current browser login attempt or session.
 struct EngineHolder {
-    slot: RwLock<Option<Arc<SyncEngine>>>,
-    // Bumped when the engine is installed so a `wait_for_state_change` that began
-    // before login (no engine yet) wakes and begins tracking the new engine.
-    installed: watch::Sender<u64>,
+    slot: RwLock<Option<HeldEngine>>,
+    // Serializes login, registration, resume and logout across their awaits.
+    auth: Mutex<()>,
+    // Bumped whenever the held engine changes. This also forms the high half of
+    // the public state version, so replacing an engine cannot move time backwards.
+    installed: watch::Sender<u32>,
+}
+
+#[derive(Clone)]
+struct HeldEngine {
+    engine: Arc<SyncEngine>,
+    generation: u32,
 }
 
 static HOLDER: LazyLock<EngineHolder> = LazyLock::new(|| {
     let (installed, _) = watch::channel(0);
     EngineHolder {
         slot: RwLock::new(None),
+        auth: Mutex::new(()),
         installed,
     }
 });
 
 impl EngineHolder {
     fn engine(&self) -> Option<Arc<SyncEngine>> {
-        self.slot.read().expect("engine slot poisoned").clone()
+        self.slot
+            .read()
+            .expect("engine slot poisoned")
+            .as_ref()
+            .map(|held| Arc::clone(&held.engine))
     }
 
-    /// Return the engine, building it bound to `requested` the first time. Once an
-    /// engine exists, `requested` must match its base URL; an empty request
-    /// imposes no constraint. The body holds no `.await`, so on the single-threaded
-    /// wasm runtime the check-and-build is atomic.
-    fn get_or_build(&self, requested: &str) -> Result<Arc<SyncEngine>, JsValue> {
-        let mut slot = self.slot.write().expect("engine slot poisoned");
-        if let Some(engine) = slot.as_ref() {
-            ensure_requested_base_url(engine, requested)?;
-            return Ok(Arc::clone(engine));
+    /// Return an engine bound to `requested`. A different URL replaces a logged-out
+    /// engine left by a failed attempt; an authenticated engine remains pinned.
+    /// Callers hold `auth`, making the state check and replacement one transition.
+    async fn get_or_build(&self, requested: &str) -> Result<Arc<SyncEngine>, JsValue> {
+        let held = self.slot.read().expect("engine slot poisoned").clone();
+        if let Some(held) = held {
+            if requested_base_url_matches(&held.engine, requested) {
+                return Ok(held.engine);
+            }
+            if held.engine.get_state().await.session.is_some() {
+                return Err(js_error(format!(
+                    "Server URL is fixed while logged in: configured {}, requested {}",
+                    held.engine.base_url(),
+                    requested.trim()
+                )));
+            }
         }
+        let mut slot = self.slot.write().expect("engine slot poisoned");
         let trimmed = requested.trim();
         let url = if trimmed.is_empty() {
             DEFAULT_BASE_URL
@@ -61,11 +73,27 @@ impl EngineHolder {
             trimmed
         };
         let engine = SyncEngine::try_new_with_data_dir(url, "web").map_err(js_error)?;
-        *slot = Some(Arc::clone(&engine));
+        let generation = self.installed.borrow().wrapping_add(1);
+        *slot = Some(HeldEngine {
+            engine: Arc::clone(&engine),
+            generation,
+        });
         drop(slot);
-        self.installed
-            .send_modify(|generation| *generation = generation.wrapping_add(1));
+        self.installed.send_replace(generation);
         Ok(engine)
+    }
+
+    fn clear_if_current(&self, engine: &Arc<SyncEngine>) {
+        let mut slot = self.slot.write().expect("engine slot poisoned");
+        if slot
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(&held.engine, engine))
+        {
+            *slot = None;
+            let generation = self.installed.borrow().wrapping_add(1);
+            drop(slot);
+            self.installed.send_replace(generation);
+        }
     }
 
     async fn current_state(&self) -> AppState {
@@ -76,23 +104,46 @@ impl EngineHolder {
     }
 
     fn state_version(&self) -> u64 {
-        self.engine().map_or(0, |engine| engine.state_version())
+        self.slot
+            .read()
+            .expect("engine slot poisoned")
+            .as_ref()
+            .map_or_else(
+                || compose_version(*self.installed.borrow(), 0),
+                |held| compose_version(held.generation, held.engine.state_version()),
+            )
     }
 
-    /// Suspend until the state version advances past `seen`. Before login there is
-    /// no engine and the version is fixed at 0, so wait for an engine to be
-    /// installed; afterwards delegate to the engine's own change watch. The engine
-    /// lives for the rest of the page, so its version stays monotonic.
+    /// Suspend until either the held engine changes or its state advances. The
+    /// generation in the public version keeps replacement monotonic and wakes a
+    /// waiter that was still subscribed to the previous engine.
     async fn wait_for_state_change(&self, seen: u64) -> Result<u64, JsValue> {
         // Subscribe before the first check so an install that races the check is
         // not missed.
         let mut installed = self.installed.subscribe();
         loop {
-            if let Some(engine) = self.engine() {
-                return engine
-                    .wait_for_state_change_after(seen)
-                    .await
-                    .map_err(js_error);
+            let held = self.slot.read().expect("engine slot poisoned").clone();
+            if let Some(held) = held {
+                let seen_generation = (seen >> 32) as u32;
+                if seen_generation != held.generation {
+                    return Ok(compose_version(
+                        held.generation,
+                        held.engine.state_version(),
+                    ));
+                }
+                let local_seen = seen & u32::MAX as u64;
+                tokio::select! {
+                    changed = held.engine.wait_for_state_change_after(local_seen) => {
+                        return changed.map(|version| compose_version(held.generation, version)).map_err(js_error);
+                    }
+                    changed = installed.changed() => {
+                        changed.map_err(|_| js_error("engine holder closed"))?;
+                        continue;
+                    }
+                }
+            }
+            if seen != compose_version(*installed.borrow(), 0) {
+                return Ok(compose_version(*installed.borrow(), 0));
             }
             installed
                 .changed()
@@ -102,8 +153,11 @@ impl EngineHolder {
     }
 }
 
-/// Resolve the engine for an operation that requires a session, erroring if the
-/// user has not logged in or registered yet this page load.
+fn compose_version(generation: u32, engine_version: u64) -> u64 {
+    (u64::from(generation) << 32) | engine_version.min(u32::MAX as u64)
+}
+
+/// Resolve the engine for an operation that requires a session.
 fn engine_or_error() -> Result<Arc<SyncEngine>, JsValue> {
     HOLDER.engine().ok_or_else(|| js_error("Not logged in"))
 }
@@ -136,8 +190,9 @@ pub fn login(
     server_url: String,
 ) -> Promise {
     ok_promise(async move {
+        let _auth = HOLDER.auth.lock().await;
         let passphrase = Zeroizing::new(passphrase);
-        let engine = HOLDER.get_or_build(&server_url)?;
+        let engine = HOLDER.get_or_build(&server_url).await?;
         engine
             .login_with_platform(
                 &passphrase,
@@ -160,9 +215,10 @@ pub fn register(
     server_url: String,
 ) -> Promise {
     ok_promise(async move {
+        let _auth = HOLDER.auth.lock().await;
         let access_key = Zeroizing::new(access_key);
         let passphrase = Zeroizing::new(passphrase);
-        let engine = HOLDER.get_or_build(&server_url)?;
+        let engine = HOLDER.get_or_build(&server_url).await?;
         let username = engine
             .register_with_platform(
                 &access_key,
@@ -191,9 +247,10 @@ pub fn resume(
     server_url: String,
 ) -> Promise {
     ok_promise(async move {
+        let _auth = HOLDER.auth.lock().await;
         let data_key = decode_resume_key(&data_key)?;
         let wrapping_key = decode_resume_key(&wrapping_key)?;
-        let engine = HOLDER.get_or_build(&server_url)?;
+        let engine = HOLDER.get_or_build(&server_url).await?;
         engine
             .resume_with_platform(
                 token,
@@ -243,8 +300,10 @@ pub fn session_resume_material() -> Promise {
 #[wasm_bindgen(js_name = logout)]
 pub fn logout() -> Promise {
     ok_promise(async {
+        let _auth = HOLDER.auth.lock().await;
         if let Some(engine) = HOLDER.engine() {
             engine.logout().await.map_err(js_error)?;
+            HOLDER.clear_if_current(&engine);
         }
         Ok(JsValue::UNDEFINED)
     })
@@ -542,21 +601,10 @@ pub fn remove_device(device_id: String) -> Promise {
     })
 }
 
-/// Guard that the engine's bound URL matches a later per-request URL. An empty
-/// request imposes no constraint. The engine binds to the first login/register
-/// URL, so this only rejects an attempt to switch servers without a page reload.
-fn ensure_requested_base_url(engine: &SyncEngine, requested: &str) -> Result<(), JsValue> {
-    let requested = requested.trim();
-    if requested.is_empty() {
-        return Ok(());
-    }
-    let configured = engine.base_url();
-    if normalize_server_url(requested) == normalize_server_url(&configured) {
-        return Ok(());
-    }
-    Err(js_error(format!(
-        "Server URL is fixed for this session: configured {configured}, requested {requested}"
-    )))
+/// An empty request reuses the current server; a nonempty one selects a server.
+fn requested_base_url_matches(engine: &SyncEngine, requested: &str) -> bool {
+    requested.trim().is_empty()
+        || normalize_server_url(requested) == normalize_server_url(&engine.base_url())
 }
 
 fn normalize_server_url(url: &str) -> &str {
