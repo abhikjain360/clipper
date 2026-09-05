@@ -309,3 +309,38 @@ select {
 .desktop-navigation button svg {
     flex-shrink: 0;
 }
+
+.library-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+    gap: 16px;
+    padding-bottom: 16px;
+    align-items: stretch;
+}
+.library-grid .library-card {
+    min-width: 0;
+    min-height: 160px;
+}
+.library-grid .library-card > div {
+    flex-direction: column;
+    align-items: stretch;
+    height: 100%;
+}
+.library-grid .library-card > div > :first-child {
+    flex: 1;
+    min-width: 0;
+}
+.library-grid .library-card > div > :last-child:not(:first-child) {
+    align-self: flex-end;
+    flex-shrink: 0;
+}
+.library-grid .library-card * {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.library-grid .library-card svg {
+    flex-shrink: 0;
+}
+.library-grid .library-card:hover {
+    border-color: #44515c !important;
+}

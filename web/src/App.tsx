@@ -39,7 +39,6 @@ import {
     Input,
     Label,
     Paragraph,
-    ScrollView,
     Spinner,
     Text,
     XStack,
@@ -463,14 +462,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                 <div className="mobile-navigation">{navigation(true, true)}</div>
             </dialog>
             <main className="app-main">
-                <YStack
-                    width="100%"
-                    maxW={location === "/schedule" ? undefined : 1100}
-                    self="center"
-                    p="$3"
-                    gap="$3"
-                    flex={1}
-                >
+                <YStack width="100%" self="center" p="$3" gap="$3" flex={1}>
                     {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
 
                     <Switch>
@@ -599,37 +591,36 @@ function ClipboardPanel({
             {items.length === 0 ? (
                 <EmptyState icon={<Clipboard size={28} />} title="No clipboard items yet" />
             ) : (
-                <ScrollView>
-                    <YStack gap="$2" pb="$4">
-                        {items.map((item) => (
-                            <ListCard key={item.id}>
-                                <XStack items="center" justify="space-between" gap="$3">
-                                    <YStack flex={1} gap="$1">
-                                        <Text
-                                            style={{
-                                                fontFamily: isTextMimeType(item.mime_type)
-                                                    ? "ui-monospace, SFMono-Regular, Menlo, monospace"
-                                                    : undefined,
-                                            }}
-                                            numberOfLines={3}
-                                        >
-                                            {item.text}
-                                        </Text>
-                                        <Paragraph size="$2" color="#9aa4ad">
-                                            {item.mime_type} - {formatRelativeTime(item.created_at)}
-                                        </Paragraph>
-                                    </YStack>
-                                    <Button
-                                        size="$3"
-                                        icon={<Copy size={16} />}
-                                        disabled={!isTextMimeType(item.mime_type)}
-                                        onPress={() => void copyItem(item)}
-                                    />
-                                </XStack>
-                            </ListCard>
-                        ))}
-                    </YStack>
-                </ScrollView>
+                <div className="library-grid">
+                    {items.map((item) => (
+                        <ListCard key={item.id}>
+                            <XStack items="center" justify="space-between" gap="$3">
+                                <YStack flex={1} gap="$1">
+                                    <Text
+                                        style={{
+                                            fontFamily: isTextMimeType(item.mime_type)
+                                                ? "ui-monospace, SFMono-Regular, Menlo, monospace"
+                                                : undefined,
+                                        }}
+                                        numberOfLines={6}
+                                    >
+                                        {item.text}
+                                    </Text>
+                                    <Paragraph size="$2" color="#9aa4ad">
+                                        {item.mime_type} - {formatRelativeTime(item.created_at)}
+                                    </Paragraph>
+                                </YStack>
+                                <Button
+                                    size="$3"
+                                    aria-label="Copy clipboard item"
+                                    icon={<Copy size={16} />}
+                                    disabled={!isTextMimeType(item.mime_type)}
+                                    onPress={() => void copyItem(item)}
+                                />
+                            </XStack>
+                        </ListCard>
+                    ))}
+                </div>
             )}
         </YStack>
     );
@@ -766,45 +757,46 @@ function FilesPanel({
                 {files.length === 0 ? (
                     <EmptyState icon={<Folder size={28} />} title="No files yet" />
                 ) : (
-                    <ScrollView>
-                        <YStack gap="$2" pb="$4">
-                            {files.map((file) => (
-                                <ListCard key={file.id}>
-                                    <XStack items="center" justify="space-between" gap="$3">
-                                        <XStack items="center" gap="$3" flex={1}>
-                                            <Files size={22} color="#6fb4ff" />
-                                            <YStack flex={1} gap="$1">
-                                                <Text numberOfLines={1}>{file.filename}</Text>
-                                                <Paragraph size="$2" color="#9aa4ad">
-                                                    {formatByteSize(file.blob_size)} -{" "}
-                                                    {formatRelativeTime(file.created_at)}
-                                                </Paragraph>
-                                            </YStack>
-                                        </XStack>
-                                        <XStack gap="$1">
-                                            {isTextMimeType(file.mime_type) && (
-                                                <Button
-                                                    size="$3"
-                                                    icon={<Eye size={16} />}
-                                                    onPress={() => void openViewer(file)}
-                                                />
-                                            )}
-                                            <Button
-                                                size="$3"
-                                                icon={<Download size={16} />}
-                                                onPress={() => void downloadFile(file)}
-                                            />
-                                            <Button
-                                                size="$3"
-                                                icon={<Trash2 size={16} color="#ff6b6b" />}
-                                                onPress={() => void deleteFile(file)}
-                                            />
-                                        </XStack>
+                    <div className="library-grid">
+                        {files.map((file) => (
+                            <ListCard key={file.id}>
+                                <XStack items="center" justify="space-between" gap="$3">
+                                    <XStack items="center" gap="$3" flex={1}>
+                                        <Files size={22} color="#6fb4ff" />
+                                        <YStack flex={1} gap="$1">
+                                            <Text numberOfLines={1}>{file.filename}</Text>
+                                            <Paragraph size="$2" color="#9aa4ad">
+                                                {formatByteSize(file.blob_size)} -{" "}
+                                                {formatRelativeTime(file.created_at)}
+                                            </Paragraph>
+                                        </YStack>
                                     </XStack>
-                                </ListCard>
-                            ))}
-                        </YStack>
-                    </ScrollView>
+                                    <XStack gap="$1">
+                                        {isTextMimeType(file.mime_type) && (
+                                            <Button
+                                                size="$3"
+                                                aria-label={`Preview ${file.filename}`}
+                                                icon={<Eye size={16} />}
+                                                onPress={() => void openViewer(file)}
+                                            />
+                                        )}
+                                        <Button
+                                            size="$3"
+                                            aria-label={`Download ${file.filename}`}
+                                            icon={<Download size={16} />}
+                                            onPress={() => void downloadFile(file)}
+                                        />
+                                        <Button
+                                            size="$3"
+                                            aria-label={`Delete ${file.filename}`}
+                                            icon={<Trash2 size={16} color="#ff6b6b" />}
+                                            onPress={() => void deleteFile(file)}
+                                        />
+                                    </XStack>
+                                </XStack>
+                            </ListCard>
+                        ))}
+                    </div>
                 )}
             </YStack>
         </>
@@ -945,43 +937,43 @@ function CollabPanel({
             {collabDocs.length === 0 ? (
                 <EmptyState icon={<FileText size={28} />} title="No collab docs yet" />
             ) : (
-                <ScrollView>
-                    <YStack gap="$2" pb="$4">
-                        {collabDocs.map((item) => (
-                            <ListCard key={item.id}>
-                                <XStack items="center" justify="space-between" gap="$3">
-                                    <XStack
-                                        items="center"
-                                        gap="$3"
-                                        flex={1}
-                                        cursor="pointer"
-                                        onPress={() => setLocation(`/collab/${item.id}`)}
-                                    >
-                                        <FileCode size={22} color="#6fb4ff" />
-                                        <YStack flex={1} gap="$1">
-                                            <Text numberOfLines={1}>{collabTitle(item)}</Text>
-                                            <Paragraph size="$2" color="#9aa4ad">
-                                                {formatRelativeTime(item.created_at)}
-                                            </Paragraph>
-                                        </YStack>
-                                    </XStack>
-                                    <XStack gap="$1">
-                                        <Button
-                                            size="$3"
-                                            icon={<Copy size={16} />}
-                                            onPress={() => void copyLink(item)}
-                                        />
-                                        <Button
-                                            size="$3"
-                                            icon={<Trash2 size={16} color="#ff6b6b" />}
-                                            onPress={() => void deleteDoc(item)}
-                                        />
-                                    </XStack>
+                <div className="library-grid">
+                    {collabDocs.map((item) => (
+                        <ListCard key={item.id}>
+                            <XStack items="center" justify="space-between" gap="$3">
+                                <XStack
+                                    items="center"
+                                    gap="$3"
+                                    flex={1}
+                                    cursor="pointer"
+                                    onPress={() => setLocation(`/collab/${item.id}`)}
+                                >
+                                    <FileCode size={22} color="#6fb4ff" />
+                                    <YStack flex={1} gap="$1">
+                                        <Text numberOfLines={1}>{collabTitle(item)}</Text>
+                                        <Paragraph size="$2" color="#9aa4ad">
+                                            {formatRelativeTime(item.created_at)}
+                                        </Paragraph>
+                                    </YStack>
                                 </XStack>
-                            </ListCard>
-                        ))}
-                    </YStack>
-                </ScrollView>
+                                <XStack gap="$1">
+                                    <Button
+                                        size="$3"
+                                        aria-label={`Copy link to ${collabTitle(item)}`}
+                                        icon={<Copy size={16} />}
+                                        onPress={() => void copyLink(item)}
+                                    />
+                                    <Button
+                                        size="$3"
+                                        aria-label={`Delete ${collabTitle(item)}`}
+                                        icon={<Trash2 size={16} color="#ff6b6b" />}
+                                        onPress={() => void deleteDoc(item)}
+                                    />
+                                </XStack>
+                            </XStack>
+                        </ListCard>
+                    ))}
+                </div>
             )}
         </YStack>
     );
@@ -1371,40 +1363,38 @@ function DevicesPanel({ onError }: { onError: (error: string | null) => void }) 
             ) : devices.length === 0 ? (
                 <EmptyState icon={<Smartphone size={28} />} title="No devices" />
             ) : (
-                <ScrollView>
-                    <YStack gap="$2" pb="$4">
-                        {devices.map((device) => (
-                            <ListCard key={device.id}>
-                                <XStack items="center" justify="space-between" gap="$3">
-                                    <XStack items="center" gap="$3" flex={1}>
-                                        <Smartphone size={22} color="#6fb4ff" />
-                                        <YStack flex={1} gap="$1">
-                                            <XStack items="center" gap="$2" flexWrap="wrap">
-                                                <Text numberOfLines={1}>{device.name}</Text>
-                                                {device.is_current && (
-                                                    <Paragraph size="$1" color="#6fb4ff">
-                                                        This device
-                                                    </Paragraph>
-                                                )}
-                                            </XStack>
-                                            <Paragraph size="$2" color="#9aa4ad">
-                                                {device.platform} - last seen{" "}
-                                                {formatRelativeTime(device.last_seen_at)}
-                                            </Paragraph>
-                                        </YStack>
-                                    </XStack>
-                                    {!device.is_current && (
-                                        <Button
-                                            size="$3"
-                                            icon={<Trash2 size={16} color="#ff6b6b" />}
-                                            onPress={() => void removeDevice(device)}
-                                        />
-                                    )}
+                <div className="library-grid">
+                    {devices.map((device) => (
+                        <ListCard key={device.id}>
+                            <XStack items="center" justify="space-between" gap="$3">
+                                <XStack items="center" gap="$3" flex={1}>
+                                    <Smartphone size={22} color="#6fb4ff" />
+                                    <YStack flex={1} gap="$1">
+                                        <XStack items="center" gap="$2" flexWrap="wrap">
+                                            <Text numberOfLines={1}>{device.name}</Text>
+                                            {device.is_current && (
+                                                <Paragraph size="$1" color="#6fb4ff">
+                                                    This device
+                                                </Paragraph>
+                                            )}
+                                        </XStack>
+                                        <Paragraph size="$2" color="#9aa4ad">
+                                            {device.platform} - last seen{" "}
+                                            {formatRelativeTime(device.last_seen_at)}
+                                        </Paragraph>
+                                    </YStack>
                                 </XStack>
-                            </ListCard>
-                        ))}
-                    </YStack>
-                </ScrollView>
+                                {!device.is_current && (
+                                    <Button
+                                        size="$3"
+                                        icon={<Trash2 size={16} color="#ff6b6b" />}
+                                        onPress={() => void removeDevice(device)}
+                                    />
+                                )}
+                            </XStack>
+                        </ListCard>
+                    ))}
+                </div>
             )}
         </YStack>
     );
@@ -1421,7 +1411,12 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function ListCard({ children }: { children: ReactNode }) {
     return (
-        <Card p="$3" bg="#171a1d" style={{ borderColor: "#252b31", borderWidth: 1 }}>
+        <Card
+            className="library-card"
+            p="$3"
+            bg="#171a1d"
+            style={{ borderColor: "#252b31", borderWidth: 1 }}
+        >
             {children}
         </Card>
     );
