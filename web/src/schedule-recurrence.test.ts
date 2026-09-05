@@ -45,13 +45,8 @@ test("a cadence the row cannot express reports custom, not once", () => {
     assert.equal(repeatChoiceOf(fortnightly), "custom");
     assert.equal(repeatChoiceOf(secondTuesday), "custom");
     assert.equal(repeatChoiceOf(yearly), "custom");
-    // Rust has a third variant, `Raw`, for a provider rule Clipper only passes
-    // through (crates/schedule/src/recurrence.rs). The TS mirror in
-    // packages/shared does not declare it yet, so this cast is the gap, not the
-    // test being lax — repeatChoiceOf still has to answer for what the wire can
-    // actually carry.
     assert.equal(
-        repeatChoiceOf({ kind: "raw", rule: "FREQ=DAILY;BYHOUR=9,17" } as unknown as Recurrence),
+        repeatChoiceOf({ kind: "imported", import: "saved-import", uid: "provider-event" }),
         "custom",
     );
 

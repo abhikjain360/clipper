@@ -219,7 +219,12 @@ parsed records reference their snapshot. A successful refresh activates a new
 batch and purges the previous batch from that source. Recordings/local plans and
 local overrides survive; references to purged imported plans become unavailable.
 Different sources may duplicate content. Cadence normalization preserves supported
-RRULEs; unsupported rules retain validated expansion data and the full raw source.
+RRULEs; unsupported recurrences resolve their rules from the encrypted raw
+snapshot at runtime through the import and provider UID. If that snapshot is
+deleted, those events are omitted with a warning rather than treated as one-off;
+one-off events, stored `Cadence` events and recordings remain. Native clients
+cache the complete encrypted raw file for offline use, while the browser keeps
+only a bounded in-memory cache and may download it again after reload.
 
 ## Decision Log
 
@@ -1091,11 +1096,12 @@ Five things the build changed about the plan:
 - **The serialized form is three contracts at once** — TypeScript, IPC, and the
   ciphertext at rest — so it is tagged and self-describing rather than
   positional, with a test pinning the shape.
-- **Ingested rules needed a variant, not a loophole.** `Recurrence::Raw` carries
-  a provider's RFC 5545 rule verbatim: validated on the way in, expanded as-is,
-  never editable. Modelling ingested rules as typed cadences would have implied
-  an editability D10 does not offer. The type now says which rules Clipper
-  understands and which it merely passes through.
+- **Ingested rules need the raw snapshot, not a persisted recurrence string.**
+  Unsupported provider rules are validated during ingest, then resolved at
+  runtime from the encrypted ICS snapshot using the import and provider UID;
+  they remain read-only. Rules that Clipper fully understands become typed
+  cadences. If the snapshot is unavailable, the event is omitted with a warning
+  rather than treated as a one-off.
 - **Ingest is native-only, and that is not a limitation to fix.** A browser
   cannot fetch a third-party calendar — no provider sends CORS headers — so the
   wasm build drops the parser entirely. This is D4 working as designed: the

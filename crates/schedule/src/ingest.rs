@@ -8,32 +8,27 @@
 //! Parsing lives here because it is pure. Fetching does not — that needs I/O and
 //! belongs to whichever client holds the source.
 
-#[cfg(not(target_family = "wasm"))]
-use std::{collections::HashMap, num::NonZeroU32};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroU32,
+};
 
-#[cfg(not(target_family = "wasm"))]
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-#[cfg(not(target_family = "wasm"))]
 use chrono_tz::Tz;
+use clipper_api_types::ObjectId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[cfg(not(target_family = "wasm"))]
-use crate::item::{OverrideChange, OverrideId, RecurrenceId, ScheduleItemId};
-#[cfg(not(target_family = "wasm"))]
-use crate::time::{BlockDuration, TimedStart};
 use crate::{
-    item::OccurrenceOverrideData,
+    engine::ImportedRuleResolver,
+    item::{OccurrenceOverrideData, OverrideChange, OverrideId, RecurrenceId, ScheduleItemId},
     recurrence::{Recurrence, RecurrenceError},
-    time::{ScheduleSpan, TimeError},
+    time::{BlockDuration, ScheduleSpan, TimeError, TimedStart},
 };
 
 /// Bound parser work even when `parse_ics` is called outside the HTTP fetcher.
-#[cfg(not(target_family = "wasm"))]
 const MAX_ICS_BYTES: usize = 8 * 1024 * 1024;
-#[cfg(not(target_family = "wasm"))]
 const MAX_COMPONENTS: usize = 50_000;
-#[cfg(not(target_family = "wasm"))]
 const MAX_PROPERTIES: usize = 500_000;
 
 /// Identifies a calendar source.
@@ -91,7 +86,7 @@ impl CalendarSource {
     pub fn contains_event(&self, object_id: &str, event: &IngestedEvent) -> bool {
         self.id == event.source
             && self.active_import.as_ref().is_some_and(|batch| {
-                event.import == Some(batch.object_id)
+                event.belongs_to_import(batch.object_id)
                     && batch.events.iter().any(|id| id.to_string() == object_id)
             })
     }
@@ -110,12 +105,14 @@ pub enum SourceKind {
 /// An event as the provider describes it. Read-only in Clipper.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IngestedEvent {
-    /// Derived from `(source, uid)` rather than random, so re-ingesting a feed
-    /// updates each event in place instead of duplicating it.
+    /// Stable domain identity derived from `(source, uid)`. Storage still uses
+    /// batch-specific object identities when an import snapshot is replaced.
     pub id: Uuid,
     pub source: SourceId,
-    /// Complete original feed. A missing/deleted target does not invalidate the parsed event.
-    /// Together with `uid` this identifies the original series and its provider overrides.
+    /// Complete original feed. Typed cadences and one-off events remain usable
+    /// if it is unavailable; reference-backed recurrence cannot expand without
+    /// resolving its raw rule from this snapshot. Together with `uid` this
+    /// identifies the original series and its provider overrides.
     pub import: Option<clipper_api_types::ObjectId>,
     /// The provider's own identifier. Stable across edits, and stable across
     /// calendars for the same meeting, which is what makes cross-source
@@ -126,14 +123,25 @@ pub struct IngestedEvent {
     pub span: ScheduleSpan,
     pub recurrence: Recurrence,
     /// Provider-owned overrides to the recurrence set. IDs are derived from
-    /// the event and recurrence position, so refreshing an unchanged feed does
-    /// not manufacture a new revision.
+    /// the stable event identity and recurrence position.
     #[serde(default)]
     pub overrides: Vec<OccurrenceOverrideData>,
     pub status: IngestedStatus,
 }
 
 impl IngestedEvent {
+    /// Both provenance and opaque recurrence must identify the same source event.
+    pub fn belongs_to_import(&self, import: ObjectId) -> bool {
+        self.import == Some(import)
+            && match &self.recurrence {
+                Recurrence::Imported {
+                    import: target,
+                    uid,
+                } => *target == import && *uid == self.uid,
+                Recurrence::Once | Recurrence::Every(_) => true,
+            }
+    }
+
     /// The stable id for an event, given its source and provider uid.
     pub fn derive_id(source: SourceId, uid: &str) -> Uuid {
         // A fixed namespace so the derivation is reproducible across devices —
@@ -174,28 +182,16 @@ pub struct SkippedEvent {
 /// Includes all-day events and invites regardless of organizer or RSVP.
 /// Attendance status is retained as metadata rather than used as a filter.
 ///
-/// Not built for wasm: a page cannot fetch a third-party calendar URL, so the
-/// browser only ever displays events another device ingested.
-#[cfg(not(target_family = "wasm"))]
-pub fn parse_ics(text: &str, source: SourceId) -> Result<IngestOutcome, IngestError> {
-    use calcard::icalendar::{ICalendar, ICalendarComponentType};
+/// `import` identifies the immutable raw file this parse came from. Opaque
+/// recurrence rules retain only that snapshot ID and their event UID.
+pub fn parse_ics(
+    text: &str,
+    source: SourceId,
+    import: ObjectId,
+) -> Result<IngestOutcome, IngestError> {
+    use calcard::icalendar::ICalendarComponentType;
 
-    validate_calendar_envelope(text)?;
-    let calendar =
-        ICalendar::parse(text).map_err(|error| IngestError::Malformed(format!("{error:?}")))?;
-    if calendar.components.len() > MAX_COMPONENTS {
-        return Err(IngestError::LimitExceeded("too many calendar components"));
-    }
-    let property_count = calendar
-        .components
-        .iter()
-        .try_fold(0usize, |total, component| {
-            total.checked_add(component.entries.len())
-        })
-        .ok_or(IngestError::LimitExceeded("too many calendar properties"))?;
-    if property_count > MAX_PROPERTIES {
-        return Err(IngestError::LimitExceeded("too many calendar properties"));
-    }
+    let calendar = parse_calendar(text)?;
 
     let mut outcome = IngestOutcome::default();
     let mut masters = Vec::new();
@@ -225,7 +221,7 @@ pub fn parse_ics(text: &str, source: SourceId) -> Result<IngestOutcome, IngestEr
             .as_ref()
             .and_then(|uid| overrides.remove(uid))
             .unwrap_or_default();
-        match event_from_component(component, &matching, source, uid.clone()) {
+        match event_from_component(component, &matching, source, import, uid.clone()) {
             Ok(event) => outcome.events.push(event),
             Err(reason) => outcome.skipped.push(SkippedEvent {
                 uid,
@@ -245,7 +241,61 @@ pub fn parse_ics(text: &str, source: SourceId) -> Result<IngestOutcome, IngestEr
     Ok(outcome)
 }
 
-#[cfg(not(target_family = "wasm"))]
+/// Recover validated opaque recurrence rules from one immutable import file.
+///
+/// Callers can merge the result for several snapshots, then construct one
+/// [`crate::RruleEngine`] and reuse it while expanding their events.
+pub fn parse_imported_recurrence_rules(
+    text: &str,
+    import: ObjectId,
+) -> Result<ImportedRuleResolver, IngestError> {
+    use calcard::icalendar::ICalendarComponentType;
+
+    let calendar = parse_calendar(text)?;
+    let mut resolver = ImportedRuleResolver::new();
+    let mut master_uids = HashSet::new();
+    for component in &calendar.components {
+        if component.component_type != ICalendarComponentType::VEvent
+            || property(component, "RECURRENCE-ID").is_some()
+        {
+            continue;
+        }
+        let Some(uid) = text_property(component, "UID") else {
+            continue;
+        };
+        if !master_uids.insert(uid.clone()) {
+            return Err(IngestError::DuplicateMasterUid(uid));
+        }
+        let Some(rule) = rrule_text(component)? else {
+            continue;
+        };
+        resolver.insert(import, uid, rule)?;
+    }
+    Ok(resolver)
+}
+
+fn parse_calendar(text: &str) -> Result<calcard::icalendar::ICalendar, IngestError> {
+    use calcard::icalendar::ICalendar;
+
+    validate_calendar_envelope(text)?;
+    let calendar =
+        ICalendar::parse(text).map_err(|error| IngestError::Malformed(format!("{error:?}")))?;
+    if calendar.components.len() > MAX_COMPONENTS {
+        return Err(IngestError::LimitExceeded("too many calendar components"));
+    }
+    let property_count = calendar
+        .components
+        .iter()
+        .try_fold(0usize, |total, component| {
+            total.checked_add(component.entries.len())
+        })
+        .ok_or(IngestError::LimitExceeded("too many calendar properties"))?;
+    if property_count > MAX_PROPERTIES {
+        return Err(IngestError::LimitExceeded("too many calendar properties"));
+    }
+    Ok(calendar)
+}
+
 fn validate_calendar_envelope(text: &str) -> Result<(), IngestError> {
     if text.len() > MAX_ICS_BYTES {
         return Err(IngestError::LimitExceeded("calendar exceeds 8 MiB"));
@@ -268,11 +318,11 @@ fn validate_calendar_envelope(text: &str) -> Result<(), IngestError> {
     Ok(())
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn event_from_component(
     component: &calcard::icalendar::ICalendarComponent,
     overrides: &[&calcard::icalendar::ICalendarComponent],
     source: SourceId,
+    import: ObjectId,
     uid: Option<String>,
 ) -> Result<IngestedEvent, IngestError> {
     let uid = uid.ok_or(IngestError::MissingUid)?;
@@ -282,10 +332,12 @@ fn event_from_component(
     let duration = duration_property(component)?;
 
     let span = span_from(&start, end.as_ref(), duration.as_ref(), None)?;
-    let recurrence = match rrule_text(component) {
+    let recurrence = match rrule_text(component)? {
         Some(rule) => Recurrence::from_imported_rule(
             rule,
             start.date.and_time(start.time.unwrap_or_default()),
+            import,
+            uid.clone(),
         )?,
         None => Recurrence::Once,
     };
@@ -294,7 +346,7 @@ fn event_from_component(
     Ok(IngestedEvent {
         id,
         source,
-        import: None,
+        import: Some(import),
         title: text_property(component, "SUMMARY").unwrap_or_else(|| "(no title)".to_string()),
         description: text_property(component, "DESCRIPTION"),
         span,
@@ -309,7 +361,6 @@ fn event_from_component(
     })
 }
 
-#[cfg(not(target_family = "wasm"))]
 /// A start as the feed expresses it, before it becomes a [`ScheduleSpan`].
 #[derive(Debug, Clone)]
 struct FeedTime {
@@ -320,7 +371,6 @@ struct FeedTime {
     utc: bool,
 }
 
-#[cfg(not(target_family = "wasm"))]
 impl FeedTime {
     fn local(&self) -> Option<NaiveDateTime> {
         self.time.map(|time| NaiveDateTime::new(self.date, time))
@@ -350,7 +400,6 @@ impl FeedTime {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn span_from(
     start: &FeedTime,
     end: Option<&FeedTime>,
@@ -411,7 +460,6 @@ fn span_from(
     })
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn positive_days(days: i64) -> Result<u32, IngestError> {
     u32::try_from(days)
         .ok()
@@ -419,7 +467,6 @@ fn positive_days(days: i64) -> Result<u32, IngestError> {
         .ok_or(IngestError::InvalidDuration)
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn duration_minutes(seconds: i64) -> Result<u32, IngestError> {
     if seconds <= 0 || seconds % 60 != 0 {
         return Err(IngestError::InvalidDuration);
@@ -427,7 +474,6 @@ fn duration_minutes(seconds: i64) -> Result<u32, IngestError> {
     u32::try_from(seconds / 60).map_err(|_| IngestError::InvalidDuration)
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn all_day_duration(duration: &calcard::icalendar::ICalendarDuration) -> Result<u32, IngestError> {
     if duration.neg || duration.hours != 0 || duration.minutes != 0 || duration.seconds != 0 {
         return Err(IngestError::InvalidDuration);
@@ -442,7 +488,6 @@ fn all_day_duration(duration: &calcard::icalendar::ICalendarDuration) -> Result<
         .ok_or(IngestError::InvalidDuration)
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn ical_duration_minutes(
     duration: &calcard::icalendar::ICalendarDuration,
 ) -> Result<u32, IngestError> {
@@ -460,7 +505,6 @@ fn ical_duration_minutes(
     duration_minutes(seconds)
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn duration_property(
     component: &calcard::icalendar::ICalendarComponent,
 ) -> Result<Option<calcard::icalendar::ICalendarDuration>, IngestError> {
@@ -479,7 +523,6 @@ fn duration_property(
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn recurrence_overrides(
     master: &calcard::icalendar::ICalendarComponent,
     overrides: &[&calcard::icalendar::ICalendarComponent],
@@ -552,7 +595,6 @@ fn recurrence_overrides(
     Ok(by_recurrence_id.into_values().collect())
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn make_override(
     event_id: Uuid,
     item: ScheduleItemId,
@@ -568,7 +610,6 @@ fn make_override(
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn recurrence_id_for(
     master_span: &ScheduleSpan,
     time: &FeedTime,
@@ -591,7 +632,6 @@ fn recurrence_id_for(
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn span_at(master_span: &ScheduleSpan, time: &FeedTime) -> Result<ScheduleSpan, IngestError> {
     match master_span {
         ScheduleSpan::Timed { duration, .. } if time.time.is_some() => Ok(ScheduleSpan::Timed {
@@ -606,7 +646,6 @@ fn span_at(master_span: &ScheduleSpan, time: &FeedTime) -> Result<ScheduleSpan, 
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn recurrence_times(
     component: &calcard::icalendar::ICalendarComponent,
     name: &str,
@@ -631,7 +670,6 @@ fn recurrence_times(
     Ok(times)
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn text_property(component: &calcard::icalendar::ICalendarComponent, name: &str) -> Option<String> {
     use calcard::{common::IanaString, icalendar::ICalendarValue};
 
@@ -646,24 +684,30 @@ fn text_property(component: &calcard::icalendar::ICalendarComponent, name: &str)
         })
 }
 
-#[cfg(not(target_family = "wasm"))]
-fn rrule_text(component: &calcard::icalendar::ICalendarComponent) -> Option<String> {
+fn rrule_text(
+    component: &calcard::icalendar::ICalendarComponent,
+) -> Result<Option<String>, IngestError> {
     use calcard::icalendar::ICalendarValue;
 
-    component
+    let mut entries = component
         .entries
         .iter()
-        .find(|entry| entry.name.as_str().eq_ignore_ascii_case("RRULE"))
-        .and_then(|entry| match entry.values.first() {
-            // calcard round-trips a parsed rule back to RFC 5545 text, which is
-            // what the expansion engine wants — no re-derivation here.
-            Some(ICalendarValue::RecurrenceRule(rule)) => Some(rule.to_string()),
-            Some(ICalendarValue::Text(text)) => Some(text.clone()),
-            _ => None,
-        })
+        .filter(|entry| entry.name.as_str().eq_ignore_ascii_case("RRULE"));
+    let Some(entry) = entries.next() else {
+        return Ok(None);
+    };
+    if entries.next().is_some() || entry.values.len() != 1 {
+        return Err(IngestError::AmbiguousRecurrenceRule);
+    }
+    match entry.values.first() {
+        // calcard round-trips a parsed rule back to RFC 5545 text, which is
+        // what the expansion engine wants — no re-derivation here.
+        Some(ICalendarValue::RecurrenceRule(rule)) => Ok(Some(rule.to_string())),
+        Some(ICalendarValue::Text(text)) => Ok(Some(text.clone())),
+        _ => Err(IngestError::AmbiguousRecurrenceRule),
+    }
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn date_time_property(
     component: &calcard::icalendar::ICalendarComponent,
     name: &str,
@@ -674,7 +718,6 @@ fn date_time_property(
     feed_time_from_entry(entry).map(Some)
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn property<'a>(
     component: &'a calcard::icalendar::ICalendarComponent,
     name: &str,
@@ -685,7 +728,6 @@ fn property<'a>(
         .find(|entry| entry.name.as_str().eq_ignore_ascii_case(name))
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn feed_time_from_entry(
     entry: &calcard::icalendar::ICalendarEntry,
 ) -> Result<FeedTime, IngestError> {
@@ -697,7 +739,6 @@ fn feed_time_from_entry(
     feed_time_from_partial(entry, partial)
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn feed_time_from_partial(
     entry: &calcard::icalendar::ICalendarEntry,
     partial: &calcard::common::PartialDateTime,
@@ -771,6 +812,10 @@ pub enum IngestError {
     MissingRecurrenceId,
     #[error("recurrence override has no matching master event")]
     MissingRecurringMaster,
+    #[error("calendar snapshot has more than one master event with UID {0:?}")]
+    DuplicateMasterUid(String),
+    #[error("event must contain at most one RRULE value")]
+    AmbiguousRecurrenceRule,
     #[error("event contains an invalid date or time")]
     InvalidDateTime,
     #[error("TZID {0:?} is not an IANA time zone known to this build")]
