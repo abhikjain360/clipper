@@ -20,13 +20,13 @@ pub const DEVICE_LOGIN_PROOF_CHALLENGE_BYTES: usize = 32;
 pub const DEVICE_LOGIN_PROOF_SIGNATURE_BYTES: usize = 64;
 pub const DEVICE_LOGIN_PROOF_VERSION: u64 = 1;
 pub const OBJECT_ENVELOPE_SIGNATURE_BYTES: usize = 64;
-/// Wire format version of `ObjectEnvelopeBodyV2`.
+/// Current wire format version of `ObjectEnvelopeBody`.
 ///
-/// Bumped from 1 when revisions landed (D6): the body gained `revision` and
-/// `parent_hash`, and postcard — which both the signature and the AAD are
-/// computed over — encodes positionally, so v1 bytes cannot be read as v2.
-/// There is deliberately no v1 compatibility path; see `docs/schedule-plan.md`.
-pub const OBJECT_ENVELOPE_VERSION_V2: u64 = 2;
+/// Version 1 is the initial supported format, including parent-linked revisions.
+/// Reject unsupported versions rather than interpreting them as this format.
+/// Future incompatible changes must increment this value; abandoned development
+/// formats have no compatibility path.
+pub const OBJECT_ENVELOPE_VERSION: u64 = 1;
 
 /// The plaintext sealed as the meta of a tombstone revision.
 ///
@@ -416,7 +416,7 @@ pub enum ObjectEnvelopeOperation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct ObjectEnvelopePayloadV2 {
+pub struct ObjectEnvelopePayload {
     #[garde(skip)]
     pub id: ObjectPayloadId,
     #[garde(length(equal = XCHACHA20_NONCE_BYTES))]
@@ -428,7 +428,7 @@ pub struct ObjectEnvelopePayloadV2 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct ObjectEnvelopeBodyV2 {
+pub struct ObjectEnvelopeBody {
     #[garde(skip)]
     pub object_id: ObjectId,
     #[garde(skip)]
@@ -466,13 +466,13 @@ pub struct ObjectEnvelopeBodyV2 {
         custom(validate_unique_envelope_payload_ids),
         custom(validate_payload_count_for_operation(self.operation))
     )]
-    pub payloads: Vec<ObjectEnvelopePayloadV2>,
+    pub payloads: Vec<ObjectEnvelopePayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct ObjectEnvelopeV2 {
+pub struct ObjectEnvelope {
     #[garde(dive)]
-    pub body: ObjectEnvelopeBodyV2,
+    pub body: ObjectEnvelopeBody,
     #[garde(length(equal = OBJECT_ENVELOPE_SIGNATURE_BYTES))]
     pub signature: Vec<u8>,
 }
@@ -498,7 +498,7 @@ pub struct ObjectReviseRequest {
     )]
     pub payloads: Vec<ObjectPayloadInit>,
     #[garde(dive)]
-    pub envelope: ObjectEnvelopeV2,
+    pub envelope: ObjectEnvelope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -535,7 +535,7 @@ pub struct ObjectInitRequest {
     )]
     pub payloads: Vec<ObjectPayloadInit>,
     #[garde(dive)]
-    pub envelope: ObjectEnvelopeV2,
+    pub envelope: ObjectEnvelope,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -620,7 +620,7 @@ pub struct ObjectListItem {
     /// holds its signing key, so object provenance cannot be re-attested and the
     /// client falls back to the export-key AEAD AAD for authenticity.
     pub source_device_signing_public_key: Option<Vec<u8>>,
-    pub envelope: ObjectEnvelopeV2,
+    pub envelope: ObjectEnvelope,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1049,7 +1049,7 @@ fn validate_revision_link(
 /// empty `Create` would be accepted as an object with no content.
 fn validate_payload_count_for_operation(
     operation: ObjectEnvelopeOperation,
-) -> impl FnOnce(&Vec<ObjectEnvelopePayloadV2>, &()) -> garde::Result {
+) -> impl FnOnce(&Vec<ObjectEnvelopePayload>, &()) -> garde::Result {
     move |payloads, _| match operation {
         ObjectEnvelopeOperation::Delete if !payloads.is_empty() => Err(garde::Error::new(
             "a delete revision must not carry payloads",
@@ -1064,7 +1064,7 @@ fn validate_payload_count_for_operation(
 }
 
 fn validate_unique_envelope_payload_ids(
-    value: &Vec<ObjectEnvelopePayloadV2>,
+    value: &Vec<ObjectEnvelopePayload>,
     _: &(),
 ) -> garde::Result {
     let mut seen = HashSet::new();
@@ -1102,8 +1102,8 @@ mod tests {
     mod revision_link {
         use super::*;
 
-        fn payload() -> ObjectEnvelopePayloadV2 {
-            ObjectEnvelopePayloadV2 {
+        fn payload() -> ObjectEnvelopePayload {
+            ObjectEnvelopePayload {
                 id: ObjectPayloadId::from(Uuid::from_bytes([2; 16])),
                 nonce: vec![0; XCHACHA20_NONCE_BYTES],
                 ciphertext_size: 1,
@@ -1115,12 +1115,12 @@ mod tests {
             revision: u64,
             parent_hash: Option<[u8; SHA256_BYTES]>,
             operation: ObjectEnvelopeOperation,
-            payloads: Vec<ObjectEnvelopePayloadV2>,
-        ) -> ObjectEnvelopeBodyV2 {
-            ObjectEnvelopeBodyV2 {
+            payloads: Vec<ObjectEnvelopePayload>,
+        ) -> ObjectEnvelopeBody {
+            ObjectEnvelopeBody {
                 object_id: ObjectId::from(Uuid::from_bytes([1; 16])),
                 object_type: ObjectKind::Schedule,
-                envelope_version: OBJECT_ENVELOPE_VERSION_V2,
+                envelope_version: OBJECT_ENVELOPE_VERSION,
                 revision,
                 parent_hash,
                 source_device_id: DeviceId::from(Uuid::from_bytes([3; 16])),

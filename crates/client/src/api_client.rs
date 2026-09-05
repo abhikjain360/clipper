@@ -982,11 +982,11 @@ fn is_json_content_type(value: Option<&str>) -> bool {
 pub fn encrypt_clipboard_meta(
     meta: &ClipboardMeta,
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV2,
+    envelope_body: &ObjectEnvelopeBody,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
     let json = serde_json::to_vec(meta)
         .map_err(|e| crypto::CryptoError::Encrypt(format!("json: {}", e)))?;
-    let aad = crypto::object_meta_aad_v2(envelope_body)?;
+    let aad = crypto::object_meta_aad(envelope_body)?;
     let (nonce, ciphertext) = crypto::encrypt(encryption_key, &json, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
@@ -996,9 +996,9 @@ pub fn decrypt_clipboard_meta(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV2,
+    envelope_body: &ObjectEnvelopeBody,
 ) -> Result<ClipboardMeta, crypto::CryptoError> {
-    let aad = crypto::object_meta_aad_v2(envelope_body)?;
+    let aad = crypto::object_meta_aad(envelope_body)?;
     let plaintext = crypto::decrypt(encryption_key, nonce, ciphertext, &aad)?;
     serde_json::from_slice(&plaintext)
         .map_err(|e| crypto::CryptoError::Decrypt(format!("json: {}", e)))
@@ -1008,10 +1008,10 @@ pub fn decrypt_clipboard_meta(
 pub fn encrypt_clipboard_payload(
     data: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV2,
+    envelope_body: &ObjectEnvelopeBody,
     payload_id: ObjectPayloadId,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
-    let aad = crypto::object_payload_aad_v2(envelope_body, payload_id)?;
+    let aad = crypto::object_payload_aad(envelope_body, payload_id)?;
     let (nonce, ciphertext) = crypto::encrypt(encryption_key, data, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
@@ -1021,10 +1021,10 @@ pub fn decrypt_clipboard_payload(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV2,
+    envelope_body: &ObjectEnvelopeBody,
     payload_id: ObjectPayloadId,
 ) -> Result<Vec<u8>, crypto::CryptoError> {
-    let aad = crypto::object_payload_aad_v2(envelope_body, payload_id)?;
+    let aad = crypto::object_payload_aad(envelope_body, payload_id)?;
     crypto::decrypt(encryption_key, nonce, ciphertext, &aad)
 }
 
@@ -1032,11 +1032,11 @@ pub fn decrypt_clipboard_payload(
 pub fn encrypt_file_meta_bytes(
     meta: &FileMeta,
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV2,
+    envelope_body: &ObjectEnvelopeBody,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
     let json = serde_json::to_vec(meta)
         .map_err(|e| crypto::CryptoError::Encrypt(format!("json: {}", e)))?;
-    let aad = crypto::object_meta_aad_v2(envelope_body)?;
+    let aad = crypto::object_meta_aad(envelope_body)?;
     let (nonce, ciphertext) = crypto::encrypt(encryption_key, &json, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
@@ -1046,9 +1046,9 @@ pub fn decrypt_file_meta_bytes(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV2,
+    envelope_body: &ObjectEnvelopeBody,
 ) -> Result<FileMeta, crypto::CryptoError> {
-    let aad = crypto::object_meta_aad_v2(envelope_body)?;
+    let aad = crypto::object_meta_aad(envelope_body)?;
     let plaintext = crypto::decrypt(encryption_key, nonce, ciphertext, &aad)?;
     decode_file_meta_plaintext(&plaintext)
 }
@@ -1062,10 +1062,10 @@ fn decode_file_meta_plaintext(plaintext: &[u8]) -> Result<FileMeta, crypto::Cryp
 pub fn encrypt_file_blob_bytes(
     data: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV2,
+    envelope_body: &ObjectEnvelopeBody,
     payload_id: ObjectPayloadId,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
-    let aad = crypto::object_payload_aad_v2(envelope_body, payload_id)?;
+    let aad = crypto::object_payload_aad(envelope_body, payload_id)?;
     let (nonce, ciphertext) = crypto::encrypt(encryption_key, data, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
@@ -1075,10 +1075,10 @@ pub fn decrypt_file_blob_bytes(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV2,
+    envelope_body: &ObjectEnvelopeBody,
     payload_id: ObjectPayloadId,
 ) -> Result<Vec<u8>, crypto::CryptoError> {
-    let aad = crypto::object_payload_aad_v2(envelope_body, payload_id)?;
+    let aad = crypto::object_payload_aad(envelope_body, payload_id)?;
     crypto::decrypt(encryption_key, nonce, ciphertext, &aad)
 }
 
@@ -1164,11 +1164,11 @@ pub enum ClientError {
 mod crypto_tests {
     use super::*;
 
-    fn envelope_body(object_id: uuid::Uuid, payload_id: uuid::Uuid) -> ObjectEnvelopeBodyV2 {
-        ObjectEnvelopeBodyV2 {
+    fn envelope_body(object_id: uuid::Uuid, payload_id: uuid::Uuid) -> ObjectEnvelopeBody {
+        ObjectEnvelopeBody {
             object_id: object_id.into(),
             object_type: ObjectKind::File,
-            envelope_version: crypto::OBJECT_ENVELOPE_VERSION_V2,
+            envelope_version: crypto::OBJECT_ENVELOPE_VERSION,
             revision: 1,
             parent_hash: None,
             source_device_id: uuid::Uuid::now_v7().into(),
@@ -1176,7 +1176,7 @@ mod crypto_tests {
             operation: ObjectEnvelopeOperation::Create,
             meta_nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
             sha256_meta_ciphertext: vec![0_u8; crypto::SHA256_BYTES],
-            payloads: vec![ObjectEnvelopePayloadV2 {
+            payloads: vec![ObjectEnvelopePayload {
                 id: payload_id.into(),
                 nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
                 ciphertext_size: 0,

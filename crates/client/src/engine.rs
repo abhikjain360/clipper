@@ -697,14 +697,14 @@ impl SyncEngine {
             created_at.clone(),
             meta_nonce.clone(),
             crypto::sha256(&meta_ciphertext).to_vec(),
-            vec![ObjectEnvelopePayloadV2 {
+            vec![ObjectEnvelopePayload {
                 id: payload_id_typed,
                 nonce: payload_nonce.clone(),
                 ciphertext_size: payload_size,
                 sha256_ciphertext: payload_hash.clone(),
             }],
         );
-        let envelope = ObjectEnvelopeV2 {
+        let envelope = ObjectEnvelope {
             signature: crypto::sign_object_envelope_body(&signing_key, &envelope_body)?,
             body: envelope_body,
         };
@@ -1010,14 +1010,14 @@ impl SyncEngine {
             created_at.clone(),
             meta_nonce.clone(),
             crypto::sha256(&meta_ciphertext).to_vec(),
-            vec![ObjectEnvelopePayloadV2 {
+            vec![ObjectEnvelopePayload {
                 id: payload_id_typed,
                 nonce: blob_nonce.clone(),
                 ciphertext_size: blob_size,
                 sha256_ciphertext: blob_hash.clone(),
             }],
         );
-        let envelope = ObjectEnvelopeV2 {
+        let envelope = ObjectEnvelope {
             signature: crypto::sign_object_envelope_body(&signing_key, &envelope_body)?,
             body: envelope_body,
         };
@@ -1252,14 +1252,14 @@ impl SyncEngine {
             created_at.clone(),
             meta_nonce.clone(),
             crypto::sha256(&meta_ciphertext).to_vec(),
-            vec![ObjectEnvelopePayloadV2 {
+            vec![ObjectEnvelopePayload {
                 id: payload_id_typed,
                 nonce: payload_nonce.clone(),
                 ciphertext_size: payload_size,
                 sha256_ciphertext: payload_hash.clone(),
             }],
         );
-        let envelope = ObjectEnvelopeV2 {
+        let envelope = ObjectEnvelope {
             signature: crypto::sign_object_envelope_body(&signing_key, &envelope_body)?,
             body: envelope_body,
         };
@@ -1363,7 +1363,7 @@ impl SyncEngine {
             created_at.clone(),
             Vec::new(),
         );
-        let aad = crypto::object_meta_aad_v2(&aad_body)?;
+        let aad = crypto::object_meta_aad(&aad_body)?;
         let (meta_nonce, meta_ciphertext) =
             crypto::encrypt(&encryption_key, TOMBSTONE_META_PLAINTEXT, &aad)?;
         let envelope_body = object_envelope_body(
@@ -1380,7 +1380,7 @@ impl SyncEngine {
             meta_nonce,
             meta_ciphertext,
             payloads: Vec::new(),
-            envelope: ObjectEnvelopeV2 {
+            envelope: ObjectEnvelope {
                 signature: crypto::sign_object_envelope_body(&signing_key, &envelope_body)?,
                 body: envelope_body,
             },
@@ -3581,7 +3581,7 @@ fn create_object_envelope_body_for_aad(
     source_device_id: DeviceId,
     created_at: String,
     payload_ids: Vec<ObjectPayloadId>,
-) -> ObjectEnvelopeBodyV2 {
+) -> ObjectEnvelopeBody {
     object_envelope_body_for_aad(
         object_id,
         kind,
@@ -3605,7 +3605,7 @@ fn object_envelope_body_for_aad(
     source_device_id: DeviceId,
     created_at: String,
     payload_ids: Vec<ObjectPayloadId>,
-) -> ObjectEnvelopeBodyV2 {
+) -> ObjectEnvelopeBody {
     object_envelope_body(
         object_id,
         kind,
@@ -3616,7 +3616,7 @@ fn object_envelope_body_for_aad(
         Vec::new(),
         payload_ids
             .into_iter()
-            .map(|id| ObjectEnvelopePayloadV2 {
+            .map(|id| ObjectEnvelopePayload {
                 id,
                 nonce: Vec::new(),
                 ciphertext_size: 0,
@@ -3670,8 +3670,8 @@ fn create_object_envelope_body(
     created_at: String,
     meta_nonce: Vec<u8>,
     sha256_meta_ciphertext: Vec<u8>,
-    payloads: Vec<ObjectEnvelopePayloadV2>,
-) -> ObjectEnvelopeBodyV2 {
+    payloads: Vec<ObjectEnvelopePayload>,
+) -> ObjectEnvelopeBody {
     object_envelope_body(
         object_id,
         kind,
@@ -3693,12 +3693,12 @@ fn object_envelope_body(
     created_at: String,
     meta_nonce: Vec<u8>,
     sha256_meta_ciphertext: Vec<u8>,
-    payloads: Vec<ObjectEnvelopePayloadV2>,
-) -> ObjectEnvelopeBodyV2 {
-    ObjectEnvelopeBodyV2 {
+    payloads: Vec<ObjectEnvelopePayload>,
+) -> ObjectEnvelopeBody {
+    ObjectEnvelopeBody {
         object_id,
         object_type: kind,
-        envelope_version: crypto::OBJECT_ENVELOPE_VERSION_V2,
+        envelope_version: crypto::OBJECT_ENVELOPE_VERSION,
         revision: placement.revision(),
         parent_hash: placement.parent_hash(),
         source_device_id,
@@ -3727,7 +3727,7 @@ fn verify_object_list_item_envelope(item: &ObjectListItem) -> Result<(), ClientE
     let meta_hash = crypto::sha256(&item.meta_ciphertext);
     if body.object_id != item.id
         || body.object_type != item.kind
-        || body.envelope_version != crypto::OBJECT_ENVELOPE_VERSION_V2
+        || body.envelope_version != crypto::OBJECT_ENVELOPE_VERSION
         // The revision is signed and also stated in the clear beside it; they
         // must agree, or the server could relabel which revision this is while
         // serving a genuinely signed body.
@@ -4103,8 +4103,8 @@ mod tests {
         }
     }
 
-    fn envelope_payload(id: ObjectPayloadId) -> ObjectEnvelopePayloadV2 {
-        ObjectEnvelopePayloadV2 {
+    fn envelope_payload(id: ObjectPayloadId) -> ObjectEnvelopePayload {
+        ObjectEnvelopePayload {
             id,
             nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
             ciphertext_size: 0,
@@ -4117,16 +4117,20 @@ mod tests {
     /// rejection can only come from the over-count guard, and a legitimately
     /// sized list verifies cleanly.
     fn signed_item_with_payload_count(count: usize) -> ObjectListItem {
+        signed_item_with_version(count, crypto::OBJECT_ENVELOPE_VERSION)
+    }
+
+    fn signed_item_with_version(count: usize, version: u64) -> ObjectListItem {
         let object_id: ObjectId = uuid::Uuid::now_v7().into();
         let device_id: DeviceId = uuid::Uuid::now_v7().into();
         let signing_key = crypto::generate_device_signing_secret_key();
         let public_key = crypto::device_signing_public_key(&signing_key);
         let payload_ids: Vec<ObjectPayloadId> =
             (0..count).map(|_| uuid::Uuid::now_v7().into()).collect();
-        let body = ObjectEnvelopeBodyV2 {
+        let body = ObjectEnvelopeBody {
             object_id,
             object_type: ObjectKind::Clipboard,
-            envelope_version: crypto::OBJECT_ENVELOPE_VERSION_V2,
+            envelope_version: version,
             revision: 1,
             parent_hash: None,
             source_device_id: device_id,
@@ -4148,7 +4152,20 @@ mod tests {
             created_at: "2026-06-13T00:00:00Z".into(),
             source_device_id: device_id,
             source_device_signing_public_key: Some(public_key.to_vec()),
-            envelope: ObjectEnvelopeV2 { body, signature },
+            envelope: ObjectEnvelope { body, signature },
+        }
+    }
+
+    #[test]
+    fn envelope_verification_accepts_initial_format_and_rejects_unknown_versions() {
+        assert_eq!(crypto::OBJECT_ENVELOPE_VERSION, 1);
+        verify_object_list_item_envelope(&signed_item_with_version(1, 1))
+            .expect("initial format must verify");
+        for version in [0, 2, u64::MAX] {
+            // Sign the actual unsupported version so this exercises format
+            // rejection, not rejection of a tampered signature.
+            verify_object_list_item_envelope(&signed_item_with_version(1, version))
+                .expect_err("unsupported format must be rejected");
         }
     }
 
