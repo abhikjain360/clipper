@@ -164,8 +164,7 @@ fn all_day_events_are_dates_and_dtend_is_exclusive() {
     );
 }
 
-/// A planner shows every invite. abnormalarm's filter — organized, accepted,
-/// or unattended, and no all-day events — belongs to an alarm app, not here.
+/// All-day events remain visible in the planner instead of being filtered out.
 #[test]
 fn all_day_events_are_not_filtered_out() {
     let outcome = parse();

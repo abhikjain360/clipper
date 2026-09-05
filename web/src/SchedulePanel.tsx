@@ -1345,7 +1345,7 @@ function ScheduleComposer({
     //
     // Keyed on a ref rather than on the effect's dependencies: a sync push
     // re-renders this panel, and re-running the load would overwrite whatever
-    // the owner had typed since opening it. Depending on the callbacks would be
+    // the user had typed since opening it. Depending on the callbacks would be
     // worse still — their identity changes every render.
     const loadedObjectId = useRef<string | null>(null);
     useEffect(() => {
@@ -1709,7 +1709,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 /// Read back a stored record. A record this build cannot parse is reported
 /// rather than silently replaced with a default, which would quietly rewrite
-/// the owner's block on save.
+/// the user's block on save.
 function parseDefinition(json: string): ScheduleItem | null {
     try {
         const parsed = JSON.parse(json) as ScheduleItem;

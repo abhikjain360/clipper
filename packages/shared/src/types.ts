@@ -152,7 +152,7 @@ export type OccurrenceView = {
   all_day: boolean;
   // An override moved this off its rule position.
   overridden: boolean;
-  // The calendar this came from, or null for a block the owner authored. Its
+  // The calendar this came from, or null for a block the user authored. Its
   // core fields are read-only, so the origin has to be visible.
   source: string | null;
   // Cancelled upstream. Shown rather than hidden — time logged against it

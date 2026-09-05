@@ -145,7 +145,7 @@ pub struct OccurrenceView {
     /// True when an override moved this occurrence off its rule position, so
     /// the UI can mark it as changed.
     pub overridden: bool,
-    /// Name of the calendar this came from, or `None` for a block the owner
+    /// Name of the calendar this came from, or `None` for a block the user
     /// authored. An ingested event's origin stays visible because its
     /// core fields are read-only here.
     #[serde(default)]
