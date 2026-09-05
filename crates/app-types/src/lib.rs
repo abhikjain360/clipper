@@ -134,6 +134,27 @@ pub struct OccurrenceView {
     pub cancelled: bool,
 }
 
+/// One alarm the platform should register.
+///
+/// Every field the ring screen needs is here rather than looked up, because on
+/// Android this has to work before the device is unlocked — at which point the
+/// encrypted store cannot be read at all.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AlarmView {
+    /// The series this belongs to.
+    pub item_id: String,
+    /// Stable per occurrence, so a dismissal lands on the right one.
+    pub occurrence_key: String,
+    pub label: String,
+    /// Epoch milliseconds. The platform alarm APIs take an absolute instant, so
+    /// this crosses as a number rather than a formatted string.
+    pub fire_at_millis: i64,
+    /// When the block itself begins. Differs from `fire_at_millis` whenever the
+    /// alarm has a lead time.
+    pub occurrence_start_millis: i64,
+}
+
 /// A calendar source, rendered for a list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]

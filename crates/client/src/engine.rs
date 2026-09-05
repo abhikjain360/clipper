@@ -9,7 +9,7 @@ use std::{
 };
 
 pub use clipper_app_types::{
-    AppState, AuthenticatedSession, CalendarSourceView, ClipboardPayload, CollabItem,
+    AlarmView, AppState, AuthenticatedSession, CalendarSourceView, ClipboardPayload, CollabItem,
     ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem, DeviceInfo, IngestReport,
     OccurrenceView, SavedProfile, ScheduleItemView,
 };
@@ -1308,6 +1308,71 @@ impl SyncEngine {
         }
         out.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| a.title.cmp(&b.title)));
         Ok(out)
+    }
+
+    /// Every alarm due in the next `within_hours`, soonest first.
+    ///
+    /// The platform registers these as one-shot exact alarms and never
+    /// recomputes a recurrence itself — this crate is the only place a rule is
+    /// expanded, so there is no second implementation to drift.
+    ///
+    /// Ingested events do not raise alarms: their fields are upstream-owned
+    /// (D10), and an alarm is something the owner decides, not the calendar.
+    pub async fn next_alarms(
+        &self,
+        within_hours: u32,
+        observer_zone: &str,
+    ) -> Result<Vec<AlarmView>, ClientError> {
+        let now = chrono::Utc::now();
+        // Expand from slightly before now so an alarm with a lead time that has
+        // started but not fired is still found.
+        let window = Window::new(
+            now - chrono::TimeDelta::hours(24),
+            now + chrono::TimeDelta::hours(i64::from(within_hours.max(1))),
+        )
+        .map_err(|error| ClientError::InvalidArgument(error.to_string()))?;
+        let expansion = Expansion {
+            window,
+            observer: zone_or_utc(observer_zone),
+        };
+
+        let records = self.local_store.schedule_records().await;
+        let overrides: Vec<OccurrenceOverride> = records
+            .iter()
+            .filter_map(|record| match record {
+                ScheduleRecord::Override(entry) => Some((**entry).clone()),
+                _ => None,
+            })
+            .collect();
+
+        let engine = RruleEngine::new();
+        let mut alarms = Vec::new();
+        for record in &records {
+            let Some(item) = record.as_item() else {
+                continue;
+            };
+            if item.alarm.is_none() {
+                continue;
+            }
+            match engine.occurrences(item, &overrides, &expansion) {
+                Ok(occurrences) => alarms.extend(
+                    clipper_schedule::plan_alarms(item, &occurrences, now)
+                        .iter()
+                        .map(|planned| AlarmView {
+                            item_id: planned.item.to_string(),
+                            occurrence_key: occurrence_key(&planned.recurrence_id),
+                            label: planned.label.clone(),
+                            fire_at_millis: planned.fire_at.timestamp_millis(),
+                            occurrence_start_millis: planned.occurrence_start.timestamp_millis(),
+                        }),
+                ),
+                // A series that will not expand must not silence every other
+                // alarm on the device.
+                Err(error) => warn!(item = %item.id, "Failed to plan alarms: {}", error),
+            }
+        }
+        alarms.sort_by_key(|alarm| alarm.fire_at_millis);
+        Ok(alarms)
     }
 
     /// Register a calendar to pull events from.
@@ -2770,6 +2835,21 @@ fn encrypted_clipboard_from_init(
     EncryptedInlineObject {
         object: encrypted_object_from_init(init_req),
         payload_ciphertext,
+    }
+}
+
+/// A stable string for one occurrence of a series.
+///
+/// The platform side needs a key it can put in an intent extra and compare
+/// later; it has no reason to understand the three ways an occurrence can be
+/// identified, only that the same occurrence yields the same string.
+fn occurrence_key(recurrence_id: &clipper_schedule::RecurrenceId) -> String {
+    match recurrence_id {
+        clipper_schedule::RecurrenceId::Floating(local) => format!("floating:{local}"),
+        clipper_schedule::RecurrenceId::Instant(instant) => {
+            format!("instant:{}", instant.timestamp_millis())
+        }
+        clipper_schedule::RecurrenceId::Date(date) => format!("date:{date}"),
     }
 }
 

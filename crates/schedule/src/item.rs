@@ -70,6 +70,11 @@ pub struct ScheduleItem {
     /// time. Optional so that no task subsystem is required for the schedule to
     /// be useful.
     pub reference: Option<ObjectRef>,
+    /// When this block should raise an alarm. Absent means silent, which is the
+    /// default — most blocks are a record of intent, not a reason to wake
+    /// someone.
+    #[serde(default)]
+    pub alarm: Option<crate::alarm::AlarmPolicy>,
 }
 
 /// A pointer to another Clipper object.

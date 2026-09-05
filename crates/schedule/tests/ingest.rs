@@ -250,6 +250,7 @@ fn an_ingested_series_expands() {
         span: standup.span.clone(),
         recurrence: standup.recurrence.clone(),
         reference: None,
+        alarm: None,
     };
 
     let from = Utc

@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use clipper_app_types::{AppState, ClipboardPayload, CollabItem, DeviceInfo};
+use clipper_app_types::{AlarmView, AppState, ClipboardPayload, CollabItem, DeviceInfo};
 use clipper_client::{
     api_client::ClientError,
     engine::{SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
@@ -147,6 +147,22 @@ impl MobileClipperClient {
             .wait_for_state_change_after(seen_version)
             .await?;
         Ok(version as f64)
+    }
+
+    /// Alarms due within `within_hours`, soonest first.
+    ///
+    /// The Android layer registers each as a one-shot exact alarm and mirrors
+    /// the list to device-protected storage so a reboot can re-register them
+    /// before the user unlocks — at which point nothing encrypted is readable.
+    pub async fn next_alarms(
+        &self,
+        within_hours: u32,
+        observer_zone: String,
+    ) -> Result<Vec<AlarmView>, MobileError> {
+        Ok(self
+            .engine
+            .next_alarms(within_hours, &observer_zone)
+            .await?)
     }
 
     pub async fn refresh(&self) -> Result<(), MobileError> {

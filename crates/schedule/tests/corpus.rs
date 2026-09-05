@@ -36,6 +36,7 @@ fn item(dtstart: &str, recurrence: Recurrence) -> ScheduleItem {
         },
         recurrence,
         reference: None,
+        alarm: None,
     }
 }
 
@@ -290,6 +291,7 @@ fn dst_gap_shifts_forward_like_java() {
         },
         recurrence: daily(1),
         reference: None,
+        alarm: None,
     };
 
     let after = Tz::Europe__Berlin
