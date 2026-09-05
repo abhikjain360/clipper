@@ -5,11 +5,15 @@ blocks, recurring events, alarm dispatch into
 [abnormalarm](https://github.com/abhikjain360/abnormalarm), and two-way sync
 with Google Calendar and Zoho Calendar.
 
-**Status: milestone 1 complete on branch `schedule-module`.** The recurrence
-engine, the schedule object kind, sync, the web grid, and iCalendar ingest are
-built and verified against a live server. Nothing is merged to `main` and
-nothing is deployed. See the [Build log](#build-log) for what landed, what it
-changed about the plan, and what milestone 1 deliberately leaves out.
+**Status: scheduler, Android alarm absorption, and D6 revisions implemented on
+`schedule-module`; awaiting owner QA and merge review.** This branch includes
+the web/desktop grid, editing, actual-time timers, and native iCalendar ingest.
+Google/Zoho OAuth connectors, publishing, mobile schedule management,
+single-occurrence editing, and undo UI remain deferred. See
+[`scheduler-review.md`](scheduler-review.md) for the current review and QA
+handoff, and the [Build log](#build-log) for implementation history. The earlier
+implementation used a disposable deployment with an explicitly approved data
+reset; this review uses isolated local data and makes no deployment.
 
 D1-D11 in the [Decision Log](#decision-log) are agreed. Everything under
 [Findings](#findings) was verified against the code as of 2026-09-07 and is
@@ -70,15 +74,15 @@ Relevant consequences for a schedule:
 
 Following the path collab docs took:
 
-| Layer | Files |
-| --- | --- |
-| Wire contract | `crates/api-types/src/lib.rs` (`ObjectKind`, request/response types) |
-| Display state | `crates/app-types/src/lib.rs` (`AppState` gains a field) |
-| Sync engine | `crates/client/src/engine.rs`, `crates/client/src/local_store.rs`, `crates/client/src/api_client.rs` |
-| Server | `crates/server/src/routes/objects.rs`, route table in `crates/server/src/main.rs` |
-| Daemon IPC | `crates/daemon-types/src/protocol.rs` (`DaemonCommand`), `crates/daemon/src/handler.rs` |
-| Adapters | `crates/web-wasm`, `crates/mobile-uniffi`, `web/src-tauri` |
-| Frontend | `packages/shared`, `web/src`, `mobile/src` |
+| Layer         | Files                                                                                                |
+| ------------- | ---------------------------------------------------------------------------------------------------- |
+| Wire contract | `crates/api-types/src/lib.rs` (`ObjectKind`, request/response types)                                 |
+| Display state | `crates/app-types/src/lib.rs` (`AppState` gains a field)                                             |
+| Sync engine   | `crates/client/src/engine.rs`, `crates/client/src/local_store.rs`, `crates/client/src/api_client.rs` |
+| Server        | `crates/server/src/routes/objects.rs`, route table in `crates/server/src/main.rs`                    |
+| Daemon IPC    | `crates/daemon-types/src/protocol.rs` (`DaemonCommand`), `crates/daemon/src/handler.rs`              |
+| Adapters      | `crates/web-wasm`, `crates/mobile-uniffi`, `web/src-tauri`                                           |
+| Frontend      | `packages/shared`, `web/src`, `mobile/src`                                                           |
 
 `IPC_AUTH_VERSION` in `crates/daemon-types/src/protocol.rs` must be bumped
 whenever a type crossing the daemon boundary changes; an old daemon can outlive
@@ -121,15 +125,15 @@ transport into it is an open question — see decision 4.
 
 ### Google Calendar and Zoho Calendar
 
-| | Google Calendar | Zoho Calendar |
-| --- | --- | --- |
-| Protocol | REST v3 | REST v1, and CalDAV |
-| Auth | OAuth2; installed-app loopback flow fits a self-hosted daemon | OAuth2 (`ZohoCalendar.event.ALL`) for REST; app-specific password for CalDAV |
-| Write scope | `https://www.googleapis.com/auth/calendar` | `ZohoCalendar.event.ALL` |
-| Incremental sync | `events.list` with a stored `nextSyncToken` | CalDAV `sync-collection` (RFC 6578) if supported; otherwise poll |
-| Push | `events.watch` → HTTPS webhook. Needs a verified domain, delivers a bare "something changed" ping, and Google documents it as lossy | None documented |
-| Recurrence | `RRULE` on the master event; instances carry `recurringEventId` + `originalStartTime`; `singleEvents=true` expands server-side | `rrule` parameter, RFC 5545 shaped |
-| CalDAV base | Deprecated in practice for this use | `https://calendar.zoho.com/` (regional: `.eu`, `.in`) |
+|                  | Google Calendar                                                                                                                     | Zoho Calendar                                                                |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Protocol         | REST v3                                                                                                                             | REST v1, and CalDAV                                                          |
+| Auth             | OAuth2; installed-app loopback flow fits a self-hosted daemon                                                                       | OAuth2 (`ZohoCalendar.event.ALL`) for REST; app-specific password for CalDAV |
+| Write scope      | `https://www.googleapis.com/auth/calendar`                                                                                          | `ZohoCalendar.event.ALL`                                                     |
+| Incremental sync | `events.list` with a stored `nextSyncToken`                                                                                         | CalDAV `sync-collection` (RFC 6578) if supported; otherwise poll             |
+| Push             | `events.watch` → HTTPS webhook. Needs a verified domain, delivers a bare "something changed" ping, and Google documents it as lossy | None documented                                                              |
+| Recurrence       | `RRULE` on the master event; instances carry `recurringEventId` + `originalStartTime`; `singleEvents=true` expands server-side      | `rrule` parameter, RFC 5545 shaped                                           |
+| CalDAV base      | Deprecated in practice for this use                                                                                                 | `https://calendar.zoho.com/` (regional: `.eu`, `.in`)                        |
 
 Two things follow. Push notifications are an optimization, not a foundation —
 polling has to work regardless, since Google's own docs say notifications drop.
@@ -161,7 +165,7 @@ Three things separated them:
 - **wasm.** `rrule` compiles to `wasm32-unknown-unknown` with no configuration.
   `calcard` does not: `ahash` pulls `getrandom` 0.3 without its `wasm_js`
   feature, so building it for the browser needs a global
-  `RUSTFLAGS=--cfg getrandom_backend="wasm_js"` *and* a direct `getrandom`
+  `RUSTFLAGS=--cfg getrandom_backend="wasm_js"` _and_ a direct `getrandom`
   dependency added purely to force feature unification. Both were verified to
   work, but they contaminate the whole workspace build and would have to be
   threaded through the flake's wasm wrappers.
@@ -173,7 +177,7 @@ Three things separated them:
 maintenance gap is the one real argument against it, and the trait boundary plus
 the test corpus is the mitigation.
 
-`calcard` remains interesting for the *ingest* side — it parses full iCalendar,
+`calcard` remains interesting for the _ingest_ side — it parses full iCalendar,
 which the private-iCal-URL fallback for a locked-down Workspace calendar would
 need. That is a separate decision, on non-wasm targets, made when the connector
 is built.
@@ -185,7 +189,7 @@ this feature needs — `FREQ=YEARLY;BYMONTHDAY` expanding monthly (#139) and
 directly. #148 does not reproduce: ordinals serialize as `2TU` and survive a
 round-trip, which matters because that path is how a rule would be pushed to
 Google. #139 reproduces, but is not a bug — `calcard` produces byte-identical
-output, and per RFC 5545 `BYMONTHDAY` *expands* the yearly period across every
+output, and per RFC 5545 `BYMONTHDAY` _expands_ the yearly period across every
 month when `BYMONTH` is absent. An open issue tracker entry is a lead, not a
 defect.
 
@@ -242,10 +246,10 @@ separate record captures what actually happened, and the difference between them
 is a thing the user wants to see. This implies a start/stop timer in the UI, and
 it means concrete per-instance records are a first-class, frequently-written
 part of the model rather than a rare exception. A planned block can be a
-recurring *rule*; an actual is always a concrete one-off against a specific
+recurring _rule_; an actual is always a concrete one-off against a specific
 instance. Those cannot be the same record.
 
-Amended 2026-09-08: for an *ingested* event there is a third layer beneath these
+Amended 2026-09-08: for an _ingested_ event there is a third layer beneath these
 two — the provider's original timing, immutable and retained. Planned may
 diverge from it freely. See D10, "An ingested event carries three layers of
 time." A Clipper-authored block has no original layer, so planned is the top.
@@ -272,7 +276,7 @@ record of what actually happened, and was withdrawn in November 2022. See
 ### D3: Pay the per-kind boilerplate toll; do not refactor the object layer first
 
 Reversed 2026-09-08. This originally said the object layer gets generalized
-*before* the schedule is built on it.
+_before_ the schedule is built on it.
 
 **The governing rule is type safety, and the generalization trades it away.** It
 replaces the per-kind `match` arms — which the compiler forces you to update for
@@ -402,11 +406,11 @@ snap and a validation rule, not a storage format.
 An earlier draft stored a single instant plus one IANA zone id, which is only
 correct for the middle row:
 
-| Kind | Meaning | Behaviour when the owner travels |
-| --- | --- | --- |
-| **Floating** | a wall-clock time with no zone | follows the device — 07:00 stays 07:00 |
-| **Zoned** | an instant pinned to an IANA zone | stays put — a Berlin meeting is still Berlin |
-| **Date-only** | an all-day event, a date with no time | no instant at all |
+| Kind          | Meaning                               | Behaviour when the owner travels             |
+| ------------- | ------------------------------------- | -------------------------------------------- |
+| **Floating**  | a wall-clock time with no zone        | follows the device — 07:00 stays 07:00       |
+| **Zoned**     | an instant pinned to an IANA zone     | stays put — a Berlin meeting is still Berlin |
+| **Date-only** | an all-day event, a date with no time | no instant at all                            |
 
 This is RFC 5545's own distinction: a floating `DTSTART` carries neither `TZID`
 nor a `Z` suffix. A daily 07:00 alarm must float, and abnormalarm already behaves
@@ -456,7 +460,7 @@ payloads; nothing is ever overwritten in place. The revision number is a
 
 That hoisting is the whole point. A version buried inside the encrypted payload
 is invisible to the server, so "give me the current state of object X" degrades
-into "give me *every revision* of X and let the client work out which is
+into "give me _every revision_ of X and let the client work out which is
 newest". A plain counter in a column lets the server index and serve the latest
 revision directly, while telling it nothing beyond the fact that an object
 changed and how often — which it already infers from event-log rows and
@@ -488,11 +492,11 @@ object_aad` tables every field with which side of the line it falls on, failing
 by name if a bound field stops being bound or an unbound one starts. Both
 directions were verified by deliberately breaking them.
 
-What that does *not* cover: a test asserts the projection you wrote, not the one
+What that does _not_ cover: a test asserts the projection you wrote, not the one
 you should have written. Whether the right set of fields is bound at all is
 still a judgment call, and still wants a human read.
 
-This is a *smaller* change to the crypto model than mutable objects would have
+This is a _smaller_ change to the crypto model than mutable objects would have
 been. The question is no longer "is it safe for a sealed object to be
 overwritten" but "which of these sealed objects is newest", so the existing
 immutability argument in `docs/object-envelopes.md` survives. The AAD gains
@@ -550,7 +554,7 @@ Consequences to build:
   installed device has no history to compare against and must trust what it is
   given. That limit is inherent, requires an actively malicious server, and gets
   written into the envelope doc rather than glossed.
-- **Delete is a tombstone; purge is the destructive one.** See *Retention*
+- **Delete is a tombstone; purge is the destructive one.** See _Retention_
   above. The storage quota accounting in `crates/server/src/storage_quota.rs`
   has to count revisions rather than objects either way, and has to keep
   counting a tombstoned chain until it is purged.
@@ -619,7 +623,7 @@ total work than going straight to absorption, and the risk it hedges against is
 small because alarms are cheap to re-enter by hand if anything is lost. Go
 straight to absorption.
 
-This also changes what the D11 step 0 spike is *for*. It no longer gates a choice
+This also changes what the D11 step 0 spike is _for_. It no longer gates a choice
 between two designs, because there is only one. It gates nothing in the schedule
 module at all — it tells the owner whether the absorbed alarm path is reliable on
 HyperOS, and if it is not, the fallback is the status quo: keep running
@@ -636,7 +640,7 @@ never do.
 
 **React Native is not the obstacle it looks like.** RN does not implement alarms,
 but an RN app hosts arbitrary native Kotlin, and `mobile/` is an Expo 57
-*prebuild* with `android/` checked into the repo, so there is no managed sandbox
+_prebuild_ with `android/` checked into the repo, so there is no managed sandbox
 to escape. abnormalarm's Kotlin moves in close to as-is: the receivers, the
 `AlarmManager.setAlarmClock` scheduler, the `mediaPlayback` foreground service,
 and the ring activity.
@@ -713,14 +717,14 @@ Four platform constraints found while researching this, detailed with sources in
 
 Settled 2026-09-07. Amended 2026-09-08: direction is per event, not per source.
 
-| Source | What lands there | Capability |
-| --- | --- | --- |
-| Google Workspace (work) | work meetings and invites | ingest only |
+| Source                  | What lands there                                    | Capability       |
+| ----------------------- | --------------------------------------------------- | ---------------- |
+| Google Workspace (work) | work meetings and invites                           | ingest only      |
 | Google personal (Gmail) | Luma, Meetup, Ticketnation and other social invites | ingest + publish |
-| Zoho (custom domain) | professional-but-not-main-work | ingest + publish |
+| Zoho (custom domain)    | professional-but-not-main-work                      | ingest + publish |
 
 The capability column is an envelope, not a setting. It says what a source is
-*allowed* to do. Which way any individual event actually travels is decided per
+_allowed_ to do. Which way any individual event actually travels is decided per
 event, within that envelope — see D10, where the binding is the unit.
 
 Two Google accounts, not one. Multi-account support is therefore required from
@@ -779,11 +783,11 @@ too blunt: it conflated the invite, which belongs to whoever sent it, with the
 owner's plan for the invite, which belongs to the owner. They separate cleanly,
 and the split lines up with D2's planned-versus-actual model already decided.
 
-| Layer | Record | Sole writer | Editable by the owner | Travels upstream |
-| --- | --- | --- | --- | --- |
-| **Original** | ingested event | sync worker | no | n/a — it *is* upstream |
-| **Planned** | plan + decoration | the owner | yes | never |
-| **Actual** | actual (D2) | the timer | yes | never |
+| Layer        | Record            | Sole writer | Editable by the owner | Travels upstream       |
+| ------------ | ----------------- | ----------- | --------------------- | ---------------------- |
+| **Original** | ingested event    | sync worker | no                    | n/a — it _is_ upstream |
+| **Planned**  | plan + decoration | the owner   | yes                   | never                  |
+| **Actual**   | actual (D2)       | the timer   | yes                   | never                  |
 
 The original is what the invite says, retained permanently as a fact about the
 meeting. The planned layer defaults to it and may diverge freely: moving a 09:30
@@ -885,7 +889,7 @@ has to be able to answer it. A failed push must be visible rather than silent.
 
 #### All-day events are not intervals
 
-D5 stores intervals in absolute time. An all-day event is a *date*, and it spans
+D5 stores intervals in absolute time. An all-day event is a _date_, and it spans
 a different absolute range depending on the observer's zone. It needs its own
 representation rather than being coerced into an interval at ingest. D9 already
 committed to ingesting all-day events, so this is not optional.
@@ -915,9 +919,9 @@ verification that cannot be compressed, such as leaving alarms overnight on the
 POCO under real background pressure or waiting for a `syncToken` to go stale;
 human-in-the-loop external setup like the Google Cloud consent screen; and the
 envelope change itself, where fast generation is a liability because a wrong AAD
-projection fails silently rather than loudly. *Amended 2026-09-08: the silent
+projection fails silently rather than loudly. _Amended 2026-09-08: the silent
 part is fixed — see the AAD guard in D6. What still wants review is the choice
-of which fields to bind, not the mechanical risk of forgetting one.*
+of which fields to bind, not the mechanical risk of forgetting one._
 
 Order that follows from that:
 
@@ -964,9 +968,9 @@ whether the private iCal fallback is also blocked (D9).
 A second adversarial review argued against the decisions rather than the facts.
 
 **Resolved and written into the decisions above:** the D6 cutover premise (the
-project *is* deployed, but the data is disposable and the DB gets recreated);
-the D8 mechanism (`mobile/android/` is gitignored, so native code needs a tracked
-module plus an Expo config plugin); D3 reversed outright; the D4 lease dropped;
+project _is_ deployed, but the data is disposable and the DB gets recreated);
+the D8 mechanism (`mobile/android/` is gitignored, so native code lives in a tracked
+Expo local module whose manifest is merged during prebuild); D3 reversed outright; the D4 lease dropped;
 D4's encryption boundary confirmed as fully encrypted; D8 confirmed as straight
 absorption with bridging rejected.
 
@@ -976,8 +980,8 @@ those decisions as final where they conflict with this list.
 - **The conflict rule generalizes.** "Conflicts disappear by construction" was
   over-claimed: only the sync worker got its own record. Alarm fired/dismissed
   state, completion toggles and RSVP are further automated or second-device
-  writers on the plan record. The rule is *every automated writer gets its own
-  record*, and D6 must still state what a human loser of a rejected revision
+  writers on the plan record. The rule is _every automated writer gets its own
+  record_, and D6 must still state what a human loser of a rejected revision
   sees.
 - **Publish is cut from v1.** Most of D10's machinery — bindings, rolling
   horizons, dedupe, remote ids, per-event direction — serves publish, which D11
@@ -1004,7 +1008,7 @@ Open, needing the owner rather than an agent:
   it.~~ **Answered 2026-09-08: retained.** The UI is undo, which is not planned
   yet — and that is the point. The format is being broken once, deliberately,
   so that adding undo later is a feature rather than a second overhaul. See
-  D6's *Retention* section for what that costs and the tombstone rule it
+  D6's _Retention_ section for what that costs and the tombstone rule it
   forces.
 
 Structural gaps to fix in the restructure: no partition between owner-gated work
@@ -1095,10 +1099,11 @@ POCO under HyperOS. An emulator says nothing about a vendor that kills
 background processes, and no code substitutes for Autostart and
 battery-optimisation exemptions set by hand.
 
-**Everything the original ask named is now built**, except publishing outward
-(D10), which waits on OAuth consent. Blocks in 5- or 10-minute grid steps,
-custom cadences, alarms, and calendar ingest all work; editing and the
-planned-versus-actual timer landed after milestone 1.
+**The first usable scheduler is implemented.** Blocks in 5- or 10-minute grid
+steps, recurrence, alarms, and plain ICS ingest are present; editing and the
+planned-versus-actual timer landed after milestone 1. The domain accepts richer
+recurrence rules than the current composer exposes. The original request's
+Google/Zoho connectors and outward publishing remain future work.
 
 What remains: the mobile schedule UI, publish, a UI for single-occurrence
 overrides (the engine and record type support them, but nothing creates one yet
@@ -1118,7 +1123,7 @@ holds, because the projection was made to fail loudly first. In order:
 3. `server: split object identity from its content, and give content a chain` —
    `objects` keeps identity and a head pointer; `object_revisions` holds every
    sealed byte; payloads hang off a revision. Two routes: `POST
-   /api/objects/{id}/revisions` appends, `DELETE /api/objects/{id}` became
+/api/objects/{id}/revisions` appends, `DELETE /api/objects/{id}` became
    purge and refuses an object that has not been tombstoned.
 4. `client: edit by revision, delete by tombstone, and check the chain` — plus
    the two checks that need local state: no rollback, and continuity against
@@ -1128,7 +1133,7 @@ holds, because the projection was made to fail loudly first. In order:
 **What the live run caught that nothing else did.** A shadowed
 `OBJECT_ENVELOPE_VERSION_V2` in the client, still holding 1 after the shared
 one became 2 — two constants, one name, two crates, and a compiler with no
-opinion. A listing that returned payloads from *every* revision, because the
+opinion. A listing that returned payloads from _every_ revision, because the
 query still filtered on object id alone. A WS handler that ignored `updated`
 for everything but collab, so an edit never reached a second device live (and
 one that had been ignoring `deleted` for schedule since the night before).
@@ -1151,8 +1156,8 @@ the first kind does need pruning the accounting is already right.
 
 Bugs the build found that reading had not, beyond those listed above:
 
-- `ScheduleItemView.id` was the *series* id while every caller passed it to
-  routes wanting the *object* id, so Delete from the list could never have
+- `ScheduleItemView.id` was the _series_ id while every caller passed it to
+  routes wanting the _object_ id, so Delete from the list could never have
   worked. The end-to-end test used the object id directly and hid it — an
   argument for driving the real UI, not only the API.
 - The edit form reloaded the stored record on every render, because its effect
@@ -1164,8 +1169,8 @@ Bugs the build found that reading had not, beyond those listed above:
 - `cancelAll` swept only `0..MAX_REGISTERED` of the request-code space, but
   past entries at the front of a plan push live codes beyond it, stranding
   alarms that could then fire after being cancelled. Of abnormalarm, these are not ported: snooze, per-alarm sound
-and volume ramp, the flashlight, the upcoming-notification lead window,
-skip-next, timers, and the clock widget. abnormalarm stays installed.
+  and volume ramp, the flashlight, the upcoming-notification lead window,
+  skip-next, timers, and the clock widget. abnormalarm stays installed.
 
 One thing milestone 1 deliberately does not have, so its absence is not a gap
 to be surprised by: any Google or Zoho connector beyond a plain ICS URL. That
@@ -1174,33 +1179,20 @@ supported fallback.
 
 ## Next Steps
 
-Owner-gated, and nothing in the build waits on them:
+1. Owner QA using [`scheduler-review.md`](scheduler-review.md), followed by a
+   walkthrough of the changes and merge review. D6 history retention is settled;
+   it is no longer an open product question.
+2. POCO/HyperOS reliability acceptance over multiple nights. Emulator results
+   cannot establish vendor battery-management behavior.
+3. Workspace OAuth/private iCal availability and the remaining connectors.
+   Publishing is explicitly outside this PR, even where D10 describes its future
+   design.
 
-- The POCO reliability spike (D11 parallel track). Days of wall-clock.
-- The Workspace OAuth question in [Open Decisions](#open-decisions) — test the
-  private iCal fallback in the same sitting, since admins can block that too.
-- D6's history retention question in [Review round 2](#review-round-2-2026-09-08--accepted-pending-restructure).
-
-Agent-doable, in order:
-
-1. ~~Create `crates/schedule`.~~ **Done 2026-09-08** (D11 step 1). Domain types
-   (`ScheduleItem`, `Recurrence`, `Occurrence`, `OccurrenceOverride`,
-   `ActualRecord`), a `RecurrenceEngine` trait with an `rrule` implementation
-   behind it, and 26 tests: the 13-case bake-off corpus plus the DST probe in
-   `tests/corpus.rs`, and time-kind, override and bounds behaviour in
-   `tests/behaviour.rs`. The throwaway scratchpad harness is now redundant.
-
-   Two things the port settled that the plan had only asserted. D5's three time
-   kinds are enforced by the type system — `ScheduleSpan` makes an all-day event
-   with a minute duration unrepresentable. And `RecurrenceId` had to become an
-   enum rather than an instant: a floating series must be identified by
-   wall-clock time, or an override recorded in Berlin silently fails to match
-   the same occurrence expanded in Tokyo. A test caught that.
-2. Then D11 steps 2 through 5, stopping at the grid.
-
-Non-goals for milestone 1, stated so scope does not drift: no publish, no
-revisions or history, no mobile UI, no alarm absorption, no Zoho, no work
-Workspace account, no kind registry, no `AppState` reshape.
+Other deferred work: mobile schedule-management UI, single-occurrence override
+UI, undo UI, source sync opt-in/automation, ingest history retention, and the
+remaining abnormalarm features (snooze, sounds/ramp, flashlight, skip-next and
+widget). Do not equate the implemented core model with these product surfaces.
+The broad kind registry and `AppState` redesign also remain out of scope.
 
 Reference docs produced alongside this plan, each with a provenance header
 stating what was verified by hand: [`object-kind-plumbing.md`](object-kind-plumbing.md),
