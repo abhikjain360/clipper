@@ -400,10 +400,10 @@ mod tests {
     }
 }
 
-/// The exact definition and exception recorded when a timer started.
+/// The exact definition and override recorded when a timer started.
 #[derive(Debug, Clone)]
 pub struct RecordedPlan {
     pub item: ScheduleItem,
-    pub exception: Option<clipper_schedule::OccurrenceException>,
+    pub override_data: Option<clipper_schedule::OccurrenceOverrideData>,
     pub context: clipper_schedule::PlannedRef,
 }

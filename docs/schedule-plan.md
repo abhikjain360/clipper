@@ -197,7 +197,7 @@ defect.
 
 The initial D1-D11 decisions are resolved; see the [Decision Log](#decision-log).
 Later open decisions and unfinished workflows are tracked in the maintained
-[scheduler backlog](scheduler-backlog.md), including exception resolution after
+[scheduler backlog](scheduler-backlog.md), including override resolution after
 schedule edits. This does not mean every scheduler product decision is settled.
 
 One item still needs an answer from the repo owner, and it gates the shape of
@@ -248,7 +248,7 @@ does not reshape the block.
 separate record captures what actually happened, and the difference between them
 is a thing the user wants to see. This implies a start/stop timer in the UI, and
 it means concrete per-instance records are a first-class, frequently-written
-part of the model rather than a rare exception. A planned block can be a
+part of the model rather than a rare override. A planned block can be a
 recurring _rule_; an actual is always a concrete one-off against a specific
 instance. Those cannot be the same record.
 
@@ -921,11 +921,11 @@ committed to ingesting all-day events, so this is not optional.
   upstream overrides (a moved instance) then have to map onto Clipper's own
   override records. This is the hardest part of ingest and needs its own
   treatment before connectors are built.
-  Current ICS implementation embeds provider exceptions inside each imported
-  event revision as pure `OccurrenceException` values. Only separately authored
-  local exceptions use revision-pinned `OccurrenceOverride` objects. Future
+  Current ICS implementation embeds provider overrides inside each imported
+  event revision as pure `OccurrenceOverrideData` values. Only separately authored
+  local overrides use revision-pinned `OccurrenceOverride` objects. Future
   connectors should preserve this distinction, rather than interpreting the
-  earlier wording as requiring standalone objects for provider exceptions.
+  earlier wording as requiring standalone objects for provider overrides.
 
 ### D11: Build order follows verification cost, not code volume
 
