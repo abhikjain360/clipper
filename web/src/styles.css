@@ -204,3 +204,108 @@ select {
         display: none;
     }
 }
+
+.app-shell {
+    min-height: 100dvh;
+    padding-left: 68px;
+}
+.app-shell.nav-expanded {
+    padding-left: 220px;
+}
+.desktop-navigation {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 68px;
+    padding: 10px 8px;
+    background: #171a1d;
+    border-right: 1px solid #303940;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    z-index: 20;
+    overflow-y: auto;
+}
+.nav-expanded .desktop-navigation {
+    width: 220px;
+}
+.nav-destinations,
+.nav-bottom {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.nav-bottom {
+    margin-top: auto;
+    padding-top: 24px;
+}
+.nav-brand {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 12px 0 4px;
+    font-size: 20px;
+}
+.app-main {
+    min-width: 0;
+}
+.mobile-nav-toggle {
+    display: none;
+}
+.mobile-nav-dialog {
+    padding: 0;
+    border: 0;
+    margin: 0;
+    height: 100dvh;
+    max-height: 100dvh;
+    width: min(280px, 85vw);
+    max-width: 85vw;
+    background: #171a1d;
+    color: #f2f5f7;
+}
+.mobile-nav-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.6);
+}
+.mobile-navigation {
+    min-height: 100%;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+@media (max-width: 700px) {
+    .app-shell,
+    .app-shell.nav-expanded {
+        padding-left: 0;
+    }
+    .desktop-navigation {
+        display: none;
+    }
+    .app-main {
+        padding-top: 48px;
+    }
+    .mobile-nav-toggle {
+        display: flex;
+        position: absolute;
+        top: 6px;
+        left: 12px;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 36px;
+        border: 1px solid #303940;
+        border-radius: 6px;
+        background: #171a1d;
+        color: #f2f5f7;
+    }
+}
+.mobile-nav-dialog:not([open]) {
+    display: none;
+}
+.app-shell:not(.nav-expanded) .desktop-navigation button {
+    padding-left: 0;
+    padding-right: 0;
+}
+.desktop-navigation button svg {
+    flex-shrink: 0;
+}
