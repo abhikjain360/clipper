@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::{collections::HashMap, path::PathBuf, sync::RwLock};
 
-use clipper_app_types::{CollabItem, DecryptedClipboardItem, DecryptedFileItem};
+use clipper_app_types::{CollabItem, DecryptedClipboardItem, DecryptedFileItem, ScheduleItemView};
 use clipper_core::{
     crypto,
     models::{ObjectEnvelopeV1, ObjectKind, ObjectPayloadDescriptor},
@@ -20,8 +20,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
-use crate::api_client::{
-    decrypt_clipboard_meta, decrypt_clipboard_payload, decrypt_file_meta_bytes,
+use crate::{
+    api_client::{decrypt_clipboard_meta, decrypt_clipboard_payload, decrypt_file_meta_bytes},
+    schedule::{ScheduleRecord, decrypt_schedule_payload, item_view},
 };
 
 const DEFAULT_PROFILE: &str = "default";
@@ -55,6 +56,7 @@ pub enum LocalObjectData {
     Clipboard(LocalClipboardRecord),
     File(LocalFileRecord),
     Collab(LocalCollabRecord),
+    Schedule(LocalScheduleRecord),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +71,17 @@ pub struct LocalFileRecord {
     pub filename: String,
     pub mime_type: String,
     pub blob_size: i64,
+}
+
+/// A decrypted schedule object, held in whole.
+///
+/// Unlike clipboard and file, the record itself is cached rather than a preview
+/// of it: schedule records are a few hundred bytes, and every consumer — the
+/// list, the grid, the alarm scheduler — needs the structured form, not a
+/// summary string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalScheduleRecord {
+    pub record: ScheduleRecord,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,8 +102,11 @@ pub struct EncryptedObject {
     pub envelope: ObjectEnvelopeV1,
 }
 
+/// An encrypted object whose single payload is small enough to travel and be
+/// cached inline. Clipboard and schedule both work this way; files do not,
+/// because a blob does not belong in a local record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EncryptedClipboardObject {
+pub struct EncryptedInlineObject {
     pub object: EncryptedObject,
     pub payload_ciphertext: Vec<u8>,
 }
@@ -181,11 +197,23 @@ pub struct LocalVisibleState {
     pub clipboard_items: Vec<DecryptedClipboardItem>,
     pub files: Vec<DecryptedFileItem>,
     pub collab_docs: Vec<CollabItem>,
+    pub schedule_items: Vec<ScheduleItemView>,
 }
 
 #[derive(Debug, Default)]
 struct LocalSyncControl {
     generation: u64,
+}
+
+/// The identity fields every stored object carries, independent of its kind.
+///
+/// Grouped because they always travel together and always come from the same
+/// place — the object listing or the init request that created it.
+#[derive(Debug, Clone, Copy)]
+pub struct StoredObjectIdentity<'a> {
+    pub object_id: &'a str,
+    pub created_at: &'a str,
+    pub source_device_id: &'a str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -235,7 +263,7 @@ impl LocalStore {
         &self,
         item: &DecryptedClipboardItem,
         payload: &[u8],
-        encrypted: &EncryptedClipboardObject,
+        encrypted: &EncryptedInlineObject,
         created_seq: i64,
         event_seq: i64,
         visible_clipboard_limit: usize,
@@ -261,7 +289,7 @@ impl LocalStore {
         &self,
         item: &DecryptedClipboardItem,
         payload: &[u8],
-        encrypted: &EncryptedClipboardObject,
+        encrypted: &EncryptedInlineObject,
         created_seq: i64,
         generation: u64,
         visible_clipboard_limit: usize,
@@ -286,6 +314,101 @@ impl LocalStore {
         self.visible_state_inner(visible_clipboard_limit)
             .await
             .map(Some)
+    }
+
+    pub async fn persist_local_schedule_present_encrypted(
+        &self,
+        identity: StoredObjectIdentity<'_>,
+        record: ScheduleRecord,
+        encrypted: &EncryptedInlineObject,
+        created_seq: i64,
+        event_seq: i64,
+        visible_clipboard_limit: usize,
+    ) -> Result<LocalVisibleState, LocalStoreError> {
+        validate_item_id(identity.object_id)?;
+        let sync = self.sync.lock().await;
+        self.persist_schedule_present_encrypted_inner(
+            identity,
+            record,
+            encrypted,
+            StoredObjectSyncMeta {
+                created_seq,
+                event_seq,
+                seen_generation: Some(sync.generation),
+            },
+        )
+        .await?;
+        self.visible_state_inner(visible_clipboard_limit).await
+    }
+
+    pub async fn persist_snapshot_schedule_present_encrypted(
+        &self,
+        identity: StoredObjectIdentity<'_>,
+        record: ScheduleRecord,
+        encrypted: &EncryptedInlineObject,
+        created_seq: i64,
+        generation: u64,
+        visible_clipboard_limit: usize,
+    ) -> Result<Option<LocalVisibleState>, LocalStoreError> {
+        validate_item_id(identity.object_id)?;
+        let sync = self.sync.lock().await;
+        if sync.generation != generation {
+            return Ok(None);
+        }
+        self.persist_schedule_present_encrypted_inner(
+            identity,
+            record,
+            encrypted,
+            StoredObjectSyncMeta {
+                created_seq,
+                event_seq: created_seq,
+                seen_generation: Some(generation),
+            },
+        )
+        .await?;
+        self.visible_state_inner(visible_clipboard_limit)
+            .await
+            .map(Some)
+    }
+
+    async fn persist_schedule_present_encrypted_inner(
+        &self,
+        identity: StoredObjectIdentity<'_>,
+        record: ScheduleRecord,
+        encrypted: &EncryptedInlineObject,
+        sync_meta: StoredObjectSyncMeta,
+    ) -> Result<(), LocalStoreError> {
+        let object_id = identity.object_id;
+        // A delete that landed after this create wins: re-persisting would
+        // resurrect a record the user already removed on another device.
+        if let Some(StoredObjectRecord::Deleted(deleted)) =
+            self.stored_object_record(object_id).await?
+            && deleted.event_seq > sync_meta.event_seq
+        {
+            return Ok(());
+        }
+
+        let local_record = LocalObjectRecord {
+            id: object_id.to_string(),
+            seen_generation: sync_meta.seen_generation,
+            event_seq: sync_meta.event_seq,
+            created_seq: sync_meta.created_seq,
+            created_at: identity.created_at.to_string(),
+            source_device_id: identity.source_device_id.to_string(),
+            data: LocalObjectData::Schedule(LocalScheduleRecord { record }),
+        };
+        let stored_record = StoredObjectRecord::Present(Box::new(StoredPresentObjectRecord {
+            id: object_id.to_string(),
+            kind: ObjectKind::Schedule,
+            seen_generation: sync_meta.seen_generation,
+            event_seq: sync_meta.event_seq,
+            created_seq: sync_meta.created_seq,
+            content: StoredPresentContent::Encrypted(encrypted.object.clone()),
+        }));
+        self.write_stored_object_payload(object_id, &encrypted.payload_ciphertext)
+            .await?;
+        self.write_stored_object_record(&stored_record).await?;
+        self.write_memory_record(local_record).await
     }
 
     pub async fn persist_local_file_present_encrypted(
@@ -564,7 +687,7 @@ impl LocalStore {
         item_id: &str,
         item: &DecryptedClipboardItem,
         payload: &[u8],
-        encrypted: &EncryptedClipboardObject,
+        encrypted: &EncryptedInlineObject,
         sync_meta: StoredObjectSyncMeta,
     ) -> Result<(), LocalStoreError> {
         if let Some(StoredObjectRecord::Deleted(record)) =
@@ -596,7 +719,7 @@ impl LocalStore {
             created_seq: sync_meta.created_seq,
             content: StoredPresentContent::Encrypted(encrypted.object.clone()),
         }));
-        self.write_stored_clipboard_payload(item_id, &encrypted.payload_ciphertext)
+        self.write_stored_object_payload(item_id, &encrypted.payload_ciphertext)
             .await?;
         self.write_stored_object_record(&stored_record).await?;
         self.write_memory_record(local_record).await
@@ -868,7 +991,73 @@ impl LocalStore {
             // rebuild the display record straight from the stored plaintext
             // metadata. (Mismatched content is a corrupt record and is dropped.)
             ObjectKind::Collab => Ok(collab_record_from_present(record)),
+            ObjectKind::Schedule => self
+                .decrypt_schedule_record(record, encryption_key)
+                .await
+                .map(Some),
         }
+    }
+
+    /// Rebuild a schedule record from its stored ciphertext.
+    ///
+    /// The record lives in the payload rather than the meta, so this needs the
+    /// cached payload ciphertext — the same path clipboard uses.
+    async fn decrypt_schedule_record(
+        &self,
+        record: &StoredPresentObjectRecord,
+        encryption_key: &[u8; 32],
+    ) -> Result<LocalObjectRecord, LocalStoreError> {
+        let encrypted = present_encrypted_object(record)?;
+        let payload = single_payload(encrypted)?;
+        let Some(ciphertext) = self.stored_object_payload_ciphertext(&record.id).await? else {
+            return Err(LocalStoreError::EncryptedCache(
+                "missing schedule payload".into(),
+            ));
+        };
+        verify_payload_ciphertext(payload, &ciphertext)?;
+        let decoded = decrypt_schedule_payload(
+            &payload.nonce,
+            &ciphertext,
+            encryption_key,
+            &encrypted.envelope.body,
+            payload.id,
+        )
+        .map_err(|error| LocalStoreError::EncryptedCache(error.to_string()))?;
+        Ok(LocalObjectRecord {
+            id: record.id.clone(),
+            seen_generation: record.seen_generation,
+            event_seq: record.event_seq,
+            created_seq: record.created_seq,
+            created_at: encrypted.created_at.clone(),
+            source_device_id: encrypted.source_device_id.clone(),
+            data: LocalObjectData::Schedule(LocalScheduleRecord { record: decoded }),
+        })
+    }
+
+    async fn schedule_items_inner(&self) -> Result<Vec<ScheduleItemView>, LocalStoreError> {
+        let mut records = self.all_memory_records().await;
+        sort_records_desc(&mut records);
+        Ok(records
+            .iter()
+            .filter_map(schedule_item_view_from_record)
+            .collect())
+    }
+
+    /// Every schedule record currently cached, in whatever form it takes.
+    ///
+    /// Expansion needs the series *and* its overrides together, so this returns
+    /// the records rather than the display views.
+    pub async fn schedule_records(&self) -> Vec<ScheduleRecord> {
+        self.all_memory_records()
+            .await
+            .iter()
+            .filter_map(|record| match &record.data {
+                LocalObjectData::Schedule(schedule) => Some(schedule.record.clone()),
+                LocalObjectData::Clipboard(_)
+                | LocalObjectData::File(_)
+                | LocalObjectData::Collab(_) => None,
+            })
+            .collect()
     }
 
     async fn decrypt_clipboard_record_preview(
@@ -927,7 +1116,7 @@ impl LocalStore {
     ) -> Result<Vec<u8>, LocalStoreError> {
         let encrypted = present_encrypted_object(record)?;
         let payload = single_payload(encrypted)?;
-        let Some(ciphertext) = self.stored_clipboard_payload_ciphertext(&record.id).await? else {
+        let Some(ciphertext) = self.stored_object_payload_ciphertext(&record.id).await? else {
             return Err(LocalStoreError::EncryptedCache(
                 "missing clipboard payload".into(),
             ));
@@ -969,6 +1158,7 @@ impl LocalStore {
                 .await?,
             files: self.file_items_inner().await?,
             collab_docs: self.collab_items_inner().await?,
+            schedule_items: self.schedule_items_inner().await?,
         })
     }
 
@@ -1117,24 +1307,20 @@ impl LocalStore {
         write_private_file_atomic(&self.object_record_path(record.id()), &bytes).await
     }
 
-    async fn write_stored_clipboard_payload(
+    async fn write_stored_object_payload(
         &self,
         object_id: &str,
         ciphertext: &[u8],
     ) -> Result<(), LocalStoreError> {
         ensure_private_dir(&self.clipboard_dir()).await?;
-        write_private_file_atomic(
-            &self.clipboard_payload_ciphertext_path(object_id),
-            ciphertext,
-        )
-        .await
+        write_private_file_atomic(&self.object_payload_ciphertext_path(object_id), ciphertext).await
     }
 
-    async fn stored_clipboard_payload_ciphertext(
+    async fn stored_object_payload_ciphertext(
         &self,
         object_id: &str,
     ) -> Result<Option<Vec<u8>>, LocalStoreError> {
-        match tokio::fs::read(self.clipboard_payload_ciphertext_path(object_id)).await {
+        match tokio::fs::read(self.object_payload_ciphertext_path(object_id)).await {
             Ok(ciphertext) => Ok(Some(ciphertext)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
@@ -1176,7 +1362,7 @@ impl LocalStore {
         object_id: &str,
     ) -> Result<(), LocalStoreError> {
         if kind == ObjectKind::Clipboard {
-            _ = tokio::fs::remove_file(self.clipboard_payload_ciphertext_path(object_id)).await;
+            _ = tokio::fs::remove_file(self.object_payload_ciphertext_path(object_id)).await;
             _ = tokio::fs::remove_file(self.clipboard_dir().join(format!("{object_id}.payload")))
                 .await;
             _ = tokio::fs::remove_file(self.clipboard_dir().join(format!("{object_id}.txt"))).await;
@@ -1215,7 +1401,7 @@ impl LocalStore {
         self.object_dir().join(format!("{object_id}.json"))
     }
 
-    fn clipboard_payload_ciphertext_path(&self, object_id: &str) -> PathBuf {
+    fn object_payload_ciphertext_path(&self, object_id: &str) -> PathBuf {
         self.clipboard_dir()
             .join(format!("{object_id}.payload.ciphertext"))
     }
@@ -1337,7 +1523,7 @@ impl LocalStore {
             let overflow = index.len() - OBJECT_INDEX_LIMIT;
             for evicted_id in index.drain(..overflow) {
                 let _ = storage.remove_item(&self.object_record_key(&evicted_id));
-                let _ = storage.remove_item(&self.clipboard_payload_ciphertext_key(&evicted_id));
+                let _ = storage.remove_item(&self.object_payload_ciphertext_key(&evicted_id));
                 let _ = storage.remove_item(&self.legacy_clipboard_payload_key(&evicted_id));
             }
         }
@@ -1348,7 +1534,7 @@ impl LocalStore {
         Ok(())
     }
 
-    async fn write_stored_clipboard_payload(
+    async fn write_stored_object_payload(
         &self,
         object_id: &str,
         ciphertext: &[u8],
@@ -1356,18 +1542,18 @@ impl LocalStore {
         let storage = browser_storage()?;
         let json = serde_json::to_string(ciphertext)?;
         storage
-            .set_item(&self.clipboard_payload_ciphertext_key(object_id), &json)
+            .set_item(&self.object_payload_ciphertext_key(object_id), &json)
             .map_err(storage_error)?;
         Ok(())
     }
 
-    async fn stored_clipboard_payload_ciphertext(
+    async fn stored_object_payload_ciphertext(
         &self,
         object_id: &str,
     ) -> Result<Option<Vec<u8>>, LocalStoreError> {
         let storage = browser_storage()?;
         let json = storage
-            .get_item(&self.clipboard_payload_ciphertext_key(object_id))
+            .get_item(&self.object_payload_ciphertext_key(object_id))
             .map_err(storage_error)?;
         json.map(|json| serde_json::from_str(&json).map_err(Into::into))
             .transpose()
@@ -1396,7 +1582,7 @@ impl LocalStore {
         if kind == ObjectKind::Clipboard {
             let storage = browser_storage()?;
             storage
-                .remove_item(&self.clipboard_payload_ciphertext_key(object_id))
+                .remove_item(&self.object_payload_ciphertext_key(object_id))
                 .map_err(storage_error)?;
             storage
                 .remove_item(&self.legacy_clipboard_payload_key(object_id))
@@ -1464,9 +1650,9 @@ impl LocalStore {
         format!("{}.clipboard_payload.{item_id}", self.storage_prefix())
     }
 
-    fn clipboard_payload_ciphertext_key(&self, item_id: &str) -> String {
+    fn object_payload_ciphertext_key(&self, item_id: &str) -> String {
         format!(
-            "{}.clipboard_payload_ciphertext.{item_id}",
+            "{}.object_payload_ciphertext.{item_id}",
             self.storage_prefix()
         )
     }
@@ -1574,6 +1760,18 @@ fn decrypt_file_record(
         }),
     };
     Ok(local_record)
+}
+
+/// Render a cached schedule record as a list row, skipping records that are
+/// not series definitions — an override or an actual has no row of its own.
+fn schedule_item_view_from_record(record: &LocalObjectRecord) -> Option<ScheduleItemView> {
+    let LocalObjectData::Schedule(schedule) = &record.data else {
+        return None;
+    };
+    schedule
+        .record
+        .as_item()
+        .map(|item| item_view(item, &record.created_at))
 }
 
 fn sort_records_desc(records: &mut [LocalObjectRecord]) {
@@ -1955,10 +2153,7 @@ mod tests {
         }
     }
 
-    fn encrypted_clipboard(
-        item: &DecryptedClipboardItem,
-        payload: &[u8],
-    ) -> EncryptedClipboardObject {
+    fn encrypted_clipboard(item: &DecryptedClipboardItem, payload: &[u8]) -> EncryptedInlineObject {
         let object_id = item.id.parse().expect("object id");
         let payload_id = uuid::Uuid::now_v7().into();
         let source_device_id = item.source_device_id.parse().expect("device id");
@@ -1999,7 +2194,7 @@ mod tests {
             payloads: vec![envelope_payload.clone()],
             ..aad_body
         };
-        EncryptedClipboardObject {
+        EncryptedInlineObject {
             object: EncryptedObject {
                 meta_nonce,
                 meta_ciphertext,
@@ -2440,7 +2635,7 @@ mod tests {
         assert!(!record_text.contains("payload_ciphertext"));
 
         let payload_path =
-            store.clipboard_payload_ciphertext_path("44444444-4444-4444-8444-444444444444");
+            store.object_payload_ciphertext_path("44444444-4444-4444-8444-444444444444");
         let payload_metadata = tokio::fs::metadata(&payload_path)
             .await
             .expect("payload metadata");
