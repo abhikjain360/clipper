@@ -31,14 +31,14 @@ body {
     background: #222a33;
     color: #f2f5f7;
     box-shadow: 0 6px 24px #0008;
-    font-size: 15px;
+    font-size: 13px;
     line-height: 1.5;
     overflow-wrap: anywhere;
     pointer-events: none;
 }
 .event-hover strong {
     display: block;
-    font-size: 16px;
+    font-size: 14px;
 }
 .event-hover div {
     color: #bac7d5;
