@@ -6,23 +6,23 @@ import android.media.MediaPlayer
 import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
+import android.os.UserManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
 import android.util.Log
 
-/**
- * Makes the noise.
- *
- * Two details are load-bearing. Audio goes out on `USAGE_ALARM`, which is what
- * lets it through the ringer setting and Do Not Disturb — an alarm on the media
- * stream is silent exactly when it matters. And vibration goes through
- * `VibratorManager`; the old `Vibrator` service is deprecated.
- */
+/** Plays alarm audio and vibration, including while credential storage is locked. */
 class Ringer(private val context: Context) {
 
     private var player: MediaPlayer? = null
+    private var playbackGeneration = 0
+
+    private val alarmAudioAttributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_ALARM)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+        .build()
 
     /**
      * `VibratorManager` replaced the `Vibrator` service in API 31 and the old
@@ -42,48 +42,149 @@ class Ringer(private val context: Context) {
     }
 
     fun stop() {
-        player?.let { active ->
-            runCatching { if (active.isPlaying) active.stop() }
-            runCatching { active.release() }
-        }
+        // Invalidate callbacks before releasing: a late prepare/error callback
+        // must not start a fallback after the user has dismissed the alarm.
+        playbackGeneration += 1
+        player?.let(::releasePlayer)
         player = null
         runCatching { vibrator?.cancel() }
     }
 
     private fun startSound() {
+        playbackGeneration += 1
+        val generation = playbackGeneration
+        player?.let(::releasePlayer)
+        player = null
+
+        val userManager = context.getSystemService(UserManager::class.java)
+        if (userManager?.isUserUnlocked != true) {
+            // APK resources are available during Direct Boot; ringtone-provider
+            // URIs generally are not until credential storage is unlocked.
+            startBundledPlayer(generation)
+            return
+        }
+
         val preferred = RingtoneManager
             .getActualDefaultRingtoneUri(context, RingtoneManager.TYPE_ALARM)
             ?: Settings.System.DEFAULT_ALARM_ALERT_URI
-        if (!startPlayer(preferred)) {
-            // A device with no configured alarm sound still has to ring.
-            startPlayer(Settings.System.DEFAULT_ALARM_ALERT_URI)
+        startPreferredPlayer(preferred, generation)
+    }
+
+    private fun startPreferredPlayer(uri: Uri, generation: Int) {
+        val next = MediaPlayer()
+        try {
+            next.setAudioAttributes(alarmAudioAttributes)
+            next.isLooping = true
+            next.setOnPreparedListener { prepared ->
+                if (!isCurrent(prepared, generation)) {
+                    releasePlayer(prepared)
+                    return@setOnPreparedListener
+                }
+                runCatching { prepared.start() }.onFailure { error ->
+                    fallbackFromPreferred(prepared, uri, generation, error)
+                }
+            }
+            next.setOnErrorListener { failed, what, extra ->
+                fallbackFromPreferred(
+                    failed,
+                    uri,
+                    generation,
+                    IllegalStateException("MediaPlayer error what=$what extra=$extra"),
+                )
+                true
+            }
+            next.setDataSource(context, uri)
+            if (generation != playbackGeneration) {
+                releasePlayer(next)
+                return
+            }
+            player = next
+            next.prepareAsync()
+        } catch (error: Exception) {
+            releasePlayer(next)
+            if (generation == playbackGeneration) {
+                Log.w(TAG, "Could not prepare preferred alarm sound from $uri", error)
+                startBundledPlayer(generation)
+            }
         }
     }
 
-    private fun startPlayer(uri: Uri): Boolean = runCatching {
-        val next = MediaPlayer().apply {
-            setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build(),
-            )
-            setDataSource(context, uri)
-            isLooping = true
-            setOnPreparedListener { it.start() }
-            prepareAsync()
+    private fun fallbackFromPreferred(
+        failed: MediaPlayer,
+        uri: Uri,
+        generation: Int,
+        error: Throwable,
+    ) {
+        val shouldFallback = isCurrent(failed, generation)
+        if (player === failed) player = null
+        releasePlayer(failed)
+        if (shouldFallback) {
+            Log.w(TAG, "Preferred alarm sound failed from $uri; using bundled sound", error)
+            startBundledPlayer(generation)
+        }
+    }
+
+    private fun startBundledPlayer(generation: Int) {
+        if (generation != playbackGeneration) return
+
+        val next = runCatching {
+            MediaPlayer.create(
+                context,
+                R.raw.clipper_alarm_fallback,
+                alarmAudioAttributes,
+                0,
+            ) ?: error("MediaPlayer could not open bundled alarm sound")
+        }.getOrElse { error ->
+            Log.e(TAG, "Could not load bundled alarm sound", error)
+            return
+        }
+
+        if (generation != playbackGeneration) {
+            releasePlayer(next)
+            return
+        }
+        next.isLooping = true
+        next.setOnErrorListener { failed, what, extra ->
+            val isActive = isCurrent(failed, generation)
+            if (player === failed) player = null
+            releasePlayer(failed)
+            if (isActive) {
+                Log.e(TAG, "Bundled alarm playback failed: what=$what extra=$extra")
+            }
+            true
         }
         player = next
-        true
-    }.getOrElse { error ->
-        Log.w(TAG, "Could not start alarm sound from $uri", error)
-        false
+        runCatching {
+            next.start()
+            Log.i(TAG, "Started bundled alarm sound")
+        }.onFailure { error ->
+            if (player === next) player = null
+            releasePlayer(next)
+            if (generation == playbackGeneration) {
+                Log.e(TAG, "Could not start bundled alarm sound", error)
+            }
+        }
     }
 
+    private fun isCurrent(candidate: MediaPlayer, generation: Int): Boolean =
+        generation == playbackGeneration && player === candidate
+
+    private fun releasePlayer(candidate: MediaPlayer) {
+        runCatching { candidate.setOnPreparedListener(null) }
+        runCatching { candidate.setOnErrorListener(null) }
+        runCatching { if (candidate.isPlaying) candidate.stop() }
+        runCatching { candidate.release() }
+    }
+
+    @Suppress("DEPRECATION")
     private fun startVibration() {
         // Wait 0ms, buzz 600ms, pause 600ms, repeating from index 0 until stopped.
         runCatching {
-            vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 600, 600), 0))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 600, 600), 0))
+            } else {
+                vibrator?.vibrate(longArrayOf(0, 600, 600), 0)
+            }
         }
     }
 

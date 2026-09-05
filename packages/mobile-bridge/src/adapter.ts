@@ -15,6 +15,7 @@ import {
 } from "./generated/clipper_app_types";
 import {
   MobileClipperClient,
+  MobileError,
   type MobileClipperClientLike,
 } from "./generated/clipper_mobile_uniffi";
 import type {
@@ -133,16 +134,37 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     expandSchedule: async () => {
       throw new Error("Expanding the schedule is not available on mobile yet");
     },
-    // Browser-only session resume (see the web client). The mobile app resumes
-    // from the OS keystore via its own flow, so these are inert here and exist
-    // only to satisfy the shared backend contract.
-    resume: async () => {
-      throw new Error("Session resume is handled by the mobile keystore flow");
+    resume: async (token, dataKey, wrappingKey, username, deviceName, serverUrl) => {
+      try {
+        await clientFor(serverUrl).resume(
+          token,
+          dataKey,
+          wrappingKey,
+          username,
+          deviceName,
+          serverUrl,
+        );
+      } catch (error) {
+        if (
+          MobileError.SessionResumeRejected.instanceOf(error) ||
+          MobileError.InvalidResumeKey.instanceOf(error)
+        ) {
+          throw Object.assign(new Error("Saved session is no longer valid; sign in again"), {
+            code: "SESSION_RESUME_REJECTED",
+          });
+        }
+        throw error;
+      }
     },
     sendClipboardPayload: async (mimeType, bytes) =>
       client.sendClipboardPayload(mimeType, arrayBufferFrom(bytes)),
     sendClipboardText: async (text) => client.sendClipboardText(text),
-    sessionResumeMaterial: async () => null,
+    sessionResumeMaterial: async () => {
+      const material = await client.sessionResumeMaterial();
+      return material
+        ? { token: material.token, dataKey: material.dataKey, wrappingKey: material.wrappingKey }
+        : null;
+    },
     stateVersion: () => client.stateVersion(),
     uploadFileBytes: async (filename, mimeType, bytes) =>
       client.uploadFileBytes(filename, mimeType, arrayBufferFrom(bytes)),

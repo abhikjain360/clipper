@@ -1,7 +1,9 @@
 package com.clipper.alarm
 
+import android.app.NotificationManager
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -44,15 +46,68 @@ class ClipperAlarmModule : Module() {
 
         /**
          * Whether the OS will deliver exact alarms. False means every alarm
-         * would be late, so the UI should say so rather than pretend.
+         * is left unarmed, so the UI should say so rather than pretend.
          */
         Function("canScheduleExactAlarms") {
             AlarmScheduler(context).canScheduleExactAlarms()
         }
 
+        Function("areNotificationsEnabled") {
+            notificationManager.areNotificationsEnabled() && (
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+                    notificationManager.getNotificationChannel(RingService.CHANNEL_ID)
+                        ?.importance != NotificationManager.IMPORTANCE_NONE
+                )
+        }
+
+        Function("canUseFullScreenIntent") {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                notificationManager.canUseFullScreenIntent()
+            } else {
+                true
+            }
+        }
+
         /** Open the system screen where exact alarms are granted. */
         Function("openExactAlarmSettings") {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                return@Function false
+            }
             val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                data = Uri.fromParts("package", context.packageName, null)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            runCatching { context.startActivity(intent) }.isSuccess
+        }
+
+        Function("openNotificationSettings") {
+            val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channelBlocked = notificationManager
+                    .getNotificationChannel(RingService.CHANNEL_ID)
+                    ?.importance == NotificationManager.IMPORTANCE_NONE
+                Intent(
+                    if (channelBlocked) Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS
+                    else Settings.ACTION_APP_NOTIFICATION_SETTINGS,
+                ).apply {
+                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    if (channelBlocked) putExtra(Settings.EXTRA_CHANNEL_ID, RingService.CHANNEL_ID)
+                }
+            } else {
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.fromParts("package", context.packageName, null)
+                }
+            }
+            intent.apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            runCatching { context.startActivity(intent) }.isSuccess
+        }
+
+        Function("openFullScreenIntentSettings") {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                return@Function false
+            }
+            val intent = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
                 data = Uri.fromParts("package", context.packageName, null)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
@@ -61,7 +116,8 @@ class ClipperAlarmModule : Module() {
 
         /** What the device-protected mirror currently holds, for diagnostics. */
         Function("plannedCount") {
-            AlarmMirror.load(context).size
+            val now = System.currentTimeMillis()
+            AlarmMirror.load(context).count { alarm -> alarm.fireAtMillis > now }
         }
 
         /**
@@ -92,5 +148,10 @@ class ClipperAlarmModule : Module() {
     private val context
         get() = requireNotNull(appContext.reactContext) {
             "ClipperAlarm needs a React context"
+        }
+
+    private val notificationManager
+        get() = requireNotNull(context.getSystemService(NotificationManager::class.java)) {
+            "NotificationManager is unavailable"
         }
 }
