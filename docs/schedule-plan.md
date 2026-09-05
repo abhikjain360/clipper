@@ -5,12 +5,16 @@ blocks, recurring events, alarm dispatch into
 [abnormalarm](https://github.com/abhikjain360/abnormalarm), and two-way sync
 with Google Calendar and Zoho Calendar.
 
-**Status: design settled, implementation not started.** No code has been
-written. D1-D11 in the [Decision Log](#decision-log) are agreed; D10 is a
-proposal awaiting sign-off and is marked as such. Everything under
-[Findings](#findings) is verified against the code as of 2026-09-07 and is meant
-to save the next reader from re-deriving it. Start at
-[Next Steps](#next-steps).
+**Status: milestone 1 in progress on branch `schedule-module`.** The recurrence
+engine, the schedule object kind, sync, and the web grid are built and verified
+against a live server; ingest is not. See the [Build log](#build-log) for what
+landed and what the build changed about the plan.
+
+D1-D11 in the [Decision Log](#decision-log) are agreed. Everything under
+[Findings](#findings) was verified against the code as of 2026-09-07 and is
+meant to save the next reader from re-deriving it — though the sections on where
+a kind is wired are now history rather than instructions, since that wiring
+exists. Start at [Next Steps](#next-steps).
 
 ## The ask
 
