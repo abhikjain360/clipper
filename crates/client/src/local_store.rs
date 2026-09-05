@@ -585,8 +585,7 @@ impl LocalStore {
                         "Failed to decrypt local cache record: {}",
                         error
                     );
-                    self.remove_stored_object_record_and_payloads(&record)
-                        .await?;
+                    self.discard_unreadable_cache_entry(&record).await?;
                 }
             }
         }
@@ -1109,6 +1108,33 @@ impl LocalStore {
             revision_anchor: Some(anchor),
         }))
         .await
+    }
+
+    /// Throw away content this device can no longer read, without throwing
+    /// away what it already accepted.
+    ///
+    /// A record that fails to decrypt is a broken *cache* entry, and the answer
+    /// to a broken cache entry is to fetch it again. It says nothing about the
+    /// chain: the envelope sitting beside the unreadable content is still
+    /// signed and still names the revision this device accepted. Deleting the
+    /// record would take that anchor with it, so a payload file that goes
+    /// missing for any reason — a crash between the two writes of a delete, a
+    /// partially restored backup, a stray cleaner — would quietly undo D6's
+    /// rollback protection for that object, and a server that noticed could
+    /// then replay an older revision unchallenged.
+    ///
+    /// Downgrading to an `Absent` marker keeps the anchor and still allows the
+    /// same head back, which is exactly what the refetch will bring.
+    async fn discard_unreadable_cache_entry(
+        &self,
+        record: &StoredObjectRecord,
+    ) -> Result<(), LocalStoreError> {
+        if revision_anchor_for_record(record).is_ok_and(|anchor| anchor.is_some()) {
+            return self.mark_record_absent(record).await;
+        }
+        // Nothing to protect: a collab doc has no revision chain, and a record
+        // too damaged to yield its envelope has no anchor left to salvage.
+        self.remove_stored_object_record_and_payloads(record).await
     }
 
     async fn mark_object_absent_inner(&self, object_id: &str) -> Result<(), LocalStoreError> {
@@ -3334,5 +3360,76 @@ mod tests {
             restarted.local_head(&original.id).await.expect("head"),
             Some(tombstone),
         );
+    }
+
+    /// The failure this closes: a clipboard payload file that goes missing made
+    /// hydration delete the whole record, anchor included, and the object then
+    /// had no memory of the revision it had accepted. Losing a cache entry must
+    /// cost a refetch, never the rollback protection.
+    #[tokio::test]
+    async fn hydration_keeps_the_anchor_when_cached_content_cannot_be_read() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let item = item(
+            "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+            "revision two",
+            "2026-01-11T00:00:00+00:00",
+        );
+        let revision_one = encrypted_clipboard(&item, b"revision one");
+        let parent_hash = crypto::object_envelope_parent_hash(&revision_one.object.envelope.body)
+            .expect("parent hash");
+        let revision_two = encrypted_clipboard_at(
+            &item,
+            item.text.as_bytes(),
+            2,
+            Some(parent_hash),
+            ObjectEnvelopeOperation::Revise,
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &item,
+                item.text.as_bytes(),
+                &revision_two,
+                2,
+                2,
+                10,
+            )
+            .await
+            .expect("persist revision two");
+
+        // The crash window during a delete leaves exactly this shape: the
+        // record and its envelope intact, the payload sidecar gone.
+        tokio::fs::remove_file(store.object_payload_ciphertext_path(&item.id))
+            .await
+            .expect("remove cached payload");
+
+        let restarted = LocalStore::new(tmp.path());
+        restarted.set_profile("profile-a".into());
+        let visible = restarted
+            .hydrate_ciphertext_cache(&TEST_KEY, 10)
+            .await
+            .expect("hydrate");
+        assert!(
+            visible.clipboard_items.is_empty(),
+            "unreadable content must not be displayed",
+        );
+
+        restarted
+            .persist_local_clipboard_present_encrypted(&item, b"revision one", &revision_one, 11, 11, 10)
+            .await
+            .expect_err("an unreadable cache entry must not forfeit the accepted revision");
+
+        restarted
+            .persist_local_clipboard_present_encrypted(
+                &item,
+                item.text.as_bytes(),
+                &revision_two,
+                12,
+                12,
+                10,
+            )
+            .await
+            .expect("the refetched head is the one the anchor already accepted");
     }
 }
