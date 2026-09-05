@@ -9,7 +9,7 @@ pub use clipper_api_types::{
     DEVICE_LOGIN_PROOF_SIGNATURE_BYTES, DEVICE_LOGIN_PROOF_VERSION,
     DEVICE_SIGNING_PUBLIC_KEY_BYTES, DEVICE_SIGNING_SECRET_KEY_BYTES, DeviceLoginProofBodyV1,
     OBJECT_ENVELOPE_SIGNATURE_BYTES, ObjectEnvelopeBodyV1, ObjectEnvelopeOperation,
-    ObjectEnvelopeV1, ObjectPayloadId,
+    ObjectEnvelopePayloadV1, ObjectEnvelopeV1, ObjectPayloadId,
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
@@ -190,22 +190,70 @@ pub fn object_payload_aad_v1(
     object_aad_v1(body, Some(payload_id))
 }
 
+/// Project an envelope body onto the bytes that authenticate its ciphertexts.
+///
+/// The body is destructured exhaustively on purpose. Leaving a field out of
+/// this projection is not a compile error anywhere else, and it is not a
+/// decryption error either: the ciphertext still decrypts and the signature
+/// still verifies. The only symptom is that a ciphertext becomes replayable
+/// into any context differing by exactly the missing field. Adding a field to
+/// `ObjectEnvelopeBodyV1` must therefore break *this line*, so that binding it
+/// is a decision rather than an omission — and `mod object_aad` in the tests
+/// below is the other half of that guard, asserting field by field which ones
+/// actually made it in.
 fn object_aad_v1(
     body: &ObjectEnvelopeBodyV1,
     payload_id: Option<ObjectPayloadId>,
 ) -> Result<Vec<u8>, CryptoError> {
+    let ObjectEnvelopeBodyV1 {
+        object_id,
+        object_type,
+        object_version,
+        source_device_id,
+        created_at,
+        operation,
+        payloads,
+        // Unbound, deliberately. A nonce is an AEAD input in its own right and
+        // is already covered by the tag, so binding it to the AAD of the very
+        // ciphertext it produced adds nothing.
+        meta_nonce: _,
+        // Unbound of necessity: this is a hash *of* the ciphertext that this
+        // AAD is needed to produce, so binding it would be circular. The
+        // signature over the body covers it instead.
+        sha256_meta_ciphertext: _,
+    } = body;
+
     let aad = ObjectAadV1 {
         domain: match payload_id {
             Some(_) => "clipper:object-payload-aad:v1",
             None => "clipper:object-meta-aad:v1",
         },
-        object_id: body.object_id,
-        object_type: body.object_type,
-        object_version: body.object_version,
-        source_device_id: body.source_device_id,
-        created_at: body.created_at.as_str(),
-        operation: body.operation,
-        payload_ids: body.payloads.iter().map(|payload| payload.id).collect(),
+        object_id: *object_id,
+        object_type: *object_type,
+        object_version: *object_version,
+        source_device_id: *source_device_id,
+        created_at: created_at.as_str(),
+        operation: *operation,
+        // The whole payload *set* is bound, not just the one being encrypted,
+        // so a payload cannot be added to or dropped from a signed envelope
+        // without invalidating every ciphertext in it.
+        payload_ids: payloads
+            .iter()
+            .map(|payload| {
+                // Same rule as above, one level down.
+                let ObjectEnvelopePayloadV1 {
+                    id,
+                    // Unbound for the reasons given above: a nonce adds
+                    // nothing, and a digest of the ciphertext is circular.
+                    nonce: _,
+                    sha256_ciphertext: _,
+                    // Unbound: a lie about the size cannot survive the tag over
+                    // the actual bytes, and the body signature covers it.
+                    ciphertext_size: _,
+                } = payload;
+                *id
+            })
+            .collect(),
         payload_id,
     };
     postcard::to_allocvec(&aad).map_err(|e| CryptoError::Encrypt(format!("aad: {e}")))
@@ -939,5 +987,247 @@ mod tests {
         .unwrap();
 
         assert!(opaque_client_login_finish(&client_state, b"wrong password", &response).is_err());
+    }
+}
+
+/// Guards for the envelope AAD projection.
+///
+/// `object_aad_v1` decides which parts of an envelope body authenticate its
+/// ciphertexts. That decision has no other enforcement: a field left out still
+/// encrypts, still decrypts, and still verifies, and the only consequence is
+/// that a ciphertext can be lifted into a context differing by exactly the
+/// missing field. Nothing turns red.
+///
+/// So it is made to turn red here. Two tables below name every field and which
+/// side of the line it falls on, and the tests exercise both directions —
+/// bound fields must break decryption, unbound fields must leave the AAD
+/// byte-identical. Between them and the exhaustive destructure in
+/// `object_aad_v1`, adding a field to the envelope cannot silently skip the
+/// question.
+#[cfg(test)]
+mod object_aad {
+    use std::str::FromStr;
+
+    use clipper_api_types::{DeviceId, ObjectId, ObjectKind};
+
+    use super::*;
+
+    const KEY: [u8; 32] = [7u8; 32];
+
+    fn uuid_str(tag: u64) -> String {
+        format!("00000000-0000-4000-8000-{tag:012x}")
+    }
+
+    fn payload(tag: u64) -> ObjectEnvelopePayloadV1 {
+        ObjectEnvelopePayloadV1 {
+            id: ObjectPayloadId::from_str(&uuid_str(tag)).expect("payload id"),
+            nonce: vec![tag as u8; XCHACHA20_NONCE_BYTES],
+            ciphertext_size: 64,
+            sha256_ciphertext: vec![tag as u8; SHA256_BYTES],
+        }
+    }
+
+    /// Written as a full struct literal, without `..`, for the same reason
+    /// `object_aad_v1` destructures: a new field on the body has to be given a
+    /// value here, which lands whoever added it in this file, in front of the
+    /// two tables below.
+    fn body() -> ObjectEnvelopeBodyV1 {
+        ObjectEnvelopeBodyV1 {
+            object_id: ObjectId::from_str(&uuid_str(1)).expect("object id"),
+            object_type: ObjectKind::Schedule,
+            object_version: 1,
+            source_device_id: DeviceId::from_str(&uuid_str(2)).expect("device id"),
+            created_at: "2026-09-08T10:00:00Z".to_string(),
+            operation: ObjectEnvelopeOperation::Create,
+            meta_nonce: vec![3; XCHACHA20_NONCE_BYTES],
+            sha256_meta_ciphertext: vec![4; SHA256_BYTES],
+            payloads: vec![payload(0x10), payload(0x11)],
+        }
+    }
+
+    type Mutation = (&'static str, fn(&mut ObjectEnvelopeBodyV1));
+
+    /// Fields the AAD must bind, each with a change to it. A ciphertext sealed
+    /// under the original body must not open under any of these.
+    fn bound_fields() -> Vec<Mutation> {
+        vec![
+            ("object_id", |body| {
+                body.object_id = ObjectId::from_str(&uuid_str(0xdead)).expect("object id");
+            }),
+            ("object_type", |body| body.object_type = ObjectKind::File),
+            ("object_version", |body| body.object_version += 1),
+            ("source_device_id", |body| {
+                body.source_device_id = DeviceId::from_str(&uuid_str(0xbeef)).expect("device id");
+            }),
+            ("created_at", |body| {
+                body.created_at = "2026-09-08T10:00:01Z".to_string();
+            }),
+            ("payloads[..].id", |body| {
+                body.payloads[0].id =
+                    ObjectPayloadId::from_str(&uuid_str(0xfeed)).expect("payload id");
+            }),
+            ("payloads.len()", |body| body.payloads.push(payload(0x12))),
+        ]
+    }
+
+    /// Fields deliberately left out of the projection; the reasoning is on
+    /// `object_aad_v1`. Changing one must leave the AAD byte-identical. A
+    /// failure here means someone bound a field — possibly correctly, but it
+    /// should be a decision, and the comment explaining it belongs next to the
+    /// destructure.
+    fn unbound_fields() -> Vec<Mutation> {
+        vec![
+            ("meta_nonce", |body| {
+                body.meta_nonce = vec![0xaa; XCHACHA20_NONCE_BYTES];
+            }),
+            ("sha256_meta_ciphertext", |body| {
+                body.sha256_meta_ciphertext = vec![0xaa; SHA256_BYTES];
+            }),
+            ("payloads[..].nonce", |body| {
+                body.payloads[0].nonce = vec![0xaa; XCHACHA20_NONCE_BYTES];
+            }),
+            ("payloads[..].ciphertext_size", |body| {
+                body.payloads[0].ciphertext_size += 1;
+            }),
+            ("payloads[..].sha256_ciphertext", |body| {
+                body.payloads[0].sha256_ciphertext = vec![0xaa; SHA256_BYTES];
+            }),
+        ]
+    }
+
+    #[test]
+    fn meta_ciphertext_will_not_open_under_a_changed_bound_field() {
+        let aad = object_meta_aad_v1(&body()).expect("meta aad");
+        let (nonce, ciphertext) = encrypt(&KEY, b"encrypted meta", &aad).expect("encrypt");
+
+        for (field, mutate) in bound_fields() {
+            let mut altered = body();
+            mutate(&mut altered);
+            let altered_aad = object_meta_aad_v1(&altered).expect("meta aad");
+
+            assert_ne!(aad, altered_aad, "{field} is missing from the meta AAD");
+            assert!(
+                decrypt(&KEY, &nonce, &ciphertext, &altered_aad).is_err(),
+                "meta ciphertext opened after {field} changed, so it is replayable across it",
+            );
+        }
+    }
+
+    #[test]
+    fn payload_ciphertext_will_not_open_under_a_changed_bound_field() {
+        let target = body().payloads[0].id;
+        let aad = object_payload_aad_v1(&body(), target).expect("payload aad");
+        let (nonce, ciphertext) = encrypt(&KEY, b"encrypted payload", &aad).expect("encrypt");
+
+        for (field, mutate) in bound_fields() {
+            let mut altered = body();
+            mutate(&mut altered);
+            // Mutating the id under test moves the target too; the point is
+            // that the surrounding envelope changed, so re-derive against the
+            // payload the altered body actually has in that slot.
+            let altered_target = altered.payloads[0].id;
+            let altered_aad = object_payload_aad_v1(&altered, altered_target).expect("payload aad");
+
+            assert_ne!(aad, altered_aad, "{field} is missing from the payload AAD");
+            assert!(
+                decrypt(&KEY, &nonce, &ciphertext, &altered_aad).is_err(),
+                "payload ciphertext opened after {field} changed, so it is replayable across it",
+            );
+        }
+    }
+
+    #[test]
+    fn unbound_fields_leave_the_aad_byte_identical() {
+        let target = body().payloads[0].id;
+        let meta = object_meta_aad_v1(&body()).expect("meta aad");
+        let payload = object_payload_aad_v1(&body(), target).expect("payload aad");
+
+        for (field, mutate) in unbound_fields() {
+            let mut altered = body();
+            mutate(&mut altered);
+
+            assert_eq!(
+                meta,
+                object_meta_aad_v1(&altered).expect("meta aad"),
+                "{field} is now bound in the meta AAD; see the destructure in object_aad_v1",
+            );
+            assert_eq!(
+                payload,
+                object_payload_aad_v1(&altered, target).expect("payload aad"),
+                "{field} is now bound in the payload AAD; see the destructure in object_aad_v1",
+            );
+        }
+    }
+
+    #[test]
+    fn the_body_signature_covers_what_the_aad_omits() {
+        // The two mechanisms split the work: the AAD binds a ciphertext to its
+        // context, the signature covers the whole body. An unbound field is
+        // not an unprotected one, and this is what says so.
+        let secret = [9u8; DEVICE_SIGNING_SECRET_KEY_BYTES];
+        let public = device_signing_public_key(&secret);
+        let signature = sign_object_envelope_body(&secret, &body()).expect("sign");
+
+        verify_object_envelope_signature(
+            &public,
+            &ObjectEnvelopeV1 {
+                body: body(),
+                signature: signature.clone(),
+            },
+        )
+        .expect("the unmodified body verifies");
+
+        for (field, mutate) in unbound_fields() {
+            let mut altered = body();
+            mutate(&mut altered);
+            assert!(
+                verify_object_envelope_signature(
+                    &public,
+                    &ObjectEnvelopeV1 {
+                        body: altered,
+                        signature: signature.clone(),
+                    },
+                )
+                .is_err(),
+                "{field} is neither bound in the AAD nor covered by the signature",
+            );
+        }
+    }
+
+    #[test]
+    fn meta_and_payload_aads_are_domain_separated() {
+        let body = body();
+        let meta = object_meta_aad_v1(&body).expect("meta aad");
+        let payload = object_payload_aad_v1(&body, body.payloads[0].id).expect("payload aad");
+        assert_ne!(meta, payload);
+
+        let (nonce, ciphertext) = encrypt(&KEY, b"encrypted meta", &meta).expect("encrypt");
+        assert!(
+            decrypt(&KEY, &nonce, &ciphertext, &payload).is_err(),
+            "encrypted meta opened as a payload",
+        );
+    }
+
+    #[test]
+    fn a_payload_ciphertext_cannot_be_moved_to_a_sibling() {
+        let body = body();
+        let first = object_payload_aad_v1(&body, body.payloads[0].id).expect("payload aad");
+        let second = object_payload_aad_v1(&body, body.payloads[1].id).expect("payload aad");
+
+        let (nonce, ciphertext) = encrypt(&KEY, b"payload one", &first).expect("encrypt");
+        assert!(
+            decrypt(&KEY, &nonce, &ciphertext, &second).is_err(),
+            "one payload's ciphertext opened in another payload's slot",
+        );
+    }
+
+    /// `operation` is bound, but with a single variant there is nothing for
+    /// `bound_fields` to mutate. This match stands in until there is: adding a
+    /// variant breaks it, and whoever adds one adds the mutation case too.
+    #[test]
+    fn operation_still_has_a_single_variant() {
+        match ObjectEnvelopeOperation::Create {
+            ObjectEnvelopeOperation::Create => {}
+        }
     }
 }
