@@ -29,6 +29,20 @@ import java.util.Date
  */
 class RingActivity : Activity() {
 
+    private val onRingingStopped: () -> Unit = { finish() }
+
+    override fun onStart() {
+        super.onStart()
+        RingService.stoppedListeners.add(onRingingStopped)
+        // Also handles a notification tap racing with dismissal/auto-silence.
+        if (!RingService.isRinging) finish()
+    }
+
+    override fun onStop() {
+        RingService.stoppedListeners.remove(onRingingStopped)
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         showOverKeyguard()
@@ -52,14 +66,14 @@ class RingActivity : Activity() {
      */
     @Suppress("DEPRECATION")
     private fun showOverKeyguard() {
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
         } else {
             window.addFlags(
                 WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON,
             )
         }
     }

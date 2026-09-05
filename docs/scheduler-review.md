@@ -205,6 +205,35 @@ device loudness or overnight reliability test.
 That alarm fired more than four minutes after the boot receiver ran; this did
 not test the immediate post-boot foreground-service restriction described below.
 
+The Abnormalarm comparison led to three Android ring-lifecycle changes:
+`FLAG_KEEP_SCREEN_ON` now applies on every supported API level; each new alarm
+starts a fixed ten-minute auto-silence window (matching Abnormalarm's default);
+and tapping the ringing notification opens the native ring screen. Dismissal
+and auto-silence stop audio/vibration, remove the notification, release the wake
+lock and close the ring screen. A new delivery resets the timeout and renews the
+wake lock. Auto-silence is not yet configurable and does not post a missed-alarm
+notification.
+
+An unlocked phone may show a heads-up notification instead of opening the full
+ring screen. This is [Android's intended full-screen-intent behavior](https://source.android.com/docs/core/permissions/fsi-limits),
+not evidence that the alarm failed. Clipper retains that behavior without adding
+Abnormalarm's overlay permission; the notification offers Dismiss and opens the
+ring screen when tapped.
+
+A focused API 36 debug-APK check on September 10 exercised the changed native
+alarm path using a temporary instrumentation fixture (no server/Rust scheduling
+flow). The alarm fired at 19:20:00 CEST and auto-silenced at 19:30:00. The ring
+screen stayed awake beyond a 15-second system display timeout. Notification-body
+tapping reopened the screen. At timeout, the service, MediaPlayer, vibration,
+notification and wake lock were gone and the ring activity closed. This checks
+emulator lifecycle behavior, not physical-device loudness or overnight reliability.
+A second alarm fired with the launcher visible and phone unlocked: it rang
+without taking over the screen, tapping its notification opened RingActivity,
+and notification Dismiss stopped the service and closed the activity.
+The module's Kotlin compilation and debug APK build passed. Android lint could
+not complete because its Kotlin analysis crashed in `react-native-worklets`
+(`Cannot find a KaModule for the VirtualFile`).
+
 The Tauri bundle starts, but logged-in native Tauri UI flows were not exercised:
 the computer-use harness lacked macOS screen/control permissions. The emulator
 had no enrolled biometric, so manual-login fallback was exercised while the OS
@@ -241,6 +270,12 @@ old QA recordings/overrides before exercising the new historical comparisons.
 5. Sign in on Android, grant notification/exact-alarm/full-screen access, and create an
    alarm-enabled block from desktop/web a few minutes ahead. Verify mirror count,
    ringing, label and dismiss. Repeat after backgrounding and rebooting.
+   With the phone unlocked, verify the heads-up notification and tap its body
+   to open the ring screen. With a short normal display timeout, leave the ring
+   screen untouched and verify it stays awake. Leave one alarm unanswered for
+   ten minutes: sound/vibration, notification and ring screen should all stop.
+   Also dismiss an alarm early and verify a later alarm still gets its own full
+   ten-minute window.
    Separately test an alarm due immediately after reboot, before first unlock,
    and one shortly after unlock. A later post-reboot success does not cover the
    known foreground-service attribution issue; capture logs for a missed alarm.
