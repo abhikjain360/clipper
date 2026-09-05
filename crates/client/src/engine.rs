@@ -1805,8 +1805,8 @@ impl SyncEngine {
     /// recomputes a recurrence itself — this crate is the only place a rule is
     /// expanded, so there is no second implementation to drift.
     ///
-    /// Ingested events do not raise alarms: their fields are upstream-owned,
-    /// and an alarm is something the owner decides, not the calendar.
+    /// Ingested events do not raise alarms automatically; imported calendar
+    /// data does not grant permission to ring on this device.
     pub async fn next_alarms(
         &self,
         within_hours: u32,
@@ -1873,7 +1873,7 @@ impl SyncEngine {
 
     /// Register a calendar to pull events from.
     pub async fn add_calendar_source(&self, name: &str, url: &str) -> Result<String, ClientError> {
-        // Reject a URL the fetcher could never use, at the point the owner can
+        // Reject a URL the fetcher could never use, at the point the user can
         // still fix the typo.
         let mut parsed = url::Url::parse(url)
             .map_err(|error| ClientError::InvalidArgument(format!("calendar URL: {error}")))?;

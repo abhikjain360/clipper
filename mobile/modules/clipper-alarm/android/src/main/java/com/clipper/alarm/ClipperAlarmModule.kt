@@ -14,7 +14,7 @@ import org.json.JSONArray
  *
  * Intentionally small. Everything about *when* an alarm rings is decided in
  * Rust and arrives here as instants; this module only registers them, reports
- * whether the OS will honour exact alarms, and can send the owner to the
+ * whether the OS will honour exact alarms, and can send the user to the
  * setting when it will not.
  *
  * The plan crosses as a JSON string rather than a list of typed records.

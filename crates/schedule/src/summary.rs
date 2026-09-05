@@ -101,7 +101,7 @@ impl ScheduleItem {
                 match start {
                     // Naming the zone is the point: a floating alarm and a
                     // zoned one look identical otherwise, and they behave
-                    // differently the moment the owner travels.
+                    // differently the moment the user travels.
                     TimedStart::Floating(_) => format!("{clock} for {minutes} min (floating)"),
                     TimedStart::Zoned { zone, .. } => {
                         format!("{clock} for {minutes} min ({zone})")

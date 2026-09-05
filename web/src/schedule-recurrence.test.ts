@@ -39,9 +39,8 @@ const yearly: Recurrence = {
     end: { when: "never" },
 };
 
-/// The repeat row offers five cadences and the record can hold more. Reporting
-/// an unrepresentable rule as "once" put the Once pill under the cursor with
-/// nothing to warn the owner, and pressing it flattened the series.
+/// Rules outside the repeat row's supported choices must show as custom, so
+/// choosing Once is an explicit recurrence change.
 test("a cadence the row cannot express reports custom, not once", () => {
     assert.equal(repeatChoiceOf(fortnightly), "custom");
     assert.equal(repeatChoiceOf(secondTuesday), "custom");

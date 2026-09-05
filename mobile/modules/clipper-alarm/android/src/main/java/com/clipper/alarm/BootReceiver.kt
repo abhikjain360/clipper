@@ -16,7 +16,7 @@ import android.util.Log
  * alarms registered until someone unlocks it, which defeats the purpose.
  *
  * On Xiaomi and HyperOS this only runs if the app has not been force-stopped
- * and Autostart is allowed. That is a one-time setup the owner has to do by
+ * and Autostart is allowed. That is a one-time setup the user has to do by
  * hand; no amount of code substitutes for it.
  */
 class BootReceiver : BroadcastReceiver() {

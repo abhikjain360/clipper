@@ -64,7 +64,7 @@ class RingService : Service() {
         // Android 10+ restricts background activity launches. The full-screen
         // intent on the alarm notification is the supported path while the
         // app is backgrounded or the device is locked; a direct launch is
-        // useful only when the owner is already looking at Clipper.
+        // useful only when the user is already looking at Clipper.
         val appWasVisible = isAppVisible()
 
         acquireWakeLock()
