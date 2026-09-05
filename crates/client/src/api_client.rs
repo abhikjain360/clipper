@@ -1123,6 +1123,11 @@ pub enum ClientError {
         context: &'static str,
         source: std::io::Error,
     },
+    /// A caller-supplied argument was malformed — a timestamp that will not
+    /// parse, a window whose end precedes its start. Distinct from
+    /// `UnexpectedResponse`, which blames the server.
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
     /// The action is not available in this build or on this platform.
     #[error("{0}")]
     Unsupported(String),
@@ -1213,7 +1218,7 @@ impl ClientError {
                 ErrorResponse::new(ApiErrorCode::NotFound, self.to_string())
             }
             Self::InvalidId { .. } => ErrorResponse::new(ApiErrorCode::InvalidId, self.to_string()),
-            Self::InvalidServerUrl(_) => {
+            Self::InvalidServerUrl(_) | Self::InvalidArgument(_) => {
                 ErrorResponse::new(ApiErrorCode::BadRequest, self.to_string())
             }
             Self::UnexpectedObjectKind { .. } => {

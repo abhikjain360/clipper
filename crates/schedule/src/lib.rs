@@ -17,6 +17,7 @@
 pub mod engine;
 pub mod item;
 pub mod recurrence;
+pub mod summary;
 pub mod time;
 
 pub use engine::{EngineError, Expansion, RecurrenceEngine, RruleEngine, Window};

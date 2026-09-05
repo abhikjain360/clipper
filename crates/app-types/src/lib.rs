@@ -84,6 +84,47 @@ pub enum ConnectionStatus {
     DaemonNotRunning,
 }
 
+/// A schedule series, rendered for a list.
+///
+/// Deliberately pre-formatted strings rather than structured time: this crate
+/// stays free of chrono and of the schedule domain crate so its UniFFI records
+/// remain primitive, and every shell renders the same text without reimplementing
+/// the formatting three times.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ScheduleItemView {
+    pub id: String,
+    pub title: String,
+    /// Human-readable cadence, e.g. "Every weekday" or "Every 2 weeks on Tue".
+    pub recurrence: String,
+    /// Human-readable time, e.g. "07:00 (floating)" or "09:00 Europe/Berlin".
+    pub time_summary: String,
+    /// Whether this series is all-day rather than timed.
+    pub all_day: bool,
+    pub created_at: String,
+}
+
+/// One computed instance of a series, ready to place on a grid.
+///
+/// Occurrences are never stored — a client expands the window it is showing and
+/// throws the result away (`docs/schedule-plan.md`, D4 and D7).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct OccurrenceView {
+    /// The series this came from.
+    pub item_id: String,
+    pub title: String,
+    /// Absolute start, RFC 3339 in UTC.
+    pub start: String,
+    /// Absolute end, RFC 3339 in UTC. Half-open: an occurrence does not include
+    /// its end instant.
+    pub end: String,
+    pub all_day: bool,
+    /// True when an override moved this occurrence off its rule position, so
+    /// the UI can mark it as changed.
+    pub overridden: bool,
+}
+
 /// The full UI state exposed to the app.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -96,6 +137,10 @@ pub struct AppState {
     pub clipboard_items: Vec<DecryptedClipboardItem>,
     pub files: Vec<DecryptedFileItem>,
     pub collab_docs: Vec<CollabItem>,
+    /// Series definitions. Occurrences are not here: they depend on which
+    /// window the UI is showing, so they come from a separate windowed call.
+    #[serde(default)]
+    pub schedule_items: Vec<ScheduleItemView>,
     pub error: Option<String>,
 }
 

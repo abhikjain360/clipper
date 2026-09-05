@@ -901,8 +901,10 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
+ "chrono-tz",
  "clipper-app-types",
  "clipper-core",
+ "clipper-schedule",
  "futures-util",
  "getrandom 0.4.3",
  "gloo-timers",
