@@ -25,11 +25,11 @@ use crate::{
     engine_manager::EngineManager,
     keychain::{self, Credentials},
     protocol::{
-        AuthChallenge, AuthenticateResult, ClipboardPayloadResult, CopyToLocalResult,
-        DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, DeviceListResult,
-        ExpandScheduleParams, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION,
-        LoginParams, RegisterParams, RegisterResult, UploadFileResult, ipc_client_auth_message,
-        ipc_daemon_auth_message,
+        AddCalendarSourceParams, AuthChallenge, AuthenticateResult, ClipboardPayloadResult,
+        CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse,
+        DeviceListResult, ExpandScheduleParams, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES,
+        IPC_AUTH_VERSION, LoginParams, RegisterParams, RegisterResult, UploadFileResult,
+        ipc_client_auth_message, ipc_daemon_auth_message,
     },
 };
 
@@ -436,6 +436,12 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 DaemonCommand::ExpandSchedule(params) => {
                     cmd_expand_schedule(id, params, &engine).await
                 }
+                DaemonCommand::AddCalendarSource(params) => {
+                    cmd_add_calendar_source(id, params, &engine).await
+                }
+                DaemonCommand::SyncCalendarSource(params) => {
+                    cmd_sync_calendar_source(id, params.object_id, &engine).await
+                }
                 DaemonCommand::Authenticate(_)
                 | DaemonCommand::Login(_)
                 | DaemonCommand::Register(_)
@@ -747,6 +753,28 @@ async fn cmd_expand_schedule(
         .await
     {
         Ok(occurrences) => json_success(id, occurrences),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_add_calendar_source(
+    id: String,
+    params: AddCalendarSourceParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.add_calendar_source(&params.name, &params.url).await {
+        Ok(object_id) => json_success(id, object_id),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_sync_calendar_source(
+    id: String,
+    object_id: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.sync_calendar_source(&object_id).await {
+        Ok(report) => json_success(id, report),
         Err(e) => client_error(id, e),
     }
 }

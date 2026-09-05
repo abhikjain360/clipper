@@ -123,6 +123,48 @@ pub struct OccurrenceView {
     /// True when an override moved this occurrence off its rule position, so
     /// the UI can mark it as changed.
     pub overridden: bool,
+    /// Name of the calendar this came from, or `None` for a block the owner
+    /// authored. D10 requires an ingested event's origin be visible, since its
+    /// core fields are read-only here.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Cancelled upstream. Shown rather than hidden, because time already
+    /// logged against it survives the cancellation.
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
+/// A calendar source, rendered for a list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct CalendarSourceView {
+    /// The object id, which is what deletes and syncs address.
+    pub id: String,
+    pub name: String,
+    /// Protocol label, e.g. "ics".
+    pub protocol: String,
+    /// The feed URL with its query stripped. A private iCalendar address is a
+    /// credential, so the secret part never reaches a UI that might be
+    /// screenshotted or logged.
+    pub location: String,
+    pub enabled: bool,
+    /// Events currently held from this source.
+    pub event_count: u32,
+}
+
+/// What one pass over a calendar feed did.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct IngestReport {
+    pub added: u32,
+    pub updated: u32,
+    pub unchanged: u32,
+    /// Present locally but gone from the feed, so marked cancelled rather than
+    /// erased — time logged against them has to survive.
+    pub tombstoned: u32,
+    /// Entries in the feed this client could not read. Reported rather than
+    /// silently dropped.
+    pub skipped: Vec<String>,
 }
 
 /// The full UI state exposed to the app.
@@ -141,6 +183,9 @@ pub struct AppState {
     /// window the UI is showing, so they come from a separate windowed call.
     #[serde(default)]
     pub schedule_items: Vec<ScheduleItemView>,
+    /// Calendar feeds this account pulls from.
+    #[serde(default)]
+    pub calendar_sources: Vec<CalendarSourceView>,
     pub error: Option<String>,
 }
 

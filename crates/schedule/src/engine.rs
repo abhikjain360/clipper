@@ -152,7 +152,7 @@ impl RruleEngine {
             Recurrence::Every(cadence) => rrule_line(cadence),
             // Passed through byte-for-byte: this is a rule Clipper deliberately
             // does not model, so re-serializing it would risk changing it.
-            Recurrence::Raw(raw) => raw.as_str().to_string(),
+            Recurrence::Raw { rule } => rule.as_str().to_string(),
         };
 
         let zone = effective_zone(item, expansion.observer);

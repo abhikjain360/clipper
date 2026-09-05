@@ -11,7 +11,7 @@
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use clipper_app_types::{OccurrenceView, ScheduleItemView};
+use clipper_app_types::{CalendarSourceView, OccurrenceView, ScheduleItemView};
 use clipper_core::{
     crypto,
     models::{
@@ -31,6 +31,8 @@ pub enum ScheduleRecord {
     Item(Box<ScheduleItem>),
     Override(Box<clipper_schedule::OccurrenceOverride>),
     Actual(Box<clipper_schedule::ActualRecord>),
+    Source(Box<clipper_schedule::CalendarSource>),
+    Ingested(Box<clipper_schedule::IngestedEvent>),
 }
 
 impl ScheduleRecord {
@@ -39,6 +41,8 @@ impl ScheduleRecord {
             Self::Item(_) => ScheduleRecordKind::Item,
             Self::Override(_) => ScheduleRecordKind::Override,
             Self::Actual(_) => ScheduleRecordKind::Actual,
+            Self::Source(_) => ScheduleRecordKind::Source,
+            Self::Ingested(_) => ScheduleRecordKind::Ingested,
         }
     }
 
@@ -53,7 +57,21 @@ impl ScheduleRecord {
     pub fn as_item(&self) -> Option<&ScheduleItem> {
         match self {
             Self::Item(item) => Some(item),
-            Self::Override(_) | Self::Actual(_) => None,
+            Self::Override(_) | Self::Actual(_) | Self::Source(_) | Self::Ingested(_) => None,
+        }
+    }
+
+    pub fn as_source(&self) -> Option<&clipper_schedule::CalendarSource> {
+        match self {
+            Self::Source(source) => Some(source),
+            Self::Item(_) | Self::Override(_) | Self::Actual(_) | Self::Ingested(_) => None,
+        }
+    }
+
+    pub fn as_ingested(&self) -> Option<&clipper_schedule::IngestedEvent> {
+        match self {
+            Self::Ingested(event) => Some(event),
+            Self::Item(_) | Self::Override(_) | Self::Actual(_) | Self::Source(_) => None,
         }
     }
 }
@@ -124,20 +142,85 @@ pub fn item_view(item: &ScheduleItem, created_at: &str) -> ScheduleItemView {
     }
 }
 
+/// How an occurrence should be labelled: what it is called, where it came
+/// from, and whether the provider has since cancelled it.
+pub struct OccurrenceLabel<'a> {
+    pub title: &'a str,
+    pub all_day: bool,
+    /// The calendar's name, for an ingested event. `None` for an owned block.
+    pub source: Option<&'a str>,
+    pub cancelled: bool,
+}
+
 /// Render one computed occurrence for a grid.
-pub fn occurrence_view(occurrence: &Occurrence, title: &str, all_day: bool) -> OccurrenceView {
+pub fn occurrence_view(occurrence: &Occurrence, label: OccurrenceLabel<'_>) -> OccurrenceView {
     OccurrenceView {
         item_id: occurrence.item.to_string(),
-        title: title.to_string(),
+        title: label.title.to_string(),
         start: to_rfc3339(occurrence.span.start),
         end: to_rfc3339(occurrence.span.end),
-        all_day,
+        all_day: label.all_day,
         overridden: matches!(occurrence.origin, OccurrenceOrigin::Overridden(_)),
+        source: label.source.map(str::to_string),
+        cancelled: label.cancelled,
+    }
+}
+
+/// Present an ingested event to the expansion engine.
+///
+/// The engine expands series; an ingested event has a span and a rule, so it is
+/// one in all but name. Building a transient [`ScheduleItem`] beats making the
+/// engine generic over two nearly identical shapes. The id is the event's own
+/// derived id, so it stays stable across refreshes.
+pub fn ingested_as_series(event: &clipper_schedule::IngestedEvent) -> ScheduleItem {
+    ScheduleItem {
+        id: clipper_schedule::ScheduleItemId(event.id),
+        title: event.title.clone(),
+        span: event.span.clone(),
+        recurrence: event.recurrence.clone(),
+        reference: None,
     }
 }
 
 fn to_rfc3339(instant: DateTime<Utc>) -> String {
     instant.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Render a calendar source for a list.
+///
+/// `event_count` is supplied rather than derived because the caller already has
+/// every record in hand.
+pub fn source_view(
+    object_id: &str,
+    source: &clipper_schedule::CalendarSource,
+    event_count: u32,
+) -> CalendarSourceView {
+    let (protocol, location) = match &source.kind {
+        clipper_schedule::SourceKind::Ics { url } => ("ics", redact_url(url)),
+    };
+    CalendarSourceView {
+        id: object_id.to_string(),
+        name: source.name.clone(),
+        protocol: protocol.to_string(),
+        location,
+        enabled: source.enabled,
+        event_count,
+    }
+}
+
+/// Strip everything after the host and path root.
+///
+/// A private iCalendar address is a bearer credential — anyone with the URL can
+/// read the calendar — so the UI shows where a feed lives without showing how to
+/// reach it.
+fn redact_url(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(parsed) => match parsed.host_str() {
+            Some(host) => format!("{}://{host}/…", parsed.scheme()),
+            None => format!("{}://…", parsed.scheme()),
+        },
+        Err(_) => "(unparseable URL)".to_string(),
+    }
 }
 
 /// Resolve an IANA zone name, falling back to UTC.
@@ -190,6 +273,16 @@ mod tests {
         let meta = record.meta();
         assert_eq!(meta.record, ScheduleRecordKind::Item);
         assert_eq!(meta.version, SCHEDULE_PAYLOAD_VERSION);
+    }
+
+    /// A private calendar URL is a bearer credential. Anything that renders one
+    /// can end up in a screenshot or a log.
+    #[test]
+    fn a_source_url_is_redacted_before_it_reaches_a_view() {
+        let secret = "https://calendar.google.com/calendar/ical/abc123secret/basic.ics";
+        assert_eq!(redact_url(secret), "https://calendar.google.com/…");
+        assert!(!redact_url(secret).contains("abc123secret"));
+        assert_eq!(redact_url("nonsense"), "(unparseable URL)");
     }
 
     #[test]

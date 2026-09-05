@@ -480,3 +480,30 @@ fn the_wire_format_is_self_describing() {
     let back: ScheduleItem = serde_json::from_value(json).expect("round trip");
     assert_eq!(back, item);
 }
+
+/// The raw variant is the one a feed produces, and it broke serialization the
+/// first time it was tried for real: serde cannot internally tag a newtype
+/// wrapping a string. Pin its shape alongside the typed cadence.
+#[test]
+fn a_raw_rule_serializes_under_the_same_tag() {
+    use clipper_schedule::RawRule;
+
+    let recurrence = Recurrence::Raw {
+        rule: RawRule::new("FREQ=WEEKLY;BYDAY=MO,WE").expect("valid rule"),
+    };
+    let json = serde_json::to_value(&recurrence).expect("serialize");
+    assert_eq!(json["kind"], "raw");
+    assert_eq!(json["rule"], "FREQ=WEEKLY;BYDAY=MO,WE");
+
+    let back: Recurrence = serde_json::from_value(json).expect("round trip");
+    assert_eq!(back, recurrence);
+
+    // Validation runs on the way back in, not only at construction.
+    assert!(
+        serde_json::from_value::<Recurrence>(
+            serde_json::json!({"kind": "raw", "rule": "NOT A RULE"})
+        )
+        .is_err(),
+        "an unparseable rule must be rejected on deserialize too"
+    );
+}

@@ -9,7 +9,9 @@
 use std::path::Path;
 use std::{collections::HashMap, path::PathBuf, sync::RwLock};
 
-use clipper_app_types::{CollabItem, DecryptedClipboardItem, DecryptedFileItem, ScheduleItemView};
+use clipper_app_types::{
+    CalendarSourceView, CollabItem, DecryptedClipboardItem, DecryptedFileItem, ScheduleItemView,
+};
 use clipper_core::{
     crypto,
     models::{ObjectEnvelopeV1, ObjectKind, ObjectPayloadDescriptor},
@@ -22,7 +24,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     api_client::{decrypt_clipboard_meta, decrypt_clipboard_payload, decrypt_file_meta_bytes},
-    schedule::{ScheduleRecord, decrypt_schedule_payload, item_view},
+    schedule::{ScheduleRecord, decrypt_schedule_payload, item_view, source_view},
 };
 
 const DEFAULT_PROFILE: &str = "default";
@@ -198,6 +200,7 @@ pub struct LocalVisibleState {
     pub files: Vec<DecryptedFileItem>,
     pub collab_docs: Vec<CollabItem>,
     pub schedule_items: Vec<ScheduleItemView>,
+    pub calendar_sources: Vec<CalendarSourceView>,
 }
 
 #[derive(Debug, Default)]
@@ -1043,6 +1046,56 @@ impl LocalStore {
             .collect())
     }
 
+    async fn calendar_sources_inner(&self) -> Result<Vec<CalendarSourceView>, LocalStoreError> {
+        let mut records = self.all_memory_records().await;
+        sort_records_desc(&mut records);
+
+        // How many events each source currently holds, so a list row can say
+        // whether a feed has actually produced anything.
+        let mut counts: HashMap<clipper_schedule::SourceId, u32> = HashMap::new();
+        for record in &records {
+            if let LocalObjectData::Schedule(schedule) = &record.data
+                && let Some(event) = schedule.record.as_ingested()
+            {
+                *counts.entry(event.source).or_default() += 1;
+            }
+        }
+
+        Ok(records
+            .iter()
+            .filter_map(|record| {
+                let LocalObjectData::Schedule(schedule) = &record.data else {
+                    return None;
+                };
+                let source = schedule.record.as_source()?;
+                Some(source_view(
+                    &record.id,
+                    source,
+                    counts.get(&source.id).copied().unwrap_or(0),
+                ))
+            })
+            .collect())
+    }
+
+    /// Every schedule record with the object id that carries it.
+    ///
+    /// Ingest needs the object id, not just the record: replacing an event means
+    /// deleting the object it currently lives in.
+    pub async fn schedule_records_with_ids(&self) -> Vec<(String, ScheduleRecord)> {
+        self.all_memory_records()
+            .await
+            .iter()
+            .filter_map(|record| match &record.data {
+                LocalObjectData::Schedule(schedule) => {
+                    Some((record.id.clone(), schedule.record.clone()))
+                }
+                LocalObjectData::Clipboard(_)
+                | LocalObjectData::File(_)
+                | LocalObjectData::Collab(_) => None,
+            })
+            .collect()
+    }
+
     /// Every schedule record currently cached, in whatever form it takes.
     ///
     /// Expansion needs the series *and* its overrides together, so this returns
@@ -1159,6 +1212,7 @@ impl LocalStore {
             files: self.file_items_inner().await?,
             collab_docs: self.collab_items_inner().await?,
             schedule_items: self.schedule_items_inner().await?,
+            calendar_sources: self.calendar_sources_inner().await?,
         })
     }
 

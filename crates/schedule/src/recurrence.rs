@@ -29,7 +29,11 @@ pub enum Recurrence {
     /// An RFC 5545 rule ingested from a provider that [`Cadence`] cannot
     /// express. Expanded verbatim and read-only: Clipper can show when it
     /// happens without claiming to understand why.
-    Raw(RawRule),
+    ///
+    /// A struct variant rather than a newtype because serde cannot internally
+    /// tag a newtype wrapping a string — and `{"kind":"raw","rule":"…"}` reads
+    /// better than a bare string would anyway.
+    Raw { rule: RawRule },
 }
 
 /// An RFC 5545 `RRULE` value, validated on the way in.

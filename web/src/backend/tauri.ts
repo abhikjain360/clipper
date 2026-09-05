@@ -5,6 +5,7 @@ import type {
     ClipperBackend,
     CollabItem,
     DeviceInfo,
+    IngestReport,
     OccurrenceView,
     ScheduleItem,
 } from "@clipper/shared";
@@ -46,6 +47,9 @@ export function tauriBackend(): ClipperBackend {
         downloadFileToDialog: (fileId, defaultFilename) =>
             invoke<boolean>("download_file_to_dialog", { fileId, defaultFilename }),
         deleteFile: (fileId) => invoke<void>("delete_file", { fileId }),
+        addCalendarSource: (name, url) => invoke<string>("add_calendar_source", { name, url }),
+        syncCalendarSource: (objectId) =>
+            invoke<IngestReport>("sync_calendar_source", { objectId }),
         createScheduleItem: (item: ScheduleItem) =>
             invoke<string>("create_schedule_item", { item }),
         deleteScheduleObject: (objectId) => invoke<void>("delete_schedule_object", { objectId }),

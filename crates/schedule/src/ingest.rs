@@ -8,16 +8,23 @@
 //! Parsing lives here because it is pure. Fetching does not — that needs I/O and
 //! belongs to whichever client holds the source (D4).
 
+#[cfg(not(target_family = "wasm"))]
 use std::num::NonZeroU32;
 
+#[cfg(not(target_family = "wasm"))]
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+#[cfg(not(target_family = "wasm"))]
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[cfg(not(target_family = "wasm"))]
+use crate::recurrence::RawRule;
+#[cfg(not(target_family = "wasm"))]
+use crate::time::{BlockDuration, TimedStart};
 use crate::{
-    recurrence::{RawRule, Recurrence, RecurrenceError},
-    time::{BlockDuration, ScheduleSpan, TimeError, TimedStart},
+    recurrence::{Recurrence, RecurrenceError},
+    time::{ScheduleSpan, TimeError},
 };
 
 /// Identifies a calendar source.
@@ -129,6 +136,10 @@ pub struct SkippedEvent {
 /// events entirely — rules that suit an alarm app. A planner wants the
 /// opposite: every invite visible, all-day included, with RSVP shown as a
 /// property rather than used as a filter (D9).
+///
+/// Not built for wasm: a page cannot fetch a third-party calendar URL, so the
+/// browser only ever displays events another device ingested.
+#[cfg(not(target_family = "wasm"))]
 pub fn parse_ics(text: &str, source: SourceId) -> Result<IngestOutcome, IngestError> {
     use calcard::icalendar::{ICalendar, ICalendarComponentType};
 
@@ -152,6 +163,7 @@ pub fn parse_ics(text: &str, source: SourceId) -> Result<IngestOutcome, IngestEr
     Ok(outcome)
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn event_from_component(
     component: &calcard::icalendar::ICalendarComponent,
     source: SourceId,
@@ -163,7 +175,9 @@ fn event_from_component(
 
     let span = span_from(&start, end.as_ref())?;
     let recurrence = match rrule_text(component) {
-        Some(rule) => Recurrence::Raw(RawRule::new(rule)?),
+        Some(rule) => Recurrence::Raw {
+            rule: RawRule::new(rule)?,
+        },
         None => Recurrence::Once,
     };
 
@@ -183,6 +197,7 @@ fn event_from_component(
     })
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// A start as the feed expresses it, before it becomes a [`ScheduleSpan`].
 struct FeedTime {
     date: NaiveDate,
@@ -192,6 +207,7 @@ struct FeedTime {
     utc: bool,
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn span_from(start: &FeedTime, end: Option<&FeedTime>) -> Result<ScheduleSpan, IngestError> {
     let Some(clock) = start.time else {
         // Date-only: an all-day event. DTEND is exclusive in RFC 5545, so a
@@ -234,6 +250,7 @@ fn span_from(start: &FeedTime, end: Option<&FeedTime>) -> Result<ScheduleSpan, I
     })
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn text_property(component: &calcard::icalendar::ICalendarComponent, name: &str) -> Option<String> {
     use calcard::{common::IanaString, icalendar::ICalendarValue};
 
@@ -248,6 +265,7 @@ fn text_property(component: &calcard::icalendar::ICalendarComponent, name: &str)
         })
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn rrule_text(component: &calcard::icalendar::ICalendarComponent) -> Option<String> {
     use calcard::icalendar::ICalendarValue;
 
@@ -264,6 +282,7 @@ fn rrule_text(component: &calcard::icalendar::ICalendarComponent) -> Option<Stri
         })
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn date_time_property(
     component: &calcard::icalendar::ICalendarComponent,
     name: &str,

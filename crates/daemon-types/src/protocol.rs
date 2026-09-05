@@ -91,6 +91,8 @@ pub enum DaemonCommand {
     CreateScheduleItem(CreateScheduleItemParams),
     DeleteScheduleObject(DeleteScheduleObjectParams),
     ExpandSchedule(ExpandScheduleParams),
+    AddCalendarSource(AddCalendarSourceParams),
+    SyncCalendarSource(SyncCalendarSourceParams),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +228,19 @@ pub struct ExpandScheduleParams {
     /// IANA zone the caller is in. Resolves floating and all-day spans, which
     /// carry no zone of their own.
     pub observer_zone: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddCalendarSourceParams {
+    pub name: String,
+    /// The feed URL. For an iCalendar source this *is* the credential, which is
+    /// why the object holding it is encrypted like everything else.
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncCalendarSourceParams {
+    pub object_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -126,6 +126,36 @@ export type OccurrenceView = {
   all_day: boolean;
   // An override moved this off its rule position.
   overridden: boolean;
+  // The calendar this came from, or null for a block the owner authored. Its
+  // core fields are read-only, so the origin has to be visible.
+  source: string | null;
+  // Cancelled upstream. Shown rather than hidden — time logged against it
+  // survives the cancellation.
+  cancelled: boolean;
+};
+
+/// A calendar Clipper pulls events from.
+export type CalendarSourceView = {
+    // The object id — what sync and delete address.
+    id: string;
+    name: string;
+    protocol: string;
+    // Host only. A private iCalendar URL is a bearer credential, so the secret
+    // path never leaves the Rust side.
+    location: string;
+    enabled: boolean;
+    event_count: number;
+};
+
+/// What one pass over a calendar feed did.
+export type IngestReport = {
+    added: number;
+    updated: number;
+    unchanged: number;
+    // Gone from the feed, so marked cancelled rather than erased.
+    tombstoned: number;
+    // Entries this client could not read, reported rather than dropped.
+    skipped: string[];
 };
 
 export type AuthenticatedSession = {
@@ -162,6 +192,7 @@ export type AppState = {
   // Series definitions only. Occurrences depend on the window being shown, so
   // they come from expandSchedule rather than from state.
   schedule_items: ScheduleItemView[];
+  calendar_sources: CalendarSourceView[];
   error?: string | null;
 };
 
@@ -209,6 +240,10 @@ export type ClipperBackend = {
   downloadFileToDialog?: (fileId: string, defaultFilename: string) => Promise<boolean>;
   deleteFile: (fileId: string) => Promise<void>;
   createScheduleItem: (item: ScheduleItem) => Promise<string>;
+  addCalendarSource: (name: string, url: string) => Promise<string>;
+  // Rejects in the browser: no calendar provider sends CORS headers, so feeds
+  // are pulled by the desktop or mobile app and reach the browser as objects.
+  syncCalendarSource: (objectId: string) => Promise<IngestReport>;
   deleteScheduleObject: (objectId: string) => Promise<void>;
   // `observerZone` is an IANA name; it resolves floating and all-day spans,
   // which carry no zone of their own.
