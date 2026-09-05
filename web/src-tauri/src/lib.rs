@@ -4,14 +4,16 @@ mod ipc_secret;
 
 use std::{path::PathBuf, sync::OnceLock};
 
-use clipper_app_types::{AppState, CollabItem, DeviceInfo, IngestReport, OccurrenceView};
+use clipper_app_types::{
+    ActualView, AppState, CollabItem, DeviceInfo, IngestReport, OccurrenceView,
+};
 use clipper_daemon_types::{
-    AddCalendarSourceParams, ClipboardPayloadParams, ClipboardPayloadResult,
+    ActualsBetweenParams, AddCalendarSourceParams, ClipboardPayloadParams, ClipboardPayloadResult,
     CreateScheduleItemParams, DaemonCommand, DeleteCollabDocParams, DeleteFileParams,
     DeleteScheduleObjectParams, DeviceListResult, DownloadFileParams, ExpandScheduleParams,
     GetCollabDocMetaParams, LoginParams, RegisterParams, RegisterResult, RemoveDeviceParams,
-    RenameCollabDocParams, SendClipboardPayloadParams, SyncCalendarSourceParams,
-    UpdateScheduleItemParams, UploadFileParams, UploadFileResult,
+    RenameCollabDocParams, SendClipboardPayloadParams, StartActualParams, StopActualParams,
+    SyncCalendarSourceParams, UpdateScheduleItemParams, UploadFileParams, UploadFileResult,
 };
 use clipper_schedule::ScheduleItem;
 use daemon_client::{DaemonClient, DaemonClientError};
@@ -138,6 +140,9 @@ pub fn run() {
             update_schedule_item,
             delete_schedule_object,
             expand_schedule,
+            start_actual,
+            stop_actual,
+            actuals_between,
             add_calendar_source,
             sync_calendar_source,
             rename_collab_doc,
@@ -500,6 +505,47 @@ async fn expand_schedule(
             from,
             to,
             observer_zone,
+        }))
+        .await?)
+}
+
+#[tauri::command]
+async fn start_actual(
+    backend: State<'_, DesktopBackend>,
+    item_id: Option<String>,
+    occurrence_key: Option<String>,
+) -> CommandResult<String> {
+    Ok(backend
+        .daemon
+        .send_result::<String>(DaemonCommand::StartActual(StartActualParams {
+            item_id,
+            occurrence_key,
+        }))
+        .await?)
+}
+
+#[tauri::command]
+async fn stop_actual(
+    backend: State<'_, DesktopBackend>,
+    object_id: String,
+) -> CommandResult<String> {
+    Ok(backend
+        .daemon
+        .send_result::<String>(DaemonCommand::StopActual(StopActualParams { object_id }))
+        .await?)
+}
+
+#[tauri::command]
+async fn actuals_between(
+    backend: State<'_, DesktopBackend>,
+    from: String,
+    to: String,
+) -> CommandResult<Vec<ActualView>> {
+    Ok(backend
+        .daemon
+        .send_result::<Vec<ActualView>>(DaemonCommand::ActualsBetween(ActualsBetweenParams {
+            from,
+            to,
         }))
         .await?)
 }

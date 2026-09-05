@@ -133,6 +133,9 @@ export type ScheduleItemView = {
 /// expands the window it is showing and throws the result away.
 export type OccurrenceView = {
   item_id: string;
+  // Identifies this occurrence within the series, so time can be logged against
+  // the right one. Opaque above the engine.
+  occurrence_key: string;
   title: string;
   // RFC 3339 UTC. Half-open: an occurrence does not include its end instant.
   start: string;
@@ -146,6 +149,20 @@ export type OccurrenceView = {
   // Cancelled upstream. Shown rather than hidden — time logged against it
   // survives the cancellation.
   cancelled: boolean;
+};
+
+/// Time actually spent. Kept apart from OccurrenceView because the plan and
+/// the record of what happened are different things that can disagree.
+export type ActualView = {
+  // The object id — what stopping addresses.
+  id: string;
+  // Empty for unplanned work.
+  item_id: string;
+  title: string;
+  start: string;
+  // Empty while the timer is still running.
+  end: string;
+  running: boolean;
 };
 
 /// One alarm for the platform to register.
@@ -216,6 +233,8 @@ export type AppState = {
   // they come from expandSchedule rather than from state.
   schedule_items: ScheduleItemView[];
   calendar_sources: CalendarSourceView[];
+  // The timer currently running, if any.
+  running_actual?: ActualView | null;
   error?: string | null;
 };
 
@@ -265,6 +284,10 @@ export type ClipperBackend = {
   downloadFileBytes: (fileId: string) => Promise<Uint8Array>;
   downloadFileToDialog?: (fileId: string, defaultFilename: string) => Promise<boolean>;
   deleteFile: (fileId: string) => Promise<void>;
+  // Start the timer. Omit both arguments for unplanned work.
+  startActual: (itemId?: string, occurrenceKey?: string) => Promise<string>;
+  stopActual: (objectId: string) => Promise<string>;
+  actualsBetween: (from: string, to: string) => Promise<ActualView[]>;
   createScheduleItem: (item: ScheduleItem) => Promise<string>;
   // Replace a series. Returns the new object id; the series id inside `item`
   // must be unchanged.

@@ -25,11 +25,12 @@ use crate::{
     engine_manager::EngineManager,
     keychain::{self, Credentials},
     protocol::{
-        AddCalendarSourceParams, AuthChallenge, AuthenticateResult, ClipboardPayloadResult,
-        CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse,
-        DeviceListResult, ExpandScheduleParams, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES,
-        IPC_AUTH_VERSION, LoginParams, RegisterParams, RegisterResult, UpdateScheduleItemParams,
-        UploadFileResult, ipc_client_auth_message, ipc_daemon_auth_message,
+        ActualsBetweenParams, AddCalendarSourceParams, AuthChallenge, AuthenticateResult,
+        ClipboardPayloadResult, CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest,
+        DaemonResponse, DeviceListResult, ExpandScheduleParams, IPC_AUTH_NONCE_BYTES,
+        IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams, RegisterParams, RegisterResult,
+        StartActualParams, UpdateScheduleItemParams, UploadFileResult, ipc_client_auth_message,
+        ipc_daemon_auth_message,
     },
 };
 
@@ -442,6 +443,13 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 DaemonCommand::AddCalendarSource(params) => {
                     cmd_add_calendar_source(id, params, &engine).await
                 }
+                DaemonCommand::StartActual(params) => cmd_start_actual(id, params, &engine).await,
+                DaemonCommand::StopActual(params) => {
+                    cmd_stop_actual(id, params.object_id, &engine).await
+                }
+                DaemonCommand::ActualsBetween(params) => {
+                    cmd_actuals_between(id, params, &engine).await
+                }
                 DaemonCommand::SyncCalendarSource(params) => {
                     cmd_sync_calendar_source(id, params.object_id, &engine).await
                 }
@@ -770,6 +778,43 @@ async fn cmd_expand_schedule(
         .await
     {
         Ok(occurrences) => json_success(id, occurrences),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_start_actual(
+    id: String,
+    params: StartActualParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    let against = params
+        .item_id
+        .as_deref()
+        .zip(params.occurrence_key.as_deref());
+    match engine.start_actual(against).await {
+        Ok(object_id) => json_success(id, object_id),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_stop_actual(
+    id: String,
+    object_id: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.stop_actual(&object_id).await {
+        Ok(replacement) => json_success(id, replacement),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_actuals_between(
+    id: String,
+    params: ActualsBetweenParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.actuals_between(&params.from, &params.to).await {
+        Ok(actuals) => json_success(id, actuals),
         Err(e) => client_error(id, e),
     }
 }

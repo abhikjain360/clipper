@@ -8,6 +8,7 @@ import {
   type DecryptedClipboardItem,
   type DecryptedFileItem,
   type DeviceInfo as NativeDeviceInfo,
+  type ActualView as NativeActualView,
   type AlarmView as NativeAlarmView,
   type CalendarSourceView as NativeCalendarSourceView,
   type ScheduleItemView as NativeScheduleItemView,
@@ -17,6 +18,7 @@ import {
   type MobileClipperClientLike,
 } from "./generated/clipper_mobile_uniffi";
 import type {
+  ActualView,
   AlarmView,
   AppState,
   ClipboardItem,
@@ -112,6 +114,13 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     syncCalendarSource: async () => {
       throw new Error("Syncing a calendar source is not available on mobile yet");
     },
+    startActual: async () => {
+      throw new Error("The timer is not available on mobile yet");
+    },
+    stopActual: async () => {
+      throw new Error("The timer is not available on mobile yet");
+    },
+    actualsBetween: async () => [],
     updateScheduleItem: async () => {
       throw new Error("Editing schedule items is not available on mobile yet");
     },
@@ -156,6 +165,7 @@ function mapAppState(state: NativeAppState): AppState {
     error: state.error ?? null,
     files: state.files.map(mapFileItem),
     calendar_sources: state.calendarSources.map(mapCalendarSourceView),
+    running_actual: state.runningActual ? mapActualView(state.runningActual) : null,
     schedule_items: state.scheduleItems.map(mapScheduleItemView),
     saved_profile: state.savedProfile
       ? {
@@ -194,6 +204,17 @@ function mapAlarmView(alarm: NativeAlarmView): AlarmView {
     label: alarm.label,
     occurrence_key: alarm.occurrenceKey,
     occurrence_start_millis: Number(alarm.occurrenceStartMillis),
+  };
+}
+
+function mapActualView(actual: NativeActualView): ActualView {
+  return {
+    end: actual.end,
+    id: actual.id,
+    item_id: actual.itemId,
+    running: actual.running,
+    start: actual.start,
+    title: actual.title,
   };
 }
 

@@ -1,4 +1,5 @@
 export type {
+  ActualView,
   AlarmPolicy,
   AlarmView,
   AppState,

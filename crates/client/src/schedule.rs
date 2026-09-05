@@ -11,7 +11,7 @@
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use clipper_app_types::{CalendarSourceView, OccurrenceView, ScheduleItemView};
+use clipper_app_types::{ActualView, CalendarSourceView, OccurrenceView, ScheduleItemView};
 use clipper_core::{
     crypto,
     models::{
@@ -156,10 +156,80 @@ pub struct OccurrenceLabel<'a> {
     pub cancelled: bool,
 }
 
+/// Render a record of time spent.
+///
+/// `title` is resolved by the caller, which has every series in hand; an actual
+/// stores only a reference so that renaming a block does not rewrite history.
+pub fn actual_view(
+    object_id: &str,
+    actual: &clipper_schedule::ActualRecord,
+    title: &str,
+) -> ActualView {
+    let (start, end, running) = match actual.span {
+        clipper_schedule::ActualSpan::Running { started } => {
+            (to_rfc3339(started), String::new(), true)
+        }
+        clipper_schedule::ActualSpan::Complete(span) => {
+            (to_rfc3339(span.start), to_rfc3339(span.end), false)
+        }
+    };
+    ActualView {
+        id: object_id.to_string(),
+        item_id: actual
+            .planned
+            .map(|planned| planned.item.to_string())
+            .unwrap_or_default(),
+        title: title.to_string(),
+        start,
+        end,
+        running,
+    }
+}
+
+/// A stable string for one occurrence of a series.
+///
+/// Layers above the engine need a key they can put in an intent extra or a
+/// button handler and compare later; they have no reason to understand the
+/// three ways an occurrence can be identified, only that the same occurrence
+/// yields the same string.
+pub fn occurrence_key(recurrence_id: &clipper_schedule::RecurrenceId) -> String {
+    match recurrence_id {
+        clipper_schedule::RecurrenceId::Floating(local) => format!("floating:{local}"),
+        clipper_schedule::RecurrenceId::Instant(instant) => {
+            format!("instant:{}", instant.timestamp_millis())
+        }
+        clipper_schedule::RecurrenceId::Date(date) => format!("date:{date}"),
+    }
+}
+
+/// Parse a key produced by [`occurrence_key`].
+///
+/// The platform and UI layers carry occurrence identity as an opaque string;
+/// this is the only place that has to understand its shape.
+pub fn parse_occurrence_key(key: &str) -> Option<clipper_schedule::RecurrenceId> {
+    let (kind, value) = key.split_once(':')?;
+    match kind {
+        "floating" => chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
+            .ok()
+            .map(clipper_schedule::RecurrenceId::Floating),
+        "instant" => value
+            .parse::<i64>()
+            .ok()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(clipper_schedule::RecurrenceId::Instant),
+        "date" => value
+            .parse::<chrono::NaiveDate>()
+            .ok()
+            .map(clipper_schedule::RecurrenceId::Date),
+        _ => None,
+    }
+}
+
 /// Render one computed occurrence for a grid.
 pub fn occurrence_view(occurrence: &Occurrence, label: OccurrenceLabel<'_>) -> OccurrenceView {
     OccurrenceView {
         item_id: occurrence.item.to_string(),
+        occurrence_key: occurrence_key(&occurrence.recurrence_id),
         title: label.title.to_string(),
         start: to_rfc3339(occurrence.span.start),
         end: to_rfc3339(occurrence.span.end),
