@@ -494,6 +494,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                         <Route path="/schedule">
                             <SchedulePanel
                                 items={state.schedule_items}
+                                warnings={state.schedule_warnings}
                                 sources={state.calendar_sources}
                                 running={state.running_actual ?? null}
                                 onState={onState}

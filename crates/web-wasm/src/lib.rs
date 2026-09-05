@@ -366,11 +366,18 @@ pub fn create_schedule_item(item: JsValue) -> Promise {
 
 /// Replace a series with an edited version. Returns the new object id.
 #[wasm_bindgen(js_name = updateScheduleItem)]
-pub fn update_schedule_item(object_id: String, item: JsValue) -> Promise {
+pub fn update_schedule_item(object_id: String, item: JsValue, expected_revision: f64) -> Promise {
     ok_promise(async move {
         let item: ScheduleItem = serde_wasm_bindgen::from_value(item).map_err(js_error)?;
+        if !expected_revision.is_finite()
+            || expected_revision < 1.0
+            || expected_revision.fract() != 0.0
+            || expected_revision > 9_007_199_254_740_991.0
+        {
+            return Err(js_error("Invalid schedule revision"));
+        }
         let replacement = engine_or_error()?
-            .update_schedule_item(&object_id, item)
+            .update_schedule_item(&object_id, item, expected_revision as u64)
             .await
             .map_err(js_error)?;
         Ok(JsValue::from_str(&replacement))
@@ -404,20 +411,13 @@ pub fn expand_schedule(from: String, to: String, observer_zone: String) -> Promi
     })
 }
 
-/// Start the timer. Omit both arguments for unplanned work.
-///
-/// `Option<String>` rather than `String`: the shared backend contract makes
-/// these optional, and a bare `String` parameter rejects `undefined` at the
-/// wasm boundary before any Rust runs.
+/// Start the timer using the opaque context returned by expansion.
+/// Omit the context for unplanned work.
 #[wasm_bindgen(js_name = startActual)]
-pub fn start_actual(item_id: Option<String>, occurrence_key: Option<String>) -> Promise {
+pub fn start_actual(plan_context: Option<String>) -> Promise {
     ok_promise(async move {
-        let item_id = item_id.unwrap_or_default();
-        let occurrence_key = occurrence_key.unwrap_or_default();
-        let against = (!item_id.is_empty() && !occurrence_key.is_empty())
-            .then_some((item_id.as_str(), occurrence_key.as_str()));
         let object_id = engine_or_error()?
-            .start_actual(against)
+            .start_actual(plan_context.as_deref())
             .await
             .map_err(js_error)?;
         Ok(JsValue::from_str(&object_id))

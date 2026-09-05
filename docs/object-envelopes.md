@@ -142,6 +142,45 @@ server can still omit objects or revisions and deny service. The local anchor
 prevents rollback of history this device has already accepted; it does not
 prove that the server showed the device every revision.
 
+## Exact historical references
+
+Schedule history uses `ObjectRevisionRef`: storage `ObjectId`, revision number,
+and `H(Canon(body))`. The body hash identifies the exact accepted content, rather
+than trusting that a server-supplied revision number names the same definition.
+It is distinct from both the envelope format version and the schedule's domain
+series ID.
+
+Standalone occurrence overrides retain the schedule reference they were authored
+against. Actual records pin the effective schedule and, where applicable, a
+standalone override revision. Provider exceptions embedded in an imported event
+share its revision; there is no separately stored provider exception to pin.
+These references are encrypted schedule content, not server-managed foreign keys.
+
+Revision-specific descriptor and payload reads are authenticated and scoped to
+the requesting user's object and completed revision. They also work for retained
+history behind a tombstoned current head. The client verifies the response/body
+agreement, pinned identity and body hash, signature when the source key is
+available, ciphertext bounds and hashes, and AEAD before using the definition.
+A memory-only historical cache holds at most 64 entries, is scoped to the
+authenticated session epoch, and is separate from current-head storage. Logout
+or account changes invalidate that session's cached reads. An explicit
+historical read must not pass through head acceptance, advance or lower a local
+anchor, replace a live record, or change a reconciliation cursor. Reading an
+older pinned revision is therefore not an exception to current-head rollback
+protection.
+
+History is immutable, not immortal. Permanent purge removes it; a server can
+also withhold it. The client reports historical context as unavailable rather
+than silently substituting the latest definition. Resolved planned bounds and
+observer timezone on the actual remain usable even when its source history is
+unavailable. References do not currently prevent purge or implement a retention
+policy. A previously verified definition can remain available in memory after
+server purge until eviction or session invalidation; server deletion cannot
+retroactively erase client-held content. A process restart discards this cache.
+
+Validation of this revision-aware historical-read change is pending integration
+completion; the earlier verification guarantees above remain the baseline.
+
 ## Trust model
 
 End-to-end content authenticity rests on AEAD under `K` and its AAD. The server
