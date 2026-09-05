@@ -477,6 +477,21 @@ client-side. It needs no format break, but it scales cold sync with edit count
 for exactly the reason above, and it gives up server-arbitrated optimistic
 concurrency and clean chain deletion — both listed as consequences below.
 
+**The AAD change no longer fails silently, as of 2026-09-08.** D11 named this
+the one place where fast generation is a liability, because omitting a field
+from the AAD projection is not a compile error, not a decryption error, and not
+a signature error — the only symptom is a ciphertext replayable across the
+missing field. That is now enforced in `crates/core/src/crypto.rs`:
+`object_aad_v1` destructures the envelope body exhaustively, so adding
+`revision` to it cannot compile until binding it is decided, and `mod
+object_aad` tables every field with which side of the line it falls on, failing
+by name if a bound field stops being bound or an unbound one starts. Both
+directions were verified by deliberately breaking them.
+
+What that does *not* cover: a test asserts the projection you wrote, not the one
+you should have written. Whether the right set of fields is bound at all is
+still a judgment call, and still wants a human read.
+
 This is a *smaller* change to the crypto model than mutable objects would have
 been. The question is no longer "is it safe for a sealed object to be
 overwritten" but "which of these sealed objects is newest", so the existing
@@ -493,8 +508,30 @@ substance even though the premise was wrong. Any agent planning one should still
 say out loud that it destroys the netcup data, rather than inferring permission
 from `CLAUDE.md`.
 
-History is retained rather than discarded, because being able to see how a plan
-changed is wanted in its own right.
+**Retention, settled 2026-09-08.** History is retained. The owner's reasoning
+is not that a history UI is wanted now — none is planned — but that undo is a
+plausible enough future feature that the format should already accommodate it,
+so adding it later does not mean breaking the format a second time. Latest-only
+revisions would have been cheaper and would still have given optimistic
+concurrency and clean chain deletion, but they foreclose undo at the format
+level, which is exactly the outcome being avoided.
+
+Two consequences follow that the rest of D6 did not previously state.
+
+**Deletion becomes a tombstone.** "Deleting an object deletes its whole
+revision chain" is incompatible with undoing a delete, which is the single most
+wanted undo there is. So `delete` appends a terminal revision carrying no
+payload, leaving the chain intact and the object resurrectable by appending a
+further revision that restores an earlier one. Actually reclaiming the space
+becomes a separate, explicit **purge**, which is irreversible and is what the
+storage quota and any TTL sweep act on. This costs a deleted object its storage
+until purged, which for schedule records is negligible and for files is why the
+per-kind retention table exists.
+
+**Undo needs no machinery beyond retention.** Restoring revision `N-1` is
+writing its content as revision `N+1`. There is no separate undo log, no
+reverse-diff, and nothing to design now — which is the whole justification for
+paying the retention cost today.
 
 Consequences to build:
 
@@ -513,9 +550,10 @@ Consequences to build:
   installed device has no history to compare against and must trust what it is
   given. That limit is inherent, requires an actively malicious server, and gets
   written into the envelope doc rather than glossed.
-- **Deleting an object deletes its whole revision chain,** and the storage quota
-  accounting in `crates/server/src/storage_quota.rs` has to count revisions, not
-  objects.
+- **Delete is a tombstone; purge is the destructive one.** See *Retention*
+  above. The storage quota accounting in `crates/server/src/storage_quota.rs`
+  has to count revisions rather than objects either way, and has to keep
+  counting a tombstoned chain until it is purged.
 
 ### D7: One object per recurring series, not per occurrence
 
@@ -877,7 +915,9 @@ verification that cannot be compressed, such as leaving alarms overnight on the
 POCO under real background pressure or waiting for a `syncToken` to go stale;
 human-in-the-loop external setup like the Google Cloud consent screen; and the
 envelope change itself, where fast generation is a liability because a wrong AAD
-projection fails silently rather than loudly.
+projection fails silently rather than loudly. *Amended 2026-09-08: the silent
+part is fixed — see the AAD guard in D6. What still wants review is the choice
+of which fields to bind, not the mechanical risk of forgetting one.*
 
 Order that follows from that:
 
@@ -960,10 +1000,12 @@ those decisions as final where they conflict with this list.
 
 Open, needing the owner rather than an agent:
 
-- **D6's history retention.** Name the UI that reads plan history or drop it.
-  Retention is what drags in the per-kind retention table, revision quota
-  accounting, the timer write rule and unbounded growth. Latest-only revisions
-  still give optimistic concurrency and clean chain deletion.
+- ~~**D6's history retention.** Name the UI that reads plan history or drop
+  it.~~ **Answered 2026-09-08: retained.** The UI is undo, which is not planned
+  yet — and that is the point. The format is being broken once, deliberately,
+  so that adding undo later is a feature rather than a second overhaul. See
+  D6's *Retention* section for what that costs and the tombstone rule it
+  forces.
 
 Structural gaps to fix in the restructure: no partition between owner-gated work
 (the POCO spike, OAuth consent) and agent-doable work; no definition of done, no
