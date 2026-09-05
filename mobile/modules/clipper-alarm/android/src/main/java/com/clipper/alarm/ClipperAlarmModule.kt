@@ -12,16 +12,15 @@ import org.json.JSONArray
 /**
  * The JS surface of the alarm layer.
  *
- * Intentionally small. Everything about *when* an alarm rings is decided in
- * Rust and arrives here as instants; this module only registers them, reports
- * whether the OS will honour exact alarms, and can send the user to the
- * setting when it will not.
+ * Small on purpose. Rust decides when an alarm rings and sends instants down.
+ * This module registers them, reports whether the OS will honour exact alarms,
+ * and can send the user to the setting when it will not.
  *
  * The plan crosses as a JSON string rather than a list of typed records.
- * Expo's argument marshalling relies on reified generics that do not survive a
- * `List<Record>` parameter here — it fails at runtime, not compile time — and
- * the plan is already JSON on both sides, so a string costs nothing and removes
- * a whole class of binding fragility.
+ * Expo's argument marshalling relies on reified generics that a `List<Record>`
+ * parameter does not survive here, and it fails at runtime rather than at
+ * compile time. The plan is already JSON on both sides, so a string costs
+ * nothing.
  */
 class ClipperAlarmModule : Module() {
 
@@ -31,9 +30,9 @@ class ClipperAlarmModule : Module() {
         /**
          * Replace the entire registered set with the plan in [planJson].
          *
-         * Returns how many were armed, which is at most
-         * `AlarmScheduler.MAX_REGISTERED` — each fire rolls the horizon forward
-         * from the device-protected mirror.
+         * Returns how many were armed, at most `AlarmScheduler.MAX_REGISTERED`.
+         * Each fire rolls the horizon forward from the device-protected
+         * mirror.
          */
         Function("setAlarms") { planJson: String ->
             AlarmScheduler(context).replaceAll(parsePlan(planJson))
@@ -121,9 +120,9 @@ class ClipperAlarmModule : Module() {
         }
 
         /**
-         * Ring immediately. Exists so the alarm path can be exercised end to
-         * end — permissions, foreground service, full-screen intent — without
-         * waiting for a real alarm time.
+         * Ring immediately. Exercises the whole alarm path — permissions,
+         * foreground service, full-screen intent — without waiting for a real
+         * alarm time.
          */
         Function("ringNow") { label: String ->
             RingService.start(context, label, "", "")

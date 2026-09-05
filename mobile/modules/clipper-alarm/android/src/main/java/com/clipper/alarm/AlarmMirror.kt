@@ -10,8 +10,8 @@ import org.json.JSONObject
  *
  * The label travels with the alarm rather than being looked up. After a reboot
  * the device sits at the lock screen with credential-protected storage sealed,
- * so there is no encrypted store to read a title from — and that is precisely
- * when an alarm clock has to work.
+ * so there is no encrypted store to read a title from. That is exactly when an
+ * alarm clock has to work.
  */
 data class PlannedAlarm(
     /** The schedule series this belongs to. */
@@ -50,15 +50,15 @@ data class PlannedAlarm(
 /**
  * The alarm plan, held in device-protected storage.
  *
- * This is what makes exact alarms compatible with end-to-end encryption. The
- * schedule itself is ciphertext the app can only read once the user has
- * unlocked and logged in, but an alarm has to survive a reboot at 3am and ring
- * at 7am without either. Mirroring just the upcoming fire times — instants and
- * labels, no schedule, no keys — into device-protected storage makes them
- * available before the first unlock.
+ * This is what makes exact alarms work alongside end-to-end encryption. The
+ * schedule is ciphertext the app can only read once the user has unlocked and
+ * logged in, but an alarm has to survive a reboot at 3am and ring at 7am
+ * without either. The mirror holds only the upcoming fire times and their
+ * labels: no schedule, no keys. Device-protected storage makes them readable
+ * before the first unlock.
  *
- * Writes use `commit` rather than `apply`: this is the fallback that has to be
- * on disk before the process is killed, not eventually.
+ * Writes use `commit` rather than `apply`. This is the fallback, so it has to
+ * be on disk before the process is killed, not eventually.
  */
 object AlarmMirror {
     private const val PREFS = "clipper_alarm_plan"

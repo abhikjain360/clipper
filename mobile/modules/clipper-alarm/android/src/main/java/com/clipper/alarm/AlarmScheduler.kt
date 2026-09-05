@@ -30,13 +30,13 @@ object AlarmIntents {
  * Registers exact alarms with the system.
  *
  * Every alarm is a single one-shot [AlarmManager.setAlarmClock]. Android's
- * repeating alarms are inexact and get batched; `setAlarmClock` is the only API
- * the system guarantees to deliver on time, because it leaves Doze. That
- * guarantee is the entire reason this code exists rather than a notification.
+ * repeating alarms are inexact and get batched. `setAlarmClock` is the only
+ * API the system delivers on time, because it leaves Doze. A notification
+ * carries no such guarantee, which is why this module exists.
  *
- * Recurrence is never computed here. The Rust engine expands the rules and hands
- * down a list of instants — see `crates/schedule/src/alarm.rs` for why there is
- * deliberately only one recurrence implementation in this project.
+ * Recurrence is never computed here. The Rust engine expands the rules and
+ * hands down a list of instants, so there is one recurrence implementation in
+ * the project rather than two that can drift apart.
  */
 class AlarmScheduler(private val context: Context) {
 
@@ -45,10 +45,9 @@ class AlarmScheduler(private val context: Context) {
     /**
      * Replace every registered alarm with the nearest [MAX_REGISTERED] of [plan].
      *
-     * The plan can cover weeks, but holding hundreds of pending intents is both
-     * wasteful and unnecessary: each fire re-arms from the mirror, so the
-     * horizon rolls forward on its own. Returns how many were actually
-     * registered.
+     * The plan can cover weeks, but there is no need to hold hundreds of
+     * pending intents. Each fire re-arms from the mirror, so the horizon rolls
+     * forward on its own. Returns how many were registered.
      */
     fun replaceAll(plan: List<PlannedAlarm>): Int {
         cancelAll()
@@ -63,12 +62,12 @@ class AlarmScheduler(private val context: Context) {
     /** Register from whatever the mirror currently holds. Safe before unlock. */
     fun armFromMirror(): Int = arm(AlarmMirror.load(context))
 
-    /** [plan] must be in mirror order — see [replaceAll]. */
+    /** [plan] must be in mirror order. See [replaceAll]. */
     @SuppressLint("MissingPermission")
     private fun arm(plan: List<PlannedAlarm>): Int {
         if (!canScheduleExactAlarms()) {
-            // Falling back to an inexact alarm would be worse than failing
-            // loudly: it looks like it worked and then rings late.
+            // Fail loudly rather than fall back to an inexact alarm, which
+            // would look like it worked and then ring late.
             Log.w(TAG, "Exact alarms are not permitted; nothing scheduled")
             return 0
         }
@@ -76,9 +75,9 @@ class AlarmScheduler(private val context: Context) {
         var registered = 0
         for ((index, alarm) in plan.withIndex()) {
             if (registered >= MAX_REGISTERED) break
-            // Already-past entries stay in the mirror — they are simply not
-            // armed. Rewriting the plan on every fire would mean a write from a
-            // broadcast receiver that may be running before unlock.
+            // An entry already in the past stays in the mirror and is left
+            // unarmed. Rewriting the plan on every fire would mean writing
+            // from a broadcast receiver that may run before unlock.
             if (alarm.fireAtMillis <= now) continue
             val info = AlarmManager.AlarmClockInfo(alarm.fireAtMillis, showIntent())
             alarmManager.setAlarmClock(info, firePendingIntent(index, alarm))
@@ -90,10 +89,10 @@ class AlarmScheduler(private val context: Context) {
 
     fun cancelAll() {
         // Sweep the whole index space the previous plan could have used, not
-        // just MAX_REGISTERED of it. A request code is the alarm's index in the
-        // mirror, and entries already in the past are skipped rather than
-        // armed — so a plan whose first entries have expired arms indices well
-        // beyond MAX_REGISTERED, and a narrower sweep would strand them.
+        // just MAX_REGISTERED of it. A request code is the alarm's index in
+        // the mirror, and a past entry is skipped rather than armed. So a plan
+        // whose first entries have expired arms indices well beyond
+        // MAX_REGISTERED, and a narrower sweep would strand them.
         val span = maxOf(MAX_REGISTERED, AlarmMirror.load(context).size)
         for (index in 0 until span) {
             pendingIntentOrNull(index)?.let {

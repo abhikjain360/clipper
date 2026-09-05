@@ -1,12 +1,11 @@
-//! Turning occurrences into alarms.
+//! Turns occurrences into alarms.
 //!
-//! The division of labour with the Android side is deliberate: this crate
-//! decides *when* an alarm should ring, and the platform decides *how* to make
-//! it ring. Android never recomputes a recurrence — it receives concrete
-//! instants and registers each as a one-shot exact alarm.
+//! This crate decides when an alarm rings. The platform decides how to ring
+//! it. Android never expands a recurrence; it receives concrete instants and
+//! registers each one as a one-shot exact alarm.
 //!
-//! Keeping recurrence expansion here gives calendar views and platform alarms
-//! the same occurrence times, including timezone and DST handling.
+//! Expanding here gives calendar views and platform alarms the same occurrence
+//! times, timezone and DST handling included.
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -15,8 +14,8 @@ use crate::item::{Occurrence, RecurrenceId, ScheduleItem, ScheduleItemId};
 
 /// When a block should raise an alarm.
 ///
-/// Absent means silent, which is the default: a planner is mostly a record of
-/// intent, and most blocks should not wake anyone.
+/// Absent means silent, and that is the default. Most blocks record intent
+/// rather than wake someone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlarmPolicy {
     /// Minutes before the occurrence starts. Zero rings at the start.
@@ -42,16 +41,16 @@ impl AlarmPolicy {
 
 /// One alarm the platform should register.
 ///
-/// Carries everything the ring screen needs, because it has to work before the
-/// device is unlocked — at which point nothing can be looked up.
+/// Carries everything the ring screen needs. That screen can run before the
+/// device is unlocked, where nothing can be looked up.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedAlarm {
     pub item: ScheduleItemId,
     /// Which occurrence this belongs to, so a dismissal can be recorded against
     /// the right one.
     pub recurrence_id: RecurrenceId,
-    /// What the ring screen shows. Denormalized on purpose: before unlock there
-    /// is no encrypted store to read a title from.
+    /// What the ring screen shows. Copied here because before unlock there is
+    /// no encrypted store to read a title from.
     pub label: String,
     /// When the alarm rings.
     pub fire_at: DateTime<Utc>,
@@ -62,8 +61,8 @@ pub struct PlannedAlarm {
 
 /// Alarms for `item`'s occurrences that have not already passed, soonest first.
 ///
-/// `now` is a parameter rather than read from the clock so this stays pure and
-/// testable, and so a caller can plan a window deliberately.
+/// `now` is a parameter rather than the system clock, so a caller can plan
+/// against any moment.
 pub fn plan_alarms(
     item: &ScheduleItem,
     occurrences: &[Occurrence],
@@ -77,8 +76,8 @@ pub fn plan_alarms(
         .filter(|occurrence| occurrence.item == item.id)
         .filter_map(|occurrence| {
             let fire_at = occurrence.span.start() - policy.lead();
-            // An alarm whose moment has passed is not rescheduled. Ringing late
-            // for something that already started is noise, not a reminder.
+            // Ringing late for something that already started is noise, so a
+            // passed alarm is dropped rather than rescheduled.
             (fire_at > now).then_some(PlannedAlarm {
                 item: occurrence.item,
                 recurrence_id: occurrence.recurrence_id,
@@ -172,7 +171,6 @@ mod tests {
         );
     }
 
-    /// Ringing for something that already started is noise, not a reminder.
     #[test]
     fn alarms_already_past_are_dropped() {
         let item = gym(Some(AlarmPolicy::at_start()));
@@ -190,8 +188,7 @@ mod tests {
         assert_eq!(planned, sorted);
     }
 
-    /// The label travels with the alarm because the ring screen may run before
-    /// the device is unlocked, when nothing can be decrypted.
+    /// The ring screen may run before unlock, when nothing can be decrypted.
     #[test]
     fn the_label_is_carried_not_looked_up() {
         let mut item = gym(Some(AlarmPolicy::at_start()));

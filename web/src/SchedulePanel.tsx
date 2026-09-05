@@ -62,10 +62,10 @@ import {
     type RepeatSelection,
 } from "./schedule-recurrence";
 
-// The grid is a view, not the storage format: blocks are stored as an interval
-// and rasterized here. SLOT_MINUTES is the snap the
-// form applies to a new block; ingested meetings are not grid-aligned and are
-// drawn wherever they actually fall.
+// The grid is a view, not the storage format. A block is stored as an interval
+// and rasterized here. SLOT_MINUTES is the snap the form applies to a new
+// block. An ingested meeting is not grid-aligned and is drawn wherever it
+// actually falls.
 const SLOT_MINUTES = 5;
 const HOUR_HEIGHT = 44;
 const DAY_MINUTES = 24 * 60;
@@ -177,9 +177,9 @@ export function SchedulePanel({
         }
     }, [weekStart, weekEnd, onError]);
 
-    // Re-expand whenever the window moves or the series set changes. `items` is
-    // the dependency that matters for the latter: a create or delete republishes
-    // state, which re-renders this panel with a new array.
+    // Re-expand whenever the window moves or the series set changes. `items`
+    // catches the second case: a create or delete republishes state, which
+    // re-renders this panel with a new array.
     useEffect(() => {
         void loadWeek();
         return () => {
@@ -520,16 +520,16 @@ function WeekGrid({
     }, []);
     const today = startOfDay(currentTime).getTime();
     const scroller = useRef<TamaguiElement | null>(null);
-    // The grid scrolls vertically and the rows above it do not, so on any
-    // platform with classic (non-overlay) scrollbars the grid is narrower than
-    // the header and every day column drifts. Measure the difference and
+    // The grid scrolls vertically and the rows above it do not. On a platform
+    // with classic (non-overlay) scrollbars that makes the grid narrower than
+    // the header, and every day column drifts. Measure the difference and
     // reserve it above rather than guessing a width.
     const [gutter, setGutter] = useState(0);
 
-    // Open on the week's earliest block rather than at midnight, which is eight
-    // hours of empty grid before anything a person scheduled. A running timer
-    // wins outright: it is the one thing happening right now, and scrolling to
-    // a 07:00 block would hide it below the fold.
+    // Open on the week's earliest block rather than at midnight, which would
+    // be hours of empty grid before anything a person scheduled. A running
+    // timer wins over that: it is what is happening now, and scrolling to an
+    // earlier block would push it below the fold.
     const running = actuals.find((actual) => actual.running);
     const [, tick] = useState(0);
     useEffect(() => {
@@ -568,8 +568,8 @@ function WeekGrid({
     }, []);
 
     return (
-        // Horizontal scroll lives here rather than on the page: a seven-day grid
-        // on a narrow window must not make the whole app scroll sideways.
+        // Horizontal scroll lives here rather than on the page, so a seven-day
+        // grid in a narrow window does not scroll the whole app sideways.
         <YStack style={{ overflowX: "auto" }}>
             <YStack minW={dayCount === 1 ? 0 : 720}>
                 <XStack pr={gutter}>
@@ -710,8 +710,8 @@ function WeekGrid({
 
 /// Time actually spent, drawn as a narrow band down the right of the column.
 ///
-/// Beside the plan rather than over it: the user must be able to
-/// see the difference, which a single merged block would hide.
+/// Drawn beside the plan rather than over it, so the difference between the
+/// two stays visible. One merged block would hide it.
 function ActualBlock({ actual, day }: { actual: ActualView; day: Date }) {
     const { top, height } = bandGeometry(actual, day);
     return (
@@ -806,8 +806,9 @@ function TimedBlock({
     );
 }
 
-/// Owned blocks, ingested events and moved occurrences should be
-/// distinguishable at a glance, since only the first is editable.
+/// Colours an owned block, an ingested event and a moved occurrence
+/// differently. Only the first is editable, so they have to be told apart at a
+/// glance.
 function blockColor(occurrence: OccurrenceView): { fill: string; accent: string } {
     if (occurrence.cancelled) return { fill: "#2a2226", accent: "#8b6b6b" };
     if (occurrence.overridden) return { fill: "#3d3320", accent: "#d0a33a" };
@@ -817,8 +818,8 @@ function blockColor(occurrence: OccurrenceView): { fill: string; accent: string 
 
 /// Where a span sits in a day column.
 ///
-/// Clamped to the column: a block can begin the previous day or run past
-/// midnight, and should draw as a band rather than escaping the grid.
+/// Clamped to the column. A block can begin the previous day or run past
+/// midnight, and draws as a band inside the grid either way.
 function bandGeometry(
     span: { start: string; end: string },
     day: Date,
@@ -843,8 +844,8 @@ function RunningTimer({
     const [now, setNow] = useState(() => Date.now());
     const [busy, setBusy] = useState(false);
 
-    // Ticks the *display* only. The record itself is written twice and no more
-    // — on start and on stop — because every write is a retained object.
+    // Ticks the display only. The record is written twice and no more, on
+    // start and on stop, because every write is a retained object.
     useEffect(() => {
         if (!running) return;
         const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -993,8 +994,8 @@ function CalendarSources({
             const backend = await clipperBackend();
             const report = await backend.syncCalendarSource(id);
             onState(await backend.getState());
-            // Say what actually happened. A sync that silently does nothing is
-            // indistinguishable from one that failed.
+            // Report what the sync did. A sync that says nothing looks the
+            // same as one that failed.
             const parts = [
                 report.added > 0 ? `${report.added} added` : null,
                 report.updated > 0 ? `${report.updated} updated` : null,
@@ -1199,8 +1200,8 @@ function SeriesList({
         };
     }, [order]);
 
-    // Separate from the displayed calendar window: browsing last month must
-    // not change what counts as this series' next occurrence.
+    // This window is separate from the displayed calendar window, so browsing
+    // last month does not change which occurrence counts as next.
     useEffect(() => {
         if (order !== "next") return;
         let cancelled = false;
@@ -1394,8 +1395,8 @@ function ScheduleComposer({
     const [repeat, setRepeat] = useState<RepeatSelection>("once");
     const [alarm, setAlarm] = useState(false);
     const [alarmLead, setAlarmLead] = useState("0");
-    // The series id is preserved across an edit so overrides and logged time
-    // keep pointing at the same series; only the object carrying it changes.
+    // The series id survives an edit, so overrides and logged time keep
+    // pointing at the same series. Only the object carrying it changes.
     const [seriesId, setSeriesId] = useState<string | null>(null);
     const original = useRef<ScheduleItem | null>(null);
     const [spanChanged, setSpanChanged] = useState(false);
@@ -1405,10 +1406,10 @@ function ScheduleComposer({
 
     // Load an existing block into the form, once per block.
     //
-    // Keyed on a ref rather than on the effect's dependencies: a sync push
+    // Keyed on a ref rather than on the effect's dependencies. A sync push
     // re-renders this panel, and re-running the load would overwrite whatever
-    // the user had typed since opening it. Depending on the callbacks would be
-    // worse still — their identity changes every render.
+    // the user had typed since opening it. Depending on the callbacks is
+    // worse still, since their identity changes every render.
     const loadedObjectId = useRef<string | null>(null);
     useEffect(() => {
         if (!editing) {
@@ -1673,10 +1674,10 @@ function ScheduleComposer({
             <XStack gap="$2" flexWrap="wrap">
                 {(
                     [
-                        // Only ever shown as the current state, never as an
-                        // offer: reaching it means the stored rule is richer
-                        // than this row, and the guard below makes pressing it
-                        // inert.
+                        // Shown only as the current state, never as an offer.
+                        // It appears when the stored rule is richer than this
+                        // row can express, and the guard below makes pressing
+                        // it do nothing.
                         ...(repeat === "custom" ? (["custom"] as const) : []),
                         "once",
                         "daily",
@@ -1690,9 +1691,9 @@ function ScheduleComposer({
                         on={repeat === choice}
                         onPress={() => {
                             // Pressing the pill that is already lit is not a
-                            // change, and must not arm one. Without this, a
-                            // series whose cadence this row cannot express
-                            // would be flattened by a press that looks inert.
+                            // change and must not arm one. Without this, a
+                            // press that looks inert would flatten a cadence
+                            // this row cannot express.
                             if (choice === repeat) return;
                             setRepeat(choice);
                             setRecurrenceChanged(true);
@@ -1769,9 +1770,8 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
     );
 }
 
-/// Read back a stored record. A record this build cannot parse is reported
-/// rather than silently replaced with a default, which would quietly rewrite
-/// the user's block on save.
+/// Reads back a stored record. Returns null for a record this build cannot
+/// parse, rather than a default, which would rewrite the user's block on save.
 function parseDefinition(json: string): ScheduleItem | null {
     try {
         const parsed = JSON.parse(json) as ScheduleItem;
@@ -1781,14 +1781,14 @@ function parseDefinition(json: string): ScheduleItem | null {
     }
 }
 
-/// Round to the grid. A block the user typed is snapped; one that arrived from a
-/// calendar is not — a meeting that runs 09:07–09:23 is ordinary.
+/// Rounds to the grid. Only a block the user typed is snapped. One from a
+/// calendar is not, since a meeting running 09:07 to 09:23 is ordinary.
 function snapMinutes(minutes: number): number {
     return Math.max(SLOT_MINUTES, Math.round(minutes / SLOT_MINUTES) * SLOT_MINUTES);
 }
 
-/// Monday-based label for a date. `Date.getDay()` is Sunday-based, so the shift
-/// is what makes Monday index 0.
+/// Monday-based label for a date. `Date.getDay()` is Sunday-based, so the
+/// shift puts Monday at index 0.
 function weekdayLabel(date: Date): string {
     const day = WEEKDAYS[(date.getDay() + 6) % 7];
     return day ? WEEKDAY_LABELS[day] : "";

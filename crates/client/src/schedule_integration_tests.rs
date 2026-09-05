@@ -262,8 +262,8 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
             .any(|alarm| alarm.item_id == future.id.to_string())
     );
 
-    // Exercise the streamed revision path as well as the inline path: payload
-    // completion must count only this revision, not all historical payloads.
+    // Exercise the streamed revision path as well as the inline one. Payload
+    // completion counts this revision's payloads, not every historical one.
     let mut large = future.clone();
     large.id = ScheduleItemId::new();
     large.alarm = None;
@@ -659,9 +659,9 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
             .any(|event| event.source.as_deref() == Some("Personal"))
     );
 
-    // Unsupported imported rules are resolved from the encrypted snapshot at
-    // runtime. Keep this source separate so the replacement/deletion checks
-    // above continue to exercise the ordinary one-event feed.
+    // An unsupported imported rule resolves from the encrypted snapshot at
+    // runtime. This source stays separate, so the replacement and deletion
+    // checks above keep exercising the ordinary one-event feed.
     *feed.write().await = concat!(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n",
         "BEGIN:VEVENT\r\nUID:cadence-1\r\nSUMMARY:Cadence meeting\r\n",
@@ -744,8 +744,8 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
         .await
         .expect("stop unsupported recurrence timer");
 
-    // Clearing the parsed-rule cache must still leave native offline expansion
-    // working from the ciphertext cached by the local store.
+    // With the parsed-rule cache cleared, a native client still expands
+    // offline from the ciphertext the local store kept.
     first.import_rules.lock().await.clear();
     let import_head = first
         .local_head(&unsupported_import.to_string())
@@ -1007,8 +1007,6 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
     third.logout().await.expect("logout third");
 }
 
-/// One connected workflow checks the relationships rather than mirroring each
-/// field assignment: edits, stale selections, overridden plans and deletion.
 #[test]
 fn imported_source_readiness_requires_a_complete_active_batch() {
     let source_id = SourceId::new();
@@ -1102,6 +1100,8 @@ fn imported_source_readiness_requires_a_complete_active_batch() {
     assert!(!calendar_import::ready_sources(&staged).contains(&source_id));
 }
 
+/// One connected workflow covering how edits, stale selections, overridden
+/// plans and deletion relate, rather than one assertion per field.
 async fn exercise_revision_aware_plans(engine: &SyncEngine) {
     use clipper_schedule::{
         ActualSpan, ObjectRevisionRef, OccurrenceOverride, OccurrenceOverrideData, OverrideChange,
@@ -1270,8 +1270,8 @@ async fn exercise_revision_aware_plans(engine: &SyncEngine) {
         moved_actual
     );
     engine.stop_actual(&moved_actual).await.unwrap();
-    // A structural edit received from an older/other writer is surfaced, never
-    // interpreted as an override to a different rule or allowed to hide peers.
+    // A structural edit from another writer is surfaced. It is never read as
+    // an override to a different rule, and never allowed to hide its peers.
     let mut incompatible = item.clone();
     incompatible.recurrence = Recurrence::Every(clipper_schedule::Cadence::each(
         clipper_schedule::Frequency::Daily,

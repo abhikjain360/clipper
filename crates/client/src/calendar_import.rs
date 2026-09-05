@@ -1,4 +1,8 @@
-//! Stage complete imports before activating them; reclaim only imported data.
+//! Staging and activating calendar imports.
+//!
+//! A batch becomes active only once it is complete. Cleanup reclaims imported
+//! data only, never a plan or a recording the user wrote.
+
 use clipper_schedule::ingest::CalendarImport;
 
 use super::*;
@@ -15,8 +19,11 @@ pub(super) struct CachedImportRules {
 const MAX_IMPORT_BYTES: i64 = 8 * 1024 * 1024;
 
 impl SyncEngine {
-    /// Resolve unsupported rules from their complete authenticated snapshot.
-    /// Check live metadata even on a cache hit: a deleted file is not a resolver.
+    /// An engine that can expand this recurrence, reading an imported rule
+    /// back out of its authenticated snapshot.
+    ///
+    /// Reads live metadata even on a cache hit, so a deleted snapshot stops
+    /// resolving.
     pub(super) async fn recurrence_engine(
         &self,
         recurrence: &clipper_schedule::Recurrence,
@@ -72,8 +79,8 @@ impl SyncEngine {
             }
         };
         verify_payload_hash(payload, &ciphertext)?;
-        // Hold the key read lock through cache writes so authentication cannot
-        // switch the local profile while this import is being resolved.
+        // Hold the key read lock across the cache writes, so authentication
+        // cannot switch the local profile while this import resolves.
         let key_guard = self.encryption_key.read().await;
         if self.history_epoch.load(Ordering::SeqCst) != epoch {
             return Err(ClientError::NotAuthenticated);
@@ -122,8 +129,10 @@ impl SyncEngine {
     }
 }
 
-/// A source becomes visible only once every event named by its manifest is local.
-/// Sync may deliver the source revision before some of the batch's events.
+/// The sources whose whole active batch is present locally.
+///
+/// Sync can deliver a source revision before some of its events. Such a source
+/// stays hidden until the rest arrive.
 pub(super) fn ready_sources(records: &Records) -> HashSet<SourceId> {
     let events: HashMap<_, _> = records
         .iter()
@@ -182,9 +191,11 @@ impl SyncEngine {
         Ok(new_head)
     }
 
-    /// Refresh replaces the source's entire imported view. Parse or staging failures
-    /// leave the previous view active. Each batch has distinct storage identities;
-    /// references from recordings are never reassigned to a replacement event.
+    /// Replaces the source's entire imported view.
+    ///
+    /// A parse or staging failure leaves the previous view active. Each batch
+    /// gets its own storage ids, so a recording's reference is never pointed
+    /// at a replacement event.
     pub async fn sync_calendar_source(&self, object_id: &str) -> Result<IngestReport, ClientError> {
         let _write = self.calendar_write.lock().await;
         self.cleanup_calendar_imports(object_id).await?;
@@ -229,8 +240,9 @@ impl SyncEngine {
                 "Calendar changed during refresh; retry".into(),
             ));
         }
-        // Check both event records and the largest source manifest before upload.
-        // The snapshot id is fixed-width, so a probe id gives the same size bound.
+        // Size-check the event records and the largest source manifest before
+        // uploading anything. A snapshot id is fixed width, so a probe id
+        // gives the same bound as the real one.
         for event in &outcome.events {
             let mut event = event.clone();
             event.import = Some(probe_id);
@@ -283,8 +295,9 @@ impl SyncEngine {
             match self.save_calendar_source(object_id, &source, head).await {
                 Ok(saved) => head = saved,
                 Err(error) => {
-                    // A lost response may still have committed the source: preserve
-                    // the raw file rather than risk deleting an accepted snapshot.
+                    // A lost response may still have committed the source, so
+                    // keep the raw file rather than delete a snapshot the
+                    // server accepted.
                     return Err(error);
                 }
             }
@@ -340,8 +353,9 @@ impl SyncEngine {
                 )
                 .await
             {
-                // Another device can resume the same batch. Accept its write only
-                // after authenticating and comparing the complete event.
+                // Another device can resume the same batch. Accept its write
+                // only after authenticating the event and finding it
+                // identical.
                 if !matches!(&error, ClientError::Api { status: 409, .. })
                     || self
                         .load_import_event(&id.to_string())
@@ -357,8 +371,8 @@ impl SyncEngine {
         if self.history_epoch.load(Ordering::SeqCst) != epoch {
             return Err(ClientError::NotAuthenticated);
         }
-        // Download and cache the complete snapshot before publishing a batch
-        // whose unsupported rules depend on it. One resolver serves the batch.
+        // Cache the snapshot before publishing a batch whose imported rules
+        // need it. One resolver covers the whole batch.
         if let Some((_, event)) = events.iter().find(|(_, event)| {
             matches!(
                 event.recurrence,
@@ -426,8 +440,9 @@ impl SyncEngine {
         Ok(Some(record))
     }
 
-    /// Verify even tombstoned targets before purging. A missing historical revision
-    /// means the object is already absent; it is not permission to delete another kind.
+    /// Verifies the target before purging it, tombstoned or not. A missing
+    /// historical revision means the object is already gone. It is not
+    /// permission to delete an object of some other kind.
     async fn purge_import_object(
         &self,
         id: &str,
@@ -496,8 +511,8 @@ impl SyncEngine {
                 if kind == ObjectKind::Schedule {
                     self.load_import_event(id).await?;
                 }
-                // File heads are hydrated by ordinary object sync. Missing heads
-                // defer cleanup rather than inventing a chain position.
+                // Ordinary object sync hydrates file heads. A missing head
+                // defers cleanup rather than inventing a chain position.
                 let (seq, head) = self.write_tombstone(id, kind).await?;
                 let visible = self
                     .local_store
@@ -574,8 +589,9 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// Source removal first hides its imported view, then purges only its batches.
-    /// Actual records and locally authored plans/overrides are never cleanup targets.
+    /// Hides the source's imported view first, then purges its batches.
+    /// Actual records and locally authored plans and overrides are never
+    /// cleanup targets.
     pub(super) async fn remove_calendar_imports(&self, id: &str) -> Result<(), ClientError> {
         let (mut source, head) = match self.calendar_source(id).await {
             Ok(value) => value,

@@ -119,8 +119,9 @@ pub struct EncryptedObject {
 }
 
 /// An encrypted object whose single payload is small enough to travel and be
-/// cached inline. Clipboard and schedule both work this way. Calendar import
-/// files use a separate native ciphertext cache for offline rule resolution.
+/// cached inline. Clipboard and schedule objects both work this way. A
+/// calendar import file is too large, so it gets its own native ciphertext
+/// cache that keeps rule resolution working offline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedInlineObject {
     pub object: EncryptedObject,
@@ -464,7 +465,8 @@ impl LocalStore {
         self.write_memory_record(local_record).await
     }
 
-    /// Read only a live file's accepted metadata. Deleted anchors cannot resolve imports.
+    /// The accepted metadata of a live file. A deleted object's anchor never
+    /// resolves an import.
     pub(crate) async fn import_file_object(
         &self,
         object_id: &str,
@@ -484,8 +486,9 @@ impl LocalStore {
         }
     }
 
-    /// Whole encrypted imports remain available offline on native clients.
-    /// The expected head prevents a concurrent replacement/deletion from reusing bytes.
+    /// The cached ciphertext of a whole import, so a native client can
+    /// resolve rules offline. Matching the expected head stops a concurrent
+    /// replacement or deletion from handing back the wrong bytes.
     #[cfg(not(target_family = "wasm"))]
     pub(crate) async fn import_file_ciphertext(
         &self,
@@ -2023,9 +2026,8 @@ impl LocalStore {
         Ok(records)
     }
 
-    /// No index to query, so this is the same scan the sweep used to do
-    /// inline. The browser store is capped, which is why that is tolerable
-    /// here and was not on native.
+    /// There is no index to query, so this scans. The browser store is
+    /// capped, which keeps the scan bounded.
     async fn stale_stored_object_ids(
         &self,
         kind: ObjectKind,
@@ -2061,8 +2063,8 @@ impl LocalStore {
             .collect())
     }
 
-    /// Removal is by id and not by kind on purpose: schedule objects cache a
-    /// payload too, and a kind check here used to leave theirs behind for good.
+    /// Removal is by id, never by kind. A schedule object caches a payload
+    /// too, so a kind check here would leave those behind for good.
     async fn remove_payloads_for_object(&self, object_id: &str) -> Result<(), LocalStoreError> {
         let storage = browser_storage()?;
         storage
@@ -3642,9 +3644,9 @@ mod tests {
             .expect_err("a wiped cache must not forfeit the revision it had accepted");
     }
 
-    /// The read-amplification fix. A deleted object used to be indistinguishable
-    /// from a live one until it had been opened and parsed, so every hydration
-    /// paid for every object ever deleted.
+    /// Hydration never opens a deleted object. If telling a deleted object
+    /// from a live one took parsing it, every hydration would pay for every
+    /// object ever deleted.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn a_deleted_object_leaves_nothing_for_hydration_to_read() {
@@ -3687,9 +3689,8 @@ mod tests {
         ));
     }
 
-    /// The payload used to be a sidecar removed by a separate, kind-conditional
-    /// step, which reclaimed clipboard bytes and silently kept schedule ones
-    /// forever. It hangs off the object row now, so nothing has to remember.
+    /// The payload hangs off the object row and cascades with it, so no
+    /// separate step has to remember to reclaim it for each kind.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn dropping_an_object_reclaims_its_cached_payload() {
