@@ -1582,7 +1582,7 @@ pub async fn delete_object(
         source_device_id: auth.device_id,
         seq: inserted.seq,
         event_type: ObjectEventType::Deleted,
-        object_kind: ObjectKind::File,
+        object_kind: kind,
         object_id: object_uuid.into(),
         created_at: now,
     });
@@ -3879,5 +3879,101 @@ mod tests {
             created_seq,
             "high-water must survive event_log pruning",
         );
+    }
+
+    /// The delete event row used to hardcode `object_kind: "file"`, which was
+    /// invisible while File was the only deletable kind. Schedule made it a live
+    /// bug: every schedule delete would have logged a file delete, and clients
+    /// reconciling by kind would have missed it entirely.
+    #[tokio::test]
+    async fn deleting_a_schedule_object_logs_its_own_kind() {
+        let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
+
+        let object_id = Uuid::now_v7().to_string();
+        let payload_id = Uuid::now_v7().to_string();
+        init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                object_id.clone(),
+                payload_id,
+                ObjectKind::Schedule,
+                b"encrypted schedule record",
+                true,
+                device_id,
+                &signing_secret_key,
+            )),
+        )
+        .await
+        .expect("init");
+
+        let mut rx = state.subscribe_ws_broadcasts(user_id);
+        let Postcard(delete_resp) = delete_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path(object_id.clone()),
+        )
+        .await
+        .expect("schedule objects are deletable");
+
+        let broadcast = rx.try_recv().expect("deleted broadcast");
+        assert_eq!(
+            broadcast.object_kind,
+            ObjectKind::Schedule,
+            "the broadcast must name the kind actually deleted"
+        );
+
+        let row = event_log::Entity::find()
+            .filter(event_log::Column::Seq.eq(delete_resp.deleted_seq))
+            .one(state.db())
+            .await
+            .expect("query event log")
+            .expect("a deleted event row");
+        assert_eq!(
+            row.object_kind, "schedule",
+            "the persisted event row must name the kind actually deleted, not a \
+             hardcoded one"
+        );
+        assert_eq!(row.event_type, ObjectEventType::Deleted.to_string());
+    }
+
+    /// Clipboard expires passively on a TTL and never emits a delete; collab is
+    /// deleted through its own route, which has a plaintext row and a Y-sync
+    /// session to tear down. Neither belongs on this path.
+    #[tokio::test]
+    async fn clipboard_objects_are_still_not_deletable_here() {
+        let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
+
+        let object_id = Uuid::now_v7().to_string();
+        init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                object_id.clone(),
+                Uuid::now_v7().to_string(),
+                ObjectKind::Clipboard,
+                b"clip",
+                true,
+                device_id,
+                &signing_secret_key,
+            )),
+        )
+        .await
+        .expect("init");
+
+        let error = delete_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path(object_id),
+        )
+        .await
+        .expect_err("clipboard deletes must be refused");
+        assert_eq!(error.body().code, ApiErrorCode::ObjectDeleteUnsupported);
     }
 }
