@@ -100,6 +100,8 @@ release packaging; and the macOS Tauri bundle. The unused-dependency check
 passed, entity generation produced no entity changes, and formatting passed.
 The dependency audit passed its existing policy with 13 filtered advisories;
 that is not a claim that all dependencies are vulnerability-free.
+Linux CI also surfaced GHSA-2883-xcg3-v3hh; the transitive `js-yaml` dependency
+is pinned to `4.3.2` in the workspace override ([advisory](https://github.com/advisories/GHSA-2883-xcg3-v3hh)).
 
 On the API 36 emulator, the final release APK passed notification permission
 setup, background ringing, lock-screen display and looping playback, Dismiss,
