@@ -190,6 +190,10 @@ async function runWebCheck(
     cwd: repoRoot,
     env: suppressNodeWarnings(env),
   });
+  await runCommand(pnpm, ["--dir", "web", "run", "test"], {
+    cwd: repoRoot,
+    env: suppressNodeWarnings(env),
+  });
 }
 
 async function runMobileCheck(
