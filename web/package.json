@@ -15,7 +15,7 @@
         "tauri:build": "tauri build",
         "precheck": "pnpm run wasm",
         "check": "tsgo --noEmit",
-        "test": "node --test src/schedule-layout.test.ts",
+        "test": "node --test src/*.test.ts",
         "lint": "oxlint .",
         "fmt": "oxfmt --write .",
         "fmt:check": "oxfmt --check ."
