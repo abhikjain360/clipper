@@ -2,7 +2,7 @@ use chrono::{NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use clipper_schedule::{
     BlockDuration, Expansion, ImportedRuleResolver, Recurrence, RecurrenceEngine, RruleEngine,
-    ScheduleItem, ScheduleItemId, ScheduleSpan, TimedStart, Window,
+    ScheduleItem, ScheduleItemId, ScheduleSpan, TimeRange, TimedStart,
 };
 
 fn import_id() -> clipper_api_types::ObjectId {
@@ -33,7 +33,7 @@ fn starts(
             &item,
             &[],
             &Expansion {
-                window: Window::new(
+                window: TimeRange::new(
                     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
                     Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap(),
                 )
@@ -43,7 +43,7 @@ fn starts(
         )
         .unwrap()
         .into_iter()
-        .map(|occurrence| occurrence.span.start)
+        .map(|occurrence| occurrence.span.start())
         .collect()
 }
 

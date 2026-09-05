@@ -1152,7 +1152,7 @@ async fn exercise_revision_aware_plans(engine: &SyncEngine) {
     assert_eq!(historical.context, original_context);
     assert_eq!(historical.context.observer, chrono_tz::Europe::Berlin);
     assert_eq!(
-        historical.context.span.start.to_rfc3339(),
+        historical.context.span.start().to_rfc3339(),
         "2027-01-05T06:00:00+00:00"
     );
     assert_eq!(engine.local_head(&id).await.unwrap().revision, 2);
@@ -1183,7 +1183,11 @@ async fn exercise_revision_aware_plans(engine: &SyncEngine) {
         .find(|entry| entry.item_id == item.id.to_string())
         .unwrap();
     let mut forged: PlannedRef = serde_json::from_str(&current.plan_context).unwrap();
-    forged.span.start += chrono::TimeDelta::minutes(1);
+    forged.span = clipper_schedule::TimeRange::new(
+        forged.span.start() + chrono::TimeDelta::minutes(1),
+        forged.span.end(),
+    )
+    .unwrap();
     assert!(
         engine
             .start_actual(Some(&serde_json::to_string(&forged).unwrap()))

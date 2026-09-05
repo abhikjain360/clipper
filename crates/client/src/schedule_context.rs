@@ -219,8 +219,7 @@ impl SyncEngine {
         }
         let overrides: Vec<_> = effective.into_iter().map(|(entry, _)| entry).collect();
         let expansion = Expansion {
-            window: Window::new(planned.span.start, planned.span.end)
-                .map_err(|e| invalid(&e.to_string()))?,
+            window: planned.span,
             observer: planned.observer,
         };
         let occurrences = self

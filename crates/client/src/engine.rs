@@ -16,7 +16,7 @@ pub use clipper_app_types::{
 use clipper_core::{crypto, models::*};
 pub use clipper_schedule::{
     CalendarSource, Expansion, IngestedEvent, IngestedStatus, OccurrenceOverride, RecurrenceEngine,
-    RruleEngine, ScheduleItem, ScheduleSpan, SourceId, SourceKind, Window,
+    RruleEngine, ScheduleItem, ScheduleSpan, SourceId, SourceKind, TimeRange,
 };
 use futures_util::{StreamExt, stream};
 use tokio::sync::{Mutex, RwLock, watch};
@@ -1531,10 +1531,10 @@ impl SyncEngine {
         };
 
         let mut stopped = *actual;
-        stopped.span = clipper_schedule::ActualSpan::Complete(clipper_schedule::ResolvedSpan {
-            start: started,
-            end: chrono::Utc::now().max(started),
-        });
+        stopped.span = clipper_schedule::ActualSpan::Complete(
+            clipper_schedule::TimeRange::new(started, chrono::Utc::now())
+                .map_err(|error| ClientError::InvalidArgument(error.to_string()))?,
+        );
         self.write_schedule_record(
             object_id,
             ScheduleRecord::Actual(Box::new(stopped)),
@@ -1552,7 +1552,8 @@ impl SyncEngine {
     ) -> Result<Vec<ActualView>, ClientError> {
         let from = parse_instant(from, "actuals window start")?;
         let to = parse_instant(to, "actuals window end")?;
-        Window::new(from, to).map_err(|error| ClientError::InvalidArgument(error.to_string()))?;
+        TimeRange::new(from, to)
+            .map_err(|error| ClientError::InvalidArgument(error.to_string()))?;
         let epoch = self.history_epoch.load(Ordering::SeqCst);
         let records = self.local_store.schedule_records_with_ids().await;
         let mut out = Vec::new();
@@ -1562,7 +1563,7 @@ impl SyncEngine {
             };
             let (start, end) = match actual.span {
                 clipper_schedule::ActualSpan::Running { started } => (started, chrono::Utc::now()),
-                clipper_schedule::ActualSpan::Complete(span) => (span.start, span.end),
+                clipper_schedule::ActualSpan::Complete(span) => (span.start(), span.end()),
             };
             if start >= to || end <= from {
                 continue;
@@ -1747,7 +1748,7 @@ impl SyncEngine {
         let epoch = self.history_epoch.load(Ordering::SeqCst);
         let from = parse_instant(from, "expansion window start")?;
         let to = parse_instant(to, "expansion window end")?;
-        let window = Window::new(from, to)
+        let window = TimeRange::new(from, to)
             .map_err(|error| ClientError::InvalidArgument(error.to_string()))?;
         let expansion = Expansion {
             window,
@@ -1917,7 +1918,7 @@ impl SyncEngine {
             // lead, tomorrow's 01:00 event must be included in today's alarms.
             let lead = chrono::TimeDelta::minutes(i64::from(policy.minutes_before));
             let expansion = Expansion {
-                window: Window::new(now + lead, until + lead)
+                window: TimeRange::new(now + lead, until + lead)
                     .map_err(|error| ClientError::InvalidArgument(error.to_string()))?,
                 observer: zone_or_utc(observer_zone),
             };

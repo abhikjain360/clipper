@@ -74,14 +74,16 @@ impl ScheduleSpan {
     ///
     /// `observer` supplies the zone for floating and all-day spans, which have
     /// no zone of their own.
-    pub fn resolve(&self, observer: Tz) -> Result<ResolvedSpan, TimeError> {
+    pub fn resolve(&self, observer: Tz) -> Result<TimeRange, TimeError> {
         match self {
             Self::Timed { start, duration } => {
                 let begin = start.resolve(observer)?;
-                Ok(ResolvedSpan {
-                    start: begin,
-                    end: begin + duration.as_time_delta(),
-                })
+                TimeRange::new(
+                    begin,
+                    begin
+                        .checked_add_signed(duration.as_time_delta())
+                        .ok_or(TimeError::DateOverflow)?,
+                )
             }
             Self::AllDay { start, days } => {
                 let begin_local = start
@@ -92,20 +94,18 @@ impl ScheduleSpan {
                     .ok_or(TimeError::DateOverflow)?
                     .and_hms_opt(0, 0, 0)
                     .expect("midnight is always valid");
-                Ok(ResolvedSpan {
-                    start: resolve_local(observer, begin_local).ok_or(
+                TimeRange::new(
+                    resolve_local(observer, begin_local).ok_or(
                         TimeError::UnresolvableLocalTime {
                             local: begin_local,
                             zone: observer,
                         },
                     )?,
-                    end: resolve_local(observer, end_local).ok_or(
-                        TimeError::UnresolvableLocalTime {
-                            local: end_local,
-                            zone: observer,
-                        },
-                    )?,
-                })
+                    resolve_local(observer, end_local).ok_or(TimeError::UnresolvableLocalTime {
+                        local: end_local,
+                        zone: observer,
+                    })?,
+                )
             }
         }
     }
@@ -146,15 +146,50 @@ impl BlockDuration {
     }
 }
 
-/// An absolute half-open interval, `[start, end)`.
+/// A non-empty absolute half-open interval, `[start, end)`.
+/// Used for both resolved occurrence spans and bounded search windows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResolvedSpan {
-    pub start: DateTime<Utc>,
-    pub end: DateTime<Utc>,
+#[serde(try_from = "TimeRangeFields")]
+pub struct TimeRange {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
 }
 
-impl ResolvedSpan {
-    /// Half-open, so blocks that merely touch do not count as overlapping.
+#[derive(Deserialize)]
+struct TimeRangeFields {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
+impl TryFrom<TimeRangeFields> for TimeRange {
+    type Error = TimeError;
+
+    fn try_from(fields: TimeRangeFields) -> Result<Self, Self::Error> {
+        Self::new(fields.start, fields.end)
+    }
+}
+
+impl TimeRange {
+    pub fn new(start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Self, TimeError> {
+        if end <= start {
+            return Err(TimeError::InvalidRange { start, end });
+        }
+        Ok(Self { start, end })
+    }
+
+    pub fn start(&self) -> DateTime<Utc> {
+        self.start
+    }
+
+    pub fn end(&self) -> DateTime<Utc> {
+        self.end
+    }
+
+    pub fn contains(&self, instant: DateTime<Utc>) -> bool {
+        self.start <= instant && instant < self.end
+    }
+
+    /// Blocks that merely touch do not count as overlapping.
     pub fn overlaps(&self, other: &Self) -> bool {
         self.start < other.end && other.start < self.end
     }
@@ -202,6 +237,11 @@ fn one_local(zone: Tz, local: NaiveDateTime) -> Option<DateTime<Tz>> {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TimeError {
+    #[error("time range start {start} must be before end {end}")]
+    InvalidRange {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    },
     #[error("a block must last at least one minute")]
     ZeroDuration,
     #[error("local time {local} does not resolve in {zone}")]

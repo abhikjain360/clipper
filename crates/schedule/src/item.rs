@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     recurrence::Recurrence,
-    time::{ResolvedSpan, ScheduleSpan},
+    time::{ScheduleSpan, TimeRange},
 };
 
 macro_rules! id_type {
@@ -178,7 +178,7 @@ pub struct PlannedRef {
     pub observer: Tz,
     /// Effective planned bounds when recording began. Retained independently
     /// of later travel and timezone database changes.
-    pub span: ResolvedSpan,
+    pub span: TimeRange,
 }
 
 /// A timer writes twice and only twice: once on start, once on stop.
@@ -190,7 +190,7 @@ pub struct PlannedRef {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ActualSpan {
     Running { started: DateTime<Utc> },
-    Complete(ResolvedSpan),
+    Complete(TimeRange),
 }
 
 /// A computed instance of a series. Never stored — clients expand what they
@@ -199,7 +199,7 @@ pub enum ActualSpan {
 pub struct Occurrence {
     pub item: ScheduleItemId,
     pub recurrence_id: RecurrenceId,
-    pub span: ResolvedSpan,
+    pub span: TimeRange,
     pub origin: OccurrenceOrigin,
 }
 

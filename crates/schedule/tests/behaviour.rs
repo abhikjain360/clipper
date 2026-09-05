@@ -3,13 +3,13 @@
 
 use std::num::NonZeroU32;
 
-use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{NaiveDate, NaiveDateTime, TimeDelta, TimeZone, Utc};
 use chrono_tz::Tz;
 use clipper_schedule::{
     BlockDuration, Cadence, EngineError, Expansion, Frequency, ImportedRuleResolver, MonthDay,
     NthWeekday, Occurrence, OccurrenceOrigin, OccurrenceOverrideData, OverrideChange, OverrideId,
     Recurrence, RecurrenceEngine, RecurrenceError, RecurrenceId, RruleEngine, ScheduleItem,
-    ScheduleItemId, ScheduleSpan, TimeError, TimedStart, ValidatedRrule, WeekdaySet, Window,
+    ScheduleItemId, ScheduleSpan, TimeError, TimeRange, TimedStart, ValidatedRrule, WeekdaySet,
 };
 
 fn local(text: &str) -> NaiveDateTime {
@@ -46,8 +46,8 @@ fn expand(
         .expect("expansion succeeds")
 }
 
-fn window(from: chrono::DateTime<Utc>, to: chrono::DateTime<Utc>) -> Window {
-    Window::new(from, to).expect("non-empty window")
+fn window(from: chrono::DateTime<Utc>, to: chrono::DateTime<Utc>) -> TimeRange {
+    TimeRange::new(from, to).expect("non-empty window")
 }
 
 /// A floating alarm is a wall-clock promise, not an instant. 07:00 means 07:00
@@ -84,7 +84,7 @@ fn floating_follows_the_observer() {
         assert_eq!(
             occurrence
                 .span
-                .start
+                .start()
                 .with_timezone(&zone)
                 .format("%H:%M")
                 .to_string(),
@@ -93,7 +93,8 @@ fn floating_follows_the_observer() {
         );
     }
     assert_ne!(
-        berlin[0].span.start, tokyo[0].span.start,
+        berlin[0].span.start(),
+        tokyo[0].span.start(),
         "different zones must give different instants"
     );
 }
@@ -127,7 +128,8 @@ fn zoned_stays_put_wherever_it_is_read() {
     assert_eq!(read_in_berlin.len(), 1);
     assert_eq!(read_in_tokyo.len(), 1);
     assert_eq!(
-        read_in_berlin[0].span.start, read_in_tokyo[0].span.start,
+        read_in_berlin[0].span.start(),
+        read_in_tokyo[0].span.start(),
         "a zoned meeting is the same instant for every observer"
     );
 }
@@ -201,7 +203,7 @@ fn cancelled_occurrence_is_skipped() {
         },
     );
 
-    let starts: Vec<_> = out.iter().map(|o| o.span.start).collect();
+    let starts: Vec<_> = out.iter().map(|o| o.span.start()).collect();
     assert_eq!(
         starts,
         vec![utc(2026, 6, 10, 8, 0), utc(2026, 6, 12, 8, 0)],
@@ -239,8 +241,8 @@ fn rescheduled_occurrence_reports_its_override() {
     );
 
     assert_eq!(out.len(), 1);
-    assert_eq!(out[0].span.start, utc(2026, 6, 11, 14, 0));
-    assert_eq!(out[0].span.end, utc(2026, 6, 11, 14, 45));
+    assert_eq!(out[0].span.start(), utc(2026, 6, 11, 14, 0));
+    assert_eq!(out[0].span.end(), utc(2026, 6, 11, 14, 45));
     assert_eq!(out[0].origin, OccurrenceOrigin::Overridden(override_id));
     assert_eq!(
         out[0].recurrence_id,
@@ -281,7 +283,7 @@ fn override_can_move_an_occurrence_into_the_window() {
         },
     );
 
-    let starts: Vec<_> = out.iter().map(|o| o.span.start).collect();
+    let starts: Vec<_> = out.iter().map(|o| o.span.start()).collect();
     assert_eq!(
         starts,
         vec![utc(2026, 6, 10, 8, 0), utc(2026, 6, 10, 9, 0)],
@@ -337,7 +339,7 @@ fn all_day_spans_whole_local_days() {
         .expect("all-day spans resolve");
 
     assert_eq!(
-        (resolved.end - resolved.start).num_hours(),
+        (resolved.end() - resolved.start()).num_hours(),
         23,
         "29 March 2026 is a 23-hour day in Berlin; an all-day event is a date, \
          not a fixed number of hours"
@@ -379,7 +381,7 @@ fn one_off_items_expand_to_themselves() {
     );
 
     assert_eq!(inside.len(), 1);
-    assert_eq!(inside[0].span.start, utc(2026, 6, 10, 15, 0));
+    assert_eq!(inside[0].span.start(), utc(2026, 6, 10, 15, 0));
     assert!(outside.is_empty());
 }
 
@@ -432,7 +434,7 @@ fn a_narrow_window_does_not_count_decades_of_series_history() {
         },
     );
     assert_eq!(out.len(), 2);
-    assert_eq!(out[0].span.start, utc(2026, 6, 10, 8, 0));
+    assert_eq!(out[0].span.start(), utc(2026, 6, 10, 8, 0));
 }
 
 #[test]
@@ -525,7 +527,7 @@ fn an_overnight_occurrence_overlaps_the_next_days_window() {
         .overlapping_occurrences(&item, &[], &expansion)
         .expect("overlap expansion succeeds");
     assert_eq!(overlapping.len(), 1);
-    assert_eq!(overlapping[0].span.end, utc(2026, 6, 10, 1, 30));
+    assert_eq!(overlapping[0].span.end(), utc(2026, 6, 10, 1, 30));
 }
 
 #[test]
@@ -551,7 +553,7 @@ fn a_multi_day_occurrence_overlaps_a_window_across_dst() {
         .expect("overlap expansion succeeds");
     assert_eq!(overlapping.len(), 1);
     assert_eq!(
-        (overlapping[0].span.end - overlapping[0].span.start).num_hours(),
+        (overlapping[0].span.end() - overlapping[0].span.start()).num_hours(),
         47,
         "two local days around spring-forward last 47 elapsed hours"
     );
@@ -584,7 +586,7 @@ fn a_longer_override_can_overlap_from_before_the_window() {
         .overlapping_occurrences(&item, &[moved], &expansion)
         .expect("overlap expansion succeeds");
     assert_eq!(overlapping.len(), 1);
-    assert_eq!(overlapping[0].span.start, utc(2026, 6, 9, 23, 30));
+    assert_eq!(overlapping[0].span.start(), utc(2026, 6, 9, 23, 30));
 }
 
 /// Running out of candidates is an error, never a short answer. A silently
@@ -659,10 +661,10 @@ fn exactly_the_candidate_limit_is_complete() {
 fn an_empty_window_is_rejected() {
     let instant = utc(2026, 6, 10, 0, 0);
     assert_eq!(
-        Window::new(instant, instant),
-        Err(EngineError::EmptyWindow {
-            from: instant,
-            to: instant
+        TimeRange::new(instant, instant),
+        Err(TimeError::InvalidRange {
+            start: instant,
+            end: instant
         })
     );
 }
@@ -902,7 +904,10 @@ fn historical_plan_retains_original_identity_and_resolved_override_after_travel(
     let restored: ActualRecord =
         serde_json::from_str(&serde_json::to_string(&actual).unwrap()).unwrap();
     assert_eq!(restored, actual);
-    assert_eq!(restored.planned.unwrap().span.start, utc(2026, 9, 16, 7, 0));
+    assert_eq!(
+        restored.planned.unwrap().span.start(),
+        utc(2026, 9, 16, 7, 0)
+    );
     assert_ne!(
         restored.planned.unwrap().span,
         moved_span.resolve(Tz::Asia__Tokyo).unwrap()
@@ -911,4 +916,40 @@ fn historical_plan_retains_original_identity_and_resolved_override_after_travel(
         restored.planned.unwrap().recurrence_id,
         RecurrenceId::Floating(local("20260915T070000"))
     );
+}
+
+#[test]
+fn time_ranges_validate_construction_and_deserialization() {
+    let start = utc(2026, 6, 10, 9, 0);
+    let end = utc(2026, 6, 10, 10, 0);
+    let range = TimeRange::new(start, end).unwrap();
+    let encoded = serde_json::to_value(range).unwrap();
+    assert_eq!(encoded, serde_json::json!({ "start": start, "end": end }));
+    assert_eq!(serde_json::from_value::<TimeRange>(encoded).unwrap(), range);
+    for invalid_end in [start, start - TimeDelta::minutes(1)] {
+        assert!(TimeRange::new(start, invalid_end).is_err());
+        assert!(
+            serde_json::from_value::<TimeRange>(serde_json::json!({
+                "start": start, "end": invalid_end,
+            }))
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn time_ranges_use_half_open_boundaries() {
+    let start = utc(2026, 6, 10, 9, 0);
+    let end = utc(2026, 6, 10, 10, 0);
+    let range = TimeRange::new(start, end).unwrap();
+    assert!(range.contains(start));
+    assert!(!range.contains(end));
+    assert!(!range.contains(start - TimeDelta::seconds(1)));
+    let touching = TimeRange::new(end, end + TimeDelta::hours(1)).unwrap();
+    assert!(!range.overlaps(&touching));
+    assert!(!touching.overlaps(&range));
+    let crossing = TimeRange::new(end - TimeDelta::minutes(1), touching.end()).unwrap();
+    assert!(range.overlaps(&crossing));
+    assert!(crossing.overlaps(&range));
+    assert!(range.overlaps(&range));
 }
