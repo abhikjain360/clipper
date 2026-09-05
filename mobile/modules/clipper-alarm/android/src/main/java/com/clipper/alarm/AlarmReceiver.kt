@@ -19,10 +19,23 @@ class AlarmReceiver : BroadcastReceiver() {
         val appContext = context.applicationContext
         val index = intent.getIntExtra(AlarmIntents.EXTRA_INDEX, -1)
 
-        // Prefer the mirror, fall back to the intent. The two are written
-        // together, but an alarm that cannot find its label should still ring:
-        // a nameless alarm beats a silent one.
-        val planned = AlarmMirror.at(appContext, index)
+        // A delivery can already be queued when replaceAll cancels its pending
+        // intent. Mirror indices are reused, so match the actual occurrence and
+        // fire time instead of accidentally ringing the new occupant of a slot.
+        val deliveredItem = intent.getStringExtra(AlarmIntents.EXTRA_ITEM_ID).orEmpty()
+        val deliveredKey = intent.getStringExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY).orEmpty()
+        val deliveredAt = intent.getLongExtra(AlarmIntents.EXTRA_FIRE_AT, -1)
+        val mirror = AlarmMirror.loadOrNull(appContext)
+        val planned = mirror?.firstOrNull {
+            it.itemId == deliveredItem && it.occurrenceKey == deliveredKey
+                && it.fireAtMillis == deliveredAt
+        }
+        if (mirror != null && planned == null) {
+            Log.i(TAG, "Ignoring cancelled or superseded alarm delivery")
+            return
+        }
+        // If the mirror is corrupt, the concrete intent still has enough data
+        // to ring. A deliberately cleared mirror, including logout, never does.
         val label = planned?.label
             ?: intent.getStringExtra(AlarmIntents.EXTRA_LABEL)
             ?: DEFAULT_LABEL

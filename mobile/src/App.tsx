@@ -20,14 +20,27 @@ import {
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   alarmsSupported,
+  areNotificationsEnabled,
+  cancelAllAlarms,
   canScheduleExactAlarms,
+  canUseFullScreenIntent,
   dismissAlarm,
   openExactAlarmSettings,
+  openFullScreenIntentSettings,
+  openNotificationSettings,
   plannedAlarmCount,
   ringNow,
   setAlarms,
 } from "../modules/clipper-alarm";
-import { Modal, Platform, StatusBar, TextInput } from "react-native";
+import {
+  AppState as NativeAppState,
+  Linking,
+  Modal,
+  PermissionsAndroid,
+  Platform,
+  StatusBar,
+  TextInput,
+} from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { TamaguiProvider } from "tamagui";
 import {
@@ -182,10 +195,19 @@ function ClipperApp() {
   // Keyed on the stored record, not the formatted summary. Toggling an alarm
   // changes neither the recurrence text nor the time text, so a summary-based
   // key would leave the registry stale exactly when it matters most.
-  const scheduleKey = state?.schedule_items
-    .map((item) => `${item.id}:${item.definition_json}`)
-    .join("|") ?? "";
+  const scheduleKey =
+    state?.schedule_items.map((item) => `${item.id}:${item.definition_json}`).join("|") ?? "";
   const lastPushedPlan = useRef<string | null>(null);
+  const [alarmRefreshGeneration, setAlarmRefreshGeneration] = useState(0);
+
+  useEffect(() => {
+    const subscription = NativeAppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        setAlarmRefreshGeneration((generation) => generation + 1);
+      }
+    });
+    return () => subscription.remove();
+  }, []);
 
   useEffect(() => {
     if (!alarmsSupported || !state?.session) return;
@@ -202,7 +224,7 @@ function ClipperApp() {
           fireAtMillis: alarm.fire_at_millis,
           occurrenceStartMillis: alarm.occurrence_start_millis,
         }));
-        const fingerprint = JSON.stringify(plan);
+        const fingerprint = `${sessionKey}:${alarmRefreshGeneration}:${JSON.stringify(plan)}`;
         if (fingerprint === lastPushedPlan.current) return;
         setAlarms(plan);
         lastPushedPlan.current = fingerprint;
@@ -215,7 +237,7 @@ function ClipperApp() {
     return () => {
       cancelled = true;
     };
-  }, [scheduleKey, state?.session]);
+  }, [alarmRefreshGeneration, scheduleKey, sessionKey]);
 
   if (startupError) {
     return <CenteredStatus title="Cannot start Clipper" message={startupError} />;
@@ -262,7 +284,9 @@ function LoginScreen({
       // Persist behind biometric so the next cold start can resume without the
       // passphrase. Best-effort and self-contained: a cancelled/unavailable
       // biometric leaves the session unsaved without failing the login.
-      await saveCredentials({ passphrase, username, deviceName: "", serverUrl });
+      await saveCredentials();
+      setPassphrase("");
+      setAccessKey("");
       onState(await backend.getState());
     } catch (caught) {
       setError(formatBackendError(caught));
@@ -364,8 +388,18 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
 
   async function logout() {
     setError(null);
-    // Forget the stored passphrase so the device stops auto-resuming.
+    // Forget stored session material so the device stops auto-resuming.
     await clearCredentials();
+    try {
+      cancelAllAlarms();
+    } catch {
+      // Native cleanup is best-effort; backend logout must still run.
+    }
+    try {
+      dismissAlarm();
+    } catch {
+      // The ring service may already be gone.
+    }
     try {
       await backend.logout();
     } catch (caught) {
@@ -723,18 +757,61 @@ function FilesPanel({
  */
 function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
   const [exact, setExact] = useState(true);
+  const [notifications, setNotifications] = useState(true);
+  const [fullScreen, setFullScreen] = useState(true);
   const [planned, setPlanned] = useState(0);
 
   const refresh = useCallback(() => {
     try {
       setExact(canScheduleExactAlarms());
+      setNotifications(areNotificationsEnabled());
+      setFullScreen(canUseFullScreenIntent());
       setPlanned(plannedAlarmCount());
     } catch (caught) {
       onError(formatBackendError(caught));
     }
   }, [onError]);
 
-  useEffect(refresh, [refresh]);
+  useEffect(() => {
+    refresh();
+    const interval = setInterval(refresh, 2_000);
+    const subscription = NativeAppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") refresh();
+    });
+    return () => {
+      clearInterval(interval);
+      subscription.remove();
+    };
+  }, [refresh]);
+
+  const requestNotifications = useCallback(async () => {
+    try {
+      if (Platform.OS === "android" && Number(Platform.Version) >= 33) {
+        const result = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+        );
+        if (
+          result === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN ||
+          (result === PermissionsAndroid.RESULTS.GRANTED && !areNotificationsEnabled())
+        ) {
+          if (!openNotificationSettings()) await Linking.openSettings();
+        }
+      } else if (!openNotificationSettings()) {
+        await Linking.openSettings();
+      }
+      refresh();
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }, [onError, refresh]);
+
+  const openFullScreenSettings = useCallback(async () => {
+    try {
+      if (!openFullScreenIntentSettings()) await Linking.openSettings();
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }, [onError]);
 
   return (
     <ScrollView flex={1}>
@@ -743,22 +820,46 @@ function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
           <H2 size="$5">Exact alarms</H2>
           <Paragraph color={exact ? "#7bd88f" : "#ff7b7b"}>
             {exact
-              ? "Permitted — alarms will ring on time."
-              : "Not permitted. Alarms would be batched and ring late."}
+              ? "Exact scheduling is permitted."
+              : "Exact scheduling is not permitted. Alarms will not be scheduled until you allow it."}
           </Paragraph>
-          {!exact && (
-            <Button onPress={() => openExactAlarmSettings()}>Open system setting</Button>
+          {!exact && <Button onPress={() => openExactAlarmSettings()}>Open system setting</Button>}
+        </Card>
+
+        <Card bg="#171a1d" p="$3" gap="$2">
+          <H2 size="$5">Notifications</H2>
+          <Paragraph color={notifications ? "#7bd88f" : "#ff7b7b"}>
+            {notifications
+              ? "Alarm notifications are enabled."
+              : "Notifications are disabled. Alarms cannot show their notification."}
+          </Paragraph>
+          {!notifications && (
+            <Button onPress={() => void requestNotifications()}>Allow notifications</Button>
+          )}
+        </Card>
+
+        <Card bg="#171a1d" p="$3" gap="$2">
+          <H2 size="$5">Full-screen alarms</H2>
+          <Paragraph color={fullScreen ? "#7bd88f" : "#ff7b7b"}>
+            {fullScreen
+              ? "Full-screen alarm display is available."
+              : "Full-screen alarm display is disabled. Android may show only a notification."}
+          </Paragraph>
+          {!fullScreen && (
+            <Button onPress={() => void openFullScreenSettings()}>Open system setting</Button>
           )}
         </Card>
 
         <Card bg="#171a1d" p="$3" gap="$2">
           <H2 size="$5">Scheduled</H2>
           <Paragraph color="#8b949e">
-            {planned === 1 ? "1 alarm planned" : `${planned} alarms planned`}
+            {planned === 1
+              ? "1 upcoming alarm in the mirrored plan"
+              : `${planned} upcoming alarms in the mirrored plan`}
           </Paragraph>
           <Paragraph fontSize={12} color="#8b949e">
-            Planned alarms are mirrored to storage the system unlocks at boot, so they survive
-            a restart and ring before you unlock the device. The schedule itself stays encrypted.
+            Planned alarms are mirrored to storage the system unlocks at boot, so they survive a
+            restart and ring before you unlock the device. The schedule itself stays encrypted.
           </Paragraph>
           <Button onPress={refresh}>Refresh</Button>
         </Card>
@@ -781,8 +882,8 @@ function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
           <H2 size="$5">Vendor settings</H2>
           <Paragraph fontSize={12} color="#8b949e">
             On Xiaomi, HyperOS, and similar, alarms only survive if Clipper has Autostart enabled
-            and is exempt from battery optimisation. Nothing in the app can set these or detect
-            that they are missing — an alarm simply never arrives.
+            and is exempt from battery optimisation. Nothing in the app can set these or detect that
+            they are missing — an alarm simply never arrives.
           </Paragraph>
         </Card>
       </YStack>

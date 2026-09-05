@@ -67,24 +67,28 @@ object AlarmMirror {
     fun save(context: Context, alarms: List<PlannedAlarm>) {
         val array = JSONArray()
         alarms.sortedBy { it.fireAtMillis }.forEach { array.put(it.toJson()) }
-        prefs(context).edit().putString(KEY_PLAN, array.toString()).commit()
+        check(prefs(context).edit().putString(KEY_PLAN, array.toString()).commit()) {
+            "Could not persist the alarm plan"
+        }
     }
 
-    fun load(context: Context): List<PlannedAlarm> {
+    fun load(context: Context): List<PlannedAlarm> = loadOrNull(context).orEmpty()
+
+    /** Null means corrupt storage; an absent/cleared plan is an intentional empty set. */
+    fun loadOrNull(context: Context): List<PlannedAlarm>? {
         val raw = prefs(context).getString(KEY_PLAN, null) ?: return emptyList()
         return runCatching {
             val array = JSONArray(raw)
             (0 until array.length()).mapNotNull { index ->
                 array.optJSONObject(index)?.let(PlannedAlarm::fromJson)
             }
-        }.getOrDefault(emptyList())
+        }.getOrNull()
     }
 
-    /** The alarm registered under [index], if the plan still has one there. */
-    fun at(context: Context, index: Int): PlannedAlarm? = load(context).getOrNull(index)
-
     fun clear(context: Context) {
-        prefs(context).edit().remove(KEY_PLAN).commit()
+        check(prefs(context).edit().remove(KEY_PLAN).commit()) {
+            "Could not clear the alarm plan"
+        }
     }
 
     /**

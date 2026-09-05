@@ -1,5 +1,6 @@
 package com.clipper.alarm
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -11,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.Process
 import android.util.Log
 
 /**
@@ -33,6 +35,15 @@ class RingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // START_STICKY may ask the system to recreate a killed service without
+        // the original extras. Never turn that lifecycle callback into a new,
+        // unlabeled alarm; only an explicit alarm delivery may start ringing.
+        if (intent == null) {
+            Log.w(TAG, "Ignoring sticky restart without an alarm intent")
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+
         when (intent?.action) {
             AlarmIntents.ACTION_DISMISS -> {
                 stopRinging()
@@ -43,6 +54,11 @@ class RingService : Service() {
         val label = intent?.getStringExtra(AlarmIntents.EXTRA_LABEL) ?: DEFAULT_LABEL
         val itemId = intent?.getStringExtra(AlarmIntents.EXTRA_ITEM_ID).orEmpty()
         val occurrenceKey = intent?.getStringExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY).orEmpty()
+        // Android 10+ restricts background activity launches. The full-screen
+        // intent on the alarm notification is the supported path while the
+        // app is backgrounded or the device is locked; a direct launch is
+        // useful only when the owner is already looking at Clipper.
+        val appWasVisible = isAppVisible()
 
         acquireWakeLock()
         startForegroundWithNotification(label, itemId, occurrenceKey)
@@ -51,13 +67,17 @@ class RingService : Service() {
             ringer = Ringer(this).also { it.start(vibrate = true) }
         }
 
-        startActivity(
-            RingActivity.intent(this, label, itemId, occurrenceKey)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        )
+        if (appWasVisible) {
+            runCatching {
+                startActivity(
+                    RingActivity.intent(this, label, itemId, occurrenceKey)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }.onFailure { Log.w(TAG, "Could not show ring activity", it) }
+        }
 
-        // START_STICKY: if the system kills this under memory pressure while an
-        // alarm is ringing, bringing it back is the right recovery.
+        // Keep the service alive while the alarm is ringing. A null sticky
+        // restart is handled above so it cannot create a phantom ring.
         return START_STICKY
     }
 
@@ -83,11 +103,21 @@ class RingService : Service() {
             .apply { runCatching { acquire(WAKE_LOCK_TIMEOUT_MS) } }
     }
 
+    private fun isAppVisible(): Boolean {
+        val manager = getSystemService(ActivityManager::class.java) ?: return false
+        val process = manager.runningAppProcesses
+            ?.firstOrNull { it.pid == Process.myPid() }
+        return process?.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+    }
+
     private fun startForegroundWithNotification(
         label: String,
         itemId: String,
         occurrenceKey: String,
     ) {
+        // Notification channels and the channel-aware Notification.Builder
+        // were added in API 26. The alarm module still supports API 24/25,
+        // where the legacy builder is the only loadable path.
         ensureChannel(this)
 
         val fullScreen = PendingIntent.getActivity(
@@ -103,7 +133,12 @@ class RingService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-        val notification = Notification.Builder(this, CHANNEL_ID)
+        val notification = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        })
             .setContentTitle(label)
             .setContentText("Alarm")
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
@@ -128,7 +163,7 @@ class RingService : Service() {
 
     companion object {
         private const val TAG = "ClipperAlarm"
-        private const val CHANNEL_ID = "clipper.alarm.ringing"
+        const val CHANNEL_ID = "clipper.alarm.ringing"
         private const val NOTIFICATION_ID = 4711
         private const val DEFAULT_LABEL = "Alarm"
 
@@ -144,7 +179,13 @@ class RingService : Service() {
                 putExtra(AlarmIntents.EXTRA_ITEM_ID, itemId)
                 putExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY, occurrenceKey)
             }
-            runCatching { context.startForegroundService(intent) }
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            }
                 .onFailure { Log.e(TAG, "Could not start the ring service", it) }
         }
 
@@ -160,6 +201,7 @@ class RingService : Service() {
          * unlock.
          */
         private fun ensureChannel(context: Context) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
             val manager = context.getSystemService(NotificationManager::class.java) ?: return
             if (manager.getNotificationChannel(CHANNEL_ID) != null) return
             val channel = NotificationChannel(

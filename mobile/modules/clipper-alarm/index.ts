@@ -24,15 +24,18 @@ type ClipperAlarmNative = {
   setAlarms: (planJson: string) => number;
   cancelAll: () => void;
   canScheduleExactAlarms: () => boolean;
+  areNotificationsEnabled: () => boolean;
+  canUseFullScreenIntent: () => boolean;
   openExactAlarmSettings: () => boolean;
+  openNotificationSettings: () => boolean;
+  openFullScreenIntentSettings: () => boolean;
   plannedCount: () => number;
   ringNow: (label: string) => void;
   dismiss: () => void;
 };
 
-const native: ClipperAlarmNative | null = Platform.OS === "android"
-  ? requireNativeModule<ClipperAlarmNative>("ClipperAlarm")
-  : null;
+const native: ClipperAlarmNative | null =
+  Platform.OS === "android" ? requireNativeModule<ClipperAlarmNative>("ClipperAlarm") : null;
 
 /**
  * Whether this platform has an alarm layer at all.
@@ -62,8 +65,8 @@ export function cancelAllAlarms(): void {
 }
 
 /**
- * Whether the OS will deliver alarms on time. When false every alarm would be
- * batched and late, which is worse than none — say so rather than pretend.
+ * Whether the OS permits exact scheduling. Other permissions still determine
+ * whether the alarm can notify and present its full-screen ring UI.
  */
 export function canScheduleExactAlarms(): boolean {
   return native?.canScheduleExactAlarms() ?? false;
@@ -71,6 +74,22 @@ export function canScheduleExactAlarms(): boolean {
 
 export function openExactAlarmSettings(): boolean {
   return native?.openExactAlarmSettings() ?? false;
+}
+
+export function areNotificationsEnabled(): boolean {
+  return native?.areNotificationsEnabled() ?? false;
+}
+
+export function canUseFullScreenIntent(): boolean {
+  return native?.canUseFullScreenIntent() ?? false;
+}
+
+export function openNotificationSettings(): boolean {
+  return native?.openNotificationSettings() ?? false;
+}
+
+export function openFullScreenIntentSettings(): boolean {
+  return native?.openFullScreenIntentSettings() ?? false;
 }
 
 /** How many alarms the device-protected mirror holds. Diagnostics only. */

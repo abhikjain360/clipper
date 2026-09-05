@@ -28,6 +28,7 @@ class BootReceiver : BroadcastReceiver() {
             Intent.ACTION_MY_PACKAGE_REPLACED,
             Intent.ACTION_TIME_CHANGED,
             Intent.ACTION_TIMEZONE_CHANGED,
+            AlarmIntents.ACTION_EXACT_ALARM_PERMISSION_CHANGED,
             -> {
                 val pending = goAsync()
                 try {

@@ -13,6 +13,11 @@ object AlarmIntents {
     const val ACTION_FIRE = "com.clipper.alarm.action.FIRE"
     const val ACTION_DISMISS = "com.clipper.alarm.action.DISMISS"
     const val ACTION_SNOOZE = "com.clipper.alarm.action.SNOOZE"
+    // Sent by the system after the user grants exact-alarm access. Keeping the
+    // literal here lets the receiver remain loadable on API levels that do not
+    // expose AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED.
+    const val ACTION_EXACT_ALARM_PERMISSION_CHANGED =
+        "android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED"
 
     const val EXTRA_INDEX = "com.clipper.alarm.extra.INDEX"
     const val EXTRA_LABEL = "com.clipper.alarm.extra.LABEL"
