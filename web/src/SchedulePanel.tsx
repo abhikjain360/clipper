@@ -38,6 +38,7 @@ import {
     Paragraph,
     Spinner,
     Text,
+    ToggleGroup,
     XStack,
     YStack,
     type TamaguiElement,
@@ -204,17 +205,36 @@ export function SchedulePanel({
                             {loading && <Spinner size="small" />}
                         </XStack>
                         <XStack gap="$2" flexWrap="wrap" items="center" minW={0} maxW="100%">
-                            {(["day", "week", "month"] as const).map((mode) => (
-                                <Button
-                                    key={mode}
-                                    size="$2"
-                                    aria-pressed={view === mode}
-                                    theme={view === mode ? "blue" : undefined}
-                                    onPress={() => setView(mode)}
-                                >
-                                    {mode.slice(0, 1).toUpperCase() + mode.slice(1)}
-                                </Button>
-                            ))}
+                            <ToggleGroup
+                                type="single"
+                                value={view}
+                                disableDeactivation
+                                aria-label="Calendar view"
+                                onValueChange={(value) => {
+                                    if (value === "day" || value === "week" || value === "month")
+                                        setView(value);
+                                }}
+                            >
+                                <XStack>
+                                    {(["day", "week", "month"] as const).map((mode) => (
+                                        <ToggleGroup.Item
+                                            asChild
+                                            key={mode}
+                                            value={mode}
+                                            aria-label={
+                                                mode.slice(0, 1).toUpperCase() + mode.slice(1)
+                                            }
+                                        >
+                                            <Button
+                                                size="$2"
+                                                theme={view === mode ? "blue" : undefined}
+                                            >
+                                                {mode.slice(0, 1).toUpperCase() + mode.slice(1)}
+                                            </Button>
+                                        </ToggleGroup.Item>
+                                    ))}
+                                </XStack>
+                            </ToggleGroup>
                             <Button
                                 size="$2"
                                 icon={<ChevronLeft size={16} />}
@@ -1468,14 +1488,16 @@ function ScheduleComposer({
                     />
                 </Field>
                 <Field label="Date">
-                    <Input
-                        value={date}
-                        onChangeText={(value) => {
-                            setDate(value);
+                    <CalendarDatePicker
+                        label="Choose event date"
+                        value={new Date(`${date}T00:00:00`)}
+                        onChange={(value) => {
+                            setDate(isoDate(value));
                             setSpanChanged(true);
                         }}
-                        width={150}
-                    />
+                    >
+                        {date}
+                    </CalendarDatePicker>
                 </Field>
                 {!allDay && (
                     <>
