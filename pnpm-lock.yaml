@@ -14,6 +14,8 @@ overrides:
   '@codemirror/state': 6.7.1
   '@codemirror/view': 6.43.9
 
+packageExtensionsChecksum: sha256-KEmU8dbXFluTehOyuATQk/zOcsGywXmwLTddEjBOtfE=
+
 patchedDependencies:
   uniffi-bindgen-react-native@0.31.0-5: a0fd7fc297dc1edae43e94f8aa22f2bdbf5e7e0cdc78b91d52d56055a69c43c8
 
@@ -4446,6 +4448,11 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
   typescript@7.0.2:
     resolution: {integrity: sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==}
     engines: {node: '>=16.20.0'}
@@ -8174,6 +8181,7 @@ snapshots:
       js-yaml: 4.3.2
       react: 19.2.3
       react-native-web: 0.21.2(react-dom@19.2.8(react@19.2.3))(react@19.2.3)
+      typescript: 5.9.3
     transitivePeerDependencies:
       - encoding
       - react-dom
@@ -8217,6 +8225,7 @@ snapshots:
       js-yaml: 4.3.2
       react: 19.2.8
       react-native-web: 0.21.2(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      typescript: 5.9.3
     transitivePeerDependencies:
       - encoding
       - react-dom
@@ -11306,6 +11315,8 @@ snapshots:
   type-fest@0.7.1: {}
 
   type-fest@4.41.0: {}
+
+  typescript@5.9.3: {}
 
   typescript@6.0.3: {}
 
