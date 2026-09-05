@@ -10,22 +10,16 @@ pub struct Model {
     pub user_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub kind: String,
-    #[sea_orm(column_type = "Blob", nullable)]
-    pub meta_ciphertext: Option<Vec<u8>>,
-    #[sea_orm(column_type = "Blob", nullable)]
-    pub meta_nonce: Option<Vec<u8>>,
     #[sea_orm(column_type = "Text")]
     pub created_at: String,
     #[sea_orm(column_type = "Text")]
     pub updated_at: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub expires_at: Option<String>,
-    pub source_device_id: Option<Uuid>,
-    #[sea_orm(column_type = "Blob", nullable)]
-    pub envelope: Option<Vec<u8>>,
-    #[sea_orm(column_type = "Text")]
-    pub status: String,
-    pub created_seq: Option<i64>,
+    pub head_revision: Option<i64>,
+    pub published_seq: Option<i64>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub deleted_at: Option<String>,
     pub collab_doc_id: Option<Uuid>,
 }
 
@@ -39,16 +33,8 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     CollabDocs,
-    #[sea_orm(
-        belongs_to = "super::devices::Entity",
-        from = "Column::SourceDeviceId",
-        to = "super::devices::Column::Id",
-        on_update = "Cascade",
-        on_delete = "SetNull"
-    )]
-    Devices,
-    #[sea_orm(has_many = "super::object_payloads::Entity")]
-    ObjectPayloads,
+    #[sea_orm(has_many = "super::object_revisions::Entity")]
+    ObjectRevisions,
     #[sea_orm(
         belongs_to = "super::users::Entity",
         from = "Column::UserId",
@@ -65,15 +51,9 @@ impl Related<super::collab_docs::Entity> for Entity {
     }
 }
 
-impl Related<super::devices::Entity> for Entity {
+impl Related<super::object_revisions::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Devices.def()
-    }
-}
-
-impl Related<super::object_payloads::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ObjectPayloads.def()
+        Relation::ObjectRevisions.def()
     }
 }
 

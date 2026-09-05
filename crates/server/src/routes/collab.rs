@@ -101,22 +101,20 @@ pub async fn create_collab_doc(
 
         let seq = state_ref.next_event_seq();
 
-        // A collab object: ciphertext columns null, collab_doc_id set, status
-        // complete from the start (no upload phase). created_seq is set here so
-        // the `status = 'complete' => created_seq NOT NULL` check holds.
+        // A collab object carries no revisions: its content is the Y-doc, which
+        // has its own versioning, and there is no upload phase to be pending
+        // for. So it is visible the moment it exists, which `published_seq`
+        // says directly — the column that replaced `status`.
         objects::ActiveModel {
             id: Set(object_id),
             user_id: Set(user_id),
             kind: Set(ObjectKind::Collab.to_string()),
-            meta_ciphertext: Set(None),
-            meta_nonce: Set(None),
             created_at: Set(now_ref.to_owned()),
             updated_at: Set(now_ref.to_owned()),
             expires_at: Set(None),
-            source_device_id: Set(Some(device_id)),
-            envelope: Set(None),
-            status: Set("complete".into()),
-            created_seq: Set(Some(seq)),
+            head_revision: Set(None),
+            published_seq: Set(Some(seq)),
+            deleted_at: Set(None),
             collab_doc_id: Set(Some(collab_doc_id)),
         }
         .insert(txn)
