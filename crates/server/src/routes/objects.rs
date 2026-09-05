@@ -3518,6 +3518,339 @@ mod tests {
         .map(|Postcard(resp)| resp)
     }
 
+    /// The D6 acceptance set: what a chain has to do beyond compiling.
+    mod revisions {
+        use super::*;
+
+        /// Set up one completed schedule object and return everything a
+        /// revision needs.
+        async fn seeded(
+            state: &AppState,
+        ) -> (
+            Uuid,
+            Uuid,
+            String,
+            [u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
+        ) {
+            let user_id = insert_user(state).await;
+            let device_id = Uuid::now_v7();
+            let signing_secret_key = insert_device(state, user_id, device_id).await;
+            let object_id = Uuid::now_v7().to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request(
+                    object_id.clone(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    b"first",
+                    true,
+                    device_id,
+                    &signing_secret_key,
+                )),
+            )
+            .await
+            .expect("init");
+            (user_id, device_id, object_id, signing_secret_key)
+        }
+
+        async fn listed(state: &AppState, user_id: Uuid, device_id: Uuid) -> Vec<ObjectListItem> {
+            let Postcard(list) = list_objects(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Query(ObjectListQuery {
+                    kind: Some(ObjectKind::Schedule.as_ref().to_string()),
+                    limit: None,
+                    created_seq_lte: None,
+                    after: None,
+                }),
+            )
+            .await
+            .expect("list");
+            list.items
+        }
+
+        #[tokio::test]
+        async fn a_revision_becomes_the_head_and_advances_the_sync_cursor() {
+            let (state, _dir) = test_state().await;
+            let (user_id, device_id, object_id, key) = seeded(&state).await;
+            let before = listed(&state, user_id, device_id).await;
+            assert_eq!(before.len(), 1);
+            assert_eq!(before[0].revision, 1);
+
+            revise_with(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                b"second",
+                &key,
+            )
+            .await
+            .expect("revise");
+
+            let after = listed(&state, user_id, device_id).await;
+            assert_eq!(after.len(), 1, "a revision is not a second object");
+            assert_eq!(after[0].revision, 2);
+            assert!(
+                after[0].created_seq > before[0].created_seq,
+                "the cursor must move, or an incremental sync never learns about the edit",
+            );
+            assert_eq!(
+                after[0].envelope.body.revision, 2,
+                "signed and stated agree"
+            );
+            assert!(after[0].envelope.body.parent_hash.is_some());
+        }
+
+        #[tokio::test]
+        async fn a_revision_signed_against_a_stale_head_is_refused() {
+            let (state, _dir) = test_state().await;
+            let (user_id, device_id, object_id, key) = seeded(&state).await;
+
+            // Capture the head the way a second device would have, then let
+            // another write land before using it.
+            let stale = head_of(&state, object_id.parse().expect("uuid")).await;
+            revise_with(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                b"landed first",
+                &key,
+            )
+            .await
+            .expect("first revision");
+
+            let payload_id: clipper_core::models::ObjectPayloadId = Uuid::now_v7().into();
+            let ciphertext = b"written against the old head";
+            let meta_nonce = vec![4_u8; XCHACHA20_NONCE_BYTES];
+            let meta_ciphertext = b"stale metadata".to_vec();
+            let envelope = signed_envelope_at(
+                object_id.parse::<Uuid>().expect("uuid").into(),
+                ObjectKind::Schedule,
+                stale.0 + 1,
+                Some(stale.1),
+                ObjectEnvelopeOperation::Revise,
+                meta_nonce.clone(),
+                &meta_ciphertext,
+                vec![ObjectEnvelopePayloadV2 {
+                    id: payload_id,
+                    nonce: vec![5_u8; XCHACHA20_NONCE_BYTES],
+                    ciphertext_size: ciphertext.len() as i64,
+                    sha256_ciphertext: sha256(ciphertext).to_vec(),
+                }],
+                device_id,
+                &key,
+            );
+            let error = revise_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path(object_id.clone()),
+                postcard(ObjectReviseRequest {
+                    meta_nonce,
+                    meta_ciphertext,
+                    payloads: vec![ObjectPayloadInit {
+                        id: payload_id,
+                        nonce: vec![5_u8; XCHACHA20_NONCE_BYTES],
+                        ciphertext_size: ciphertext.len() as i64,
+                        sha256_ciphertext: sha256(ciphertext).to_vec(),
+                        inline_ciphertext: Some(ciphertext.to_vec()),
+                    }],
+                    envelope,
+                }),
+            )
+            .await
+            .expect_err("a write against a superseded head must lose");
+            assert_eq!(error.body().code, ApiErrorCode::ObjectRevisionConflict);
+
+            let after = listed(&state, user_id, device_id).await;
+            assert_eq!(
+                after[0].revision, 2,
+                "the loser must not have overwritten the winner",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_correct_revision_number_with_a_wrong_parent_hash_is_refused() {
+            // The previous test is really the revision *number* doing the work.
+            // This one isolates the hash: right number, right everything else,
+            // a parent that is not the head. Without it the chain would be
+            // decoration — a client could claim any ancestry it liked, and a
+            // dropped revision in a retained history would go unnoticed.
+            let (state, _dir) = test_state().await;
+            let (user_id, device_id, object_id, key) = seeded(&state).await;
+            let (head_revision, real_parent) =
+                head_of(&state, object_id.parse().expect("uuid")).await;
+
+            let mut wrong_parent = real_parent;
+            wrong_parent[0] ^= 0x01;
+
+            let payload_id: clipper_core::models::ObjectPayloadId = Uuid::now_v7().into();
+            let ciphertext = b"claims a parent it never saw";
+            let meta_nonce = vec![6_u8; XCHACHA20_NONCE_BYTES];
+            let meta_ciphertext = b"forked metadata".to_vec();
+            let payload_nonce = vec![7_u8; XCHACHA20_NONCE_BYTES];
+            let envelope = signed_envelope_at(
+                object_id.parse::<Uuid>().expect("uuid").into(),
+                ObjectKind::Schedule,
+                head_revision + 1,
+                Some(wrong_parent),
+                ObjectEnvelopeOperation::Revise,
+                meta_nonce.clone(),
+                &meta_ciphertext,
+                vec![ObjectEnvelopePayloadV2 {
+                    id: payload_id,
+                    nonce: payload_nonce.clone(),
+                    ciphertext_size: ciphertext.len() as i64,
+                    sha256_ciphertext: sha256(ciphertext).to_vec(),
+                }],
+                device_id,
+                &key,
+            );
+            let error = revise_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path(object_id.clone()),
+                postcard(ObjectReviseRequest {
+                    meta_nonce,
+                    meta_ciphertext,
+                    payloads: vec![ObjectPayloadInit {
+                        id: payload_id,
+                        nonce: payload_nonce,
+                        ciphertext_size: ciphertext.len() as i64,
+                        sha256_ciphertext: sha256(ciphertext).to_vec(),
+                        inline_ciphertext: Some(ciphertext.to_vec()),
+                    }],
+                    envelope,
+                }),
+            )
+            .await
+            .expect_err("one flipped bit in the parent hash must be enough");
+            assert_eq!(error.body().code, ApiErrorCode::ObjectRevisionConflict);
+            assert_eq!(
+                listed(&state, user_id, device_id).await[0].revision,
+                1,
+                "the refused write must leave the head alone",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_tombstone_hides_the_object_but_keeps_its_history() {
+            let (state, _dir) = test_state().await;
+            let (user_id, device_id, object_id, key) = seeded(&state).await;
+            tombstone_object(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                &key,
+            )
+            .await
+            .expect("tombstone");
+
+            assert!(
+                listed(&state, user_id, device_id).await.is_empty(),
+                "a tombstoned object is not part of the live set",
+            );
+            let object_uuid: Uuid = object_id.parse().expect("uuid");
+            assert_eq!(
+                object_revisions::Entity::find()
+                    .filter(object_revisions::Column::ObjectId.eq(object_uuid))
+                    .all(state.db())
+                    .await
+                    .expect("query revisions")
+                    .len(),
+                2,
+                "the chain behind the tombstone survives",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_revision_after_a_tombstone_brings_the_object_back() {
+            // This is the whole reason retention was kept: undoing a delete is
+            // writing the next revision, with no undo machinery of its own.
+            let (state, _dir) = test_state().await;
+            let (user_id, device_id, object_id, key) = seeded(&state).await;
+            tombstone_object(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                &key,
+            )
+            .await
+            .expect("tombstone");
+
+            let mut rx = state.subscribe_ws_broadcasts(user_id);
+            revise_with(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                b"restored",
+                &key,
+            )
+            .await
+            .expect("undo the delete");
+
+            let broadcast = rx.try_recv().expect("broadcast");
+            assert_eq!(
+                broadcast.event_type,
+                ObjectEventType::Created,
+                "to a client that dropped it on the tombstone, this is a creation",
+            );
+            let after = listed(&state, user_id, device_id).await;
+            assert_eq!(after.len(), 1, "the object is live again");
+            assert_eq!(after[0].revision, 3);
+        }
+
+        #[tokio::test]
+        async fn purge_refuses_an_object_that_is_still_live() {
+            let (state, _dir) = test_state().await;
+            let (user_id, device_id, object_id, _key) = seeded(&state).await;
+            let error = purge_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path(object_id),
+            )
+            .await
+            .expect_err("purging skips the reversible step");
+            assert_eq!(error.body().code, ApiErrorCode::ObjectNotTombstoned);
+        }
+
+        #[tokio::test]
+        async fn a_revision_charges_bytes_but_not_an_object() {
+            let (state, _dir) = test_state().await;
+            let (user_id, device_id, object_id, key) = seeded(&state).await;
+            assert_eq!(user_storage_usage(&state, user_id).await, (5, 1));
+
+            revise_with(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                b"second",
+                &key,
+            )
+            .await
+            .expect("revise");
+
+            assert_eq!(
+                user_storage_usage(&state, user_id).await,
+                (11, 1),
+                "retained history is stored bytes and has to be charged, but \
+                 editing must not consume an object slot",
+            );
+        }
+    }
+
     #[tokio::test]
     async fn init_rejects_wrong_payload_nonce_length_before_writing() {
         let (_state, data_dir) = test_state().await;

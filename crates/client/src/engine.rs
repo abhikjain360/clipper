@@ -30,7 +30,7 @@ use crate::{
         encrypt_clipboard_payload, encrypt_file_blob_bytes, encrypt_file_meta_bytes,
     },
     local_store::{
-        DeviceSigningIdentity, EncryptedInlineObject, EncryptedObject, LocalStore,
+        DeviceSigningIdentity, EncryptedInlineObject, EncryptedObject, LocalHead, LocalStore,
         LocalVisibleState, StoredObjectIdentity,
     },
     schedule::{
@@ -824,8 +824,33 @@ impl SyncEngine {
         payload_size: i64,
         payload_hash: Vec<u8>,
     ) -> Result<i64, ClientError> {
+        let init_resp = self.api.object_init(init_req).await?;
+        self.finish_single_payload_object(
+            object_id,
+            payload_id,
+            init_resp,
+            encrypted_payload,
+            payload_size,
+            payload_hash,
+        )
+        .await
+    }
+
+    /// Drive a started object write to a published seq.
+    ///
+    /// Shared by init and revise, which differ only in the call that starts
+    /// them: after that a write is a write, and an inline payload means it is
+    /// already finished.
+    async fn finish_single_payload_object(
+        &self,
+        object_id: &str,
+        payload_id: &str,
+        init_resp: ObjectInitResponse,
+        encrypted_payload: Vec<u8>,
+        payload_size: i64,
+        payload_hash: Vec<u8>,
+    ) -> Result<i64, ClientError> {
         let api = &self.api;
-        let init_resp = api.object_init(init_req).await?;
         let payload_id_typed = payload_id
             .parse()
             .map_err(|source| ClientError::InvalidId {
@@ -1016,6 +1041,7 @@ impl SyncEngine {
             let api = &self.api;
             let file_item = api.get_object(file_id).await?;
             verify_object_list_item_envelope(&file_item)?;
+            self.check_revision_advance(&file_item).await?;
             if file_item.kind != ObjectKind::File {
                 return Err(ClientError::UnexpectedObjectKind {
                     expected: ObjectKind::File,
@@ -1120,21 +1146,60 @@ impl SyncEngine {
         &self,
         record: ScheduleRecord,
     ) -> Result<String, ClientError> {
+        let object_id = uuid::Uuid::now_v7().to_string();
+        self.write_schedule_record(&object_id, Some(record), EnvelopePlacement::Create)
+            .await?;
+        info!(object_id = %object_id, "Schedule record created");
+        Ok(object_id)
+    }
+
+    /// Seal a schedule record and write it as one revision of an object.
+    ///
+    /// Genesis and revise differ only in the placement they are given and the
+    /// route that starts the write — everything about sealing, and the fact
+    /// that a small record rides inline and so completes without a second
+    /// round-trip, is the same. `record` is `None` for a tombstone, which
+    /// carries no payload at all.
+    async fn write_schedule_record(
+        &self,
+        object_id: &str,
+        record: Option<ScheduleRecord>,
+        placement: EnvelopePlacement,
+    ) -> Result<i64, ClientError> {
         let encryption_key = self.current_encryption_key().await?;
         let (device_id, device_id_typed, signing_key) =
             self.current_device_signing_context().await?;
 
-        let object_uuid = uuid::Uuid::now_v7();
-        let payload_uuid = uuid::Uuid::now_v7();
-        let object_id = object_uuid.to_string();
-        let payload_id = payload_uuid.to_string();
+        let object_uuid: uuid::Uuid =
+            object_id.parse().map_err(|source| ClientError::InvalidId {
+                kind: "object id",
+                source,
+            })?;
         let object_id_typed: ObjectId = object_uuid.into();
-        let payload_id_typed: ObjectPayloadId = payload_uuid.into();
         let created_at = chrono::Utc::now().to_rfc3339();
 
-        let aad_body = create_object_envelope_body_for_aad(
+        let Some(record) = record else {
+            return self
+                .write_schedule_tombstone(
+                    object_id,
+                    object_id_typed,
+                    placement,
+                    &encryption_key,
+                    device_id_typed,
+                    &signing_key,
+                    created_at,
+                )
+                .await;
+        };
+
+        let payload_uuid = uuid::Uuid::now_v7();
+        let payload_id = payload_uuid.to_string();
+        let payload_id_typed: ObjectPayloadId = payload_uuid.into();
+
+        let aad_body = object_envelope_body_for_aad(
             object_id_typed,
             ObjectKind::Schedule,
+            placement,
             device_id_typed,
             created_at.clone(),
             vec![payload_id_typed],
@@ -1147,9 +1212,10 @@ impl SyncEngine {
 
         let payload_hash = crypto::sha256(&encrypted_payload).to_vec();
         let payload_size = encrypted_payload.len() as i64;
-        let envelope_body = create_object_envelope_body(
+        let envelope_body = object_envelope_body(
             object_id_typed,
             ObjectKind::Schedule,
+            placement,
             device_id_typed,
             created_at.clone(),
             meta_nonce.clone(),
@@ -1161,33 +1227,54 @@ impl SyncEngine {
                 sha256_ciphertext: payload_hash.clone(),
             }],
         );
-        let init_req = ObjectInitRequest {
-            id: object_id_typed,
-            kind: ObjectKind::Schedule,
-            meta_nonce,
-            meta_ciphertext,
-            payloads: vec![ObjectPayloadInit {
-                id: payload_id_typed,
-                nonce: payload_nonce,
-                ciphertext_size: payload_size,
-                sha256_ciphertext: payload_hash.clone(),
-                inline_ciphertext: inline_ciphertext(&encrypted_payload),
-            }],
-            envelope: ObjectEnvelopeV2 {
-                signature: crypto::sign_object_envelope_body(&signing_key, &envelope_body)?,
-                body: envelope_body,
-            },
+        let envelope = ObjectEnvelopeV2 {
+            signature: crypto::sign_object_envelope_body(&signing_key, &envelope_body)?,
+            body: envelope_body,
         };
-        let encrypted = EncryptedInlineObject {
-            object: encrypted_object_from_init(&init_req),
-            payload_ciphertext: encrypted_payload.clone(),
+        let payloads = vec![ObjectPayloadInit {
+            id: payload_id_typed,
+            nonce: payload_nonce,
+            ciphertext_size: payload_size,
+            sha256_ciphertext: payload_hash.clone(),
+            inline_ciphertext: inline_ciphertext(&encrypted_payload),
+        }];
+
+        let (encrypted_object, write_resp) = match placement {
+            EnvelopePlacement::Create => {
+                let init_req = ObjectInitRequest {
+                    id: object_id_typed,
+                    kind: ObjectKind::Schedule,
+                    meta_nonce,
+                    meta_ciphertext,
+                    payloads,
+                    envelope,
+                };
+                let encrypted = encrypted_object_from_init(&init_req);
+                let resp = self.api.object_init(&init_req).await?;
+                (encrypted, resp)
+            }
+            EnvelopePlacement::Revise(_) | EnvelopePlacement::Delete(_) => {
+                let revise_req = ObjectReviseRequest {
+                    meta_nonce,
+                    meta_ciphertext,
+                    payloads,
+                    envelope,
+                };
+                let encrypted = encrypted_object_from_revise(&revise_req);
+                let resp = self.api.object_revise(object_id, &revise_req).await?;
+                (encrypted, resp)
+            }
         };
 
+        let encrypted = EncryptedInlineObject {
+            object: encrypted_object,
+            payload_ciphertext: encrypted_payload.clone(),
+        };
         let created_seq = self
-            .submit_single_payload_object(
-                &object_id,
+            .finish_single_payload_object(
+                object_id,
                 &payload_id,
-                &init_req,
+                write_resp,
                 encrypted_payload,
                 payload_size,
                 payload_hash,
@@ -1198,7 +1285,7 @@ impl SyncEngine {
             .local_store
             .persist_local_schedule_present_encrypted(
                 StoredObjectIdentity {
-                    object_id: &object_id,
+                    object_id,
                     created_at: &created_at,
                     source_device_id: &device_id,
                 },
@@ -1210,8 +1297,61 @@ impl SyncEngine {
             )
             .await?;
         self.publish_visible_state(visible).await;
-        info!(object_id = %object_id, "Schedule record created");
-        Ok(object_id)
+        Ok(created_seq)
+    }
+
+    /// The tombstone half: a revision with no payloads.
+    ///
+    /// Its meta is still encrypted and still bound to the envelope, even though
+    /// there is nothing left to say — an empty ciphertext would be a second
+    /// shape for the meta column to have, and the server's checks would have to
+    /// know about it.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_schedule_tombstone(
+        &self,
+        object_id: &str,
+        object_id_typed: ObjectId,
+        placement: EnvelopePlacement,
+        encryption_key: &zeroize::Zeroizing<[u8; 32]>,
+        device_id_typed: DeviceId,
+        signing_key: &[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
+        created_at: String,
+    ) -> Result<i64, ClientError> {
+        let aad_body = object_envelope_body_for_aad(
+            object_id_typed,
+            ObjectKind::Schedule,
+            placement,
+            device_id_typed,
+            created_at.clone(),
+            Vec::new(),
+        );
+        let (meta_nonce, meta_ciphertext) =
+            encrypt_schedule_meta(&ScheduleRecord::tombstone_meta(), encryption_key, &aad_body)?;
+        let envelope_body = object_envelope_body(
+            object_id_typed,
+            ObjectKind::Schedule,
+            placement,
+            device_id_typed,
+            created_at,
+            meta_nonce.clone(),
+            crypto::sha256(&meta_ciphertext).to_vec(),
+            Vec::new(),
+        );
+        let revise_req = ObjectReviseRequest {
+            meta_nonce,
+            meta_ciphertext,
+            payloads: Vec::new(),
+            envelope: ObjectEnvelopeV2 {
+                signature: crypto::sign_object_envelope_body(signing_key, &envelope_body)?,
+                body: envelope_body,
+            },
+        };
+        match self.api.object_revise(object_id, &revise_req).await? {
+            ObjectInitResponse::Complete { created_seq } => Ok(created_seq),
+            ObjectInitResponse::Pending { .. } => Err(ClientError::UnexpectedResponse(
+                "a tombstone carries no payloads and must complete immediately".into(),
+            )),
+        }
     }
 
     // ── Actuals (D2) ──
@@ -1409,24 +1549,87 @@ impl SyncEngine {
             ));
         }
 
-        let replacement = self.create_schedule_item(item).await?;
-        self.delete_schedule_object(object_id).await?;
-        info!(object_id = %object_id, replacement = %replacement, "Schedule item edited");
-        Ok(replacement)
+        let head = self.local_head(object_id).await?;
+        self.write_schedule_record(
+            object_id,
+            Some(ScheduleRecord::Item(Box::new(item))),
+            EnvelopePlacement::Revise(head),
+        )
+        .await?;
+        info!(object_id = %object_id, revision = head.revision + 1, "Schedule item edited");
+        // The object id is stable across an edit now, so callers that used to
+        // follow a replacement id get the same one back.
+        Ok(object_id.to_string())
     }
 
-    /// Delete a schedule object.
+    /// Refuse a served revision that is older than, or discontinuous with, the
+    /// one this client already holds.
     ///
-    /// Until the revision layer lands (D6), editing a series is a create
-    /// followed by one of these.
+    /// Two distinct checks, and both need local state, which is why they cannot
+    /// live in the stateless envelope verification:
+    ///
+    /// Rollback. A server can serve revision 3 while 7 exists — every envelope
+    /// in the chain is genuinely signed, so nothing about revision 3 looks
+    /// wrong on its own. Only a client that remembers 7 can tell. A freshly
+    /// installed device has nothing to remember and must trust what it is
+    /// given; that limit is inherent to D6 and is written down rather than
+    /// glossed.
+    ///
+    /// Continuity. When the served revision is the immediate successor of the
+    /// held one, its parent hash must be the held one's. That is what makes the
+    /// chain load-bearing instead of decorative — a server that drops or
+    /// substitutes a revision leaves a hash that does not match. A larger jump
+    /// cannot be checked locally, because the revisions in between were never
+    /// seen.
+    async fn check_revision_advance(&self, item: &ObjectListItem) -> Result<(), ClientError> {
+        let object_id = item.id.to_string();
+        let Some(head) = self.local_store.local_head(&object_id).await? else {
+            return Ok(());
+        };
+        if item.revision < head.revision {
+            return Err(object_envelope_error(format!(
+                "server served revision {} of {object_id} after this device saw {}",
+                item.revision, head.revision,
+            )));
+        }
+        if item.revision == head.revision + 1
+            && item.envelope.body.parent_hash != Some(head.parent_hash)
+        {
+            return Err(object_envelope_error(format!(
+                "revision {} of {object_id} does not chain to the revision this device holds",
+                item.revision,
+            )));
+        }
+        Ok(())
+    }
+
+    /// The chain position this client holds for an object, or a typed error.
+    async fn local_head(&self, object_id: &str) -> Result<LocalHead, ClientError> {
+        self.local_store
+            .local_head(object_id)
+            .await?
+            .ok_or_else(|| ClientError::ItemNotFound {
+                id: object_id.to_string(),
+            })
+    }
+
+    /// Delete a schedule object by appending a tombstone revision.
+    ///
+    /// Reversible on purpose: the chain behind the tombstone survives, so the
+    /// object can be brought back by writing a revision that restores an
+    /// earlier one. Reclaiming the bytes is a separate purge, which nothing in
+    /// the UI calls yet.
     pub async fn delete_schedule_object(&self, object_id: &str) -> Result<(), ClientError> {
-        let delete_resp = self.api.delete_object(object_id).await?;
+        let head = self.local_head(object_id).await?;
+        let deleted_seq = self
+            .write_schedule_record(object_id, None, EnvelopePlacement::Delete(head))
+            .await?;
         let visible = self
             .local_store
             .apply_local_delete(
                 ObjectKind::Schedule,
                 object_id,
-                delete_resp.deleted_seq,
+                deleted_seq,
                 RECENT_CLIPBOARD_LIMIT,
             )
             .await?;
@@ -1772,6 +1975,7 @@ impl SyncEngine {
         encryption_key: &[u8; 32],
     ) -> Result<(ScheduleRecord, EncryptedInlineObject), ClientError> {
         verify_object_list_item_envelope(item)?;
+        self.check_revision_advance(item).await?;
         // The meta is decrypted for its own sake: it authenticates that this
         // object really is a schedule record of the kind the payload claims.
         let meta = decrypt_schedule_meta(
@@ -2273,6 +2477,7 @@ impl SyncEngine {
         encryption_key: &[u8; 32],
     ) -> Result<DecryptedClipboardObject, ClientError> {
         verify_object_list_item_envelope(item)?;
+        self.check_revision_advance(item).await?;
         let meta = decrypt_clipboard_meta(
             &item.meta_nonce,
             &item.meta_ciphertext,
@@ -3160,6 +3365,26 @@ fn encrypted_object_from_init(init_req: &ObjectInitRequest) -> EncryptedObject {
     }
 }
 
+fn encrypted_object_from_revise(req: &ObjectReviseRequest) -> EncryptedObject {
+    EncryptedObject {
+        meta_nonce: req.meta_nonce.clone(),
+        meta_ciphertext: req.meta_ciphertext.clone(),
+        payloads: req
+            .payloads
+            .iter()
+            .map(|payload| ObjectPayloadDescriptor {
+                id: payload.id,
+                nonce: payload.nonce.clone(),
+                ciphertext_size: payload.ciphertext_size,
+                sha256_ciphertext: payload.sha256_ciphertext.clone(),
+            })
+            .collect(),
+        created_at: req.envelope.body.created_at.clone(),
+        source_device_id: req.envelope.body.source_device_id.to_string(),
+        envelope: req.envelope.clone(),
+    }
+}
+
 fn encrypted_object_from_list_item(item: &ObjectListItem) -> EncryptedObject {
     EncryptedObject {
         meta_nonce: item.meta_nonce.clone(),
@@ -3189,9 +3414,34 @@ fn create_object_envelope_body_for_aad(
     created_at: String,
     payload_ids: Vec<ObjectPayloadId>,
 ) -> ObjectEnvelopeBodyV2 {
-    create_object_envelope_body(
+    object_envelope_body_for_aad(
         object_id,
         kind,
+        EnvelopePlacement::Create,
+        source_device_id,
+        created_at,
+        payload_ids,
+    )
+}
+
+/// The projection the AAD is computed from, before the ciphertexts exist.
+///
+/// It has to agree with the final envelope on every bound field — `revision`
+/// and `parent_hash` included, which is why placement is threaded through here
+/// rather than defaulted. Getting it wrong does not fail here; it fails as an
+/// undecryptable object on some other device.
+fn object_envelope_body_for_aad(
+    object_id: ObjectId,
+    kind: ObjectKind,
+    placement: EnvelopePlacement,
+    source_device_id: DeviceId,
+    created_at: String,
+    payload_ids: Vec<ObjectPayloadId>,
+) -> ObjectEnvelopeBodyV2 {
+    object_envelope_body(
+        object_id,
+        kind,
+        placement,
         source_device_id,
         created_at,
         Vec::new(),
@@ -3208,9 +3458,69 @@ fn create_object_envelope_body_for_aad(
     )
 }
 
+/// Where a new envelope sits in its object's chain.
+///
+/// The revision number, the parent hash and the operation always move together
+/// — a create has no parent, a revise and a tombstone both do — so they travel
+/// as one value rather than three arguments that could be combined into
+/// something the server would reject.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum EnvelopePlacement {
+    Create,
+    Revise(LocalHead),
+    Delete(LocalHead),
+}
+
+impl EnvelopePlacement {
+    fn revision(self) -> u64 {
+        match self {
+            Self::Create => 1,
+            Self::Revise(head) | Self::Delete(head) => head.revision + 1,
+        }
+    }
+
+    fn parent_hash(self) -> Option<[u8; crypto::SHA256_BYTES]> {
+        match self {
+            Self::Create => None,
+            Self::Revise(head) | Self::Delete(head) => Some(head.parent_hash),
+        }
+    }
+
+    fn operation(self) -> ObjectEnvelopeOperation {
+        match self {
+            Self::Create => ObjectEnvelopeOperation::Create,
+            Self::Revise(_) => ObjectEnvelopeOperation::Revise,
+            Self::Delete(_) => ObjectEnvelopeOperation::Delete,
+        }
+    }
+}
+
 fn create_object_envelope_body(
     object_id: ObjectId,
     kind: ObjectKind,
+    source_device_id: DeviceId,
+    created_at: String,
+    meta_nonce: Vec<u8>,
+    sha256_meta_ciphertext: Vec<u8>,
+    payloads: Vec<ObjectEnvelopePayloadV2>,
+) -> ObjectEnvelopeBodyV2 {
+    object_envelope_body(
+        object_id,
+        kind,
+        EnvelopePlacement::Create,
+        source_device_id,
+        created_at,
+        meta_nonce,
+        sha256_meta_ciphertext,
+        payloads,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn object_envelope_body(
+    object_id: ObjectId,
+    kind: ObjectKind,
+    placement: EnvelopePlacement,
     source_device_id: DeviceId,
     created_at: String,
     meta_nonce: Vec<u8>,
@@ -3221,14 +3531,11 @@ fn create_object_envelope_body(
         object_id,
         object_type: kind,
         envelope_version: OBJECT_ENVELOPE_VERSION_V2,
-        // Genesis only. Writing a later revision needs the parent's body to
-        // hash, so it gets its own constructor once the revision write path
-        // exists; until then every object this client creates is revision 1.
-        revision: 1,
-        parent_hash: None,
+        revision: placement.revision(),
+        parent_hash: placement.parent_hash(),
         source_device_id,
         created_at,
-        operation: ObjectEnvelopeOperation::Create,
+        operation: placement.operation(),
         meta_nonce,
         sha256_meta_ciphertext,
         payloads,
@@ -3253,7 +3560,18 @@ fn verify_object_list_item_envelope(item: &ObjectListItem) -> Result<(), ClientE
     if body.object_id != item.id
         || body.object_type != item.kind
         || body.envelope_version != OBJECT_ENVELOPE_VERSION_V2
-        || body.operation != ObjectEnvelopeOperation::Create
+        // The revision is signed and also stated in the clear beside it; they
+        // must agree, or the server could relabel which revision this is while
+        // serving a genuinely signed body.
+        || body.revision != item.revision
+        // A listing serves live heads. A `Delete` here would mean the server
+        // offered a tombstone as current content, and a `Create` above revision
+        // 1 is a chain restarting on top of itself.
+        || match body.operation {
+            ObjectEnvelopeOperation::Create => body.revision != 1,
+            ObjectEnvelopeOperation::Revise => body.revision < 2,
+            ObjectEnvelopeOperation::Delete => true,
+        }
         || body.source_device_id != item.source_device_id
         || body.created_at != item.created_at
         || body.meta_nonce != item.meta_nonce

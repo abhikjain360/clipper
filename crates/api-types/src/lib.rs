@@ -330,6 +330,13 @@ pub enum ScheduleRecordKind {
     /// iCalendar source *is* the credential — hence encrypted like everything
     /// else (D4).
     Source,
+    /// The meta of a tombstone revision, which carries no payload.
+    ///
+    /// It exists only because the meta column is not nullable and every
+    /// ciphertext is bound to its envelope; nothing reads it, because a
+    /// tombstoned object is never listed. Naming it beats writing an
+    /// undecodable blob and hoping nobody ever tries.
+    Tombstone,
     /// An event as a provider describes it: the upstream-owned layer of D10,
     /// written only by the sync worker and read-only to the owner.
     Ingested,

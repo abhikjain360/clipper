@@ -95,6 +95,16 @@ pub struct LocalCollabRecord {
     pub updated_at: String,
 }
 
+/// The chain position of a locally-held object.
+#[derive(Debug, Clone, Copy)]
+pub struct LocalHead {
+    /// Which revision this client holds.
+    pub revision: u64,
+    /// SHA-256 of that revision's canonical envelope body — what the next
+    /// revision must carry as `parent_hash`.
+    pub parent_hash: [u8; crypto::SHA256_BYTES],
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedObject {
     pub meta_nonce: Vec<u8>,
@@ -1118,6 +1128,30 @@ impl LocalStore {
     ///
     /// Ingest needs the object id, not just the record: replacing an event means
     /// deleting the object it currently lives in.
+    /// Where the local copy of an object sits in its chain.
+    ///
+    /// A new revision has to name the head it follows, and it has to be *this*
+    /// head — the one this client actually saw — not whatever the server
+    /// currently holds. Rebasing onto the server's head would silently absorb
+    /// another device's edit instead of colliding with it, which is the exact
+    /// thing the parent hash exists to prevent.
+    ///
+    /// `None` means there is no local copy to follow, which is a caller error
+    /// rather than a reason to fall back to asking the server.
+    pub async fn local_head(&self, object_id: &str) -> Result<Option<LocalHead>, LocalStoreError> {
+        let Some(StoredObjectRecord::Present(record)) =
+            self.stored_object_record(object_id).await?
+        else {
+            return Ok(None);
+        };
+        let body = &present_encrypted_object(&record)?.envelope.body;
+        Ok(Some(LocalHead {
+            revision: body.revision,
+            parent_hash: crypto::object_envelope_parent_hash(body)
+                .map_err(|e| LocalStoreError::EncryptedCache(e.to_string()))?,
+        }))
+    }
+
     pub async fn schedule_records_with_ids(&self) -> Vec<(String, ScheduleRecord)> {
         self.all_memory_records()
             .await
