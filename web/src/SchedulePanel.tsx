@@ -39,13 +39,19 @@ import type {
     AppState,
     CalendarSourceView,
     OccurrenceView,
-    Recurrence,
     ScheduleItem,
     ScheduleItemView,
     Weekday,
 } from "@clipper/shared";
 import { clipperBackend, formatBackendError, isTauriRuntime } from "./backend";
 import { layoutDay, overlapsDay, spanMinutes } from "./schedule-layout";
+import {
+    buildRecurrence,
+    repeatChoiceOf,
+    repeatLabel,
+    weekdaysOf,
+    type RepeatSelection,
+} from "./schedule-recurrence";
 
 // The grid is a view, not the storage format: blocks are stored as an interval
 // and rasterized here (docs/schedule-plan.md, D5). SLOT_MINUTES is the snap the
@@ -66,8 +72,6 @@ const WEEKDAY_LABELS: Record<Weekday, string> = {
     sat: "Sat",
     sun: "Sun",
 };
-
-type RepeatChoice = "once" | "daily" | "weekly" | "weekdays" | "monthly";
 
 /// The viewer's IANA zone. Floating and all-day blocks have no zone of their
 /// own, so this is what resolves them (D5).
@@ -857,7 +861,7 @@ function ScheduleComposer({
     const [duration, setDuration] = useState("30");
     const [allDay, setAllDay] = useState(false);
     const [floating, setFloating] = useState(false);
-    const [repeat, setRepeat] = useState<RepeatChoice>("once");
+    const [repeat, setRepeat] = useState<RepeatSelection>("once");
     const [alarm, setAlarm] = useState(false);
     const [alarmLead, setAlarmLead] = useState("0");
     // The series id is preserved across an edit so overrides and logged time
@@ -962,7 +966,7 @@ function ScheduleComposer({
                 recurrence:
                     original.current && !recurrenceChanged
                         ? original.current.recurrence
-                        : buildRecurrence(repeat, days, date),
+                        : buildRecurrence(repeat, days, date, original.current?.recurrence ?? null),
                 reference: original.current?.reference ?? null,
                 alarm: alarm
                     ? { minutes_before: Math.max(0, Number.parseInt(alarmLead, 10) || 0) }
@@ -1135,20 +1139,36 @@ function ScheduleComposer({
             )}
 
             <XStack gap="$2" flexWrap="wrap">
-                {(["once", "daily", "weekdays", "weekly", "monthly"] as RepeatChoice[]).map(
-                    (choice) => (
-                        <Toggle
-                            key={choice}
-                            on={repeat === choice}
-                            onPress={() => {
-                                setRepeat(choice);
-                                setRecurrenceChanged(true);
-                            }}
-                        >
-                            {repeatLabel(choice)}
-                        </Toggle>
-                    ),
-                )}
+                {(
+                    [
+                        // Only ever shown as the current state, never as an
+                        // offer: reaching it means the stored rule is richer
+                        // than this row, and the guard below makes pressing it
+                        // inert.
+                        ...(repeat === "custom" ? (["custom"] as const) : []),
+                        "once",
+                        "daily",
+                        "weekdays",
+                        "weekly",
+                        "monthly",
+                    ] as RepeatSelection[]
+                ).map((choice) => (
+                    <Toggle
+                        key={choice}
+                        on={repeat === choice}
+                        onPress={() => {
+                            // Pressing the pill that is already lit is not a
+                            // change, and must not arm one. Without this, a
+                            // series whose cadence this row cannot express
+                            // would be flattened by a press that looks inert.
+                            if (choice === repeat) return;
+                            setRepeat(choice);
+                            setRecurrenceChanged(true);
+                        }}
+                    >
+                        {repeatLabel(choice)}
+                    </Toggle>
+                ))}
             </XStack>
 
             {repeat === "weekly" && (
@@ -1226,97 +1246,6 @@ function parseDefinition(json: string): ScheduleItem | null {
         return parsed.span && parsed.recurrence ? parsed : null;
     } catch {
         return null;
-    }
-}
-
-/// Map a stored recurrence back onto the form's coarser choices.
-///
-/// The form offers a handful of common cadences while the record can express
-/// more. The original recurrence is retained until repeat settings are changed;
-/// the composer also shows its full stored summary.
-function repeatChoiceOf(recurrence: Recurrence): RepeatChoice {
-    if (recurrence.kind !== "every" || recurrence.interval !== 1) return "once";
-    switch (recurrence.frequency.unit) {
-        case "daily":
-            return "daily";
-        case "weekly":
-            return isWeekdaySet(recurrence.frequency.weekdays) ? "weekdays" : "weekly";
-        case "monthly":
-            return recurrence.frequency.by === "on_day" ? "monthly" : "once";
-        default:
-            return "once";
-    }
-}
-
-function weekdaysOf(recurrence: Recurrence): Weekday[] | null {
-    return recurrence.kind === "every" && recurrence.frequency.unit === "weekly"
-        ? recurrence.frequency.weekdays
-        : null;
-}
-
-function isWeekdaySet(days: Weekday[]): boolean {
-    const workweek: Weekday[] = ["mon", "tue", "wed", "thu", "fri"];
-    return days.length === workweek.length && workweek.every((day) => days.includes(day));
-}
-
-function buildRecurrence(choice: RepeatChoice, days: Weekday[], date: string): Recurrence {
-    switch (choice) {
-        case "once":
-            return { kind: "once" };
-        case "daily":
-            return {
-                kind: "every",
-                frequency: { unit: "daily" },
-                interval: 1,
-                end: { when: "never" },
-            };
-        case "weekdays":
-            return {
-                kind: "every",
-                frequency: {
-                    unit: "weekly",
-                    weekdays: ["mon", "tue", "wed", "thu", "fri"],
-                    week_start: "mon",
-                },
-                interval: 1,
-                end: { when: "never" },
-            };
-        case "weekly":
-            return {
-                kind: "every",
-                frequency: { unit: "weekly", weekdays: days, week_start: "mon" },
-                interval: 1,
-                end: { when: "never" },
-            };
-        case "monthly":
-            return {
-                kind: "every",
-                frequency: {
-                    unit: "monthly",
-                    by: "on_day",
-                    from: "from_start",
-                    // The day the block starts on, so "monthly" means "this date
-                    // every month" without asking a second question.
-                    day: Number.parseInt(date.slice(8, 10), 10) || 1,
-                },
-                interval: 1,
-                end: { when: "never" },
-            };
-    }
-}
-
-function repeatLabel(choice: RepeatChoice): string {
-    switch (choice) {
-        case "once":
-            return "Once";
-        case "daily":
-            return "Daily";
-        case "weekdays":
-            return "Weekdays";
-        case "weekly":
-            return "Weekly";
-        case "monthly":
-            return "Monthly";
     }
 }
 
