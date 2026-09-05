@@ -121,7 +121,7 @@ pub struct ScheduleItemView {
 /// One computed instance of a series, ready to place on a grid.
 ///
 /// Occurrences are never stored — a client expands the window it is showing and
-/// throws the result away (`docs/schedule-plan.md`, D4 and D7).
+/// throws the result away.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct OccurrenceView {
@@ -142,7 +142,7 @@ pub struct OccurrenceView {
     /// the UI can mark it as changed.
     pub overridden: bool,
     /// Name of the calendar this came from, or `None` for a block the owner
-    /// authored. D10 requires an ingested event's origin be visible, since its
+    /// authored. An ingested event's origin stays visible because its
     /// core fields are read-only here.
     #[serde(default)]
     pub source: Option<String>,
@@ -155,8 +155,7 @@ pub struct OccurrenceView {
 /// Time actually spent, rendered for a grid.
 ///
 /// Kept apart from [`OccurrenceView`] rather than folded into it, because the
-/// whole point of D2 is that the plan and the record of what happened are
-/// different things that can disagree.
+/// plan and the record of what happened can disagree.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ActualView {

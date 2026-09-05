@@ -173,7 +173,7 @@ where
 
     // Two hops now, and the sum runs over every revision's payloads rather
     // than one set per object. That is the point: retained history is real
-    // stored bytes, so it has to be charged (D6).
+    // stored bytes, so it has to be charged.
     objects::Entity::find()
         .join(JoinType::LeftJoin, objects::Relation::ObjectRevisions.def())
         .join(

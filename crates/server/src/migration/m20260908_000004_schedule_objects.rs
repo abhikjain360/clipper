@@ -2,13 +2,12 @@
 //!
 //! Schedule records — a series definition, a single-occurrence override, or a
 //! log of time actually spent — all share this one kind. Splitting them would
-//! cost the full per-kind plumbing toll three times over (see
-//! `docs/schedule-plan.md`, D3) and would let the server tell a plan apart from
-//! a record of what actually happened. The discriminant lives in the encrypted
+//! duplicate routing and storage plumbing and let the server distinguish a
+//! plan from a record of what actually happened. The discriminant lives in the encrypted
 //! meta instead, so the server sees only that a schedule object exists.
 //!
-//! Editing a plan is the core interaction of a planner, and until the revision
-//! layer lands (D6) an edit is a create followed by a delete. So `schedule`
+//! At this migration stage, editing a plan creates a replacement object and
+//! deletes the old one. Therefore `schedule`
 //! joins `file` and `collab` as a kind that admits a `deleted` event. It does
 //! not admit `updated`: that stays collab-only, because a schedule object is
 //! immutable ciphertext like clipboard and file.

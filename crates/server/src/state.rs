@@ -178,7 +178,7 @@ impl AppState {
             .one(self.db())
             .await?;
         // Every revision holds a seq, not only the head, and a superseded one
-        // is retained (D6). Seeding from `objects.published_seq` alone would
+        // is retained. Seeding from `objects.published_seq` alone would
         // still be correct today — a chain's head always carries its largest
         // seq — but it would quietly stop being correct the moment retention
         // starts pruning heads, so read the revisions themselves.

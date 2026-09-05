@@ -164,7 +164,7 @@ fn all_day_events_are_dates_and_dtend_is_exclusive() {
     );
 }
 
-/// D9: a planner shows every invite. abnormalarm's filter — organized, accepted,
+/// A planner shows every invite. abnormalarm's filter — organized, accepted,
 /// or unattended, and no all-day events — belongs to an alarm app, not here.
 #[test]
 fn all_day_events_are_not_filtered_out() {

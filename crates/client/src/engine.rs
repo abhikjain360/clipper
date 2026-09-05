@@ -1397,7 +1397,7 @@ impl SyncEngine {
         }
     }
 
-    // ── Actuals (D2) ──
+    // ── Actuals ──
 
     /// Start the timer.
     ///
@@ -1449,7 +1449,7 @@ impl SyncEngine {
 
     /// Stop the timer, closing the record at now.
     ///
-    /// Two writes per session and no more (D2): the record is created on start
+    /// Two writes per session and no more: the record is created on start
     /// and replaced on stop. Persisting progress on a tick would turn an hour
     /// of work into sixty retained revisions.
     pub async fn stop_actual(&self, object_id: &str) -> Result<String, ClientError> {
@@ -1627,8 +1627,7 @@ impl SyncEngine {
     /// in the chain is genuinely signed, so nothing about revision 3 looks
     /// wrong on its own. Only a client that remembers 7 can tell. A freshly
     /// installed device has nothing to remember and must trust what it is
-    /// given; that limit is inherent to D6 and is written down rather than
-    /// glossed.
+    /// given: signatures alone cannot establish that a head is the newest one.
     ///
     /// Continuity. When the served revision is the immediate successor of the
     /// held one, its parent hash must be the held one's. That is what makes the
@@ -1682,8 +1681,8 @@ impl SyncEngine {
     /// Expand every cached series across `[from, to)` and return the
     /// occurrences that overlap it, including blocks starting before `from`.
     ///
-    /// Occurrences are computed here rather than stored (D7), and the window is
-    /// the caller's choice rather than a fixed horizon (D4) — a grid asks for a
+    /// Occurrences are computed here rather than stored, and the window is
+    /// the caller's choice rather than a fixed horizon — a grid asks for a
     /// week, an alarm scheduler asks for the next day.
     pub async fn expand_schedule(
         &self,
@@ -1778,8 +1777,8 @@ impl SyncEngine {
     /// recomputes a recurrence itself — this crate is the only place a rule is
     /// expanded, so there is no second implementation to drift.
     ///
-    /// Ingested events do not raise alarms: their fields are upstream-owned
-    /// (D10), and an alarm is something the owner decides, not the calendar.
+    /// Ingested events do not raise alarms: their fields are upstream-owned,
+    /// and an alarm is something the owner decides, not the calendar.
     pub async fn next_alarms(
         &self,
         within_hours: u32,
@@ -1956,7 +1955,7 @@ impl SyncEngine {
             }
         }
 
-        // Gone from the feed. Tombstone rather than erase (D10): a meeting the
+        // Gone from the feed. Tombstone rather than erase: a meeting the
         // organiser withdrew still happened to whatever time was logged on it.
         for (event_id, (old_object_id, event, head)) in &existing {
             if !allow_cancellations
@@ -2286,7 +2285,7 @@ impl SyncEngine {
                         self.handle_updated_collab_event(generation, object_id, seq);
                     }
                     // For every other kind an update means a new revision is
-                    // the head (D6). The ciphertext is still immutable; which
+                    // the head. The ciphertext is still immutable; which
                     // ciphertext is current has moved, so the answer is the
                     // same as for a creation — fetch the object and replace the
                     // local copy with what comes back.
@@ -3436,7 +3435,7 @@ const MAX_CALENDAR_FEED_BYTES: usize = 8 * 1024 * 1024;
 ///
 /// Not available in the browser: a page cannot read an arbitrary third-party URL
 /// without that server sending CORS headers, and calendar providers do not. This
-/// is fine under D4, where each client decides which sources it is responsible
+/// is fine because each client decides which sources it is responsible
 /// for — the desktop daemon and mobile can sync feeds, and the browser reads the
 /// results like any other device.
 #[cfg(not(target_family = "wasm"))]
