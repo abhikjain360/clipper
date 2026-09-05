@@ -234,6 +234,7 @@ function mapScheduleItemView(item: NativeScheduleItemView): ScheduleItemView {
     all_day: item.allDay,
     created_at: item.createdAt,
     definition_json: item.definitionJson,
+    has_alarm: item.hasAlarm,
     id: item.id,
     recurrence: item.recurrence,
     time_summary: item.timeSummary,

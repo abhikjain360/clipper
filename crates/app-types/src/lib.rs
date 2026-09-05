@@ -101,6 +101,10 @@ pub struct ScheduleItemView {
     pub time_summary: String,
     /// Whether this series is all-day rather than timed.
     pub all_day: bool,
+    /// Whether this series raises an alarm, so a list can show which blocks
+    /// will actually wake someone.
+    #[serde(default)]
+    pub has_alarm: bool,
     pub created_at: String,
     /// The exact record, serialized.
     ///

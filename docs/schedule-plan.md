@@ -991,6 +991,9 @@ Branch `schedule-module`, started 2026-09-08. Commits, in order:
 9. `schedule: plan alarms from occurrences` — the Rust half of D8.
 10. `mobile: absorb abnormalarm's alarm layer` — the Android half, verified on
     an emulator.
+11. `schedule: let a block be edited` — create-then-delete, since objects are
+    immutable until D6.
+12. `schedule: track time actually spent` — D2's other half: the timer.
 
 **Verified against a live local server**, not just in unit tests: the migration
 applied cleanly to the existing dev database (collab docs survived); a cold
@@ -1050,8 +1053,36 @@ POCO under HyperOS. An emulator says nothing about a vendor that kills
 background processes, and no code substitutes for Autostart and
 battery-optimisation exemptions set by hand.
 
-What remains, in D11's order: the D6 revision layer, the mobile schedule UI,
-and publish (D10). Of abnormalarm, these are not ported: snooze, per-alarm sound
+**Everything the original ask named is now built**, except publishing outward
+(D10), which waits on OAuth consent. Blocks in 5- or 10-minute grid steps,
+custom cadences, alarms, and calendar ingest all work; editing and the
+planned-versus-actual timer landed after milestone 1.
+
+What remains: the D6 revision layer, the mobile schedule UI, publish, and a UI
+for single-occurrence overrides (the engine and record type support them, but
+nothing creates one yet — "skip today's gym" has no button).
+
+**D6 was deliberately not attempted.** D11 says the envelope change is the one
+place where fast generation is a liability, because a wrong AAD projection
+fails silently rather than loudly. It wants a reviewed change, not an
+unsupervised one. Until then an edit is a create followed by a delete, which
+D11 anticipated and which works.
+
+Bugs the build found that reading had not, beyond those listed above:
+
+- `ScheduleItemView.id` was the *series* id while every caller passed it to
+  routes wanting the *object* id, so Delete from the list could never have
+  worked. The end-to-end test used the object id directly and hid it — an
+  argument for driving the real UI, not only the API.
+- The edit form reloaded the stored record on every render, because its effect
+  depended on callbacks whose identity changes each time. A sync push mid-edit
+  silently reverted unsaved input.
+- The mobile alarm push was keyed on formatted summary strings. Toggling an
+  alarm changes neither the recurrence text nor the time text, so the registry
+  would have gone stale in exactly the case that matters.
+- `cancelAll` swept only `0..MAX_REGISTERED` of the request-code space, but
+  past entries at the front of a plan push live codes beyond it, stranding
+  alarms that could then fire after being cancelled. Of abnormalarm, these are not ported: snooze, per-alarm sound
 and volume ramp, the flashlight, the upcoming-notification lead window,
 skip-next, timers, and the clock widget. abnormalarm stays installed.
 
