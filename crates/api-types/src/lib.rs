@@ -20,6 +20,13 @@ pub const DEVICE_LOGIN_PROOF_CHALLENGE_BYTES: usize = 32;
 pub const DEVICE_LOGIN_PROOF_SIGNATURE_BYTES: usize = 64;
 pub const DEVICE_LOGIN_PROOF_VERSION: u64 = 1;
 pub const OBJECT_ENVELOPE_SIGNATURE_BYTES: usize = 64;
+/// Wire format version of `ObjectEnvelopeBodyV2`.
+///
+/// Bumped from 1 when revisions landed (D6): the body gained `revision` and
+/// `parent_hash`, and postcard — which both the signature and the AAD are
+/// computed over — encodes positionally, so v1 bytes cannot be read as v2.
+/// There is deliberately no v1 compatibility path; see `docs/schedule-plan.md`.
+pub const OBJECT_ENVELOPE_VERSION_V2: u64 = 2;
 /// Maximum payload entries one object may declare. Clients currently send
 /// exactly one; the cap bounds the batched insert a single init request can
 /// force under the server's write lock.
@@ -383,11 +390,21 @@ pub enum ObjectEventType {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ObjectEnvelopeOperation {
+    /// Revision 1. Brings the object into existence.
     Create,
+    /// A later revision carrying new content.
+    Revise,
+    /// A later revision carrying no payloads, marking the object deleted.
+    ///
+    /// A tombstone rather than an erasure: the chain behind it survives, so the
+    /// object can be brought back by appending a `Revise` that restores an
+    /// earlier revision's content. Actually reclaiming the bytes is a separate,
+    /// irreversible purge. See D6 in `docs/schedule-plan.md`.
+    Delete,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct ObjectEnvelopePayloadV1 {
+pub struct ObjectEnvelopePayloadV2 {
     #[garde(skip)]
     pub id: ObjectPayloadId,
     #[garde(length(equal = XCHACHA20_NONCE_BYTES))]
@@ -399,13 +416,28 @@ pub struct ObjectEnvelopePayloadV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct ObjectEnvelopeBodyV1 {
+pub struct ObjectEnvelopeBodyV2 {
     #[garde(skip)]
     pub object_id: ObjectId,
     #[garde(skip)]
     pub object_type: ObjectKind,
     #[garde(range(min = 1))]
-    pub object_version: u64,
+    pub envelope_version: u64,
+    /// 1 for the first revision of an object, one greater than its parent's
+    /// thereafter. Redundant with `parent_hash`, which already pins the chain
+    /// position — but it lets a single envelope be checked without walking the
+    /// chain, and it is what the server's `current + 1` rule compares against.
+    #[garde(range(min = 1))]
+    pub revision: u64,
+    /// SHA-256 of the parent revision's canonical body bytes
+    /// (`object_envelope_body_bytes`), present exactly when `revision > 1`.
+    ///
+    /// This is what makes a retained history verifiable rather than merely
+    /// stored: a server that drops a revision from the middle of a chain leaves
+    /// a hash that no longer matches. It does not detect truncation of the
+    /// head — only a client-remembered high-water mark does that.
+    #[garde(custom(validate_revision_link(self.revision, self.operation)))]
+    pub parent_hash: Option<[u8; SHA256_BYTES]>,
     #[garde(skip)]
     pub source_device_id: DeviceId,
     #[garde(length(min = 1))]
@@ -418,16 +450,17 @@ pub struct ObjectEnvelopeBodyV1 {
     pub sha256_meta_ciphertext: Vec<u8>,
     #[garde(
         dive,
-        length(min = 1, max = MAX_OBJECT_PAYLOAD_ENTRIES),
-        custom(validate_unique_envelope_payload_ids)
+        length(max = MAX_OBJECT_PAYLOAD_ENTRIES),
+        custom(validate_unique_envelope_payload_ids),
+        custom(validate_payload_count_for_operation(self.operation))
     )]
-    pub payloads: Vec<ObjectEnvelopePayloadV1>,
+    pub payloads: Vec<ObjectEnvelopePayloadV2>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct ObjectEnvelopeV1 {
+pub struct ObjectEnvelopeV2 {
     #[garde(dive)]
-    pub body: ObjectEnvelopeBodyV1,
+    pub body: ObjectEnvelopeBodyV2,
     #[garde(length(equal = OBJECT_ENVELOPE_SIGNATURE_BYTES))]
     pub signature: Vec<u8>,
 }
@@ -466,7 +499,7 @@ pub struct ObjectInitRequest {
     )]
     pub payloads: Vec<ObjectPayloadInit>,
     #[garde(dive)]
-    pub envelope: ObjectEnvelopeV1,
+    pub envelope: ObjectEnvelopeV2,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -543,7 +576,7 @@ pub struct ObjectListItem {
     /// holds its signing key, so object provenance cannot be re-attested and the
     /// client falls back to the export-key AEAD AAD for authenticity.
     pub source_device_signing_public_key: Option<Vec<u8>>,
-    pub envelope: ObjectEnvelopeV1,
+    pub envelope: ObjectEnvelopeV2,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -925,8 +958,55 @@ fn validate_unique_init_payload_ids(value: &Vec<ObjectPayloadInit>, _: &()) -> g
     Ok(())
 }
 
+/// Keep `revision`, `parent_hash` and `operation` from disagreeing.
+///
+/// Three states are legal and no others: revision 1 is a `Create` with no
+/// parent; any later revision is a `Revise` or a `Delete` and carries the hash
+/// of the one before it. Rejecting the rest here means the rest of the codebase
+/// can read one of the three fields and know the other two.
+fn validate_revision_link(
+    revision: u64,
+    operation: ObjectEnvelopeOperation,
+) -> impl FnOnce(&Option<[u8; SHA256_BYTES]>, &()) -> garde::Result {
+    move |parent_hash, _| {
+        let genesis = revision == 1;
+        if genesis != parent_hash.is_none() {
+            return Err(garde::Error::new(
+                "revision 1 must have no parent hash, and every later revision must have one",
+            ));
+        }
+        if genesis != matches!(operation, ObjectEnvelopeOperation::Create) {
+            return Err(garde::Error::new(
+                "revision 1 must be a create, and no later revision may be one",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A tombstone carries no payloads; everything else carries at least one.
+///
+/// This was a plain `length(min = 1)` before deletes became revisions. It has
+/// to be correlated now, or a `Delete` would be rejected for being empty and an
+/// empty `Create` would be accepted as an object with no content.
+fn validate_payload_count_for_operation(
+    operation: ObjectEnvelopeOperation,
+) -> impl FnOnce(&Vec<ObjectEnvelopePayloadV2>, &()) -> garde::Result {
+    move |payloads, _| match operation {
+        ObjectEnvelopeOperation::Delete if !payloads.is_empty() => Err(garde::Error::new(
+            "a delete revision must not carry payloads",
+        )),
+        ObjectEnvelopeOperation::Create | ObjectEnvelopeOperation::Revise
+            if payloads.is_empty() =>
+        {
+            Err(garde::Error::new("must contain at least one payload"))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn validate_unique_envelope_payload_ids(
-    value: &Vec<ObjectEnvelopePayloadV1>,
+    value: &Vec<ObjectEnvelopePayloadV2>,
     _: &(),
 ) -> garde::Result {
     let mut seen = HashSet::new();
@@ -956,6 +1036,136 @@ mod tests {
     use garde::Validate;
 
     use super::*;
+
+    /// The three legal shapes of a revision, and the illegal combinations that
+    /// `validate_revision_link` and `validate_payload_count_for_operation`
+    /// exist to keep out. These run on every envelope arriving at the server,
+    /// so they are the boundary where a malformed chain is refused.
+    mod revision_link {
+        use super::*;
+
+        fn payload() -> ObjectEnvelopePayloadV2 {
+            ObjectEnvelopePayloadV2 {
+                id: ObjectPayloadId::from(Uuid::from_bytes([2; 16])),
+                nonce: vec![0; XCHACHA20_NONCE_BYTES],
+                ciphertext_size: 1,
+                sha256_ciphertext: vec![0; SHA256_BYTES],
+            }
+        }
+
+        fn body(
+            revision: u64,
+            parent_hash: Option<[u8; SHA256_BYTES]>,
+            operation: ObjectEnvelopeOperation,
+            payloads: Vec<ObjectEnvelopePayloadV2>,
+        ) -> ObjectEnvelopeBodyV2 {
+            ObjectEnvelopeBodyV2 {
+                object_id: ObjectId::from(Uuid::from_bytes([1; 16])),
+                object_type: ObjectKind::Schedule,
+                envelope_version: OBJECT_ENVELOPE_VERSION_V2,
+                revision,
+                parent_hash,
+                source_device_id: DeviceId::from(Uuid::from_bytes([3; 16])),
+                created_at: "2026-09-08T10:00:00Z".to_string(),
+                operation,
+                meta_nonce: vec![0; XCHACHA20_NONCE_BYTES],
+                sha256_meta_ciphertext: vec![0; SHA256_BYTES],
+                payloads,
+            }
+        }
+
+        #[test]
+        fn the_three_legal_shapes_validate() {
+            body(1, None, ObjectEnvelopeOperation::Create, vec![payload()])
+                .validate()
+                .expect("a genesis create");
+
+            body(
+                2,
+                Some([9; SHA256_BYTES]),
+                ObjectEnvelopeOperation::Revise,
+                vec![payload()],
+            )
+            .validate()
+            .expect("a chained revise");
+
+            body(
+                7,
+                Some([9; SHA256_BYTES]),
+                ObjectEnvelopeOperation::Delete,
+                Vec::new(),
+            )
+            .validate()
+            .expect("a chained tombstone, which carries no payloads");
+        }
+
+        #[test]
+        fn a_genesis_revision_may_not_claim_a_parent() {
+            assert!(
+                body(
+                    1,
+                    Some([9; SHA256_BYTES]),
+                    ObjectEnvelopeOperation::Create,
+                    vec![payload()],
+                )
+                .validate()
+                .is_err()
+            );
+        }
+
+        #[test]
+        fn a_later_revision_must_carry_one() {
+            // The dangerous direction: an unparented revision 2 is a chain with
+            // no link back, which is precisely what the hash is for.
+            assert!(
+                body(2, None, ObjectEnvelopeOperation::Revise, vec![payload()])
+                    .validate()
+                    .is_err()
+            );
+        }
+
+        #[test]
+        fn create_and_revision_number_must_agree() {
+            assert!(
+                body(
+                    2,
+                    Some([9; SHA256_BYTES]),
+                    ObjectEnvelopeOperation::Create,
+                    vec![payload()],
+                )
+                .validate()
+                .is_err(),
+                "a create at revision 2 would restart a chain that already exists",
+            );
+            assert!(
+                body(1, None, ObjectEnvelopeOperation::Revise, vec![payload()])
+                    .validate()
+                    .is_err(),
+                "a revise at revision 1 revises nothing",
+            );
+        }
+
+        #[test]
+        fn only_a_tombstone_may_be_empty() {
+            assert!(
+                body(1, None, ObjectEnvelopeOperation::Create, Vec::new())
+                    .validate()
+                    .is_err(),
+                "an object with no payloads has no content",
+            );
+            assert!(
+                body(
+                    2,
+                    Some([9; SHA256_BYTES]),
+                    ObjectEnvelopeOperation::Delete,
+                    vec![payload()],
+                )
+                .validate()
+                .is_err(),
+                "a tombstone carrying content is a contradiction",
+            );
+        }
+    }
 
     #[test]
     fn argon2_params_validate_pragmatic_security_floor() {

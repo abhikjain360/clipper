@@ -68,7 +68,7 @@ const MAX_CLIPBOARD_PAYLOAD_CIPHERTEXT_BYTES: i64 = (MAX_CLIPBOARD_PAYLOAD_BYTES
 /// server's default `max_file_blob_bytes` so a hostile server cannot advertise
 /// a multi-GiB size and OOM the client during a download.
 const MAX_FILE_PAYLOAD_CIPHERTEXT_BYTES: i64 = 512 * 1024 * 1024;
-const OBJECT_ENVELOPE_VERSION_V1: u64 = 1;
+const OBJECT_ENVELOPE_VERSION_V2: u64 = 1;
 #[cfg(target_family = "wasm")]
 const WS_TICKET_PROTOCOL: &str = "clipper-ticket";
 
@@ -661,14 +661,14 @@ impl SyncEngine {
             created_at.clone(),
             meta_nonce.clone(),
             crypto::sha256(&meta_ciphertext).to_vec(),
-            vec![ObjectEnvelopePayloadV1 {
+            vec![ObjectEnvelopePayloadV2 {
                 id: payload_id_typed,
                 nonce: payload_nonce.clone(),
                 ciphertext_size: payload_size,
                 sha256_ciphertext: payload_hash.clone(),
             }],
         );
-        let envelope = ObjectEnvelopeV1 {
+        let envelope = ObjectEnvelopeV2 {
             signature: crypto::sign_object_envelope_body(&signing_key, &envelope_body)?,
             body: envelope_body,
         };
@@ -949,14 +949,14 @@ impl SyncEngine {
             created_at.clone(),
             meta_nonce.clone(),
             crypto::sha256(&meta_ciphertext).to_vec(),
-            vec![ObjectEnvelopePayloadV1 {
+            vec![ObjectEnvelopePayloadV2 {
                 id: payload_id_typed,
                 nonce: blob_nonce.clone(),
                 ciphertext_size: blob_size,
                 sha256_ciphertext: blob_hash.clone(),
             }],
         );
-        let envelope = ObjectEnvelopeV1 {
+        let envelope = ObjectEnvelopeV2 {
             signature: crypto::sign_object_envelope_body(&signing_key, &envelope_body)?,
             body: envelope_body,
         };
@@ -1154,7 +1154,7 @@ impl SyncEngine {
             created_at.clone(),
             meta_nonce.clone(),
             crypto::sha256(&meta_ciphertext).to_vec(),
-            vec![ObjectEnvelopePayloadV1 {
+            vec![ObjectEnvelopePayloadV2 {
                 id: payload_id_typed,
                 nonce: payload_nonce.clone(),
                 ciphertext_size: payload_size,
@@ -1173,7 +1173,7 @@ impl SyncEngine {
                 sha256_ciphertext: payload_hash.clone(),
                 inline_ciphertext: inline_ciphertext(&encrypted_payload),
             }],
-            envelope: ObjectEnvelopeV1 {
+            envelope: ObjectEnvelopeV2 {
                 signature: crypto::sign_object_envelope_body(&signing_key, &envelope_body)?,
                 body: envelope_body,
             },
@@ -3075,6 +3075,10 @@ fn parse_calendar_feed(
 /// Largest calendar feed the client will read. A feed is a remote document
 /// fetched on a timer; without a ceiling a hostile or broken one could make the
 /// client buffer arbitrarily many bytes.
+///
+/// Native-only, like the fetch it bounds — the browser build has no fetch to
+/// bound, and an ungated constant is dead code there.
+#[cfg(not(target_family = "wasm"))]
 const MAX_CALENDAR_FEED_BYTES: usize = 8 * 1024 * 1024;
 
 /// Fetch a calendar feed over plain HTTP.
@@ -3184,7 +3188,7 @@ fn create_object_envelope_body_for_aad(
     source_device_id: DeviceId,
     created_at: String,
     payload_ids: Vec<ObjectPayloadId>,
-) -> ObjectEnvelopeBodyV1 {
+) -> ObjectEnvelopeBodyV2 {
     create_object_envelope_body(
         object_id,
         kind,
@@ -3194,7 +3198,7 @@ fn create_object_envelope_body_for_aad(
         Vec::new(),
         payload_ids
             .into_iter()
-            .map(|id| ObjectEnvelopePayloadV1 {
+            .map(|id| ObjectEnvelopePayloadV2 {
                 id,
                 nonce: Vec::new(),
                 ciphertext_size: 0,
@@ -3211,12 +3215,17 @@ fn create_object_envelope_body(
     created_at: String,
     meta_nonce: Vec<u8>,
     sha256_meta_ciphertext: Vec<u8>,
-    payloads: Vec<ObjectEnvelopePayloadV1>,
-) -> ObjectEnvelopeBodyV1 {
-    ObjectEnvelopeBodyV1 {
+    payloads: Vec<ObjectEnvelopePayloadV2>,
+) -> ObjectEnvelopeBodyV2 {
+    ObjectEnvelopeBodyV2 {
         object_id,
         object_type: kind,
-        object_version: OBJECT_ENVELOPE_VERSION_V1,
+        envelope_version: OBJECT_ENVELOPE_VERSION_V2,
+        // Genesis only. Writing a later revision needs the parent's body to
+        // hash, so it gets its own constructor once the revision write path
+        // exists; until then every object this client creates is revision 1.
+        revision: 1,
+        parent_hash: None,
         source_device_id,
         created_at,
         operation: ObjectEnvelopeOperation::Create,
@@ -3243,7 +3252,7 @@ fn verify_object_list_item_envelope(item: &ObjectListItem) -> Result<(), ClientE
     let meta_hash = crypto::sha256(&item.meta_ciphertext);
     if body.object_id != item.id
         || body.object_type != item.kind
-        || body.object_version != OBJECT_ENVELOPE_VERSION_V1
+        || body.envelope_version != OBJECT_ENVELOPE_VERSION_V2
         || body.operation != ObjectEnvelopeOperation::Create
         || body.source_device_id != item.source_device_id
         || body.created_at != item.created_at
@@ -3458,8 +3467,8 @@ mod tests {
         }
     }
 
-    fn envelope_payload(id: ObjectPayloadId) -> ObjectEnvelopePayloadV1 {
-        ObjectEnvelopePayloadV1 {
+    fn envelope_payload(id: ObjectPayloadId) -> ObjectEnvelopePayloadV2 {
+        ObjectEnvelopePayloadV2 {
             id,
             nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
             ciphertext_size: 0,
@@ -3478,10 +3487,12 @@ mod tests {
         let public_key = crypto::device_signing_public_key(&signing_key);
         let payload_ids: Vec<ObjectPayloadId> =
             (0..count).map(|_| uuid::Uuid::now_v7().into()).collect();
-        let body = ObjectEnvelopeBodyV1 {
+        let body = ObjectEnvelopeBodyV2 {
             object_id,
             object_type: ObjectKind::Clipboard,
-            object_version: OBJECT_ENVELOPE_VERSION_V1,
+            envelope_version: OBJECT_ENVELOPE_VERSION_V2,
+            revision: 1,
+            parent_hash: None,
             source_device_id: device_id,
             created_at: "2026-06-13T00:00:00Z".into(),
             operation: ObjectEnvelopeOperation::Create,
@@ -3500,7 +3511,7 @@ mod tests {
             created_at: "2026-06-13T00:00:00Z".into(),
             source_device_id: device_id,
             source_device_signing_public_key: Some(public_key.to_vec()),
-            envelope: ObjectEnvelopeV1 { body, signature },
+            envelope: ObjectEnvelopeV2 { body, signature },
         }
     }
 
