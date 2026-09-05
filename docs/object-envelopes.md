@@ -1,258 +1,147 @@
 # Signed Object Envelopes
 
-Math + step-by-step for the object envelope code in
-`crates/core/src/crypto.rs`, the client object upload/decrypt helpers
-(`crates/client/src/api_client.rs`, `crates/client/src/engine.rs`), and the
-server object routes (`crates/server/src/routes/objects.rs`). The shared wire
-types live in `crates/api-types/src/lib.rs` (`ObjectEnvelopeBodyV1`,
-`ObjectEnvelopePayloadV1`, `ObjectEnvelopeV1`).
+Encrypted clipboard, file, and schedule objects use envelope version 2. An
+object has a stable id and an append-only chain of immutable revisions. The
+wire types are `ObjectEnvelopeBodyV2`, `ObjectEnvelopePayloadV2`, and
+`ObjectEnvelopeV2` in `crates/api-types`; cryptographic construction lives in
+`crates/core/src/crypto.rs`; the client creates and verifies envelopes; the
+server validates placement and stores the chain.
 
-## Notation
+## Keys and primitives
 
-- `K`: per-user symmetric object encryption key derived from the OPAQUE export
-  key (see "Key derivation" below).
-- `sk_D, pk_D`: Ed25519 signing keypair for source device `D`.
-- `AEAD_Enc(K, N, P, A)`: XChaCha20-Poly1305 encryption of plaintext `P` with
-  24-byte nonce `N` and associated data `A`.
-- `AEAD_Dec(K, N, C, A)`: matching authenticated decryption.
-- `Sign(sk, m)` / `Verify(pk, m, sig)`: Ed25519 signature (64 bytes) and
-  verification.
-- `H(x)`: SHA-256.
-- `Canon(x)`: postcard serialization of the Rust value `x`. Postcard is a
-  positional binary format, so field order in the serialized struct is part of
-  the canonical bytes.
+- `K` is the per-user object key derived from the stable OPAQUE export key with
+  HKDF-SHA256 and the label `clipper:opaque-export:data-key:v1`.
+- `sk_D` / `pk_D` are a device's Ed25519 signing keypair.
+- Object metadata and payloads use XChaCha20-Poly1305.
+- `H` is SHA-256. `Canon` is postcard serialization, whose field order is part
+  of the canonical bytes.
 
-## Key derivation
+The server never learns the OPAQUE export key or `K`.
 
-`K` is derived from the stable OPAQUE `export_key` with HKDF-SHA256 and a domain
-label, in `derive_data_key_from_opaque_export_key`:
+## Version 2 body and chain
 
-```text
-K = HKDF-SHA256(salt = none, ikm = export_key)
-      .expand("clipper:opaque-export:data-key:v1", 32)
-```
-
-The same `export_key` is reproduced by OPAQUE registration and login, so `K` is
-stable across sessions and devices for one user without `K` ever being sent to
-the server. The server never learns `export_key` or `K`.
-
-A second, independent subkey is derived from the same `export_key` for wrapping
-the device's persisted signing secret at rest (see "Device key storage"):
-
-```text
-wrap_key = HKDF-SHA256(salt = none, ikm = export_key)
-             .expand("clipper:opaque-export:device-identity-wrap-key:v1", 32)
-```
-
-The labels keep `K` and `wrap_key` independent.
-
-## Envelope Body
-
-For object version 1, the signed body (`ObjectEnvelopeBodyV1`) is, in
-serialization order:
+In serialization order, each signed body contains:
 
 ```text
 body = (
   object_id,
   object_type,
-  object_version = 1,
+  envelope_version = 2,
+  revision,                    // 1, 2, 3, ...
+  parent_hash,                 // None at 1; H(Canon(parent body)) afterward
   source_device_id,
-  created_at,                 // RFC 3339 string
-  operation = create,         // only `create` exists today
-  meta_nonce,                 // 24 bytes
-  H(meta_ciphertext),         // 32 bytes
-  [
-    (
-      payload_id,
-      payload_nonce,          // 24 bytes
-      ciphertext_size,
-      H(payload_ciphertext)   // 32 bytes
-    ),
-    ...                       // 1..=MAX_OBJECT_PAYLOAD_ENTRIES (16), unique ids
-  ]
+  created_at,
+  operation,                   // create | revise | delete
+  meta_nonce,
+  H(meta_ciphertext),
+  [(payload_id, payload_nonce, ciphertext_size, H(payload_ciphertext)), ...]
 )
 
-signature = Sign(sk_D, Canon(body))   // 64-byte Ed25519
-envelope  = (body, signature)
+signature = Sign(sk_D, Canon(body))
 ```
 
-The server stores `envelope` (postcard-encoded) with the object row and returns
-it from object listing/get. The client verifies `signature` before decrypting
-metadata or payload bytes (see "Trust model" for what that signature does and
-does not protect against).
+Revision 1 has no parent and must use `create`. Every later revision has a
+32-byte parent hash and uses `revise` or `delete`. A delete revision is a signed
+tombstone with no payloads. The server keeps earlier revisions, so restoring an
+object means appending a new `revise` revision after the tombstone. Purging is a
+separate irreversible operation.
 
-Clients currently always send exactly one payload entry, but the body and the
-wire validators accept up to `MAX_OBJECT_PAYLOAD_ENTRIES = 16` payloads.
+The parent hash is over the canonical signed body, excluding the signature. A
+client writing revision `n + 1` names the exact head body it accepted at `n`.
+The server rejects a wrong revision number, a wrong parent hash, or a concurrent
+writer that lost the `(object_id, revision)` uniqueness race with
+`ObjectRevisionConflict`.
 
-## AAD Projection
+## AEAD associated data
 
-Ciphertext hashes cannot be inside the AAD for the same ciphertext because the
-ciphertext does not exist until after encryption. The AEAD AAD is therefore a
-projection of the envelope identity and payload set. It deliberately excludes
-`meta_nonce`, the per-payload nonces, sizes, and ciphertext hashes; it binds
-only the stable identity fields plus the payload-id set (and, for a payload, the
-specific payload id). In serialization order (`ObjectAadV1`):
+The AAD projection binds ciphertext to the full revision identity:
 
 ```text
 A_meta = Canon((
-  "clipper:object-meta-aad:v1",
-  object_id,
-  object_type,
-  object_version,
-  source_device_id,
-  created_at,
-  operation,
-  [payload_id_1, payload_id_2, ...],   // ids drawn from body.payloads
+  "clipper:object-meta-aad:v2",
+  object_id, object_type, envelope_version,
+  revision, parent_hash,
+  source_device_id, created_at, operation,
+  [payload_id_1, ...],
   None
 ))
 
-A_payload_i = Canon((
-  "clipper:object-payload-aad:v1",
-  object_id,
-  object_type,
-  object_version,
-  source_device_id,
-  created_at,
-  operation,
-  [payload_id_1, payload_id_2, ...],
-  payload_id_i
-))
+A_payload_i = the same projection with payload_id_i in the final field
 ```
 
-Then:
+Nonces, sizes, and ciphertext hashes are excluded from the AAD because the
+ciphertext does not exist when its AAD is constructed. They are included in the
+signed body instead. The payload-id set is present in both projections, so a
+payload cannot be moved between objects or revisions without AEAD rejection.
 
-```text
-(N_meta, C_meta) = AEAD_Enc(K, random_24, meta_plaintext, A_meta)
-(N_i, C_i)       = AEAD_Enc(K, random_24, payload_plaintext_i, A_payload_i)
-```
+## Server validation and storage
 
-The metadata plaintext is the JSON encoding of `ClipboardMeta` / `FileMeta`; the
-payload plaintext is the raw clipboard/file bytes. The client builds the AAD by
-constructing an envelope body that already carries the final `object_id`,
-`object_type`, `source_device_id`, `created_at`, `operation`, and the payload-id
-list (`create_object_envelope_body_for_aad` in `engine.rs`); the nonce/size/hash
-fields are irrelevant to the AAD and are filled in afterward.
+For both genesis and later revisions the server cross-checks the body against
+the authenticated request: object id and kind, envelope version, source device,
+operation, metadata nonce and hash, and the complete payload descriptor set. It
+then verifies the Ed25519 signature with the authenticated device's stored
+public key.
 
-After encryption, the client fills `meta_nonce`, payload nonces, sizes, and
-ciphertext hashes into `body`, signs `Canon(body)`, and uploads the request.
+For a later revision the server loads the current completed head, computes its
+body hash, and requires the submitted `(revision, parent_hash)` to be the next
+link. Publication happens in one database transaction: payload rows become
+complete, the revision receives its committed sequence, the object's
+`head_revision` / `published_seq` / `deleted_at` projection advances, and the
+matching created, updated, or deleted event is inserted. Sequence allocation
+happens only after the transaction holds SQLite's write lock.
 
-## Verification Flow
+Payload rows are keyed by `(object_id, revision, payload_id)`. Streamed upload
+claim, completion, and status changes are scoped to that exact revision. Each
+revision's payload bytes count toward the user's storage-byte quota; additional
+revisions do not consume additional object-count quota. Orphan cleanup may
+remove incomplete revisions and releases only their reserved bytes. Completed
+history remains until the whole tombstoned object is purged.
 
-### Server, on object init (`validate_object_init_envelope`)
+## Client verification and rollback limits
 
-The server cross-checks the envelope body against the request context and then
-verifies the signature:
+For a listed or fetched live head, the client checks that the clear response and
+signed body agree on id, kind, revision, source device, timestamp, metadata, and
+payload descriptors. It verifies the signature when the source device public
+key is still available, checks downloaded payload hashes, and then decrypts
+with the version 2 AAD.
 
-```text
-body.object_id        == request.id
-body.object_type      == request.kind
-body.object_version   == 1
-body.source_device_id == authenticated device id
-body.operation        == create
-body.meta_nonce       == request.meta_nonce
-H(request.meta_ciphertext) == body.sha256_meta_ciphertext
-request payload set    == body payload set            // matched by payload id
-for each payload: body.{nonce, ciphertext_size, sha256_ciphertext}
-                    == request.{nonce, ciphertext_size, sha256_ciphertext}
-Verify(pk_D, Canon(body), signature)
-```
+The client persists the newest accepted revision body hash as a local anchor.
+It rejects a served revision below that anchor, rejects a different body at the
+same revision, and checks the parent hash for an immediate successor. Locally
+created tombstones are retained as exact signed anchors. A delete learned only
+from the event stream has no tombstone body, so the client retains the preceding
+signed head and requires any later visible revision to be at least two steps
+newer. Snapshot absence retains the accepted head but permits that same head to
+reappear. Delete and absence markers survive reconciliation sweeps and process
+restarts while retained by the local cache; the browser cache's bounded
+capacity can evict old records and their anchors.
 
-`pk_D` is loaded from the `devices` row keyed by `(authenticated device id,
-authenticated user_id)`, so the server checks the signature against the
-signing key it has on file for that device. `created_at` is parsed for RFC 3339
-validity but is not compared against any server clock on init.
+These checks do not provide global transparency. A new installation has no
+anchor. If the server jumps forward by more than one revision, the client does
+not possess the intermediate bodies and cannot verify each missing link. The
+server can still omit objects or revisions and deny service. The local anchor
+prevents rollback of history this device has already accepted; it does not
+prove that the server showed the device every revision.
 
-### Client, on list/get/download
+## Trust model
 
-The client repeats the envelope/list-item checks (`verify_object_list_item_envelope`),
-verifies the signature, checks downloaded payload hashes, then decrypts with the
-envelope AAD:
+End-to-end content authenticity rests on AEAD under `K` and its AAD. The server
+supplies the device public key alongside a listed object, and clients do not pin
+peer device keys independently. A malicious server can therefore substitute a
+public key and re-sign a matching body, but it still cannot create ciphertext
+that authenticates under `K`.
 
-```text
-body.object_id            == item.id
-body.object_type          == item.kind
-body.object_version       == 1
-body.operation            == create
-body.source_device_id     == item.source_device_id
-body.created_at           == item.created_at
-body.meta_nonce           == item.meta_nonce
-body.sha256_meta_ciphertext == H(item.meta_ciphertext)
-body payload set          == item payload set         // matched by id, with
-                                                      // nonce/size/hash equality
-Verify(pk_D, Canon(body), signature)
-H(downloaded_payload_i)   == body.payload_i.H(payload_ciphertext)
-P_i = AEAD_Dec(K, N_i, C_i, A_payload_i)
-```
+Deleting a device sets revision source-device foreign keys to null. The signed
+body still carries the original device id, but the server can no longer return
+that device's public key. The client then skips the provenance signature check
+while retaining all response/body checks and the load-bearing AEAD verification.
 
-Here `pk_D` is `item.source_device_signing_public_key`, which the **server**
-supplies in the list/get response (it is read from the source device's row,
-scoped to the authenticated user, in `object_list_items`). The client does not
-pin or otherwise independently verify device public keys, so the signature check
-confirms only that the envelope is internally consistent with whatever key the
-server returned — see "Trust model".
+## Device key storage
 
-`source_device_signing_public_key` is `Option<…>` and is **`None` once the
-source device has been reclaimed**: the `objects.source_device_id` foreign key is
-`ON DELETE SET NULL`, so deleting a device detaches its objects (the column
-becomes NULL) and the server no longer holds a key to attest provenance. With no
-key the client **skips** `Verify(pk_D, …)` but still performs every other
-equality check above and, critically, the AEAD step — which is the real
-authenticity mechanism (see "Trust model"). `item.source_device_id` itself is
-unaffected: the server reports it from the signed envelope body, which survives
-reclamation, so the `body.source_device_id == item.source_device_id` check still
-holds.
-
-### Ciphertext-substitution argument
-
-If a server swaps object `Y`'s ciphertext into object `X`, the receiver uses
-`A_payload_X` while the tag was created with `A_payload_Y`:
-
-```text
-AEAD_Dec(K, N_Y, C_Y, A_payload_X) = reject
-```
-
-Because `K` is derived from the user's OPAQUE export key, the server cannot
-produce a valid `(C, tag)` under `A_payload_X` for chosen plaintext, and it
-cannot move a tag created under `A_payload_Y` onto `X` whose AAD differs in
-`object_id` (and the payload-id set / payload id). The AAD also pins
-`object_type`, `source_device_id`, `created_at`, and `operation`, so none of
-those identity fields can be retargeted without breaking the AEAD tag.
-
-## Trust model — what authenticity the AEAD vs. the signature provide
-
-The cryptographic authenticity of object contents rests on the **AEAD with `K`
-plus its AAD**, not on the Ed25519 envelope signature.
-
-- `K` is derived from the OPAQUE export key and is never disclosed to the
-  server. AEAD verification (with the AAD binding above) is what stops the
-  server (or anyone in the middle) from forging, swapping, or retargeting
-  ciphertext that a legitimate client will accept and decrypt.
-- The Ed25519 envelope signature is verified against a public key the **server**
-  hands back alongside the object (`source_device_signing_public_key`). There is
-  no client-side device-key trust store or pinning. A malicious/compromised
-  server could substitute its own device public key into the listing **and**
-  re-sign the (matching) envelope body with the corresponding secret key; the
-  client's signature check would pass. The AEAD step would still fail for any
-  payload the server cannot encrypt under `K`.
-
-So the signature is best understood as a server-checked provenance/consistency
-field (the server rejects an init whose body is not signed by the claiming
-device's on-file key, and clients reject a body that is internally inconsistent
-with the listing), not as an end-to-end authenticity guarantee against the
-server. Treat AEAD+AAD as the real authenticity mechanism. Genuine end-to-end
-device authentication would require clients to learn and pin peer device public
-keys out of band; that is not implemented today.
-
-## Device key storage (at rest)
-
-The device signing secret `sk_D` is generated locally
-(`generate_device_signing_secret_key`) and persisted wrapped, not in the clear.
-The on-disk / browser-storage record (`DeviceIdentityEncryptedRecord`, version 2) stores `wrap_with_key(wrap_key, sk_D, "clipper:wrap:device-signing-secret:v1")`,
-where `wrap_key` is the export-key-derived wrapping key above and the wrap is
-XChaCha20-Poly1305 (`nonce_24 || ciphertext_with_tag`). On native targets the
-record file and its parent directory are created `0600`/`0700`, ownership-checked
-against the current euid, and written atomically; legacy or forged plaintext
-identity records are rejected rather than migrated. The locally cached object
-records (metadata + payload ciphertext) are stored as the same ciphertext the
-server holds, keyed by profile id derived from `K`; plaintext is only recovered
-transiently by decrypting with `K`.
+The device signing secret is stored wrapped with a separate key derived from
+the OPAQUE export key using
+`clipper:opaque-export:device-identity-wrap-key:v1`. The local record uses
+XChaCha20-Poly1305 with the label
+`clipper:wrap:device-signing-secret:v1`. Native files and directories are
+permission-restricted and written atomically. Plaintext or forged legacy
+identity records are rejected rather than migrated.

@@ -244,13 +244,15 @@ security audit (finding A1):
   `localStorage` ciphertext cache, which outlives the tab); against a malicious
   server that archives ciphertext, content confidentiality past and future is
   lost until a passphrase-rotation feature exists.
-- Native shells do not use this path: under Tauri the daemon owns the session
-  and survives webview reloads. The mobile client currently persists the
-  **passphrase itself** — the OPAQUE/E2E root, not the revocable resume
-  material above — in the OS keystore behind Class-3 biometric authentication
-  (2026-07-19 audit R1: Keystore-wrapped and biometric-gated, so a separate
-  installed app cannot read it, but revocation cannot bound a store compromise;
-  migrating to the v2 resume material is tracked as R1).
+- Under Tauri the daemon owns the session and survives webview reloads. Mobile
+  now exports the same resume operations over UniFFI and stores token, data key,
+  identity wrapping key, and profile in `clipper.session.v2` using biometric-gated
+  SecureStore. It never saves the passphrase. Startup deletes the obsolete v1
+  credential slot; users of that local state log in again. Resume reuses the
+  device identity and validates the revocable session with the server. The static
+  data-key caveat above still applies: revocation bounds API access, not access
+  to ciphertext already obtained. This resolves audit R1/CR6's persisted-root
+  issue; it does not implement key rotation.
 
 ## The `fs-txn` crate is a different mechanism
 

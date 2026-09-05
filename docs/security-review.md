@@ -66,16 +66,7 @@ choice) and a recommendation.
    leaked the evicted record+payload — was fixed in this pass; the native cap is
    the remaining open decision.)
 
-3. **Mobile app is hard-pinned to `http://127.0.0.1:8787`.**
-   `crates/mobile-uniffi/src/lib.rs` · As shipped this is loopback-only (no wire
-   exposure) but the editable "Server URL" field rejects every non-default value,
-   and a developer pointing it at a real host would send the 30-day bearer token in
-   cleartext (folds into the accepted no-TLS finding). _Decision:_ the deployment
-   model — loopback-only vs configurable remote, http vs enforced https, URL
-   persistence. _Recommend:_ plumb a persisted user URL, require https for
-   non-loopback, and fix/disable the misleading field.
-
-4. **OPAQUE passphrase KSF (Argon2id) is pinned to the library-default OWASP
+3. **OPAQUE passphrase KSF (Argon2id) is pinned to the library-default OWASP
    floor and is not configurable.** `crates/core/src/crypto.rs` · Register/login
    finish pass `*FinishParameters::default()`, whose `ksf` is `None`, so
    opaque-ke falls back to `Argon2::default()` (m=19 MiB, t=2). This is the only
@@ -90,7 +81,7 @@ choice) and a recommendation.
    _Recommend:_ pass an explicit hardened `ksf` (e.g. ≥64 MiB / t≥3) in both
    finish calls; at minimum document the actual parameters in `docs/opaque.md`.
 
-5. **Standalone browser client ships CSP only via `<meta>`, so `frame-ancestors`
+4. **Standalone browser client ships CSP only via `<meta>`, so `frame-ancestors`
    is ignored (no clickjacking protection).** `web/index.html`,
    `web/vite.config.ts` · Browsers honor `frame-ancestors` only as an HTTP
    response header; the declared `frame-ancestors 'none'` is silently dropped,
@@ -103,7 +94,7 @@ choice) and a recommendation.
    `vite.config.ts`). _Recommend:_ serve `web/dist` with a real HTTP CSP +
    `X-Frame-Options: DENY`; document the host header requirement.
 
-6. **Auth form fields lack autofill/credential-persistence suppression; web
+5. **Auth form fields lack autofill/credential-persistence suppression; web
    renders the one-time access key as a plaintext field.** `web/src/App.tsx`,
    `mobile/src/App.tsx` · Distinct from the in-memory residual-copy risk below:
    passphrase/access-key inputs can be learned by the OS/browser credential and
@@ -112,7 +103,7 @@ choice) and a recommendation.
    `autoComplete`/`autocapitalize`/keyboard-learning-off attributes on the secret
    inputs and consider masking the access key.
 
-7. **`init_object` Postcard body is bounded by axum's implicit 2 MiB
+6. **`init_object` Postcard body is bounded by axum's implicit 2 MiB
    `DefaultBodyLimit`, decoupled from the configured object-size limits.**
    `crates/server/src/main.rs`, `routes/objects.rs` · The 64 KiB `DefaultBodyLimit`
    is a route-layer on the public-auth router only; the authed router inherits the
@@ -127,7 +118,7 @@ choice) and a recommendation.
    inline-vs-streamed contract and bound the inline path explicitly so clients get
    a precise `PayloadTooLarge`.
 
-8. **Web `upload_file_bytes` has no client-side size cap.**
+7. **Web `upload_file_bytes` has no client-side size cap.**
    `crates/client/src/engine.rs`, `web/src/App.tsx` · Unlike
    `send_clipboard_payload` (authoritative client ceiling), file upload encrypts
    arbitrary data immediately and relies on the server cap; on web the file is
@@ -138,7 +129,7 @@ choice) and a recommendation.
    `MAX_FILE_PLAINTEXT_BYTES` checked before encrypt (benefits web and native),
    and check `File.size` before `arrayBuffer()` on web.
 
-9. **Per-user API limiter charges one token per request regardless of payload
+8. **Per-user API limiter charges one token per request regardless of payload
    size.** `crates/server/src/rate_limit.rs`, `routes/objects.rs` · The PUT/GET
    payload routes (blobs up to `max_file_blob_bytes`) are bounded only by request
    counts, so a 512 MiB transfer and a 1-byte request cost the same. Net stored
@@ -149,19 +140,20 @@ choice) and a recommendation.
    routes, or document the read-amplification/churn vectors as intentionally out
    of scope.
 
-10. **Reconciliation pagination loop has no page cap and does not require the
-    server cursor to advance.** `crates/client/src/engine.rs` ·
-    `snapshot_files`/`snapshot_clipboard` exit only when the server returns
-    `next_after == None`; a malicious server can return a constant non-advancing
-    cursor (or keep emitting decrypt-fail-skipped items) to spin a detached
-    reconciliation task forever, and reconnects stack additional loops.
-    Availability against a malicious server is out of scope. _Decision:_ the
-    strict cursor-monotonicity check is clearly correct and cheap; the page/item
-    hard-cap and abort-prior-loops-on-reconnect are availability-only.
-    _Recommend:_ at least enforce strict `(created_seq, id)` cursor monotonicity;
-    optionally cap pages and supersede prior loops by generation.
+9. **Reconciliation pagination has no total page cap or cancellation of a
+   superseded loop.** `crates/client/src/engine.rs` · Every file, clipboard, and
+   schedule page is now bounded and validated: items must be strictly ordered
+   after the prior cursor and at or below the snapshot watermark, and a
+   continuation cursor must equal the nonempty page's final item. This rejects
+   constant/non-advancing and otherwise deceptive cursors. A malicious server
+   can still return an indefinitely long sequence of individually valid pages,
+   and reconnects can leave prior network loops running (generation fencing
+   prevents their writes). Availability against a malicious server is out of
+   scope. _Decision:_ total page/item cap and abort-prior-loop behavior are
+   availability policy. _Recommend:_ cap pages and cancel superseded loops if
+   this threat enters scope.
 
-11. **Web/mobile display state carries full decrypted clipboard payloads (up to
+10. **Web/mobile display state carries full decrypted clipboard payloads (up to
     16 MiB × 100) and re-serializes the whole `AppState` across the wasm boundary
     on every change.** `crates/app-types/src/lib.rs`, `crates/web-wasm/src/lib.rs`,
     `web/src/App.tsx` · `DecryptedClipboardItem.text` holds the full payload; the
@@ -241,8 +233,14 @@ Known and acknowledged; not currently being fixed.
   authenticity.** The export-key-derived AEAD AAD is the real mechanism; a
   malicious server can swap the device public key it returns and re-sign. (See
   `object-envelopes.md`.)
-- **A malicious server can drop / omit / replay valid objects** — availability and
-  history integrity, not confidentiality.
+- **A malicious server can still omit objects or skip revision history.** Version
+  2 clients retain per-object revision anchors across restarts and sweeps: they
+  reject a lower revision, a changed body at the same revision, and an immediate
+  successor with the wrong parent hash. That prevents rollback below history the
+  device already accepted. It does not help a fresh install, and a jump of more
+  than one revision cannot be fully checked without the omitted intermediate
+  bodies. These remaining powers affect availability and history completeness,
+  not confidentiality. See `object-envelopes.md`.
 - **Per-session and admin/cross-user revocation are unbuilt.** Device list/remove
   _is_ shipped (`GET /api/auth/devices`, `DELETE /api/auth/devices/{id}`, user-
   scoped, with `sessions.device_id ON DELETE CASCADE` revoking that device's

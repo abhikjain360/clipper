@@ -192,6 +192,11 @@ Re-derived from code so the surface does not get re-litigated:
 
 ### CR6 — [Medium] Confirmed R1: Android persists the passphrase for biometric resume
 
+> Resolved during the September 2026 scheduler review by wiring derived-session
+> resume through UniFFI and biometric SecureStore. The passphrase is no longer
+> persisted, and the old slot is deleted. Static data-key rotation remains open
+> under CR1. The original finding follows for provenance.
+
 - **Files:** `mobile/src/backend.ts` (SecureStore passphrase resume) ·
   `crates/mobile-uniffi/src/lib.rs` (no resume export) ·
   `docs/local-at-rest-encryption.md` (mobile note)
