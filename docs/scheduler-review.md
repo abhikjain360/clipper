@@ -2,8 +2,10 @@
 
 Review of PR #1 (`schedule-module`), September 2026. Read this first for the
 current state; `schedule-plan.md` preserves the longer product discussion and
-implementation history. Owner QA comes before the code walkthrough and merge.
-Updated after the follow-up review and native SQLite cutover through `2db2b4b`.
+implementation history. Web UI QA is complete; Rust review precedes the
+remaining installed-app QA and merge.
+Updated for the follow-up revision-aware schedule model. Current automated
+validation and earlier interactive QA evidence are separated below.
 
 ## Assessment
 
@@ -89,7 +91,68 @@ not become a surprise during QA.
   their payloads. Anchors are retained indefinitely. The browser keeps its
   bounded localStorage backend and best-effort history checks.
 
+## Plans across edits and historical recordings
+
+A series ID identifies the continuing schedule; an immutable object revision
+identifies the definition that gave one occurrence its meaning. `RecurrenceId`
+remains the original date/time, not a revision number. Occurrences are computed,
+but their identity is persisted in exceptions and linked actual records.
+
+- A standalone `OccurrenceOverride` contains its pure `OccurrenceException`
+  plus the exact base schedule reference: storage `ObjectId`, revision number,
+  and signed envelope body hash. Before applying it to a newer definition, the
+  client checks that the series identity, scheduled span and recurrence match.
+  Title, linked-object and alarm-setting edits preserve exceptions. Structural
+  edits with local exceptions are blocked pending an explicit exception-editing
+  workflow; silently retargeting an old occurrence is not supported. If a synced
+  definition is incompatible, or the base revision cannot be loaded, expansion
+  skips that series and publishes a warning in the Schedule UI. Other series
+  continue to appear and generate alarms; affected alarms are omitted rather
+  than guessed.
+- Provider exceptions are embedded in the imported event object. They have no
+  independent envelope revision. Pinning the imported object revision captures
+  its provider exceptions as well. Standalone local exceptions have their own
+  revisions and are treated separately.
+- A linked actual pins the schedule revision and the applied standalone override
+  revision, if any, when recording starts. It also stores the original occurrence
+  identity, observer timezone and resolved planned UTC bounds. These preserve the
+  effective plan after travel or timezone database updates without duplicating
+  the entire schedule. Stopping the timer preserves that context.
+- Calculated occurrence views carry the revision context used to render them.
+  Timer start validates that context and occurrence against its local snapshot
+  before stopping an existing
+  timer. A stale click must fail rather than start against a substituted plan.
+- Historical definitions use revision-specific authenticated reads and bounded
+  payload validation. They are checked against the pinned object ID, revision
+  and body hash and decrypted using the revision's AAD. Historical reads do not
+  install an old head, update sync cursors, or weaken accepted-history anchors.
+  Missing or purged history is unavailable, never replaced with today's plan.
+  Already-cached history may remain readable after server purge until the
+  memory cache is cleared; purge does not retroactively erase client memory.
+- The Rust `recorded_plan(actual_id)` read returns the pinned definition, applied
+  exception and captured context. The history cache holds at most 64 entries and
+  is scoped to the authenticated session epoch. Routine state publication does
+  not wait for historical network requests, so titles can initially show
+  “Historical plan unavailable”; an explicit actuals-window read resolves them.
+  The historical-detail UI remains deferred.
+
+The calendar and alarm plan still expand the latest definition. Revision pins
+provide a historical comparison for an actual, not a complete historical
+calendar. “Change this and all future occurrences” and effective-date series
+splits remain unimplemented. Actual manual entry, reassociation, correction and
+historical-detail UI also remain future work.
+
 ## Validation
+
+The revision-aware change passes the Rust workspace tests (including 73 domain
+and 93 server tests), the isolated live server/client regression, workspace
+Clippy with warnings denied, wasm and mobile bridge checks, web type/lint/tests
+and standalone web build. Focused additions cover cosmetic versus structural
+edits, exact signed revision pins, stale timer selections preserving the running
+timer, captured floating bounds, provider exceptions, and reconstruction after
+edits and tombstones. History tests cover ownership, pending revisions, retention,
+purge, and preservation of the current sync head. This change has not received
+a new interactive Android or Tauri QA pass.
 
 The broad build and UI results below describe the earlier review build, before
 the follow-up recurrence and SQLite changes. They are useful baseline evidence,
@@ -148,6 +211,10 @@ had no enrolled biometric, so manual-login fallback was exercised while the OS
 biometric SecureStore save/resume round trip remains for owner QA. Rust session
 resume and revoked-token rejection are covered by the live regression.
 
+The revised development payloads and timer IPC intentionally have no legacy
+compatibility path. Rebuild/restart the server and clients together and regenerate
+old QA recordings/overrides before exercising the new historical comparisons.
+
 ## Owner QA sequence
 
 1. Open the Schedule tab. Create a floating morning routine, a zoned meeting, and
@@ -158,6 +225,10 @@ resume and revoked-token rejection are covered by the live regression.
    the end condition and the interval when the recurrence unit is unchanged.
 2. Start a timer from a block, stop it, then start untracked time. Check the
    actual-time lane. Reload and verify stopped/running state is retained.
+   Rename the originating plan and
+   check that the recorded session retains its historical plan title. In a
+   second client, change a displayed occurrence before starting it from the
+   first client; a stale click must not stop an already-running timer.
 3. Open a second client with the same account. Check create/edit/delete live
    propagation. Open an edit on both clients; save one, then try saving the other.
    On rebuilt native clients, restart and verify schedule and clipboard content

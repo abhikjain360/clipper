@@ -118,6 +118,8 @@ export type ScheduleItem = {
 /// A series as rendered for a list. Built by the Rust side so every shell shows
 /// the same wording.
 export type ScheduleItemView = {
+  // Revision opened by the editor; reject saving over a newer definition.
+  revision: number;
   // The object id — what edits and deletes address. The series id is inside
   // definition_json and survives an edit, so overrides and logged time keep
   // pointing at the right series.
@@ -141,6 +143,8 @@ export type OccurrenceView = {
   // Identifies this occurrence within the series, so time can be logged against
   // the right one. Opaque above the engine.
   occurrence_key: string;
+  // Opaque plan context captured by expansion and validated when starting a timer.
+  plan_context: string;
   title: string;
   // RFC 3339 UTC. Half-open: an occurrence does not include its end instant.
   start: string;
@@ -237,6 +241,7 @@ export type AppState = {
   // Series definitions only. Occurrences depend on the window being shown, so
   // they come from expandSchedule rather than from state.
   schedule_items: ScheduleItemView[];
+  schedule_warnings: string[];
   calendar_sources: CalendarSourceView[];
   // The timer currently running, if any.
   running_actual?: ActualView | null;
@@ -289,14 +294,18 @@ export type ClipperBackend = {
   downloadFileBytes: (fileId: string) => Promise<Uint8Array>;
   downloadFileToDialog?: (fileId: string, defaultFilename: string) => Promise<boolean>;
   deleteFile: (fileId: string) => Promise<void>;
-  // Start the timer. Omit both arguments for unplanned work.
-  startActual: (itemId?: string, occurrenceKey?: string) => Promise<string>;
+  // Start the timer. Omit the plan context for unplanned work.
+  startActual: (planContext?: string) => Promise<string>;
   stopActual: (objectId: string) => Promise<string>;
   actualsBetween: (from: string, to: string) => Promise<ActualView[]>;
   createScheduleItem: (item: ScheduleItem) => Promise<string>;
   // Replace a series. Returns the new object id; the series id inside `item`
   // must be unchanged.
-  updateScheduleItem: (objectId: string, item: ScheduleItem) => Promise<string>;
+  updateScheduleItem: (
+    objectId: string,
+    item: ScheduleItem,
+    expectedRevision: number,
+  ) => Promise<string>;
   addCalendarSource: (name: string, url: string) => Promise<string>;
   // Rejects in the browser: no calendar provider sends CORS headers, so feeds
   // are pulled by the desktop or mobile app and reach the browser as objects.

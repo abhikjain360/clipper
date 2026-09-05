@@ -7,7 +7,7 @@ use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use clipper_schedule::{
     BlockDuration, Cadence, EngineError, Expansion, Frequency, MonthDay, NthWeekday, Occurrence,
-    OccurrenceOrigin, OccurrenceOverride, OverrideChange, OverrideId, RawRule, Recurrence,
+    OccurrenceException, OccurrenceOrigin, OverrideChange, OverrideId, RawRule, Recurrence,
     RecurrenceEngine, RecurrenceError, RecurrenceId, RruleEngine, ScheduleItem, ScheduleItemId,
     ScheduleSpan, TimeError, TimedStart, WeekdaySet, Window,
 };
@@ -38,7 +38,7 @@ fn daily_at(start: TimedStart) -> ScheduleItem {
 
 fn expand(
     item: &ScheduleItem,
-    overrides: &[OccurrenceOverride],
+    overrides: &[OccurrenceException],
     expansion: &Expansion,
 ) -> Vec<Occurrence> {
     RruleEngine::new()
@@ -142,7 +142,7 @@ fn zoned_stays_put_wherever_it_is_read() {
 fn a_floating_override_matches_in_any_zone() {
     let item = daily_at(TimedStart::Floating(local("20260601T070000")));
     // Recorded on a device in Berlin: skip the morning of the 10th.
-    let skipped = OccurrenceOverride {
+    let skipped = OccurrenceException {
         id: OverrideId::new(),
         item: item.id,
         recurrence_id: RecurrenceId::Floating(local("20260610T070000")),
@@ -185,7 +185,7 @@ fn cancelled_occurrence_is_skipped() {
         local: local("20260610T080000"),
         zone: Tz::UTC,
     });
-    let cancelled = OccurrenceOverride {
+    let cancelled = OccurrenceException {
         id: OverrideId::new(),
         item: item.id,
         recurrence_id: RecurrenceId::Instant(utc(2026, 6, 11, 8, 0)),
@@ -215,7 +215,7 @@ fn rescheduled_occurrence_reports_its_override() {
         local: local("20260610T080000"),
         zone: Tz::UTC,
     });
-    let moved = OccurrenceOverride {
+    let moved = OccurrenceException {
         id: OverrideId::new(),
         item: item.id,
         recurrence_id: RecurrenceId::Instant(utc(2026, 6, 11, 8, 0)),
@@ -258,7 +258,7 @@ fn override_can_move_an_occurrence_into_the_window() {
         local: local("20260601T080000"),
         zone: Tz::UTC,
     });
-    let pulled_forward = OccurrenceOverride {
+    let pulled_forward = OccurrenceException {
         id: OverrideId::new(),
         item: item.id,
         // The 11th, which the window below does not contain.
@@ -296,7 +296,7 @@ fn overrides_for_other_items_are_ignored() {
         local: local("20260610T080000"),
         zone: Tz::UTC,
     });
-    let someone_elses = OccurrenceOverride {
+    let someone_elses = OccurrenceException {
         id: OverrideId::new(),
         item: ScheduleItemId::new(),
         recurrence_id: RecurrenceId::Instant(utc(2026, 6, 10, 8, 0)),
@@ -552,7 +552,7 @@ fn a_longer_override_can_overlap_from_before_the_window() {
         local: local("20260601T080000"),
         zone: Tz::UTC,
     });
-    let moved = OccurrenceOverride {
+    let moved = OccurrenceException {
         id: OverrideId::new(),
         item: item.id,
         recurrence_id: RecurrenceId::Instant(utc(2026, 6, 9, 8, 0)),
@@ -785,5 +785,97 @@ fn a_raw_rule_cannot_smuggle_a_second_property() {
             .expect("a padded rule stays valid")
             .as_str(),
         "FREQ=DAILY;COUNT=2"
+    );
+}
+
+#[test]
+fn descriptive_edits_preserve_exception_applicability() {
+    let original = daily_at(TimedStart::Floating(local("20260915T070000")));
+    let mut edited = original.clone();
+    edited.title = "Renamed workout".to_owned();
+    edited.reference = Some(clipper_api_types::ObjectId::from(uuid::Uuid::new_v4()));
+    edited.alarm = Some(clipper_schedule::AlarmPolicy::minutes_before(10));
+    assert!(original.exceptions_compatible_with(&edited));
+}
+
+#[test]
+fn structural_edits_require_reconsidering_exceptions() {
+    let original = daily_at(TimedStart::Floating(local("20260915T070000")));
+    let mut changed_rule = original.clone();
+    changed_rule.recurrence = Recurrence::Once;
+    let mut changed_start = original.clone();
+    changed_start.span = ScheduleSpan::Timed {
+        start: TimedStart::Floating(local("20260915T080000")),
+        duration: BlockDuration::from_minutes(30).unwrap(),
+    };
+    let mut changed_duration = original.clone();
+    changed_duration.span = ScheduleSpan::Timed {
+        start: TimedStart::Floating(local("20260915T070000")),
+        duration: BlockDuration::from_minutes(45).unwrap(),
+    };
+    let mut changed_zone = original.clone();
+    changed_zone.span = ScheduleSpan::Timed {
+        start: TimedStart::Zoned {
+            local: local("20260915T070000"),
+            zone: Tz::Europe__Berlin,
+        },
+        duration: BlockDuration::from_minutes(30).unwrap(),
+    };
+    let mut different_series = original.clone();
+    different_series.id = ScheduleItemId::new();
+    for edited in [
+        changed_rule,
+        changed_start,
+        changed_duration,
+        changed_zone,
+        different_series,
+    ] {
+        assert!(!original.exceptions_compatible_with(&edited));
+    }
+}
+
+#[test]
+fn historical_plan_retains_original_identity_and_resolved_override_after_travel() {
+    use clipper_schedule::{ActualId, ActualRecord, ActualSpan, ObjectRevisionRef, PlannedRef};
+
+    let item = daily_at(TimedStart::Floating(local("20260915T070000")));
+    let moved_span = ScheduleSpan::Timed {
+        start: TimedStart::Floating(local("20260916T090000")),
+        duration: BlockDuration::from_minutes(30).unwrap(),
+    };
+    let planned = PlannedRef {
+        item: item.id,
+        recurrence_id: RecurrenceId::Floating(local("20260915T070000")),
+        schedule: ObjectRevisionRef {
+            object_id: clipper_api_types::ObjectId::from(uuid::Uuid::new_v4()),
+            revision: 3,
+            body_hash: [3; 32],
+        },
+        override_revision: Some(ObjectRevisionRef {
+            object_id: clipper_api_types::ObjectId::from(uuid::Uuid::new_v4()),
+            revision: 2,
+            body_hash: [2; 32],
+        }),
+        observer: Tz::Europe__Berlin,
+        span: moved_span.resolve(Tz::Europe__Berlin).unwrap(),
+    };
+    let actual = ActualRecord {
+        id: ActualId::new(),
+        planned: Some(planned),
+        span: ActualSpan::Running {
+            started: utc(2026, 9, 16, 7, 5),
+        },
+    };
+    let restored: ActualRecord =
+        serde_json::from_str(&serde_json::to_string(&actual).unwrap()).unwrap();
+    assert_eq!(restored, actual);
+    assert_eq!(restored.planned.unwrap().span.start, utc(2026, 9, 16, 7, 0));
+    assert_ne!(
+        restored.planned.unwrap().span,
+        moved_span.resolve(Tz::Asia__Tokyo).unwrap()
+    );
+    assert_eq!(
+        restored.planned.unwrap().recurrence_id,
+        RecurrenceId::Floating(local("20260915T070000"))
     );
 }

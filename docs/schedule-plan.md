@@ -532,6 +532,12 @@ storage quota and any TTL sweep act on. This costs a deleted object its storage
 until purged, which for schedule records is negligible and for files is why the
 per-kind retention table exists.
 
+> Follow-up clarification: this describes the storage operation, not a complete
+> undo feature. Reading retained content requires the revision-specific read
+> path, and undo still needs UI and conflict handling. Actuals now pin historical
+> schedule/override definitions; retained history alone did not provide that
+> association. See [scheduler-review.md](scheduler-review.md).
+
 **Undo needs no machinery beyond retention.** Restoring revision `N-1` is
 writing its content as revision `N+1`. There is no separate undo log, no
 reverse-diff, and nothing to design now — which is the whole justification for
@@ -554,6 +560,11 @@ Consequences to build:
   installed device has no history to compare against and must trust what it is
   given. That limit is inherent, requires an actively malicious server, and gets
   written into the envelope doc rather than glossed.
+  Follow-up clarification: current anchors reject rollback of accepted heads,
+  but no revision-enumeration or transparency protocol proves history complete.
+  Explicit historical reads check an exact pinned body without replacing the
+  current head or changing its anchor. Browser retention is best-effort; see
+  [object-envelopes.md](object-envelopes.md) for platform-specific limits.
 - **Delete is a tombstone; purge is the destructive one.** See _Retention_
   above. The storage quota accounting in `crates/server/src/storage_quota.rs`
   has to count revisions rather than objects either way, and has to keep
@@ -907,6 +918,11 @@ committed to ingesting all-day events, so this is not optional.
   upstream overrides (a moved instance) then have to map onto Clipper's own
   override records. This is the hardest part of ingest and needs its own
   treatment before connectors are built.
+  Current ICS implementation embeds provider exceptions inside each imported
+  event revision as pure `OccurrenceException` values. Only separately authored
+  local exceptions use revision-pinned `OccurrenceOverride` objects. Future
+  connectors should preserve this distinction, rather than interpreting the
+  earlier wording as requiring standalone objects for provider exceptions.
 
 ### D11: Build order follows verification cost, not code volume
 

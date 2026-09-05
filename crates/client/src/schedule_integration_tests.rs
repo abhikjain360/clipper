@@ -161,7 +161,7 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
     assert_eq!(berlin[0].occurrence_key, tokyo[0].occurrence_key);
 
     let timer = first
-        .start_actual(Some((&berlin[0].item_id, &berlin[0].occurrence_key)))
+        .start_actual(Some(&berlin[0].plan_context))
         .await
         .expect("start floating timer");
     wait_for(&second, |state| {
@@ -171,12 +171,7 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
             .is_some_and(|actual| actual.id == timer)
     })
     .await;
-    assert!(
-        first
-            .start_actual(Some(("invalid", "invalid")))
-            .await
-            .is_err()
-    );
+    assert!(first.start_actual(Some("invalid")).await.is_err());
     assert_eq!(
         first
             .get_state()
@@ -203,12 +198,14 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
         1
     );
 
+    exercise_revision_aware_plans(&first).await;
+
     let stale_head = second.local_head(&object_id).await.expect("old head");
     let mut edited = item.clone();
     edited.title = "Edited workout".into();
     assert_eq!(
         first
-            .update_schedule_item(&object_id, edited.clone())
+            .update_schedule_item(&object_id, edited.clone(), 1)
             .await
             .expect("edit"),
         object_id
@@ -276,7 +273,7 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
         .expect("streamed create");
     large.title = "y".repeat(70_000);
     first
-        .update_schedule_item(&large_id, large.clone())
+        .update_schedule_item(&large_id, large.clone(), 1)
         .await
         .expect("streamed revision");
     wait_for(&second, |state| {
@@ -297,7 +294,7 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
     let mut oversized = large;
     oversized.title = "z".repeat(256 * 1024);
     assert!(matches!(
-        first.update_schedule_item(&large_id, oversized).await,
+        first.update_schedule_item(&large_id, oversized, 2).await,
         Err(ClientError::InvalidArgument(message)) if message.contains("256 KiB")
     ));
     assert_eq!(
@@ -385,6 +382,17 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
         .map(|event| event.start.as_str())
         .collect();
     assert_eq!(starts, ["2026-09-08T09:00:00Z", "2026-09-09T12:00:00Z"]);
+    let provider_added = imported_occurrences
+        .iter()
+        .find(|event| {
+            event.start == "2026-09-09T12:00:00Z" && event.source.as_deref() == Some("Work")
+        })
+        .unwrap();
+    let provider_actual = first
+        .start_actual(Some(&provider_added.plan_context))
+        .await
+        .unwrap();
+    first.stop_actual(&provider_actual).await.unwrap();
     *feed.write().await = basic_feed;
     let updated_feed = feed
         .read()
@@ -407,6 +415,20 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
             .revision,
         3
     );
+    first.schedule_history.lock().await.clear();
+    let recorded_provider = first
+        .recorded_plan(&provider_actual)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recorded_provider.item.title, "Planning");
+    assert_eq!(recorded_provider.context.schedule.revision, 2);
+    assert!(recorded_provider.context.override_revision.is_none());
+    assert!(
+        recorded_provider.exception.is_some(),
+        "RDATE captured inside imported revision"
+    );
+
     let valid_feed = feed.read().await.clone();
     *feed.write().await = valid_feed.replace("DTSTART:20260908T090000Z", "DTSTART:invalid");
     let partial = first
@@ -586,4 +608,243 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
     );
     second.logout().await.expect("logout second");
     third.logout().await.expect("logout third");
+}
+
+/// One connected workflow checks the relationships rather than mirroring each
+/// field assignment: edits, stale selections, overridden plans and deletion.
+async fn exercise_revision_aware_plans(engine: &SyncEngine) {
+    use clipper_schedule::{
+        ActualSpan, ObjectRevisionRef, OccurrenceException, OccurrenceOverride, OverrideChange,
+        OverrideId, PlannedRef, RecurrenceId,
+    };
+    let mut item = ScheduleItem {
+        id: ScheduleItemId::new(),
+        title: "Original historical title".into(),
+        span: ScheduleSpan::Timed {
+            start: TimedStart::Floating("2027-01-05T07:00:00".parse().unwrap()),
+            duration: BlockDuration::from_minutes(30).unwrap(),
+        },
+        recurrence: Recurrence::Once,
+        reference: None,
+        alarm: None,
+    };
+    let id = engine.create_schedule_item(item.clone()).await.unwrap();
+    let from = "2027-01-04T00:00:00Z";
+    let to = "2027-01-08T00:00:00Z";
+    let calendar = engine
+        .expand_schedule(from, to, "Europe/Berlin")
+        .await
+        .unwrap();
+    let original = calendar
+        .iter()
+        .find(|entry| entry.item_id == item.id.to_string())
+        .unwrap();
+    let original_context: PlannedRef = serde_json::from_str(&original.plan_context).unwrap();
+    let actual_id = engine
+        .start_actual(Some(&original.plan_context))
+        .await
+        .unwrap();
+    item.title = "Renamed while recording".into();
+    engine
+        .update_schedule_item(&id, item.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.get_state().await.running_actual.unwrap().title,
+        "Original historical title"
+    );
+    engine.stop_actual(&actual_id).await.unwrap();
+
+    // Force a historical HTTP read rather than accepting a cache-only success.
+    engine.schedule_history.lock().await.clear();
+    let historical = engine.recorded_plan(&actual_id).await.unwrap().unwrap();
+    assert_eq!(historical.item.title, "Original historical title");
+    assert_eq!(historical.context, original_context);
+    assert_eq!(historical.context.observer, chrono_tz::Europe::Berlin);
+    assert_eq!(
+        historical.context.span.start.to_rfc3339(),
+        "2027-01-05T06:00:00+00:00"
+    );
+    assert_eq!(engine.local_head(&id).await.unwrap().revision, 2);
+
+    let unplanned = engine.start_actual(None).await.unwrap();
+    assert!(
+        engine
+            .start_actual(Some(&original.plan_context))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        engine.get_state().await.running_actual.unwrap().id,
+        unplanned
+    );
+    assert!(
+        engine
+            .update_schedule_item(&id, item.clone(), 1)
+            .await
+            .is_err()
+    );
+    let current = engine
+        .expand_schedule(from, to, "Europe/Berlin")
+        .await
+        .unwrap();
+    let current = current
+        .iter()
+        .find(|entry| entry.item_id == item.id.to_string())
+        .unwrap();
+    let mut forged: PlannedRef = serde_json::from_str(&current.plan_context).unwrap();
+    forged.span.start += chrono::TimeDelta::minutes(1);
+    assert!(
+        engine
+            .start_actual(Some(&serde_json::to_string(&forged).unwrap()))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        engine.get_state().await.running_actual.unwrap().id,
+        unplanned
+    );
+
+    let base = revision_ref(&id, engine.local_head(&id).await.unwrap()).unwrap();
+    let mut exception = OccurrenceOverride {
+        base,
+        exception: OccurrenceException {
+            id: OverrideId::new(),
+            item: item.id,
+            recurrence_id: original_context.recurrence_id,
+            change: OverrideChange::Rescheduled(ScheduleSpan::Timed {
+                start: TimedStart::Floating("2027-01-06T09:00:00".parse().unwrap()),
+                duration: BlockDuration::from_minutes(45).unwrap(),
+            }),
+        },
+    };
+    let override_id = engine
+        .create_schedule_record(ScheduleRecord::Override(Box::new(exception.clone())))
+        .await
+        .unwrap();
+    let mut structural = item.clone();
+    structural.recurrence = Recurrence::Every(clipper_schedule::Cadence::each(
+        clipper_schedule::Frequency::Daily,
+    ));
+    assert!(
+        engine
+            .update_schedule_item(&id, structural, 2)
+            .await
+            .is_err()
+    );
+    item.title = "Cosmetic edit keeps exception".into();
+    engine
+        .update_schedule_item(&id, item.clone(), 2)
+        .await
+        .unwrap();
+
+    let moved = engine
+        .expand_schedule(from, to, "Europe/Berlin")
+        .await
+        .unwrap();
+    let moved = moved
+        .iter()
+        .find(|entry| entry.item_id == item.id.to_string())
+        .unwrap();
+    assert_eq!(moved.start, "2027-01-06T08:00:00Z");
+    let moved_context: PlannedRef = serde_json::from_str(&moved.plan_context).unwrap();
+    assert_eq!(moved_context.schedule.revision, 3);
+    assert_eq!(moved_context.override_revision.unwrap().revision, 1);
+    assert_eq!(moved_context.recurrence_id, original_context.recurrence_id);
+    let moved_actual = engine
+        .start_actual(Some(&moved.plan_context))
+        .await
+        .unwrap();
+    let override_head = engine.local_head(&override_id).await.unwrap();
+    exception.exception.change = OverrideChange::Cancelled;
+    engine
+        .write_schedule_record(
+            &override_id,
+            ScheduleRecord::Override(Box::new(exception)),
+            EnvelopePlacement::Revise(override_head),
+        )
+        .await
+        .unwrap();
+    assert!(
+        engine
+            .start_actual(Some(&moved.plan_context))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        engine.get_state().await.running_actual.unwrap().id,
+        moved_actual
+    );
+    engine.stop_actual(&moved_actual).await.unwrap();
+    // A structural edit received from an older/other writer is surfaced, never
+    // interpreted as an exception to a different rule or allowed to hide peers.
+    let mut incompatible = item.clone();
+    incompatible.recurrence = Recurrence::Every(clipper_schedule::Cadence::each(
+        clipper_schedule::Frequency::Daily,
+    ));
+    engine
+        .write_schedule_record(
+            &id,
+            ScheduleRecord::Item(Box::new(incompatible)),
+            EnvelopePlacement::Revise(engine.local_head(&id).await.unwrap()),
+        )
+        .await
+        .unwrap();
+    let mut unaffected = item.clone();
+    unaffected.id = ScheduleItemId::new();
+    engine
+        .create_schedule_item(unaffected.clone())
+        .await
+        .unwrap();
+    let visible = engine
+        .expand_schedule(from, to, "Europe/Berlin")
+        .await
+        .unwrap();
+    assert!(
+        !visible
+            .iter()
+            .any(|entry| entry.item_id == item.id.to_string())
+    );
+    assert!(
+        visible
+            .iter()
+            .any(|entry| entry.item_id == unaffected.id.to_string())
+    );
+    assert!(!engine.get_state().await.schedule_warnings.is_empty());
+    engine.delete_schedule_object(&id).await.unwrap();
+    engine.delete_schedule_object(&override_id).await.unwrap();
+    engine.schedule_history.lock().await.clear();
+    let historical = engine.recorded_plan(&moved_actual).await.unwrap().unwrap();
+    assert!(matches!(
+        historical.exception.unwrap().change,
+        OverrideChange::Rescheduled(_)
+    ));
+    assert_eq!(historical.context, moved_context);
+    assert_eq!(engine.local_head(&id).await.unwrap().revision, 5);
+    assert_eq!(engine.local_head(&override_id).await.unwrap().revision, 3);
+
+    // A wrong accepted hash must not return some other authentic revision.
+    let mut wrong_pin: ObjectRevisionRef = historical.context.schedule;
+    wrong_pin.body_hash[0] ^= 1;
+    assert!(engine.schedule_revision(wrong_pin).await.is_err());
+
+    // The timing and pins survive the stop revision.
+    let stopped = engine.local_store.schedule_records_with_ids().await;
+    let actual = stopped
+        .iter()
+        .find_map(|(id, record)| match record {
+            ScheduleRecord::Actual(actual) if id == &moved_actual => Some(actual),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(actual.span, ActualSpan::Complete(_)));
+    assert_eq!(actual.planned, Some(moved_context));
+    assert!(matches!(
+        actual.planned.unwrap().recurrence_id,
+        RecurrenceId::Floating(_)
+    ));
+
+    engine.api.delete_object(&id).await.unwrap();
+    engine.schedule_history.lock().await.clear();
+    assert!(engine.recorded_plan(&moved_actual).await.is_err());
 }

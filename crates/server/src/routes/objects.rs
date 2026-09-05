@@ -1372,14 +1372,14 @@ fn head_revision_join() -> sea_orm::RelationDef {
         })
 }
 
-/// The head revision's columns, in the order `ListedObjectRow` expects.
-fn select_head_revision<S: QuerySelect>(query: S) -> S {
+/// Project the joined revision alongside its stable object identity.
+fn select_revision_columns<S: QuerySelect>(query: S) -> S {
     query
         .select_only()
         .column(objects::Column::Id)
         .column(objects::Column::Kind)
         .column(object_revisions::Column::Revision)
-        .column_as(objects::Column::PublishedSeq, "created_seq")
+        .column(object_revisions::Column::CreatedSeq)
         .column(object_revisions::Column::MetaCiphertext)
         .column(object_revisions::Column::MetaNonce)
         .column(object_revisions::Column::CreatedAt)
@@ -1387,7 +1387,7 @@ fn select_head_revision<S: QuerySelect>(query: S) -> S {
         .column(object_revisions::Column::Envelope)
 }
 
-/// One listed object, assembled from its identity row and its head revision.
+/// One object revision, assembled from its identity row and revision row.
 ///
 /// A hand-written `FromQueryResult` rather than a partial model, because the
 /// columns come from two tables — `DerivePartialModel` can only project one.
@@ -1556,7 +1556,7 @@ pub async fn list_objects(
             .order_by(objects::Column::Id, Order::Desc)
     };
 
-    let mut objects = select_head_revision(q.limit(limit + 1))
+    let mut objects = select_revision_columns(q.limit(limit + 1))
         .into_model::<ListedObjectRow>()
         .all(state.db())
         .await
@@ -1617,7 +1617,7 @@ pub async fn get_object(
 ) -> Result<Postcard<ObjectListItem>, ApiError> {
     let object_uuid =
         Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
-    let object = select_head_revision(
+    let object = select_revision_columns(
         objects::Entity::find_by_id(object_uuid)
             .join(JoinType::InnerJoin, head_revision_join())
             .filter(objects::Column::UserId.eq(auth.user_id))
@@ -1657,6 +1657,69 @@ pub async fn get_object(
         ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
     Ok(Postcard(item))
+}
+
+/// Read an immutable revision without changing or requiring the current head.
+/// Tombstoning preserves history; purging and clipboard retention still remove
+/// access. Historical readers must verify their pinned revision/hash locally.
+pub async fn get_object_revision(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
+    Path((object_id, revision)): Path<(String, u64)>,
+) -> Result<Postcard<ObjectListItem>, ApiError> {
+    let object_uuid =
+        Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
+    let object = load_readable_revision(&state, auth.user_id, object_uuid, revision).await?;
+    let mut items = object_list_items(&state, auth.user_id, &[object]).await?;
+    Ok(Postcard(items.pop().ok_or_else(|| {
+        ApiError::from_code(ApiErrorCode::Database)
+    })?))
+}
+
+async fn load_readable_revision(
+    state: &AppState,
+    user_id: Uuid,
+    object_id: Uuid,
+    revision: u64,
+) -> Result<ListedObjectRow, ApiError> {
+    let revision = i64::try_from(revision)
+        .ok()
+        .filter(|revision| *revision > 0)
+        .ok_or_else(|| ApiError::from_code(ApiErrorCode::ObjectNotFound))?;
+    let object = select_revision_columns(
+        objects::Entity::find_by_id(object_id)
+            .join(
+                JoinType::InnerJoin,
+                objects::Relation::ObjectRevisions.def(),
+            )
+            .filter(objects::Column::UserId.eq(user_id))
+            .filter(objects::Column::CollabDocId.is_null())
+            .filter(object_revisions::Column::Revision.eq(revision))
+            .filter(object_revisions::Column::Status.eq("complete")),
+    )
+    .into_model::<ListedObjectRow>()
+    .one(state.db())
+    .await
+    .map_err(|e| {
+        error!(%object_id, revision, %e, "Failed to load historical object revision");
+        ApiError::from_code(ApiErrorCode::Database)
+    })?
+    .ok_or_else(|| ApiError::from_code(ApiErrorCode::ObjectNotFound))?;
+    ensure_object_read_retained(state, user_id, object_id, &object.kind).await?;
+    Ok(object)
+}
+
+pub async fn download_revision_payload(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
+    Path((object_id, revision, payload_id)): Path<(String, u64, String)>,
+) -> Result<Body, ApiError> {
+    let object_uuid =
+        Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
+    let payload_uuid =
+        Uuid::parse_str(&payload_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
+    let object = load_readable_revision(&state, auth.user_id, object_uuid, revision).await?;
+    read_revision_payload(&state, object_uuid, object.revision, payload_uuid).await
 }
 
 /// The clipboard objects a user can still read: not expired, newest
@@ -1744,7 +1807,7 @@ async fn object_list_items(
     user_id: Uuid,
     objects: &[ListedObjectRow],
 ) -> Result<Vec<ObjectListItem>, ApiError> {
-    // Scoped to each object's *head* revision, not just its id. Payloads now
+    // Scoped to each requested revision, not just its object id. Payloads now
     // belong to a revision, so an object with history has several sets of them;
     // an id-only filter returns all of them at once and the client rejects the
     // item for having more payloads than its envelope declares.
@@ -1944,6 +2007,15 @@ pub async fn download_payload(
     };
     ensure_object_read_retained(&state, auth.user_id, object_uuid, &kind).await?;
 
+    read_revision_payload(&state, object_uuid, revision, payload_uuid).await
+}
+
+async fn read_revision_payload(
+    state: &AppState,
+    object_uuid: Uuid,
+    revision: i64,
+    payload_uuid: Uuid,
+) -> Result<Body, ApiError> {
     let payload = object_payloads::Entity::find_by_id((object_uuid, revision, payload_uuid))
         .filter(object_payloads::Column::Status.eq("complete"))
         .select_only()
@@ -4172,6 +4244,202 @@ mod tests {
                 ))
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn historical_revisions_survive_edits_and_tombstones_but_not_purge() {
+        let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let other_user = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        let key = insert_device(&state, user_id, device_id).await;
+        let object_id = Uuid::now_v7().to_string();
+        let payload_id = Uuid::now_v7().to_string();
+        init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                object_id.clone(),
+                payload_id.clone(),
+                ObjectKind::Schedule,
+                b"original",
+                true,
+                device_id,
+                &key,
+            )),
+        )
+        .await
+        .expect("init");
+        revise_with(
+            &state,
+            user_id,
+            device_id,
+            &object_id,
+            ObjectKind::Schedule,
+            b"changed",
+            &key,
+        )
+        .await
+        .expect("revise");
+        tombstone_object(
+            &state,
+            user_id,
+            device_id,
+            &object_id,
+            ObjectKind::Schedule,
+            &key,
+        )
+        .await
+        .expect("tombstone");
+        let Postcard(old) = get_object_revision(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path((object_id.clone(), 1)),
+        )
+        .await
+        .expect("old revision readable after deletion");
+        assert_eq!(old.revision, 1);
+        assert_eq!(old.payloads[0].id.to_string(), payload_id);
+        let body = download_revision_payload(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path((object_id.clone(), 1, payload_id.clone())),
+        )
+        .await
+        .expect("historical payload");
+        assert_eq!(&to_bytes(body, 100).await.expect("bytes")[..], b"original");
+        assert!(
+            download_revision_payload(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path((object_id.clone(), 2, payload_id.clone()))
+            )
+            .await
+            .is_err(),
+            "payload cannot cross revisions"
+        );
+        for revision in [0, 1, 4, u64::MAX] {
+            let error = get_object_revision(
+                State(state.clone()),
+                Extension(auth(other_user, device_id)),
+                Path((object_id.clone(), revision)),
+            )
+            .await
+            .expect_err("other user cannot read history");
+            assert_eq!(error.body().code, ApiErrorCode::ObjectNotFound);
+        }
+        assert!(
+            download_revision_payload(
+                State(state.clone()),
+                Extension(auth(other_user, device_id)),
+                Path((object_id.clone(), 1, payload_id.clone()))
+            )
+            .await
+            .is_err()
+        );
+        purge_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path(object_id.clone()),
+        )
+        .await
+        .expect("purge");
+        assert!(
+            get_object_revision(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path((object_id.clone(), 1))
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            download_revision_payload(
+                State(state),
+                Extension(auth(user_id, device_id)),
+                Path((object_id, 1, payload_id))
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn historical_reads_exclude_pending_revisions_and_expired_clipboard() {
+        let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        let key = insert_device(&state, user_id, device_id).await;
+        for kind in [ObjectKind::Schedule, ObjectKind::Clipboard] {
+            let object_id = Uuid::now_v7().to_string();
+            let payload_id = Uuid::now_v7().to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request(
+                    object_id.clone(),
+                    payload_id.clone(),
+                    kind,
+                    b"original",
+                    true,
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("init");
+            let (pending, _) = begin_streamed_revision(
+                &state, user_id, device_id, &object_id, kind, b"pending", &key,
+            )
+            .await;
+            assert!(
+                get_object_revision(
+                    State(state.clone()),
+                    Extension(auth(user_id, device_id)),
+                    Path((object_id.clone(), 2))
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                download_revision_payload(
+                    State(state.clone()),
+                    Extension(auth(user_id, device_id)),
+                    Path((object_id.clone(), 2, pending.id.to_string()))
+                )
+                .await
+                .is_err()
+            );
+            if kind == ObjectKind::Clipboard {
+                objects::Entity::update_many()
+                    .col_expr(
+                        objects::Column::ExpiresAt,
+                        sea_orm::sea_query::Expr::value("2000-01-01T00:00:00+00:00"),
+                    )
+                    .filter(objects::Column::Id.eq(object_id.parse::<Uuid>().unwrap()))
+                    .exec(state.db())
+                    .await
+                    .expect("expire");
+                assert!(
+                    get_object_revision(
+                        State(state.clone()),
+                        Extension(auth(user_id, device_id)),
+                        Path((object_id.clone(), 1))
+                    )
+                    .await
+                    .is_err()
+                );
+                assert!(
+                    download_revision_payload(
+                        State(state.clone()),
+                        Extension(auth(user_id, device_id)),
+                        Path((object_id, 1, payload_id))
+                    )
+                    .await
+                    .is_err()
+                );
+            }
+        }
     }
 
     #[tokio::test]
