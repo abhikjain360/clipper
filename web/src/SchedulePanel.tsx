@@ -63,7 +63,7 @@ import {
 } from "./schedule-recurrence";
 
 // The grid is a view, not the storage format: blocks are stored as an interval
-// and rasterized here (docs/schedule-plan.md, D5). SLOT_MINUTES is the snap the
+// and rasterized here. SLOT_MINUTES is the snap the
 // form applies to a new block; ingested meetings are not grid-aligned and are
 // drawn wherever they actually fall.
 const SLOT_MINUTES = 5;
@@ -83,7 +83,7 @@ const WEEKDAY_LABELS: Record<Weekday, string> = {
 };
 
 /// The viewer's IANA zone. Floating and all-day blocks have no zone of their
-/// own, so this is what resolves them (D5).
+/// own, so this is what resolves them.
 function observerZone(): string {
     try {
         return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -702,7 +702,7 @@ function WeekGrid({
 
 /// Time actually spent, drawn as a narrow band down the right of the column.
 ///
-/// Beside the plan rather than over it: the entire point of D2 is being able to
+/// Beside the plan rather than over it: the user must be able to
 /// see the difference, which a single merged block would hide.
 function ActualBlock({ actual, day }: { actual: ActualView; day: Date }) {
     const { top, height } = bandGeometry(actual, day);
@@ -836,7 +836,7 @@ function RunningTimer({
     const [busy, setBusy] = useState(false);
 
     // Ticks the *display* only. The record itself is written twice and no more
-    // — on start and on stop (D2) — because every write is a retained object.
+    // — on start and on stop — because every write is a retained object.
     useEffect(() => {
         if (!running) return;
         const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -1712,7 +1712,7 @@ function parseDefinition(json: string): ScheduleItem | null {
 }
 
 /// Round to the grid. A block the user typed is snapped; one that arrived from a
-/// calendar is not (D5) — a meeting that runs 09:07–09:23 is ordinary.
+/// calendar is not — a meeting that runs 09:07–09:23 is ordinary.
 function snapMinutes(minutes: number): number {
     return Math.max(SLOT_MINUTES, Math.round(minutes / SLOT_MINUTES) * SLOT_MINUTES);
 }

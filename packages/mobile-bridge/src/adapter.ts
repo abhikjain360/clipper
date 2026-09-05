@@ -102,7 +102,7 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     renameCollabDoc: async (objectId, title) =>
       mapCollabItem(await client.renameCollabDoc(objectId, title)),
     // Schedule editing is not on mobile yet: the web and desktop grid comes
-    // first (docs/schedule-plan.md, D11), and these three carry the schedule
+    // first, and these three carry the schedule
     // domain types, which UniFFI cannot express without flattening them into
     // strings. Series still *sync* to this device and appear in
     // `state.scheduleItems` — only creating and expanding are missing. These
