@@ -49,7 +49,10 @@ export function tauriBackend(): ClipperBackend {
             invoke<boolean>("download_file_to_dialog", { fileId, defaultFilename }),
         deleteFile: (fileId) => invoke<void>("delete_file", { fileId }),
         startActual: (itemId, occurrenceKey) =>
-            invoke<string>("start_actual", { itemId: itemId ?? null, occurrenceKey: occurrenceKey ?? null }),
+            invoke<string>("start_actual", {
+                itemId: itemId ?? null,
+                occurrenceKey: occurrenceKey ?? null,
+            }),
         stopActual: (objectId) => invoke<string>("stop_actual", { objectId }),
         actualsBetween: (from, to) => invoke<ActualView[]>("actuals_between", { from, to }),
         addCalendarSource: (name, url) => invoke<string>("add_calendar_source", { name, url }),

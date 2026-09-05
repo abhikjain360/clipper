@@ -41,19 +41,25 @@ export type CollabItem = {
 export type Weekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
 
 export type MonthName =
-  | "january" | "february" | "march" | "april" | "may" | "june"
-  | "july" | "august" | "september" | "october" | "november" | "december";
+  | "january"
+  | "february"
+  | "march"
+  | "april"
+  | "may"
+  | "june"
+  | "july"
+  | "august"
+  | "september"
+  | "october"
+  | "november"
+  | "december";
 
 /// A day of the month, counted from either end. `from_end` with day 1 is the
 /// last day, which is how "last day of the month" works without special-casing
 /// February.
-export type MonthDay =
-  | { from: "from_start"; day: number }
-  | { from: "from_end"; day: number };
+export type MonthDay = { from: "from_start"; day: number } | { from: "from_end"; day: number };
 
-export type NthWeekday =
-  | { from: "from_start"; nth: number }
-  | { from: "from_end"; nth: number };
+export type NthWeekday = { from: "from_start"; nth: number } | { from: "from_end"; nth: number };
 
 export type MonthlyRule =
   | ({ by: "on_day" } & MonthDay)
@@ -80,8 +86,7 @@ export type Recurrence =
 /// 07:00 wherever you wake up — while zoned stays pinned to its IANA zone.
 export type TimedStart =
   // Local wall-clock, no zone: "2026-06-10T07:00:00".
-  | { kind: "floating"; at: string }
-  | { kind: "zoned"; at: { local: string; zone: string } };
+  { kind: "floating"; at: string } | { kind: "zoned"; at: { local: string; zone: string } };
 
 /// A block's extent. All-day is a date span, not a number of hours: 29 March
 /// 2026 is 23 hours long in Berlin.
@@ -178,26 +183,26 @@ export type AlarmView = {
 
 /// A calendar Clipper pulls events from.
 export type CalendarSourceView = {
-    // The object id — what sync and delete address.
-    id: string;
-    name: string;
-    protocol: string;
-    // Host only. A private iCalendar URL is a bearer credential, so the secret
-    // path never leaves the Rust side.
-    location: string;
-    enabled: boolean;
-    event_count: number;
+  // The object id — what sync and delete address.
+  id: string;
+  name: string;
+  protocol: string;
+  // Host only. A private iCalendar URL is a bearer credential, so the secret
+  // path never leaves the Rust side.
+  location: string;
+  enabled: boolean;
+  event_count: number;
 };
 
 /// What one pass over a calendar feed did.
 export type IngestReport = {
-    added: number;
-    updated: number;
-    unchanged: number;
-    // Gone from the feed, so marked cancelled rather than erased.
-    tombstoned: number;
-    // Entries this client could not read, reported rather than dropped.
-    skipped: string[];
+  added: number;
+  updated: number;
+  unchanged: number;
+  // Gone from the feed, so marked cancelled rather than erased.
+  tombstoned: number;
+  // Entries this client could not read, reported rather than dropped.
+  skipped: string[];
 };
 
 export type AuthenticatedSession = {
