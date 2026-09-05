@@ -15,19 +15,24 @@
 //! window (D4).
 
 pub mod engine;
+pub mod ingest;
 pub mod item;
 pub mod recurrence;
 pub mod summary;
 pub mod time;
 
 pub use engine::{EngineError, Expansion, RecurrenceEngine, RruleEngine, Window};
+pub use ingest::{
+    CalendarSource, IngestError, IngestOutcome, IngestedEvent, IngestedStatus, SkippedEvent,
+    SourceId, SourceKind, parse_ics,
+};
 pub use item::{
     ActualId, ActualRecord, ActualSpan, ObjectRef, Occurrence, OccurrenceOrigin,
     OccurrenceOverride, OverrideChange, OverrideId, PlannedRef, RecurrenceId, ScheduleItem,
     ScheduleItemId,
 };
 pub use recurrence::{
-    Cadence, Frequency, MonthDay, MonthlyRule, NthWeekday, Recurrence, RecurrenceEnd,
+    Cadence, Frequency, MonthDay, MonthlyRule, NthWeekday, RawRule, Recurrence, RecurrenceEnd,
     RecurrenceError, WeekdaySet,
 };
 pub use time::{BlockDuration, ResolvedSpan, ScheduleSpan, TimeError, TimedStart};

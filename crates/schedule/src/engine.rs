@@ -136,7 +136,7 @@ impl RruleEngine {
         item: &ScheduleItem,
         expansion: &Expansion,
     ) -> Result<Vec<(RecurrenceId, ScheduleSpan)>, EngineError> {
-        let cadence = match &item.recurrence {
+        let rule_line = match &item.recurrence {
             // A one-off needs no expansion library at all.
             Recurrence::Once => {
                 let resolved = item.span.resolve(expansion.observer)?;
@@ -149,7 +149,10 @@ impl RruleEngine {
                     Vec::new()
                 });
             }
-            Recurrence::Every(cadence) => cadence,
+            Recurrence::Every(cadence) => rrule_line(cadence),
+            // Passed through byte-for-byte: this is a rule Clipper deliberately
+            // does not model, so re-serializing it would risk changing it.
+            Recurrence::Raw(raw) => raw.as_str().to_string(),
         };
 
         let zone = effective_zone(item, expansion.observer);
@@ -157,7 +160,7 @@ impl RruleEngine {
             "DTSTART;TZID={}:{}\nRRULE:{}",
             zone.name(),
             item.span.local_start().format("%Y%m%dT%H%M%S"),
-            rrule_line(cadence),
+            rule_line,
         );
         let set = rrule::RRuleSet::from_str(&text)
             .map_err(|source| EngineError::RuleRejected(source.to_string()))?;

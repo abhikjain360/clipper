@@ -21,6 +21,9 @@ impl Recurrence {
         match self {
             Self::Once => "Once".to_string(),
             Self::Every(cadence) => cadence.summary(),
+            // No attempt to render a rule Clipper does not model. A wrong
+            // plain-English summary would be worse than an honest label.
+            Self::Raw(_) => "Repeats (from calendar)".to_string(),
         }
     }
 }

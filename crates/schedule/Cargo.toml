@@ -8,12 +8,14 @@ license-file.workspace = true
 clipper-api-types.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
+calcard = "0.3.13"
 rrule.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-uuid = { workspace = true, features = ["serde", "v4"] }
+uuid = { workspace = true, features = ["serde", "v4", "v5"] }
 
 [dev-dependencies]
+uuid = { workspace = true, features = ["v4", "v5"] }
 serde_json.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true

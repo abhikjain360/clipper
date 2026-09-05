@@ -6,12 +6,14 @@
 //! user input, and never round-tripped. Every constructor below validates, so
 //! an out-of-range weekday ordinal or an empty weekday set cannot be built.
 //!
-//! Rules that Google returns and this enum cannot express will need a variant
-//! of their own when ingest lands. Adding one is a compiler-guided change:
-//! every `match` in the crate is exhaustive and will fail to build until the
-//! new case is handled. That is the point of not storing a string.
+//! Ingest is the exception, and it has its own variant rather than a loophole.
+//! A provider can send a rule this enum cannot express, and [`Recurrence::Raw`]
+//! carries it verbatim — validated at construction, expanded as-is, and never
+//! editable in Clipper, because Clipper does not understand its structure. The
+//! type says which rules are understood and which are passed through, which is
+//! the property that matters; a bare string field everywhere would say nothing.
 
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, str::FromStr};
 
 use chrono::{DateTime, Month, Utc, Weekday};
 use serde::{Deserialize, Serialize};
@@ -22,8 +24,56 @@ use serde::{Deserialize, Serialize};
 pub enum Recurrence {
     /// Happens once. The overwhelming majority of ingested meetings.
     Once,
-    /// Repeats on a cadence.
+    /// Repeats on a cadence Clipper understands and can edit.
     Every(Cadence),
+    /// An RFC 5545 rule ingested from a provider that [`Cadence`] cannot
+    /// express. Expanded verbatim and read-only: Clipper can show when it
+    /// happens without claiming to understand why.
+    Raw(RawRule),
+}
+
+/// An RFC 5545 `RRULE` value, validated on the way in.
+///
+/// Parsing at construction rather than at expansion means an unparseable feed
+/// is rejected where it arrives, not hours later when an alarm fails to fire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RawRule(String);
+
+impl RawRule {
+    /// A reference start used only to check that the rule parses. Any valid
+    /// instant works; the real `DTSTART` comes from the item being expanded.
+    const PROBE_DTSTART: &'static str = "DTSTART:20200101T000000Z";
+
+    pub fn new(rule: impl Into<String>) -> Result<Self, RecurrenceError> {
+        let rule = rule.into();
+        let trimmed = rule.trim().trim_start_matches("RRULE:").trim().to_string();
+        if trimmed.is_empty() {
+            return Err(RecurrenceError::UnparseableRule("empty rule".into()));
+        }
+        let probe = format!("{}\nRRULE:{trimmed}", Self::PROBE_DTSTART);
+        rrule::RRuleSet::from_str(&probe)
+            .map_err(|error| RecurrenceError::UnparseableRule(error.to_string()))?;
+        Ok(Self(trimmed))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for RawRule {
+    type Error = RecurrenceError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<RawRule> for String {
+    fn from(value: RawRule) -> Self {
+        value.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,6 +405,8 @@ impl RecurrenceEnd {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecurrenceError {
+    #[error("recurrence rule could not be parsed: {0}")]
+    UnparseableRule(String),
     #[error("a repeat interval must be at least 1")]
     ZeroInterval,
     #[error("a repeat count must be at least 1")]
