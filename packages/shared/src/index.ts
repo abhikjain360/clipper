@@ -1,4 +1,6 @@
 export type {
+  AlarmPolicy,
+  AlarmView,
   AppState,
   ClipboardItem,
   ClipboardPayload,

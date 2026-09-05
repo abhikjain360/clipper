@@ -8,6 +8,7 @@ import {
   type DecryptedClipboardItem,
   type DecryptedFileItem,
   type DeviceInfo as NativeDeviceInfo,
+  type AlarmView as NativeAlarmView,
   type CalendarSourceView as NativeCalendarSourceView,
   type ScheduleItemView as NativeScheduleItemView,
 } from "./generated/clipper_app_types";
@@ -16,6 +17,7 @@ import {
   type MobileClipperClientLike,
 } from "./generated/clipper_mobile_uniffi";
 import type {
+  AlarmView,
   AppState,
   ClipboardItem,
   ClipboardPayload,
@@ -102,6 +104,8 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     // strings. Series still *sync* to this device and appear in
     // `state.scheduleItems` — only creating and expanding are missing. These
     // throw rather than silently no-op so a premature caller is obvious.
+    nextAlarms: async (withinHours, observerZone) =>
+      (await client.nextAlarms(withinHours, observerZone)).map(mapAlarmView),
     addCalendarSource: async () => {
       throw new Error("Adding a calendar source is not available on mobile yet");
     },
@@ -175,6 +179,18 @@ function mapCollabItem(item: NativeCollabItem): CollabItem {
     share_url: item.shareUrl ?? null,
     title: item.title,
     updated_at: item.updatedAt,
+  };
+}
+
+function mapAlarmView(alarm: NativeAlarmView): AlarmView {
+  return {
+    // UniFFI maps Rust's i64 to bigint. Epoch milliseconds sit far inside
+    // Number.MAX_SAFE_INTEGER, and the platform alarm APIs want a plain number.
+    fire_at_millis: Number(alarm.fireAtMillis),
+    item_id: alarm.itemId,
+    label: alarm.label,
+    occurrence_key: alarm.occurrenceKey,
+    occurrence_start_millis: Number(alarm.occurrenceStartMillis),
   };
 }
 

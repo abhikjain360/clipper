@@ -96,12 +96,20 @@ export type ObjectRef = {
 };
 
 /// A series definition. Stored once however often it repeats.
+/// When a block should raise an alarm. Absent means silent, which is the
+/// default — most blocks are a record of intent, not a reason to wake someone.
+export type AlarmPolicy = {
+  /// Minutes before the block starts. Zero rings at the start.
+  minutes_before: number;
+};
+
 export type ScheduleItem = {
   id: string;
   title: string;
   span: ScheduleSpan;
   recurrence: Recurrence;
   reference?: ObjectRef | null;
+  alarm?: AlarmPolicy | null;
 };
 
 /// A series as rendered for a list. Built by the Rust side so every shell shows
@@ -132,6 +140,15 @@ export type OccurrenceView = {
   // Cancelled upstream. Shown rather than hidden — time logged against it
   // survives the cancellation.
   cancelled: boolean;
+};
+
+/// One alarm for the platform to register.
+export type AlarmView = {
+  item_id: string;
+  occurrence_key: string;
+  label: string;
+  fire_at_millis: number;
+  occurrence_start_millis: number;
 };
 
 /// A calendar Clipper pulls events from.
@@ -231,6 +248,9 @@ export type ClipperBackend = {
   refresh: () => Promise<void>;
   sendClipboardText: (text: string) => Promise<string>;
   sendCurrentClipboardText?: () => Promise<string | null>;
+  // Alarms due soon, soonest first. Optional: only the shells with a platform
+  // alarm layer implement it, which today means Android.
+  nextAlarms?: (withinHours: number, observerZone: string) => Promise<AlarmView[]>;
   sendClipboardPayload: (mimeType: string, bytes: Uint8Array) => Promise<string>;
   clipboardPayload: (id: string) => Promise<ClipboardPayload>;
   writeClipboardItemText?: (id: string) => Promise<void>;
