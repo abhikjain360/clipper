@@ -36,11 +36,10 @@ is the missing control.
   bearer tokens. Per-session and admin revocation remain the gap this doc plans to
   close.
 - The schema is already prepared for device retirement:
-  `objects.source_device_id` is nullable with an `ON DELETE SET NULL` foreign
-  key, so deleting a device detaches the objects it created (rather than the old
-  `ON DELETE RESTRICT`, which would have blocked the delete) without losing the
-  objects. A reclaim/revoke flow therefore only needs the endpoint and the
-  session cascade, not a schema change to the objects table.
+  `object_revisions.source_device_id` is nullable with an `ON DELETE SET NULL`
+  foreign key, so deleting a device detaches the revisions it created without
+  losing the object or its history. The endpoint and session cascade need no
+  further object-schema change.
 
 ## Plan
 
@@ -65,8 +64,9 @@ Use the existing `sessions.last_seen_at` column for the listing UI.
 lists the user's devices (id, name, platform, created-at, last-seen,
 `is_current`) and `DELETE /api/auth/devices/{id}` removes one. Both are scoped to
 `user_id`; `sessions.device_id` is `ON DELETE CASCADE`, so removing a device
-deletes its sessions (revoking its bearer tokens), and `objects.source_device_id`
-is `ON DELETE SET NULL`, so its objects are detached and kept.
+deletes its sessions (revoking its bearer tokens), and
+`object_revisions.source_device_id` is `ON DELETE SET NULL`, so its object
+history is detached and kept.
 
 Still open if soft-revoke is wanted instead of hard delete: add `state`
 (`active` | `revoked`) + `revoked_at` to `devices` and reject a revoked device id
@@ -80,7 +80,8 @@ provenance, not the load-bearing authenticity mechanism (that is AEAD+AAD under
 use of the device id; it does not retroactively invalidate history. Document this
 so the guarantee is not over-claimed. If a revoke also **deletes** the device row
 (rather than just flagging it), the `ON DELETE SET NULL` foreign key nulls each
-object's `source_device_id`; the list/get response then returns
+revision's `source_device_id`; a list/get response whose head came from that
+device then returns
 `source_device_signing_public_key = None` and the client skips the (now
 unavailable) provenance check while still verifying AEAD+AAD.
 

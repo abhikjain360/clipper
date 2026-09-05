@@ -178,16 +178,16 @@ single user can accumulate: `issue_session`
 (`crates/server/src/routes/auth.rs`) counts the user's existing devices before
 inserting a new one and rejects the login with `403 Device limit reached` once
 the user is at the cap. An existing device re-authenticating reuses its row and
-is never blocked. The count and insert are not one transaction, so concurrent
-new-device logins can overshoot the cap by a small margin — acceptable for a
-coarse anti-abuse bound that still prevents unbounded growth. The value is
-validated like the other quotas (non-zero, fits `i64`).
+is never blocked. The count, device insert, and session insert share one
+transaction, so concurrent new-device logins cannot race past the cap and a
+failed session insert cannot orphan a device. The value is validated like the
+other quotas (non-zero, fits `i64`).
 
 A user at the cap frees a slot by reclaiming a device. The
-`objects.source_device_id` foreign key is `ON DELETE SET NULL`, so deleting a
-device detaches the objects it created (their provenance pointer becomes NULL)
-rather than blocking the delete or cascading into the objects; the authoritative
-source device id still lives, signed, inside each object envelope. (The
+`object_revisions.source_device_id` foreign key is `ON DELETE SET NULL`, so
+deleting a device detaches the revisions it created rather than blocking the
+delete or cascading into object history; the authoritative source device id
+still lives, signed, inside each revision envelope. (The
 user-facing device-removal endpoint is shipped: `DELETE /api/auth/devices/{id}`,
 user-scoped, with the device's sessions cascade-deleted — see
 `docs/revocation.md`.)
@@ -195,8 +195,8 @@ user-scoped, with the device's sessions cascade-deleted — see
 ### What counts toward the quota
 
 The reserved byte amount for an object is computed by
-`init_request_storage_bytes`, which sums **only** the declared
-`ciphertext_size` of each payload in the init request (with a per-payload
+the init/revise handlers, which sum **only** the declared `ciphertext_size` of
+each payload in the revision request (with a per-payload
 `>= 0` check and a checked add that rejects overflow as `PayloadTooLarge`).
 
 This means:
@@ -205,18 +205,19 @@ This means:
   content, whether inline or streamed.
 - **Object metadata ciphertext (`meta_ciphertext`) and the signed envelope do
   not count** toward `storage_bytes`. They are separately bounded only by
-  `limits.max_object_meta_ciphertext_bytes` (default 64 KiB) per object and by
-  the per-user `object_count` cap.
-- Every successfully initialized object increments `object_count` by exactly 1,
-  regardless of kind or payload count.
+  `limits.max_object_meta_ciphertext_bytes` (default 64 KiB) per revision.
+- A genesis revision increments `object_count` by exactly 1. Later revisions
+  reserve their payload bytes with `objects_added = 0`, so retained history is
+  charged without consuming another object slot.
 
-Both clipboard and file objects reserve quota at init time. (Clipboard objects
-are additionally trimmed to `clipboard.max_items`, which releases their quota;
-see below.)
+Clipboard, file, and schedule objects reserve quota at init time. File and
+schedule revisions reserve their additional bytes when written. Clipboard
+objects are additionally trimmed to `clipboard.max_items`, which releases the
+whole object's usage; see below.
 
 ### Where and how it is enforced
 
-Reservation happens inside the `init_object` transaction, via
+Reservation happens inside the `init_object` or `revise_object` transaction, via
 `reserve_user_storage_quota` → `storage_quota::try_reserve_user_storage`, after
 the object and payload rows are inserted but before the transaction commits. The
 reservation is a single conditional `UPDATE users` that both increments the
@@ -224,10 +225,10 @@ counters and asserts the post-increment values stay within bounds:
 
 ```rust
 .col_expr(StorageBytes, StorageBytes + storage_bytes)
-.col_expr(ObjectCount,  ObjectCount + 1)
+.col_expr(ObjectCount,  ObjectCount + objects_added)
 .filter(Id.eq(user_id))
 .filter(StorageBytes.lte(max_storage_bytes - storage_bytes))
-.filter(ObjectCount.lte(max_objects - 1))
+.filter(ObjectCount.lte(max_objects - objects_added))
 ```
 
 The update affects exactly one row only if both filters hold, so the check and
@@ -258,18 +259,21 @@ undone, and any staged inline payload files are removed on drop).
 `storage_quota::release_user_storage` decrements both counters (guarded so they
 never go negative) and is called whenever an object's bytes leave the system:
 
-- **File delete** (`DELETE /api/objects/{id}`): inside the delete transaction,
-  releasing `object_count: 1` and the summed payload bytes.
+- **Object purge** (`DELETE /api/objects/{id}`): after a signed tombstone has
+  made the file or schedule object non-live, the purge transaction locks the
+  object, removes its entire revision chain, and releases `object_count: 1`
+  plus every revision's payload bytes.
 - **Clipboard trim** (`cleanup::trim_user_clipboard`, spawned after each
   clipboard init/complete and also run by the periodic cleanup loop): deletes
   clipboard objects beyond `clipboard.max_items` and releases their usage.
 - **Orphan upload cleanup** (`cleanup::cleanup_orphan_object_uploads`): deletes
-  never-completed objects with no upload progress for
-  `cleanup.orphan_upload_ttl_secs` and releases their usage. Eligibility keys on
-  the server-assigned `objects.updated_at` (stamped at init and bumped on each
-  payload upload), never the client envelope's `created_at`, so a backdated or
-  future-dated `created_at` can neither force an instant reap nor escape the
-  sweep.
+  incomplete revisions with no upload progress for
+  `cleanup.orphan_upload_ttl_secs`, releases those revisions' bytes, and removes
+  the object slot only when an unpublished genesis was the whole object.
+  Eligibility keys on server-assigned `object_revisions.stored_at` (stamped at
+  init/revise and bumped on each payload upload), never the client envelope's
+  `created_at`, so a forged timestamp can neither force an instant reap nor
+  escape the sweep.
 
 `delete_objects_and_release_usage` recomputes the freed usage from the rows
 being deleted (`object_usage_by_user`) inside the transaction and asserts the
