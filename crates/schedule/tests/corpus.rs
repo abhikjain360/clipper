@@ -79,7 +79,6 @@ fn weekdays_mwf() {
         Recurrence::Every(Cadence::each(Frequency::Weekly {
             weekdays: WeekdaySet::new(&[Weekday::Mon, Weekday::Wed, Weekday::Fri])
                 .expect("non-empty"),
-            week_start: Weekday::Mon,
         })),
     );
     assert_eq!(
@@ -96,7 +95,6 @@ fn every_2_weeks_tue() {
             Cadence::every(
                 Frequency::Weekly {
                     weekdays: WeekdaySet::just(Weekday::Tue),
-                    week_start: Weekday::Mon,
                 },
                 2,
             )
@@ -106,6 +104,27 @@ fn every_2_weeks_tue() {
     assert_eq!(
         next_after(&item, (2026, 6, 12, 10, 0)).as_deref(),
         Some("2026-06-23T07:00")
+    );
+}
+
+// Sunday and the following Monday belong to different recurrence weeks.
+#[test]
+fn fortnightly_weeks_start_on_monday() {
+    let item = item(
+        "20260607T070000",
+        Recurrence::Every(
+            Cadence::every(
+                Frequency::Weekly {
+                    weekdays: WeekdaySet::new(&[Weekday::Sun, Weekday::Mon]).expect("non-empty"),
+                },
+                2,
+            )
+            .expect("non-zero interval"),
+        ),
+    );
+    assert_eq!(
+        next_after(&item, (2026, 6, 7, 10, 0)).as_deref(),
+        Some("2026-06-15T07:00")
     );
 }
 
@@ -259,7 +278,6 @@ fn until_past() {
         Recurrence::Every(
             Cadence::each(Frequency::Weekly {
                 weekdays: WeekdaySet::just(Weekday::Mon),
-                week_start: Weekday::Mon,
             })
             .ending(RecurrenceEnd::On(until)),
         ),
