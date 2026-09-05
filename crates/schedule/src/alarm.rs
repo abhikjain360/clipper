@@ -96,7 +96,7 @@ pub fn plan_alarms(
 
 #[cfg(test)]
 mod tests {
-    use chrono::{NaiveDateTime, TimeZone, Weekday};
+    use chrono::{NaiveDateTime, TimeZone};
     use chrono_tz::Tz;
 
     use super::*;
@@ -125,7 +125,6 @@ mod tests {
             },
             recurrence: Recurrence::Every(Cadence::each(Frequency::Weekly {
                 weekdays: WeekdaySet::weekdays(),
-                week_start: Weekday::Mon,
             })),
             reference: None,
             alarm,

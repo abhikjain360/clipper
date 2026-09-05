@@ -413,14 +413,11 @@ fn rrule_line(cadence: &Cadence) -> String {
     let mut parts = Vec::new();
     match &cadence.frequency {
         Frequency::Daily => parts.push("FREQ=DAILY".to_string()),
-        Frequency::Weekly {
-            weekdays,
-            week_start,
-        } => {
+        Frequency::Weekly { weekdays } => {
             parts.push("FREQ=WEEKLY".to_string());
             let days: Vec<&str> = weekdays.iter().map(ical_weekday).collect();
             parts.push(format!("BYDAY={}", days.join(",")));
-            parts.push(format!("WKST={}", ical_weekday(*week_start)));
+            parts.push("WKST=MO".to_string());
         }
         Frequency::Monthly(rule) => {
             parts.push("FREQ=MONTHLY".to_string());

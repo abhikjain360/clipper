@@ -79,7 +79,7 @@ not become a surprise during QA.
   the envelope and security documentation to match the code.
 - Follow-up recurrence fixes display unsupported cadences as Custom, make
   clicking the selected cadence a no-op, and preserve recurrence end conditions
-  and week start when changing repeat settings. The interval is preserved when
+  when changing repeat settings. Weekly cadences always start on Monday. The interval is preserved when
   the recurrence unit stays the same. Raw rules now reject control characters
   that could inject another calendar property.
 - Follow-up native storage fixes preserve anchors when cached content cannot be

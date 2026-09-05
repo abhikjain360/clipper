@@ -184,7 +184,6 @@ mod tests {
     fn weekly(days: &[Weekday]) -> Recurrence {
         Recurrence::Every(Cadence::each(Frequency::Weekly {
             weekdays: WeekdaySet::new(days).expect("non-empty"),
-            week_start: Weekday::Mon,
         }))
     }
 
@@ -214,7 +213,6 @@ mod tests {
             Cadence::every(
                 Frequency::Weekly {
                     weekdays: WeekdaySet::just(Weekday::Tue),
-                    week_start: Weekday::Mon,
                 },
                 2,
             )

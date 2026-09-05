@@ -67,7 +67,7 @@ export type MonthlyRule =
 
 export type Frequency =
   | { unit: "daily" }
-  | { unit: "weekly"; weekdays: Weekday[]; week_start: Weekday }
+  | { unit: "weekly"; weekdays: Weekday[] }
   | ({ unit: "monthly" } & MonthlyRule)
   | { unit: "yearly"; month: MonthName; day: MonthDay };
 

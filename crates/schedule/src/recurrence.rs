@@ -130,14 +130,8 @@ impl Cadence {
 pub enum Frequency {
     /// Every N days.
     Daily,
-    /// On the given weekdays, every N weeks.
-    Weekly {
-        weekdays: WeekdaySet,
-        /// Which day the week starts on. Changes which occurrences fall in
-        /// which interval when `interval > 1`, so it is not cosmetic.
-        #[serde(with = "weekday_name")]
-        week_start: Weekday,
-    },
+    /// On the given weekdays, every N weeks, with weeks starting on Monday.
+    Weekly { weekdays: WeekdaySet },
     /// Every N months, on a day picked by ordinal or by weekday.
     Monthly(MonthlyRule),
     /// Every N years, in a fixed month, on a day of that month.
