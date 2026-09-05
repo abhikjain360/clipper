@@ -1699,12 +1699,23 @@ async fn object_list_items(
     user_id: Uuid,
     objects: &[ListedObjectRow],
 ) -> Result<Vec<ObjectListItem>, ApiError> {
-    let object_ids: Vec<Uuid> = objects.iter().map(|object| object.id).collect();
-    let payloads = if object_ids.is_empty() {
+    // Scoped to each object's *head* revision, not just its id. Payloads now
+    // belong to a revision, so an object with history has several sets of them;
+    // an id-only filter returns all of them at once and the client rejects the
+    // item for having more payloads than its envelope declares.
+    let mut head_payloads = Condition::any();
+    for object in objects {
+        head_payloads = head_payloads.add(
+            Condition::all()
+                .add(object_payloads::Column::ObjectId.eq(object.id))
+                .add(object_payloads::Column::Revision.eq(object.revision)),
+        );
+    }
+    let payloads = if objects.is_empty() {
         Vec::new()
     } else {
         object_payloads::Entity::find()
-            .filter(object_payloads::Column::ObjectId.is_in(object_ids))
+            .filter(head_payloads)
             .filter(object_payloads::Column::Status.eq("complete"))
             .order_by(object_payloads::Column::ObjectId, Order::Asc)
             .order_by(object_payloads::Column::PayloadId, Order::Asc)
@@ -2215,6 +2226,11 @@ async fn validate_object_envelope(
         debug!(
             object_id = %object_id,
             device_id = %device_id,
+            id_ok = body.object_id.into_uuid() == object_id,
+            kind_ok = body.object_type == ctx.kind,
+            version_ok = body.envelope_version == OBJECT_ENVELOPE_VERSION_V2,
+            device_ok = body.source_device_id.into_uuid() == device_id,
+            nonce_ok = body.meta_nonce == ctx.meta_nonce,
             "Rejected object write with envelope fields that do not match request context",
         );
         return Err(ApiError::from_code_with_message(

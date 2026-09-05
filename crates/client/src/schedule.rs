@@ -53,16 +53,6 @@ impl ScheduleRecord {
         }
     }
 
-    /// The meta a tombstone revision carries. There is no record behind it —
-    /// that is what a tombstone means — but the column still has to hold
-    /// something, and it may as well say so.
-    pub fn tombstone_meta() -> ScheduleMeta {
-        ScheduleMeta {
-            record: ScheduleRecordKind::Tombstone,
-            version: SCHEDULE_PAYLOAD_VERSION,
-        }
-    }
-
     /// The series definition, if this is one.
     pub fn as_item(&self) -> Option<&ScheduleItem> {
         match self {

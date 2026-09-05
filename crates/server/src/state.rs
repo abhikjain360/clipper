@@ -178,11 +178,11 @@ impl AppState {
             .one(self.db())
             .await?;
         // Every revision holds a seq, not only the head, and a superseded one
-        // is retained (D6). Seeding from `objects.published_seq` would still be
-        // correct today — a chain's head always carries its largest seq — but
-        // it would quietly stop being correct the moment retention starts
-        // pruning heads, so read the revisions themselves.
-        let max_object_seq: Option<i64> = object_revisions::Entity::find()
+        // is retained (D6). Seeding from `objects.published_seq` alone would
+        // still be correct today — a chain's head always carries its largest
+        // seq — but it would quietly stop being correct the moment retention
+        // starts pruning heads, so read the revisions themselves.
+        let max_revision_seq: Option<i64> = object_revisions::Entity::find()
             .filter(object_revisions::Column::CreatedSeq.is_not_null())
             .select_only()
             .column(object_revisions::Column::CreatedSeq)
@@ -191,7 +191,22 @@ impl AppState {
             .one(self.db())
             .await?
             .flatten();
-        let seed = max_event_seq.unwrap_or(0).max(max_object_seq.unwrap_or(0));
+        // And collab objects have no revisions at all, so their seq exists only
+        // on the object row. Missing them would let a restart reissue a seq
+        // beneath a live collab document's.
+        let max_published_seq: Option<i64> = objects::Entity::find()
+            .filter(objects::Column::PublishedSeq.is_not_null())
+            .select_only()
+            .column(objects::Column::PublishedSeq)
+            .order_by_desc(objects::Column::PublishedSeq)
+            .into_tuple::<Option<i64>>()
+            .one(self.db())
+            .await?
+            .flatten();
+        let seed = max_event_seq
+            .unwrap_or(0)
+            .max(max_revision_seq.unwrap_or(0))
+            .max(max_published_seq.unwrap_or(0));
         self.inner.event_seq.store(seed, Ordering::SeqCst);
         Ok(())
     }
