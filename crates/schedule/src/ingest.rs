@@ -1,12 +1,12 @@
 //! Calendar sources, and the events pulled from them.
 //!
-//! These are the original calendar fields owned
-//! upstream, written only by the sync worker, never edited in Clipper. The
-//! user's plan for an ingested event is a separate record, so a refresh that
-//! replaces the original wholesale cannot clobber anything the user wrote.
+//! An ingested event holds the provider's own fields. Only the sync worker
+//! writes them and Clipper never edits them. The user's plan for an ingested
+//! event is a separate record, so a refresh can replace the original wholesale
+//! without touching anything the user wrote.
 //!
-//! Parsing lives here because it is pure. Fetching does not — that needs I/O and
-//! belongs to whichever client holds the source.
+//! Parsing lives here because it is pure. Fetching needs I/O, so it belongs to
+//! whichever client holds the source.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -26,7 +26,8 @@ use crate::{
     time::{BlockDuration, ScheduleSpan, TimeError, TimedStart},
 };
 
-/// Bound parser work even when `parse_ics` is called outside the HTTP fetcher.
+/// Bounds parser work even when `parse_ics` is called outside the HTTP
+/// fetcher.
 const MAX_ICS_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COMPONENTS: usize = 50_000;
 const MAX_PROPERTIES: usize = 500_000;
@@ -55,16 +56,16 @@ impl std::fmt::Display for SourceId {
 
 /// A calendar Clipper pulls events from.
 ///
-/// Stored as an encrypted object like everything else, which matters here: an
-/// iCalendar feed URL *is* the credential, so it must never be server-visible.
+/// Stored as an encrypted object. An iCalendar feed URL is the credential for
+/// that feed, so it must never be server-visible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalendarSource {
     pub id: SourceId,
-    /// What the user calls it — "Work", "Gmail", "Zoho".
+    /// What the user calls it: "Work", "Gmail", "Zoho".
     pub name: String,
     pub kind: SourceKind,
-    /// Whether this client should sync it. Per-client, because each device
-    /// decides which sources it is responsible for.
+    /// Whether this client syncs it. Per-client, because each device picks the
+    /// sources it is responsible for.
     pub enabled: bool,
     /// Only this complete batch contributes events to the current calendar.
     pub active_import: Option<CalendarImport>,
@@ -95,28 +96,27 @@ impl CalendarSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "protocol", rename_all = "snake_case")]
 pub enum SourceKind {
-    /// A read-only iCalendar feed at a private URL. No OAuth and no admin
-    /// approval, making it a fallback for a work calendar
-    /// whose Workspace blocks third-party apps. It is coarser than the API:
-    /// polling only, and it carries no RSVP or attendee detail.
+    /// A read-only iCalendar feed at a private URL. It needs no OAuth and no
+    /// admin approval, so it reaches a work calendar whose workspace blocks
+    /// third-party apps. It is polling only and carries no RSVP or attendee
+    /// detail.
     Ics { url: String },
 }
 
 /// An event as the provider describes it. Read-only in Clipper.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IngestedEvent {
-    /// Stable domain identity derived from `(source, uid)`. Storage still uses
-    /// batch-specific object identities when an import snapshot is replaced.
+    /// Stable identity derived from `(source, uid)`. Storage still gives each
+    /// batch its own object ids when an import snapshot is replaced.
     pub id: Uuid,
     pub source: SourceId,
-    /// Complete original feed. Typed cadences and one-off events remain usable
-    /// if it is unavailable; reference-backed recurrence cannot expand without
-    /// resolving its raw rule from this snapshot. Together with `uid` this
-    /// identifies the original series and its provider overrides.
+    /// The snapshot of the complete original feed. With `uid` it names the
+    /// original series and its provider overrides. A typed cadence or a
+    /// one-off still works without it; a [`Recurrence::Imported`] cannot
+    /// expand until its rule is read back out of this snapshot.
     pub import: Option<clipper_api_types::ObjectId>,
-    /// The provider's own identifier. Stable across edits, and stable across
-    /// calendars for the same meeting, which is what makes cross-source
-    /// deduplication possible later.
+    /// The provider's own identifier. Stable across edits, and the same in
+    /// every calendar that carries the meeting.
     pub uid: String,
     pub title: String,
     pub description: Option<String>,
@@ -130,7 +130,8 @@ pub struct IngestedEvent {
 }
 
 impl IngestedEvent {
-    /// Both provenance and opaque recurrence must identify the same source event.
+    /// True when the provenance and the recurrence reference name the same
+    /// source event.
     pub fn belongs_to_import(&self, import: ObjectId) -> bool {
         self.import == Some(import)
             && match &self.recurrence {
@@ -144,8 +145,8 @@ impl IngestedEvent {
 
     /// The stable id for an event, given its source and provider uid.
     pub fn derive_id(source: SourceId, uid: &str) -> Uuid {
-        // A fixed namespace so the derivation is reproducible across devices —
-        // two clients ingesting the same feed must agree on ids.
+        // A fixed namespace, so two clients ingesting the same feed derive
+        // the same ids.
         const NAMESPACE: Uuid = Uuid::from_u128(0x9f2c_4c6e_5d17_4c9b_a1e8_3f0b_7d24_88a1);
         Uuid::new_v5(&NAMESPACE, format!("{source}:{uid}").as_bytes())
     }
@@ -156,15 +157,15 @@ impl IngestedEvent {
 pub enum IngestedStatus {
     Confirmed,
     Tentative,
-    /// Cancelled upstream. Tombstoned rather than erased so that time
-    /// already logged against the meeting survives it.
+    /// Cancelled upstream. Kept as a tombstone rather than erased, so time
+    /// already logged against the meeting survives.
     Cancelled,
 }
 
 /// What one pass over a feed produced.
 ///
-/// Skipped events are reported rather than swallowed: a feed that silently
-/// drops half its entries is worse than one that says which it could not read.
+/// Skipped events are reported, never dropped silently, so a caller can see
+/// which entries did not parse.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestOutcome {
     pub events: Vec<IngestedEvent>,
@@ -179,11 +180,11 @@ pub struct SkippedEvent {
 
 /// Parse an iCalendar feed into events.
 ///
-/// Includes all-day events and invites regardless of organizer or RSVP.
-/// Attendance status is retained as metadata rather than used as a filter.
+/// Takes all-day events and invites whatever the organizer or RSVP says.
+/// Attendance status is kept as metadata, never used as a filter.
 ///
-/// `import` identifies the immutable raw file this parse came from. Opaque
-/// recurrence rules retain only that snapshot ID and their event UID.
+/// `import` names the immutable raw file this parse came from. An opaque
+/// recurrence rule stores only that snapshot id and its event UID.
 pub fn parse_ics(
     text: &str,
     source: SourceId,
@@ -241,10 +242,10 @@ pub fn parse_ics(
     Ok(outcome)
 }
 
-/// Recover validated opaque recurrence rules from one immutable import file.
+/// Reads the validated opaque recurrence rules out of one import snapshot.
 ///
-/// Callers can merge the result for several snapshots, then construct one
-/// [`crate::RruleEngine`] and reuse it while expanding their events.
+/// Merge the results for several snapshots to build one [`crate::RruleEngine`]
+/// that expands every event in them.
 pub fn parse_imported_recurrence_rules(
     text: &str,
     import: ObjectId,
@@ -445,13 +446,13 @@ fn span_from(
             duration_minutes(delta.num_seconds())?
         }
         None if duration.is_some() => ical_duration_minutes(duration.expect("checked above"))?,
+        // RFC 5545 makes a timed VEVENT with no DTEND and no DURATION
+        // instantaneous. An instant cannot be drawn, so it gets the shortest
+        // block the grid can show.
         None => match inherited {
             Some(ScheduleSpan::Timed { duration, .. }) => duration.minutes(),
             _ => 5,
         },
-        // RFC 5545 says a VEVENT with no DTEND and no DURATION lasts a day when
-        // date-only, and is instantaneous otherwise. An instant cannot be drawn,
-        // so give it the shortest block the grid can show.
     };
 
     Ok(ScheduleSpan::Timed {
@@ -581,9 +582,9 @@ fn recurrence_overrides(
         );
     }
 
-    // RFC 5545 gives EXDATE precedence over inclusion dates. Apply it last so
-    // a duplicated RDATE, or a detached component for the same recurrence
-    // position, cannot accidentally resurrect an explicitly excluded date.
+    // RFC 5545 gives EXDATE precedence over inclusion dates, so apply it last.
+    // A duplicated RDATE, or a detached component at the same recurrence
+    // position, then cannot bring an excluded date back.
     for excluded in recurrence_times(master, "EXDATE")? {
         let recurrence_id = recurrence_id_for(master_span, &excluded)?;
         by_recurrence_id.insert(
@@ -700,8 +701,8 @@ fn rrule_text(
         return Err(IngestError::AmbiguousRecurrenceRule);
     }
     match entry.values.first() {
-        // calcard round-trips a parsed rule back to RFC 5545 text, which is
-        // what the expansion engine wants — no re-derivation here.
+        // calcard prints a parsed rule back as RFC 5545 text, which is the
+        // form the expansion engine takes.
         Some(ICalendarValue::RecurrenceRule(rule)) => Ok(Some(rule.to_string())),
         Some(ICalendarValue::Text(text)) => Ok(Some(text.clone())),
         _ => Err(IngestError::AmbiguousRecurrenceRule),
@@ -783,9 +784,9 @@ fn feed_time_from_partial(
     if partial.tz_hour.is_some()
         && (partial.tz_hour != Some(0) || partial.tz_minute.unwrap_or(0) != 0)
     {
-        // RFC 5545 DATE-TIME permits UTC (`Z`) or a TZID, not a numeric UTC
-        // offset. The domain model intentionally has no fixed-offset zone, so
-        // accepting one as UTC would move the event.
+        // RFC 5545 DATE-TIME allows UTC (`Z`) or a TZID, not a numeric UTC
+        // offset. There is no fixed-offset zone in the domain model, so
+        // reading one as UTC would move the event.
         return Err(IngestError::UnsupportedUtcOffset);
     }
 

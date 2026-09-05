@@ -1,18 +1,18 @@
 //! Scheduling domain types and recurrence expansion for Clipper.
 //!
-//! Pure: no I/O, no crypto, no storage. Everything here is computable from its
-//! inputs, so recurrence and time behavior can be tested without running a
-//! server or a platform UI.
+//! No I/O, no crypto, no storage. Every result follows from its inputs, so
+//! recurrence and time behavior test without a server or a platform UI.
 //!
-//! Three shapes matter, and they are separate types on purpose:
+//! Plan, deviation and outcome are three separate types:
 //!
-//! - [`ScheduleItem`] is a *series*, stored once however often it repeats.
-//! - [`OccurrenceOverride`] exists only for occurrences that deviate.
-//! - [`ActualRecord`] is what really happened, kept apart from what was planned
-//!   so that logged time survives the plan changing under it.
+//! - [`ScheduleItem`] is a series, stored once however often it repeats.
+//! - [`OccurrenceOverride`] exists only for an occurrence that differs from
+//!   the series.
+//! - [`ActualRecord`] is what happened. It sits apart from the plan, so logged
+//!   time survives an edit to the series.
 //!
-//! Occurrences are computed, never stored, and always within a caller-supplied
-//! window.
+//! Occurrences are computed on demand inside a caller-supplied window, never
+//! stored.
 
 pub mod alarm;
 pub mod engine;

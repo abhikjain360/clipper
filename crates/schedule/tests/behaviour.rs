@@ -736,8 +736,8 @@ fn the_wire_format_is_self_describing() {
     assert_eq!(back, item);
 }
 
-/// An unsupported imported rule persists only the immutable snapshot and UID.
-/// The opaque provider syntax belongs exclusively to the runtime resolver.
+/// An unsupported imported rule persists only its snapshot id and UID. The
+/// provider syntax stays in the runtime resolver.
 #[test]
 fn an_imported_rule_serializes_only_its_reference() {
     let import = clipper_api_types::ObjectId::from(uuid::Uuid::new_v4());
@@ -794,12 +794,11 @@ fn an_imported_rule_without_its_snapshot_fails_clearly() {
     );
 }
 
-/// A raw rule is one property, and expansion splices it verbatim after
-/// `RRULE:` against the item's real DTSTART and zone. Validation parses a whole
-/// `RRuleSet`, so a value carrying its own line break used to validate as the
-/// probe's DTSTART plus a bonus property, and that property then went live
-/// against a start it was never checked with. Both smuggling shapes matter: an
-/// `EXDATE` silently deletes occurrences, a second `RRULE` silently adds them.
+/// An imported rule is one property, and expansion splices it verbatim after
+/// `RRULE:` against the item's real DTSTART and zone. A value carrying its own
+/// line break would therefore add a second property that validation never saw.
+/// Both shapes matter: an `EXDATE` deletes occurrences, a second `RRULE` adds
+/// them.
 #[test]
 fn a_raw_rule_cannot_smuggle_a_second_property() {
     for smuggled in [
@@ -813,8 +812,8 @@ fn a_raw_rule_cannot_smuggle_a_second_property() {
         );
     }
 
-    // The legitimate value is unaffected: only control characters are refused,
-    // and surrounding whitespace is still trimmed rather than rejected.
+    // Only control characters are refused. Surrounding whitespace is trimmed,
+    // not rejected.
     assert_eq!(
         ValidatedRrule::new("  RRULE:FREQ=DAILY;COUNT=2  ")
             .expect("a padded rule stays valid")

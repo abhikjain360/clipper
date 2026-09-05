@@ -1,11 +1,11 @@
 //! When a block starts and how long it lasts.
 //!
-//! RFC 5545 distinguishes three kinds of start and conflating them breaks the
-//! alarm path. A floating 07:00 alarm follows the
-//! device across timezones; a zoned meeting stays pinned to the zone it was
-//! scheduled in; an all-day event has no instant at all.
+//! There are three kinds of start and they behave differently. A floating
+//! 07:00 alarm follows the device across timezones. A zoned meeting stays
+//! pinned to the zone it was scheduled in. An all-day event has no instant at
+//! all.
 //!
-//! The span type makes the invalid combinations unrepresentable: an all-day
+//! [`ScheduleSpan`] leaves the invalid combinations unrepresentable: an all-day
 //! event cannot carry a minute duration, and a timed event cannot lack a time.
 
 use std::num::NonZeroU32;
@@ -16,18 +16,18 @@ use serde::{Deserialize, Serialize};
 
 /// A start that has a time of day.
 ///
-/// Tagged rather than positional: this shape is the wire format for the UI, the
-/// IPC boundary, and the encrypted payload on disk, all of which are read back
-/// by hand often enough to be worth making self-describing.
+/// Serialized with a `kind` tag. The same shape crosses the IPC boundary,
+/// reaches the UI, and lands in the encrypted payload on disk, and all three
+/// get read by hand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "at", rename_all = "snake_case")]
 pub enum TimedStart {
-    /// Wall-clock time with no zone. Follows the observer: 07:00 is 07:00
-    /// wherever you wake up. This is what an alarm wants.
+    /// Wall-clock time with no zone. Follows the observer, so 07:00 stays
+    /// 07:00 in every zone. Alarms use this.
     Floating(NaiveDateTime),
-    /// Wall-clock time pinned to an IANA zone. Stays put when you travel; the
-    /// local time is stored rather than an instant so that a 09:00 Berlin
-    /// meeting is still 09:00 after a DST transition.
+    /// Wall-clock time pinned to an IANA zone. Does not follow the observer.
+    /// Stores the local time rather than an instant, so a 09:00 Berlin meeting
+    /// is still 09:00 after a DST transition.
     Zoned { local: NaiveDateTime, zone: Tz },
 }
 
@@ -53,9 +53,9 @@ impl TimedStart {
 
 /// A block's extent in time.
 ///
-/// Splitting timed from all-day preserves imported all-day events:
-/// coercing a date into an instant silently moves
-/// it across a border.
+/// All-day is its own variant rather than a timed span of 24 hours. Turning an
+/// all-day date into an instant lands it on a different day for observers in
+/// other zones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScheduleSpan {
@@ -123,14 +123,14 @@ impl ScheduleSpan {
 
 /// How long a timed block lasts.
 ///
-/// Stored in minutes because the UI grid snaps to 5 or 10 of them, but
-/// ingested events are not grid-aligned so any positive count is legal.
+/// Counted in minutes. The UI grid snaps to 5 or 10 of them, but ingested
+/// events do not, so any positive count is legal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockDuration(NonZeroU32);
 
 impl BlockDuration {
-    /// A duration of `minutes`. Zero-length blocks are rejected: an instant is
-    /// not a block, and a zero duration breaks overlap detection.
+    /// Rejects zero. An instant is not a block, and a zero-length span never
+    /// overlaps anything.
     pub fn from_minutes(minutes: u32) -> Result<Self, TimeError> {
         NonZeroU32::new(minutes)
             .map(Self)
@@ -204,11 +204,11 @@ fn resolve_local(zone: Tz, local: NaiveDateTime) -> Option<DateTime<Utc>> {
     match zone.from_local_datetime(&local) {
         LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
         LocalResult::Ambiguous(first, second) => Some(first.min(second).with_timezone(&Utc)),
-        // Match java.time's gap rule: retain the position within the gap by
-        // shifting the wall clock by the transition's offset change. Looking
-        // only for the next valid whole hour gets half-hour transitions (Lord
-        // Howe) wrong, and a four-hour ceiling cannot cross Samoa's skipped
-        // date in 2011.
+        // Shift the wall clock forward by the transition's offset change,
+        // which keeps the time's position inside the gap. Jumping to the next
+        // valid whole hour instead gets half-hour transitions wrong (Lord
+        // Howe), and a four-hour search ceiling cannot cross Samoa's skipped
+        // date.
         LocalResult::None => {
             const SEARCH_MINUTES: i64 = 48 * 60;
             let before = (1..=SEARCH_MINUTES)

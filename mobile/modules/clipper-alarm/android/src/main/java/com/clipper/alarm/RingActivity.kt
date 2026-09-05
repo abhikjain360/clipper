@@ -18,11 +18,10 @@ import java.util.Date
 /**
  * The screen shown while an alarm rings.
  *
- * Deliberately plain Android views rather than React Native. This has to appear
- * over the lock screen after a reboot, before the user has unlocked — the JS
- * bundle, the encrypted store and the sync engine are all unavailable at that
- * point, and the label it displays arrived in the intent for exactly that
- * reason.
+ * Plain Android views rather than React Native. This has to appear over the
+ * lock screen after a reboot, before the user has unlocked, and at that point
+ * the JS bundle, the encrypted store and the sync engine are all unavailable.
+ * The label it shows arrives in the intent for the same reason.
  *
  * `showWhenLocked` and `turnScreenOn` in the manifest are what put it in front
  * of the keyguard instead of behind it.
@@ -60,9 +59,9 @@ class RingActivity : Activity() {
     /**
      * Put this screen in front of the keyguard rather than behind it.
      *
-     * The dedicated methods arrived in API 27; on anything older the equivalent
-     * window flags are the only way, and they are deprecated on newer releases
-     * — hence the split rather than one call.
+     * The dedicated methods arrived in API 27. Anything older needs the
+     * equivalent window flags, which newer releases deprecate, so there are
+     * two paths rather than one call.
      */
     @Suppress("DEPRECATION")
     private fun showOverKeyguard() {

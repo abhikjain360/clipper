@@ -19,8 +19,9 @@ struct EngineHolder {
     slot: RwLock<Option<HeldEngine>>,
     // Serializes login, registration, resume and logout across their awaits.
     auth: Mutex<()>,
-    // Bumped whenever the held engine changes. This also forms the high half of
-    // the public state version, so replacing an engine cannot move time backwards.
+    // Bumped whenever the held engine changes. It is also the high half of the
+    // public state version, so replacing an engine cannot move that version
+    // backwards.
     installed: watch::Sender<u32>,
 }
 
@@ -48,9 +49,12 @@ impl EngineHolder {
             .map(|held| Arc::clone(&held.engine))
     }
 
-    /// Return an engine bound to `requested`. A different URL replaces a logged-out
-    /// engine left by a failed attempt; an authenticated engine remains pinned.
-    /// Callers hold `auth`, making the state check and replacement one transition.
+    /// An engine bound to `requested`.
+    ///
+    /// A different URL replaces a logged-out engine left behind by a failed
+    /// attempt. An authenticated engine stays pinned to its server. The caller
+    /// holds `auth`, so the state check and the replacement are one
+    /// transition.
     async fn get_or_build(&self, requested: &str) -> Result<Arc<SyncEngine>, JsValue> {
         let held = self.slot.read().expect("engine slot poisoned").clone();
         if let Some(held) = held {
@@ -114,9 +118,10 @@ impl EngineHolder {
             )
     }
 
-    /// Suspend until either the held engine changes or its state advances. The
-    /// generation in the public version keeps replacement monotonic and wakes a
-    /// waiter that was still subscribed to the previous engine.
+    /// Waits until the held engine changes or its state advances.
+    ///
+    /// The generation in the public version keeps replacement monotonic, and
+    /// wakes a waiter still subscribed to the previous engine.
     async fn wait_for_state_change(&self, seen: u64) -> Result<u64, JsValue> {
         // Subscribe before the first check so an install that races the check is
         // not missed.
@@ -601,7 +606,8 @@ pub fn remove_device(device_id: String) -> Promise {
     })
 }
 
-/// An empty request reuses the current server; a nonempty one selects a server.
+/// An empty request means the current server. A nonempty one names the server
+/// it wants.
 fn requested_base_url_matches(engine: &SyncEngine, requested: &str) -> bool {
     requested.trim().is_empty()
         || normalize_server_url(requested) == normalize_server_url(&engine.base_url())

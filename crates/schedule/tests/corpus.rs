@@ -1,9 +1,9 @@
 //! Recurrence regression coverage for cadence, interval, end conditions,
 //! missing calendar dates, and DST gap resolution.
 //!
-//! Do not delete a case because it looks redundant with another. `monthday_31`
-//! and `monthly_31_skip` differ only in an explicit `INTERVAL=1`, and that is
-//! exactly the kind of difference an engine swap breaks.
+//! Do not delete a case for looking redundant. `monthday_31` and
+//! `monthly_31_skip` differ only in an explicit `INTERVAL=1`, which produces
+//! different RRULE text, which is exactly what an engine change breaks.
 
 use chrono::{Month, NaiveDateTime, TimeDelta, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
@@ -13,9 +13,8 @@ use clipper_schedule::{
     TimedStart, WeekdaySet,
 };
 
-/// Five years is generous enough for the longest gap in the corpus (a leap-day
-/// yearly rule jumping 2026 to 2028) and small enough to stay well inside the
-/// engine's candidate ceiling.
+/// Five years covers the longest gap in the corpus, a leap-day yearly rule
+/// jumping 2026 to 2028, and stays well inside the engine's candidate ceiling.
 const LOOKAHEAD_DAYS: i64 = 365 * 5;
 
 fn item(dtstart: &str, recurrence: Recurrence) -> ScheduleItem {
@@ -281,8 +280,8 @@ fn until_past() {
     assert_eq!(next_after(&item, (2026, 6, 12, 10, 0)), None);
 }
 
-/// Case 14. 2026-03-29 02:30 does not exist in Europe/Berlin — the clocks jump
-/// 02:00 to 03:00.
+/// Case 14. 2026-03-29 02:30 does not exist in Europe/Berlin, where the clocks
+/// jump 02:00 to 03:00.
 ///
 /// The occurrence must shift forward to 03:30, preserving its position within
 /// the one-hour gap rather than emitting a nonexistent local time.

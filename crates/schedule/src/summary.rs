@@ -1,8 +1,7 @@
 //! Human-readable descriptions of a schedule item.
 //!
-//! These live in the domain crate rather than in each shell so that web,
-//! desktop and mobile render a cadence identically instead of growing three
-//! slightly different phrasings of "every second Tuesday".
+//! They live here rather than in each shell, so web, desktop and mobile phrase
+//! a cadence identically.
 
 use chrono::{Month, Weekday};
 
@@ -21,8 +20,8 @@ impl Recurrence {
         match self {
             Self::Once => "Once".to_string(),
             Self::Every(cadence) => cadence.summary(),
-            // No attempt to render a rule Clipper does not model. A wrong
-            // plain-English summary would be worse than an honest label.
+            // An imported rule is not modelled here, so there is nothing to
+            // phrase. A wrong summary would be worse than a vague one.
             Self::Imported { .. } => "Repeats (from calendar)".to_string(),
         }
     }
@@ -99,9 +98,9 @@ impl ScheduleItem {
                 let clock = start.local().format("%H:%M");
                 let minutes = duration.minutes();
                 match start {
-                    // Naming the zone is the point: a floating alarm and a
-                    // zoned one look identical otherwise, and they behave
-                    // differently the moment the user travels.
+                    // Name the zone. A floating alarm and a zoned one read
+                    // the same without it, and they behave differently once
+                    // the user travels.
                     TimedStart::Floating(_) => format!("{clock} for {minutes} min (floating)"),
                     TimedStart::Zoned { zone, .. } => {
                         format!("{clock} for {minutes} min ({zone})")

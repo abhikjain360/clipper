@@ -1,6 +1,7 @@
 # Agent Notes
 
-NOTE: Always use built in harness commands for reading and writing instead of bash/python, whenever possible.
+- Always use built in harness commands for reading and writing instead of bash/python, whenever possible.
+- **Do not talk in prose.** Talk in simple English, your explanations should follow linearly/serially, or at least like a waterfall, not requiring cyclic back-and-forth of reading paragraphs or sentences to understand. No mannered prose. If there's a literal phrase available, please use it. The same applies for comments.
 
 ## Scheduler status
 

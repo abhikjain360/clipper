@@ -1,13 +1,11 @@
-//! Turning a recurrence rule into concrete occurrences.
+//! Turns a recurrence rule into concrete occurrences.
 //!
-//! Expansion is client-side and always bounded by an explicit window: the
-//! caller decides how far to look, because a phone expanding tomorrow's alarms
-//! and a desktop rendering a month have different appetites. There is no
-//! unbounded scan anywhere in this module.
+//! Expansion runs on the client and always takes an explicit window. The caller
+//! picks how far to look: a phone expands tomorrow's alarms, a desktop renders a
+//! month. Nothing here scans without a bound.
 //!
-//! `rrule` sits behind [`RecurrenceEngine`] rather than being used directly, so
-//! the rest of Clipper never sees an RFC 5545 string. The iCalendar text this
-//! adapter generates is an implementation detail of the crate boundary.
+//! `rrule` stays behind [`RecurrenceEngine`], so no RFC 5545 string leaves this
+//! module. The iCalendar text built below is internal to that boundary.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -32,8 +30,8 @@ use crate::{
 #[derive(Debug, Clone, Copy)]
 pub struct Expansion {
     pub window: TimeRange,
-    /// Resolves floating and all-day spans, which carry no zone of their own.
-    /// A floating 07:00 alarm expands to 07:00 *here*.
+    /// Zone for floating and all-day spans, which carry no zone of their own.
+    /// A floating 07:00 alarm expands to 07:00 in this zone.
     pub observer: Tz,
 }
 
@@ -51,10 +49,10 @@ pub trait RecurrenceEngine {
 
     /// Every occurrence whose half-open span intersects the expansion window.
     ///
-    /// Calendar views need this rather than start-in-window semantics: an
-    /// overnight block that starts yesterday still occupies time today. The
-    /// widened rule window remains bounded by the longest relevant span, and
-    /// the regular candidate ceiling still applies to everything it produces.
+    /// Calendar views use this instead of [`Self::occurrences`]: an overnight
+    /// block that starts yesterday still occupies time today. Widening the rule
+    /// window by the longest span keeps it bounded, and the candidate ceiling
+    /// still applies.
     fn overlapping_occurrences(
         &self,
         item: &ScheduleItem,
@@ -79,8 +77,8 @@ pub trait RecurrenceEngine {
     /// The first occurrence starting strictly after `after`, looking at most
     /// `within` ahead.
     ///
-    /// The bound is a parameter rather than a default because an unbounded
-    /// "next occurrence ever" cannot be answered for a rule with no end.
+    /// `within` is required. A rule with no end may have its next occurrence
+    /// arbitrarily far away, so an unbounded search has nothing to stop it.
     fn next_after(
         &self,
         item: &ScheduleItem,
@@ -100,8 +98,8 @@ pub trait RecurrenceEngine {
     }
 }
 
-/// A conservative elapsed-time bound for how far before a view an occurrence
-/// may start and still overlap it.
+/// How far before a window an occurrence may start and still overlap it.
+/// Rounded up, never down.
 fn maximum_lookback(
     item: &ScheduleItem,
     overrides: &[OccurrenceOverrideData],
@@ -122,9 +120,9 @@ fn span_lookback(span: &ScheduleSpan) -> Result<TimeDelta, TimeError> {
             TimeDelta::try_minutes(i64::from(duration.minutes())).ok_or(TimeError::DateOverflow)
         }
         ScheduleSpan::AllDay { days, .. } => {
-            // Local-midnight intervals vary at offset transitions. Two extra
-            // days conservatively cover the full IANA offset range, including
-            // date-line changes such as Samoa's skipped day.
+            // A local-midnight day is not always 24 hours. Two extra days
+            // cover the whole IANA offset range, including date-line moves
+            // such as Samoa's skipped day.
             let days = i64::from(days.get())
                 .checked_add(2)
                 .ok_or(TimeError::DateOverflow)?;
@@ -135,15 +133,12 @@ fn span_lookback(span: &ScheduleSpan) -> Result<TimeDelta, TimeError> {
 
 /// [`RecurrenceEngine`] backed by the `rrule` crate.
 ///
-/// Chosen over `calcard` on measured behaviour, not reputation: both pass the
-/// same 13-case corpus (see `tests/corpus.rs`), and they diverge only at a DST
-/// gap, where `rrule` shifts forward the way `java.time` does. That matches the
-/// alarm behaviour already in daily use.
+/// At a DST gap an occurrence shifts forward, not back, matching platform
+/// alarm clocks.
 #[derive(Debug, Clone)]
 pub struct RruleEngine {
-    /// Hard ceiling on rule-generated candidates per expansion. Guards against
-    /// a dense rule and a wide window producing unbounded work; exceeding it is
-    /// an error rather than a silent truncation.
+    /// Most rule-generated candidates one expansion may produce. A dense rule
+    /// over a wide window hits this and errors; it never truncates silently.
     max_candidates: usize,
     imported_rules: Arc<ImportedRuleResolver>,
 }
@@ -169,9 +164,8 @@ impl RruleEngine {
         }
     }
 
-    /// Builds an engine over rules recovered from one or more raw import
-    /// snapshots. The resolver is owned so the same engine can be cached and
-    /// reused for every event in those snapshots.
+    /// Builds an engine over rules parsed from import snapshots. The engine
+    /// owns the resolver, so one engine serves every event in those snapshots.
     pub fn with_imported_rules(imported_rules: ImportedRuleResolver) -> Self {
         Self {
             imported_rules: Arc::new(imported_rules),
@@ -186,7 +180,7 @@ impl RruleEngine {
         expansion: &Expansion,
     ) -> Result<Vec<(RecurrenceId, ScheduleSpan)>, EngineError> {
         let rule_line = match &item.recurrence {
-            // A one-off needs no expansion library at all.
+            // A one-off has no rule to expand.
             Recurrence::Once => {
                 let resolved = item.span.resolve(expansion.observer)?;
                 return Ok(if expansion.window.contains(resolved.start()) {
@@ -220,12 +214,14 @@ impl RruleEngine {
         let set = rrule::RRuleSet::from_str(&text)
             .map_err(|source| EngineError::RuleRejected(source.to_string()))?;
 
-        // rrule's `after` filter does not fast-forward: it still generates all
-        // history. Collect from DTSTART through the requested end under the
-        // library's public hard cap and reject any truncation it reports.
-        // rrule 0.14 unfortunately does not propagate a nested rule iterator's
-        // empty-period stop into this bit; impossible sparse raw rules remain
-        // an upstream limitation, but generated history is strictly bounded.
+        // rrule's `after` filter does not skip ahead; it still generates every
+        // occurrence from DTSTART. So collect from DTSTART to the window end
+        // under the library's hard cap and treat a truncated result as an
+        // error.
+        //
+        // rrule 0.14 does not set `limited` when a nested iterator gives up on
+        // an impossible sparse rule, so such a rule yields nothing instead of
+        // erroring. The work it does stays capped either way.
         const MAX_SCANNED_CANDIDATES: u16 = u16::MAX;
         let before = expansion
             .window
@@ -261,11 +257,11 @@ impl RruleEngine {
     }
 }
 
-/// Validated opaque recurrence rules recovered from immutable import files.
+/// Validated recurrence rules parsed from import snapshots.
 ///
-/// This map is deliberately runtime-only. [`Recurrence::Imported`] persists a
-/// snapshot reference and provider UID; the rule text is parsed from that
-/// snapshot when a client prepares an expansion engine.
+/// Runtime-only, never persisted. [`Recurrence::Imported`] stores a snapshot
+/// reference and a provider UID; the rule text is read back out of the snapshot
+/// each time a client builds an engine.
 #[derive(Debug, Clone, Default)]
 pub struct ImportedRuleResolver {
     rules: HashMap<(ObjectId, String), ValidatedRrule>,
@@ -288,7 +284,7 @@ impl ImportedRuleResolver {
         Ok(())
     }
 
-    /// Adds all rules from another parsed snapshot set.
+    /// Adds every rule from another resolver.
     pub fn merge(&mut self, other: Self) {
         self.rules.extend(other.rules);
     }
@@ -344,9 +340,9 @@ impl RecurrenceEngine for RruleEngine {
             }
         }
 
-        // An occurrence can be moved *into* the window from a rule position
-        // outside it. Those are invisible to the loop above, which only walks
-        // rule positions the window contains.
+        // An override can move an occurrence into the window from a rule
+        // position outside it. The loop above only walks rule positions inside
+        // the window, so it misses those.
         for entry in relevant.values() {
             if handled.contains(&entry.recurrence_id) {
                 continue;
@@ -372,8 +368,8 @@ impl RecurrenceEngine for RruleEngine {
 
 /// The zone a rule expands in.
 ///
-/// Floating and all-day series expand in the observer's zone, which is what
-/// makes a 07:00 alarm ring at 07:00 after you fly. A zoned series expands in
+/// Floating and all-day series expand in the observer's zone, so a 07:00 alarm
+/// rings at 07:00 after the observer changes zone. A zoned series expands in
 /// its own zone and does not move.
 fn effective_zone(item: &ScheduleItem, observer: Tz) -> Tz {
     match &item.span {
@@ -389,7 +385,7 @@ fn effective_zone(item: &ScheduleItem, observer: Tz) -> Tz {
     }
 }
 
-/// Identify an occurrence in a way that does not depend on who is looking.
+/// An occurrence identity that is the same for every observer.
 fn recurrence_id(
     item: &ScheduleItem,
     local: chrono::NaiveDateTime,
@@ -407,9 +403,9 @@ fn recurrence_id(
             let start = TimedStart::Zoned { local, zone: *zone };
             match start.resolve(expansion.observer) {
                 Ok(instant) => RecurrenceId::Instant(instant),
-                // `resolve` shifts unresolvable local times rather than
-                // failing, so this arm is unreachable in practice — but it must
-                // not panic if that ever changes.
+                // `resolve` shifts a local time that does not exist rather
+                // than failing, so this arm never runs today. Fall back
+                // instead of panicking if that changes.
                 Err(_) => RecurrenceId::Floating(local),
             }
         }
@@ -417,7 +413,7 @@ fn recurrence_id(
     }
 }
 
-/// Rebuild the item's span at a new start, preserving its kind and length.
+/// Rebuilds the item's span at a new start, keeping its kind and length.
 fn span_at(item: &ScheduleItem, local: chrono::NaiveDateTime, zone: Tz) -> ScheduleSpan {
     match &item.span {
         ScheduleSpan::Timed {

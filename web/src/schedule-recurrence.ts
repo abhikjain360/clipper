@@ -1,27 +1,27 @@
 import type { Frequency, Recurrence, RecurrenceEnd, Weekday } from "@clipper/shared";
 
 // The repeat row of the schedule composer, kept out of the component so it can
-// be tested directly. Everything here is pure: a stored `Recurrence` in, a form
-// choice out, and back again.
+// be tested directly. Every function here is pure: a stored `Recurrence` in, a
+// form choice out, and back again.
 
 export type RepeatChoice = "once" | "daily" | "weekly" | "weekdays" | "monthly";
 
 /// What the repeat row is showing, which is not always something it can offer.
 ///
 /// A stored rule can be an every-two-weeks, a "second Tuesday", a yearly, or a
-/// provider rule Clipper only passes through. None of those is a pill, and
-/// labelling them "Once" would incorrectly imply that the event never repeats.
-/// `custom` indicates that the stored cadence is outside these choices;
-/// selecting a supported cadence replaces the stored rule.
+/// provider rule Clipper only passes through. The row has no pill for any of
+/// those, and showing "Once" would claim the event never repeats. `custom`
+/// says the stored cadence is outside these choices. Picking a supported
+/// cadence then replaces the stored rule.
 export type RepeatSelection = RepeatChoice | "custom";
 
-/// Map a stored recurrence back onto the form's coarser choices.
+/// Maps a stored recurrence onto the form's coarser choices.
 ///
-/// The form offers a handful of common cadences while the record can express
-/// more. Anything outside that handful reports `custom` rather than collapsing
-/// to `once`: the two are not the same claim, and the pill row is live. The
-/// original recurrence is retained until repeat settings are changed; the
-/// composer also shows its full stored summary.
+/// The form offers a handful of common cadences. A record can express more.
+/// Anything outside the handful reports `custom` instead of collapsing to
+/// `once`, because the pill row is live and those two say different things.
+/// The stored recurrence is kept until the repeat settings change, and the
+/// composer shows its full summary alongside.
 export function repeatChoiceOf(recurrence: Recurrence): RepeatSelection {
     if (recurrence.kind === "once") return "once";
     if (recurrence.kind !== "every" || recurrence.interval !== 1) return "custom";
@@ -48,19 +48,16 @@ export function isWeekdaySet(days: Weekday[]): boolean {
     return days.length === workweek.length && workweek.every((day) => days.includes(day));
 }
 
-/// Rebuild the recurrence from the repeat row's coarser controls.
+/// Rebuilds the recurrence from the repeat row's coarser controls.
 ///
-/// The row names a cadence unit, and for weekly its weekdays. Everything else a
-/// stored rule carries — when it stops, how many
-/// periods it skips — has no control here, so it is carried over from
-/// `previous` instead of reset. Losing an end date because someone toggled one
-/// weekday is data loss about a field the form never showed.
+/// The row names a cadence unit, plus the weekdays for a weekly one. It has no
+/// control for the rest of a stored rule, such as when the rule stops. Those
+/// fields carry over from `previous` rather than reset, so toggling one weekday
+/// cannot drop an end date the form never showed.
 ///
-/// `interval` is the exception, because it counts periods and the period is
-/// exactly what changed. It survives an edit that keeps the unit, so a
-/// fortnightly series stays fortnightly when its weekdays move, and resets when
-/// the unit itself changes, where carrying "2" would silently mean something
-/// new.
+/// `interval` carries over only when the unit stays the same. A fortnightly
+/// series stays fortnightly when its weekdays move, and resets when the unit
+/// changes, where keeping "2" would mean something else entirely.
 export function buildRecurrence(
     choice: RepeatSelection,
     days: Weekday[],
@@ -73,9 +70,9 @@ export function buildRecurrence(
         carried?.frequency.unit === unit ? carried.interval : 1;
 
     switch (choice) {
-        // Not reachable from submit(), which keeps the stored rule whenever the
-        // repeat row was left alone, and the row cannot select `custom`. Keeping
-        // the rule anyway beats inventing a cadence nobody picked.
+        // submit() never reaches this: it keeps the stored rule whenever the
+        // repeat row was left alone, and the row cannot select `custom`.
+        // Keeping the rule anyway beats inventing a cadence nobody picked.
         case "custom":
             return previous ?? { kind: "once" };
         case "once":
@@ -111,8 +108,8 @@ export function buildRecurrence(
                     unit: "monthly",
                     by: "on_day",
                     from: "from_start",
-                    // The day the block starts on, so "monthly" means "this date
-                    // every month" without asking a second question.
+                    // The day the block starts on, so "monthly" means "this
+                    // date every month" without a second question.
                     day: Number.parseInt(date.slice(8, 10), 10) || 1,
                 },
                 interval: intervalFor("monthly"),

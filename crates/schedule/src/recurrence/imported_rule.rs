@@ -1,3 +1,9 @@
+//! Converts a provider `RRULE` into a typed [`Cadence`].
+//!
+//! The conversion must be lossless. Anything this module cannot express
+//! exactly, including anything whose meaning depends on DTSTART, stays as
+//! [`Recurrence::Imported`].
+
 use std::{collections::BTreeMap, num::NonZeroU32};
 
 use chrono::{Datelike, NaiveDateTime, TimeZone, Utc, Weekday};
@@ -52,8 +58,9 @@ fn cadence(rule: &str, local_start: NaiveDateTime) -> Option<Cadence> {
     let end = if let Some(count) = fields.get("COUNT") {
         RecurrenceEnd::After(parse_positive(count)?)
     } else if let Some(until) = fields.get("UNTIL") {
-        // A local or DATE UNTIL depends on the DTSTART zone/type and cannot be
-        // represented by RecurrenceEnd::On, which is always an absolute UTC instant.
+        // A local or DATE UNTIL depends on the DTSTART zone and value kind.
+        // RecurrenceEnd::On is always an absolute UTC instant, so it cannot
+        // hold one.
         if !until.ends_with('Z') {
             return None;
         }

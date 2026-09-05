@@ -1,17 +1,13 @@
 //! How a block repeats.
 //!
-//! Rules Clipper understands are modelled as typed cadences. Imported RFC 5545
-//! `RRULE` values are converted when their complete meaning fits those types;
-//! otherwise the stored recurrence points back to the import snapshot that
-//! contains the provider rule. Every typed
-//! constructor below validates, so an out-of-range weekday ordinal or an empty
-//! weekday set cannot be built.
+//! A rule Clipper understands becomes a typed [`Cadence`]. Every constructor
+//! below validates, so an out-of-range weekday ordinal or an empty weekday set
+//! cannot be built.
 //!
-//! Ingest is the exception, and it has its own variant rather than a loophole.
-//! A provider can send a rule this enum cannot express, and
-//! [`Recurrence::Imported`] identifies the original event without copying the
-//! rule into each persisted event. Expansion resolves and validates the rule
-//! from the raw import snapshot at runtime.
+//! A provider can send an RFC 5545 `RRULE` that [`Cadence`] cannot express.
+//! Those become [`Recurrence::Imported`], which names the original event inside
+//! its import snapshot instead of copying rule text into every persisted event.
+//! Expansion reads the rule back out of that snapshot and validates it.
 
 use std::{num::NonZeroU32, str::FromStr};
 
@@ -31,15 +27,15 @@ pub enum Recurrence {
     Every(Cadence),
     /// An imported RFC 5545 rule that [`Cadence`] cannot express.
     ///
-    /// The raw rule remains in the complete import file. These two fields find
-    /// the master `VEVENT` inside that immutable snapshot, so persisted domain
-    /// state does not duplicate opaque provider syntax.
+    /// The rule text stays in the import snapshot. These two fields locate the
+    /// master `VEVENT` inside it, so no persisted schedule object carries
+    /// provider syntax.
     Imported { import: ObjectId, uid: String },
 }
 
 impl Recurrence {
-    /// Converts a validated imported `RRULE` to an editable cadence when doing
-    /// so is lossless, retaining a reference to its import snapshot otherwise.
+    /// Converts an imported `RRULE` to an editable cadence when that is
+    /// lossless, and keeps a reference to the import snapshot otherwise.
     pub fn from_imported_rule(
         rule: impl Into<String>,
         local_start: chrono::NaiveDateTime,
@@ -52,9 +48,9 @@ impl Recurrence {
 
 /// A runtime-only RFC 5545 `RRULE` value, validated on the way in.
 ///
-/// This type is deliberately not serializable. Persisted recurrence state uses
-/// [`Recurrence::Imported`]; clients recover this value from the complete raw
-/// snapshot just before expansion.
+/// Not serializable. Persisted recurrence state uses [`Recurrence::Imported`],
+/// and a client rebuilds this value from the raw snapshot just before
+/// expansion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedRrule(String);
 
@@ -65,21 +61,21 @@ impl ValidatedRrule {
         if trimmed.is_empty() {
             return Err(RecurrenceError::UnparseableRule("empty rule".into()));
         }
-        // One property, not a document. The probe below parses a whole
-        // `RRuleSet`, so a value carrying its own line break would validate as
-        // the probe's DTSTART plus an extra property — and expansion splices
-        // the stored value verbatim after `RRULE:`, against the *real* DTSTART
-        // and zone. That turns a smuggled `\nEXDATE:` or second `\nRRULE:` into
-        // live content this check never saw. Refuse the whole control range so
-        // a bare CR or a NUL cannot fold lines either.
+        // A rule is one property, not a document. Expansion splices this
+        // stored value verbatim after `RRULE:`, against the real DTSTART and
+        // zone. So a value carrying its own line break would smuggle a second
+        // property past the probe below, which validates only against its own
+        // DTSTART: a `\nEXDATE:` or a second `\nRRULE:` would go live
+        // unchecked. Reject the whole control range, so a bare CR or a NUL
+        // cannot fold lines either.
         if trimmed.contains(|character: char| character.is_control()) {
             return Err(RecurrenceError::UnparseableRule(
                 "rule contains a control character".into(),
             ));
         }
-        // UNTIL must have the same value kind as DTSTART (or be UTC for a
-        // timed DTSTART). Try each legal imported DTSTART kind: the real start
-        // is supplied by the item during expansion.
+        // UNTIL must match DTSTART's value kind, or be UTC for a timed
+        // DTSTART. The real start only arrives at expansion time, so probe
+        // each legal kind here.
         let starts = [
             "DTSTART:20200101T000000Z",
             "DTSTART:20200101T000000",
@@ -178,8 +174,8 @@ pub enum MonthlyRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "from", content = "day", rename_all = "snake_case")]
 pub enum MonthDay {
-    /// 1..=31, counting forwards. Months without the day are skipped, per
-    /// RFC 5545: `BYMONTHDAY=31` simply does not occur in April.
+    /// 1..=31, counting forwards. A month without that day is skipped:
+    /// `BYMONTHDAY=31` does not occur in April.
     FromStart(u8),
     /// 1..=31, counting backwards. One is the last day of the month.
     FromEnd(u8),
@@ -258,8 +254,7 @@ impl NthWeekday {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WeekdaySet(u8);
 
-/// Serialized as a list of day names, never as the internal bitmask — the bit
-/// layout is an implementation detail and no consumer should have to know it.
+/// Serialized as a list of day names. The bitmask layout stays internal.
 impl Serialize for WeekdaySet {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
@@ -283,11 +278,10 @@ impl<'de> Deserialize<'de> for WeekdaySet {
     }
 }
 
-/// Spell a lone weekday the same way [`WeekdaySet`] spells its members.
+/// Spells a lone weekday the way [`WeekdaySet`] spells its members.
 ///
-/// chrono's own `Weekday` serialization is `"Mon"`; mixing that with the
-/// lowercase names in a weekday set would put two spellings in one JSON object
-/// and make every consumer handle both.
+/// chrono serializes `Weekday` as `"Mon"`. Mixing that with the lowercase
+/// names in a weekday set would put two spellings in one JSON object.
 mod weekday_name {
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -303,8 +297,8 @@ mod weekday_name {
     }
 }
 
-/// Spell a month in lower case, matching the weekday convention above rather
-/// than chrono's own `"February"`.
+/// Spells a month in lower case, matching the weekday convention above.
+/// chrono uses `"February"`.
 mod month_name {
     use serde::{Deserialize, Deserializer, Serializer};
 

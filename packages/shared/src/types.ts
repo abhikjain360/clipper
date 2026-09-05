@@ -23,9 +23,10 @@ export type CollabItem = {
   // Empty for a doc that has never been renamed; render a placeholder for it.
   title: string;
   share_token: string;
-  // The server-built public link. Null when the server has no `public_web_url`
-  // configured — clients cannot derive it, since the web frontend and the API
-  // are separate origins and the native shells have no web origin at all.
+  // The server-built public link. Null when the server has no
+  // `public_web_url` configured. No client can derive it: the web frontend
+  // and the API are separate origins, and the native shells have no web
+  // origin at all.
   share_url: string | null;
   created_at: string;
   updated_at: string;
@@ -83,8 +84,8 @@ export type Recurrence =
   | { kind: "every"; frequency: Frequency; interval: number; end: RecurrenceEnd }
   | { kind: "imported"; import: string; uid: string };
 
-/// A start with a time of day. Floating follows the device — a 07:00 alarm is
-/// 07:00 wherever you wake up — while zoned stays pinned to its IANA zone.
+/// A start with a time of day. Floating follows the device, so a 07:00 alarm
+/// is 07:00 in every zone. Zoned stays pinned to its IANA zone.
 export type TimedStart =
   // Local wall-clock, no zone: "2026-06-10T07:00:00".
   { kind: "floating"; at: string } | { kind: "zoned"; at: { local: string; zone: string } };
@@ -99,14 +100,14 @@ export type ScheduleSpan =
 /// UUID of a stored Clipper object; mirrors the Rust ObjectId wire format.
 export type ObjectId = string;
 
-/// A series definition. Stored once however often it repeats.
-/// When a block should raise an alarm. Absent means silent, which is the
-/// default — most blocks are a record of intent, not a reason to wake someone.
+/// When a block rings. Absent means silent, and that is the default. Most
+/// blocks record intent rather than wake someone.
 export type AlarmPolicy = {
   /// Minutes before the block starts. Zero rings at the start.
   minutes_before: number;
 };
 
+/// A series definition. Stored once however often it repeats.
 export type ScheduleItem = {
   id: string;
   title: string;
@@ -121,9 +122,9 @@ export type ScheduleItem = {
 export type ScheduleItemView = {
   // Revision opened by the editor; reject saving over a newer definition.
   revision: number;
-  // The object id — what edits and deletes address. The series id is inside
-  // definition_json and survives an edit, so overrides and logged time keep
-  // pointing at the right series.
+  // The object id, which is what edits and deletes address. The series id is
+  // inside definition_json and survives an edit, so overrides and logged time
+  // keep pointing at the right series.
   id: string;
   title: string;
   recurrence: string;
@@ -137,12 +138,12 @@ export type ScheduleItemView = {
   definition_json: string;
 };
 
-/// One computed instance, ready to place on a grid. Never stored — the client
+/// One computed instance, ready to place on a grid. Never stored: the client
 /// expands the window it is showing and throws the result away.
 export type OccurrenceView = {
   item_id: string;
-  // Identifies this occurrence within the series, so time can be logged against
-  // the right one. Opaque above the engine.
+  // Names this occurrence within the series, so time is logged against the
+  // right one. Opaque above the engine.
   occurrence_key: string;
   // Opaque plan context captured by expansion and validated when starting a timer.
   plan_context: string;
@@ -153,18 +154,18 @@ export type OccurrenceView = {
   all_day: boolean;
   // An override moved this off its rule position.
   overridden: boolean;
-  // The calendar this came from, or null for a block the user authored. Its
-  // core fields are read-only, so the origin has to be visible.
+  // The calendar this came from, or null for a block the user authored. An
+  // imported event's core fields are read-only, so the UI shows the origin.
   source: string | null;
-  // Cancelled upstream. Shown rather than hidden — time logged against it
-  // survives the cancellation.
+  // Cancelled upstream. Shown rather than hidden, because time logged against
+  // it survives the cancellation.
   cancelled: boolean;
 };
 
 /// Time actually spent. Kept apart from OccurrenceView because the plan and
 /// the record of what happened are different things that can disagree.
 export type ActualView = {
-  // The object id — what stopping addresses.
+  // The object id, which is what stopping the timer addresses.
   id: string;
   // Empty for unplanned work.
   item_id: string;
@@ -186,7 +187,7 @@ export type AlarmView = {
 
 /// A calendar Clipper pulls events from.
 export type CalendarSourceView = {
-  // The object id — what sync and delete address.
+  // The object id, which is what sync and delete address.
   id: string;
   name: string;
   protocol: string;
@@ -214,9 +215,9 @@ export type AuthenticatedSession = {
   username: string;
   device_id: string;
   device_name: string;
-  // The server this session is with. The collab Y-sync WebSocket is opened from
-  // the UI rather than through the engine, so it needs the URL the user actually
-  // logged in to — not the compiled-in default.
+  // The server this session is with. The UI opens the collab Y-sync WebSocket
+  // itself rather than going through the engine, so it needs the URL the user
+  // logged in to rather than the compiled-in default.
   server_url: string;
 };
 
@@ -326,7 +327,7 @@ export type ClipperBackend = {
   // Browser session resume. `sessionResumeMaterial` snapshots the bearer token
   // and OPAQUE-derived keys (never the passphrase) after login; `resume`
   // re-mounts the session from them on reload without an OPAQUE login. Under
-  // Tauri these are inert — the desktop daemon owns the session.
+  // Tauri these are inert, because the desktop daemon owns the session.
   resume: (
     token: string,
     dataKey: string,

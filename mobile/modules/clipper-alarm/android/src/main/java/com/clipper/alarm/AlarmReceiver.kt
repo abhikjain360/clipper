@@ -9,8 +9,8 @@ import android.util.Log
  * Fires when an exact alarm goes off.
  *
  * The system cold-starts the process to deliver this even if the app has never
- * been opened, and — because every component on this path is `directBootAware`
- * — even if the device has rebooted and not yet been unlocked.
+ * been opened. Every component on this path is `directBootAware`, so it also
+ * arrives when the device has rebooted and nobody has unlocked it yet.
  */
 class AlarmReceiver : BroadcastReceiver() {
 
