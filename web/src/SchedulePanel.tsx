@@ -356,14 +356,14 @@ export function SchedulePanel({
                     }}
                 />
                 <aside className="schedule-sidebar" aria-label="Schedule events">
+                    <CalendarSources sources={sources} onState={onState} onError={onError} />
+                    <H2 size="$5">Events</H2>
                     <ScheduleComposer
                         editing={null}
                         onDone={() => setEditing(null)}
                         onState={onState}
                         onError={onError}
                     />
-                    <CalendarSources sources={sources} onState={onState} onError={onError} />
-                    <H2 size="$5">Events</H2>
                     <SeriesList
                         items={items}
                         onEdit={setEditing}
