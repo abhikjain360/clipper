@@ -5,9 +5,9 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::{
-    entity::{event_log, object_payloads, objects, sessions},
+    entity::{event_log, object_payloads, object_revisions, objects, sessions},
     state::AppState,
-    storage_quota,
+    storage_quota::{self, UserStorageUsage},
 };
 
 type CleanupResult<T> = Result<T, CleanupError>;
@@ -130,7 +130,7 @@ pub(crate) async fn trim_user_clipboard(
     let mut victim_query = objects::Entity::find()
         .filter(objects::Column::Kind.eq("clipboard"))
         .filter(objects::Column::UserId.eq(user_id))
-        .filter(objects::Column::CreatedSeq.is_not_null())
+        .filter(objects::Column::PublishedSeq.is_not_null())
         .filter(
             Condition::any()
                 .add(objects::Column::ExpiresAt.is_null())
@@ -181,62 +181,105 @@ async fn cleanup_orphan_object_uploads(state: &AppState) -> CleanupResult<()> {
 
     let txn = state.db().begin().await?;
 
-    // Eligibility keys on the server-assigned `updated_at`, never the client's
+    // An abandoned upload is now a pending *revision*, not a pending object,
+    // and the difference matters: a failed edit must cost the object nothing.
+    // So this sweeps revisions, and only removes the object underneath when
+    // that revision was the object's first and it never became visible.
+    //
+    // Eligibility keys on the server-assigned `stored_at`, never the client's
     // `created_at`: the latter rides in the client envelope and could be
     // backdated to make a fresh upload instantly orphan-eligible, or
-    // future-dated to escape the sweep forever. `updated_at` is stamped by the
+    // future-dated to escape the sweep forever. `stored_at` is stamped by the
     // server at init and bumped on every payload upload, so this means "no
     // upload progress for orphan_upload_ttl_secs" rather than "created long ago".
     //
     // Select the orphan set inside the transaction with the SAME predicate the
-    // delete uses. An object that races to `complete` between selection and the
-    // delete is excluded by the status filter on the delete itself, so a
-    // just-completed object (and its payload files) can never be destroyed here.
-    let orphan_ids: Vec<Uuid> = objects::Entity::find()
-        .filter(objects::Column::Status.ne("complete"))
-        .filter(objects::Column::UpdatedAt.lt(&cutoff))
+    // delete uses. A revision that races to `complete` between selection and
+    // the delete is excluded by the status filter on the delete itself, so a
+    // just-completed revision (and its payload files) can never be destroyed
+    // here.
+    let orphans: Vec<(Uuid, i64)> = object_revisions::Entity::find()
+        .filter(object_revisions::Column::Status.ne("complete"))
+        .filter(object_revisions::Column::StoredAt.lt(&cutoff))
+        .select_only()
+        .column(object_revisions::Column::ObjectId)
+        .column(object_revisions::Column::Revision)
+        .into_tuple()
+        .all(&txn)
+        .await?;
+    if orphans.is_empty() {
+        _ = txn.rollback().await;
+        return Ok(());
+    }
+
+    let orphan_object_ids: Vec<Uuid> = {
+        let mut ids: Vec<Uuid> = orphans.iter().map(|(id, _)| *id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+
+    // Objects that never published anything. A chain only extends from a
+    // complete head, so such an object has exactly this one pending revision
+    // and nothing worth keeping the row for.
+    let stillborn_ids: Vec<Uuid> = objects::Entity::find()
+        .filter(objects::Column::Id.is_in(orphan_object_ids.clone()))
+        .filter(objects::Column::PublishedSeq.is_null())
         .select_only()
         .column(objects::Column::Id)
         .into_tuple()
         .all(&txn)
         .await?;
-    if orphan_ids.is_empty() {
-        _ = txn.rollback().await;
-        return Ok(());
-    }
 
     let payload_paths: Vec<String> = object_payloads::Entity::find()
-        .filter(object_payloads::Column::ObjectId.is_in(orphan_ids.clone()))
+        .filter(payload_paths_for_revisions(&orphans))
         .select_only()
         .column(object_payloads::Column::CiphertextPath)
         .into_tuple()
         .all(&txn)
         .await?;
-    let usage = storage_quota::object_usage_by_user(&txn, &orphan_ids).await?;
-    let expected_objects = usage.iter().try_fold(0_i64, |total, usage| {
-        total
-            .checked_add(usage.object_count)
-            .ok_or_else(|| sea_orm::DbErr::Custom("orphan cleanup count overflow".into()))
-    })?;
 
-    let res = objects::Entity::delete_many()
-        .filter(objects::Column::Id.is_in(orphan_ids))
-        .filter(objects::Column::Status.ne("complete"))
-        .filter(objects::Column::UpdatedAt.lt(&cutoff))
+    // Bytes come from the revisions; the object count only from the stillborn
+    // objects. Counting both from `object_usage_by_user` would double-charge a
+    // release on an object that also has live revisions.
+    let mut usage = storage_quota::revision_usage_by_user(&txn, &orphans).await?;
+    for stillborn in storage_quota::object_usage_by_user(&txn, &stillborn_ids).await? {
+        match usage.iter_mut().find(|u| u.user_id == stillborn.user_id) {
+            Some(existing) => existing.object_count += stillborn.object_count,
+            None => usage.push(UserStorageUsage {
+                storage_bytes: 0,
+                ..stillborn
+            }),
+        }
+    }
+
+    let res = object_revisions::Entity::delete_many()
+        .filter(revision_keys_condition(&orphans))
+        .filter(object_revisions::Column::Status.ne("complete"))
+        .filter(object_revisions::Column::StoredAt.lt(&cutoff))
         .exec(&txn)
         .await?;
-    if res.rows_affected as i64 != expected_objects {
-        // A pending upload completed concurrently, so the usage we counted no
-        // longer matches the rows the status-filtered delete actually removed.
-        // Roll back and retry on the next sweep rather than mis-accounting a
-        // user's storage quota (the just-completed object is preserved either way).
+    if res.rows_affected as usize != orphans.len() {
+        // A pending upload completed concurrently, so the usage counted above
+        // no longer matches the rows the status-filtered delete actually
+        // removed. Roll back and retry on the next sweep rather than
+        // mis-accounting a user's storage quota (the just-completed revision is
+        // preserved either way).
         _ = txn.rollback().await;
         debug!(
             deleted = res.rows_affected,
-            expected = expected_objects,
+            expected = orphans.len(),
             "Orphan cleanup raced a completion; retrying on the next sweep",
         );
         return Ok(());
+    }
+
+    if !stillborn_ids.is_empty() {
+        objects::Entity::delete_many()
+            .filter(objects::Column::Id.is_in(stillborn_ids.clone()))
+            .filter(objects::Column::PublishedSeq.is_null())
+            .exec(&txn)
+            .await?;
     }
 
     for usage in usage {
@@ -247,12 +290,42 @@ async fn cleanup_orphan_object_uploads(state: &AppState) -> CleanupResult<()> {
     remove_payload_files(state, payload_paths).await;
     if res.rows_affected > 0 {
         info!(
-            count = res.rows_affected,
+            revisions = res.rows_affected,
+            objects = stillborn_ids.len(),
             "Cleaned up orphan object uploads"
         );
     }
 
     Ok(())
+}
+
+/// Match exactly the given `(object_id, revision)` pairs.
+///
+/// Two `IN` lists would match their cross product, which on a mixed orphan set
+/// would delete live revisions of other objects.
+fn revision_keys_condition(revisions: &[(Uuid, i64)]) -> Condition {
+    revisions
+        .iter()
+        .fold(Condition::any(), |condition, (object_id, revision)| {
+            condition.add(
+                Condition::all()
+                    .add(object_revisions::Column::ObjectId.eq(*object_id))
+                    .add(object_revisions::Column::Revision.eq(*revision)),
+            )
+        })
+}
+
+/// The same pair-wise match, against `object_payloads`.
+fn payload_paths_for_revisions(revisions: &[(Uuid, i64)]) -> Condition {
+    revisions
+        .iter()
+        .fold(Condition::any(), |condition, (object_id, revision)| {
+            condition.add(
+                Condition::all()
+                    .add(object_payloads::Column::ObjectId.eq(*object_id))
+                    .add(object_payloads::Column::Revision.eq(*revision)),
+            )
+        })
 }
 
 async fn delete_objects_and_release_usage(
