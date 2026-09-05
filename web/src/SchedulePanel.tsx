@@ -1,3 +1,5 @@
+import { calendarWindow, movePeriod, periodStart, type CalendarView } from "./calendar-view";
+import { EventHover } from "./EventHover";
 import {
     AlarmClock,
     CalendarClock,
@@ -98,14 +100,17 @@ export function SchedulePanel({
     onError: (error: string | null) => void;
 }) {
     const [editing, setEditing] = useState<ScheduleItemView | null>(null);
-    const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()));
+    const [view, setView] = useState<CalendarView>("week");
+    const [selectedDate, setSelectedDate] = useState(() => startOfDay(new Date()));
+    const { start: weekStart, end: weekEnd } = useMemo(
+        () => calendarWindow(selectedDate, view),
+        [selectedDate, view],
+    );
     const [occurrences, setOccurrences] = useState<OccurrenceView[]>([]);
     const [actuals, setActuals] = useState<ActualView[]>([]);
     const [loading, setLoading] = useState(false);
     const loadGeneration = useRef(0);
     const [starting, setStarting] = useState(false);
-
-    const weekEnd = useMemo(() => addDays(weekStart, 7), [weekStart]);
 
     const loadWeek = useCallback(async () => {
         const generation = ++loadGeneration.current;
@@ -154,50 +159,97 @@ export function SchedulePanel({
                 >
                     <XStack items="center" justify="space-between" gap="$2" flexWrap="wrap">
                         <XStack items="center" gap="$2">
-                            <H2 size="$5">{weekLabel(weekStart)}</H2>
                             {loading && <Spinner size="small" />}
                         </XStack>
-                        <XStack gap="$2">
+                        <XStack gap="$2" flexWrap="wrap" items="center" minW={0} maxW="100%">
+                            {(["day", "week", "month"] as const).map((mode) => (
+                                <Button
+                                    key={mode}
+                                    size="$2"
+                                    aria-pressed={view === mode}
+                                    theme={view === mode ? "blue" : undefined}
+                                    onPress={() => setView(mode)}
+                                >
+                                    {mode.slice(0, 1).toUpperCase() + mode.slice(1)}
+                                </Button>
+                            ))}
                             <Button
                                 size="$2"
                                 icon={<ChevronLeft size={16} />}
-                                onPress={() => setWeekStart(addDays(weekStart, -7))}
-                                aria-label="Previous week"
+                                onPress={() => setSelectedDate(movePeriod(selectedDate, view, -1))}
+                                aria-label={`Previous ${view}`}
                             />
-                            <Button size="$2" onPress={() => setWeekStart(startOfWeek(new Date()))}>
-                                Today
-                            </Button>
+                            <Text aria-live="polite" fontSize={14}>
+                                {view === "week"
+                                    ? weekLabel(weekStart)
+                                    : selectedDate.toLocaleDateString(
+                                          undefined,
+                                          view === "month"
+                                              ? { month: "long", year: "numeric" }
+                                              : {
+                                                    weekday: "long",
+                                                    month: "short",
+                                                    day: "numeric",
+                                                    year: "numeric",
+                                                },
+                                      )}
+                            </Text>
                             <Button
                                 size="$2"
                                 icon={<ChevronRight size={16} />}
-                                onPress={() => setWeekStart(addDays(weekStart, 7))}
-                                aria-label="Next week"
+                                onPress={() => setSelectedDate(movePeriod(selectedDate, view, 1))}
+                                aria-label={`Next ${view}`}
                             />
                         </XStack>
                     </XStack>
+                    {periodStart(selectedDate, view).getTime() !==
+                        periodStart(new Date(), view).getTime() && (
+                        <Button
+                            size="$2"
+                            self="flex-start"
+                            onPress={() => setSelectedDate(startOfDay(new Date()))}
+                        >
+                            {view === "day" ? "Back to today" : `Back to this ${view}`}
+                        </Button>
+                    )}
 
-                    <WeekGrid
-                        weekStart={weekStart}
-                        occurrences={occurrences}
-                        actuals={actuals}
-                        onStart={async (occurrence) => {
-                            if (starting) return;
-                            setStarting(true);
-                            onError(null);
-                            try {
-                                const backend = await clipperBackend();
-                                await backend.startActual(
-                                    occurrence.item_id,
-                                    occurrence.occurrence_key,
-                                );
-                                onState(await backend.getState());
-                            } catch (caught) {
-                                onError(formatBackendError(caught));
-                            } finally {
-                                setStarting(false);
-                            }
-                        }}
-                    />
+                    {view === "month" ? (
+                        <MonthGrid
+                            start={weekStart}
+                            end={weekEnd}
+                            selectedMonth={selectedDate.getMonth()}
+                            occurrences={occurrences}
+                            actuals={actuals}
+                            onDay={(day) => {
+                                setSelectedDate(day);
+                                setView("day");
+                            }}
+                        />
+                    ) : (
+                        <WeekGrid
+                            dayCount={view === "day" ? 1 : 7}
+                            weekStart={weekStart}
+                            occurrences={occurrences}
+                            actuals={actuals}
+                            onStart={async (occurrence) => {
+                                if (starting) return;
+                                setStarting(true);
+                                onError(null);
+                                try {
+                                    const backend = await clipperBackend();
+                                    await backend.startActual(
+                                        occurrence.item_id,
+                                        occurrence.occurrence_key,
+                                    );
+                                    onState(await backend.getState());
+                                } catch (caught) {
+                                    onError(formatBackendError(caught));
+                                } finally {
+                                    setStarting(false);
+                                }
+                            }}
+                        />
+                    )}
                 </Card>
 
                 <aside className="schedule-sidebar" aria-label="Schedule events">
@@ -221,20 +273,96 @@ export function SchedulePanel({
     );
 }
 
+function MonthGrid({
+    start,
+    end,
+    selectedMonth,
+    occurrences,
+    actuals,
+    onDay,
+}: {
+    start: Date;
+    end: Date;
+    selectedMonth: number;
+    occurrences: OccurrenceView[];
+    actuals: ActualView[];
+    onDay: (day: Date) => void;
+}) {
+    const days: Date[] = [];
+    for (let day = start; day < end; day = addDays(day, 1)) days.push(day);
+    return (
+        <div style={{ overflowX: "auto" }}>
+            <div className="month-grid">
+                {WEEKDAYS.map((day) => (
+                    <div className="month-heading" key={day}>
+                        {WEEKDAY_LABELS[day]}
+                    </div>
+                ))}
+                {days.map((day) => (
+                    <div
+                        key={isoDate(day)}
+                        className="month-cell"
+                        data-outside={day.getMonth() !== selectedMonth}
+                    >
+                        <button
+                            className="month-date"
+                            onClick={() => onDay(day)}
+                            aria-label={`View ${isoDate(day)}`}
+                            aria-current={isoDate(day) === isoDate(new Date()) ? "date" : undefined}
+                        >
+                            {day.getDate()}
+                        </button>
+                        {occurrences
+                            .filter((event) => overlapsDay(event, day))
+                            .toSorted(
+                                (a, b) =>
+                                    Number(b.all_day) - Number(a.all_day) ||
+                                    a.start.localeCompare(b.start),
+                            )
+                            .map((event) => (
+                                <EventHover
+                                    key={`${event.item_id}-${event.occurrence_key}`}
+                                    title={event.title}
+                                    detail={event.all_day ? "All day" : clockRange(event)}
+                                >
+                                    <button
+                                        className="month-event"
+                                        onClick={() => onDay(day)}
+                                        style={{ background: blockColor(event).fill }}
+                                    >
+                                        {event.all_day ? "" : `${clock(event.start)} `}
+                                        {event.title}
+                                    </button>
+                                </EventHover>
+                            ))}
+                        {actuals.some((actual) => overlapsDay(actual, day)) && (
+                            <button className="month-actual" onClick={() => onDay(day)}>
+                                Actual time logged
+                            </button>
+                        )}
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 function WeekGrid({
+    dayCount,
     weekStart,
     occurrences,
     actuals,
     onStart,
 }: {
+    dayCount: number;
     weekStart: Date;
     occurrences: OccurrenceView[];
     actuals: ActualView[];
     onStart: (occurrence: OccurrenceView) => void;
 }) {
     const days = useMemo(
-        () => Array.from({ length: 7 }, (_, index) => addDays(weekStart, index)),
-        [weekStart],
+        () => Array.from({ length: dayCount }, (_, index) => addDays(weekStart, index)),
+        [weekStart, dayCount],
     );
     const allDay = occurrences.filter((occurrence) => occurrence.all_day);
     const timed = occurrences.filter((occurrence) => !occurrence.all_day);
@@ -291,7 +419,7 @@ function WeekGrid({
         // Horizontal scroll lives here rather than on the page: a seven-day grid
         // on a narrow window must not make the whole app scroll sideways.
         <YStack style={{ overflowX: "auto" }}>
-            <YStack minW={720}>
+            <YStack minW={dayCount === 1 ? 0 : 720}>
                 <XStack pr={gutter}>
                     <YStack width={56} style={{ flexShrink: 0 }} />
                     {days.map((day) => (
@@ -456,47 +584,59 @@ function TimedBlock({
     }${occurrence.cancelled ? ", cancelled" : ""}`;
 
     return (
-        <div
-            style={{
-                position: "absolute",
-                display: "flex",
-                flexDirection: "column",
-                padding: "1px 4px",
-                cursor: "pointer",
-                top,
-                height,
-                left: `calc(${(lane / lanes) * 100}% + 2px)`,
-                width: `calc(${100 / lanes}% - 4px)`,
-                overflow: "hidden",
-                borderRadius: 4,
-                backgroundColor: blockColor(occurrence).fill,
-                borderLeftColor: blockColor(occurrence).accent,
-                borderLeftWidth: 3,
-                opacity: occurrence.cancelled ? 0.55 : 1,
-            }}
-            aria-label={label}
-            title={label}
-            onClick={() => onStart(occurrence)}
+        <EventHover
+            title={occurrence.title}
+            detail={`${clockRange(occurrence)}${occurrence.source ? ` · ${occurrence.source}` : ""}${occurrence.cancelled ? " · Cancelled" : ""}`}
         >
-            {/* One complete 13px line plus 1px padding above and below. */}
-            {height >= 15 && (
-                <Text
-                    fontSize={11}
-                    lineHeight={13}
-                    numberOfLines={1}
-                    textDecorationLine={occurrence.cancelled ? "line-through" : "none"}
-                >
-                    {occurrence.title}
-                </Text>
-            )}
-            {height >= 34 && (
-                <Text fontSize={10} lineHeight={12} color="#8b949e" numberOfLines={1}>
-                    {occurrence.source
-                        ? `${clockRange(occurrence)} · ${occurrence.source}`
-                        : clockRange(occurrence)}
-                </Text>
-            )}
-        </div>
+            <div
+                style={{
+                    position: "absolute",
+                    display: "flex",
+                    flexDirection: "column",
+                    padding: "1px 4px",
+                    cursor: "pointer",
+                    top,
+                    height,
+                    left: `calc(${(lane / lanes) * 100}% + 2px)`,
+                    width: `calc(${100 / lanes}% - 4px)`,
+                    overflow: "hidden",
+                    borderRadius: 4,
+                    backgroundColor: blockColor(occurrence).fill,
+                    borderLeftColor: blockColor(occurrence).accent,
+                    borderLeftWidth: 3,
+                    opacity: occurrence.cancelled ? 0.55 : 1,
+                }}
+                aria-label={label}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        onStart(occurrence);
+                    }
+                }}
+                onClick={() => onStart(occurrence)}
+            >
+                {/* One complete 13px line plus 1px padding above and below. */}
+                {height >= 15 && (
+                    <Text
+                        fontSize={11}
+                        lineHeight={13}
+                        numberOfLines={1}
+                        textDecorationLine={occurrence.cancelled ? "line-through" : "none"}
+                    >
+                        {occurrence.title}
+                    </Text>
+                )}
+                {height >= 34 && (
+                    <Text fontSize={10} lineHeight={12} color="#8b949e" numberOfLines={1}>
+                        {occurrence.source
+                            ? `${clockRange(occurrence)} · ${occurrence.source}`
+                            : clockRange(occurrence)}
+                    </Text>
+                )}
+            </div>
+        </EventHover>
     );
 }
 
@@ -612,18 +752,20 @@ function pad(value: number): string {
 
 function OccurrenceChip({ occurrence }: { occurrence: OccurrenceView }) {
     return (
-        <YStack
-            px={4}
-            py={1}
-            style={{
-                borderRadius: 4,
-                backgroundColor: occurrence.overridden ? "#3d3320" : "#243a2c",
-            }}
-        >
-            <Text fontSize={11} numberOfLines={1}>
-                {occurrence.title}
-            </Text>
-        </YStack>
+        <EventHover title={occurrence.title} detail="All day">
+            <YStack
+                px={4}
+                py={1}
+                style={{
+                    borderRadius: 4,
+                    backgroundColor: occurrence.overridden ? "#3d3320" : "#243a2c",
+                }}
+            >
+                <Text fontSize={11} numberOfLines={1}>
+                    {occurrence.title}
+                </Text>
+            </YStack>
+        </EventHover>
     );
 }
 
@@ -1303,13 +1445,6 @@ function weekdayLabel(date: Date): string {
     return day ? WEEKDAY_LABELS[day] : "";
 }
 
-function startOfWeek(date: Date): Date {
-    const start = startOfDay(date);
-    // getDay() is Sunday-based; the grid starts on Monday.
-    start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
-    return start;
-}
-
 function startOfDay(date: Date): Date {
     const copy = new Date(date);
     copy.setHours(0, 0, 0, 0);
@@ -1340,6 +1475,9 @@ function weekLabel(weekStart: Date): string {
     const sameMonth = weekStart.getMonth() === end.getMonth();
     const month = weekStart.toLocaleDateString(undefined, { month: "short" });
     const endMonth = end.toLocaleDateString(undefined, { month: "short" });
+    if (weekStart.getFullYear() !== end.getFullYear()) {
+        return `${month} ${weekStart.getDate()}, ${weekStart.getFullYear()} – ${endMonth} ${end.getDate()}, ${end.getFullYear()}`;
+    }
     return sameMonth
         ? `${month} ${weekStart.getDate()}–${end.getDate()}, ${end.getFullYear()}`
         : `${month} ${weekStart.getDate()} – ${endMonth} ${end.getDate()}, ${end.getFullYear()}`;
