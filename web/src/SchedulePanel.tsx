@@ -94,12 +94,14 @@ function observerZone(): string {
 
 export function SchedulePanel({
     items,
+    warnings,
     sources,
     running,
     onState,
     onError,
 }: {
     items: ScheduleItemView[];
+    warnings: string[];
     sources: CalendarSourceView[];
     /** The timer currently running, if any. */
     running: ActualView | null;
@@ -188,6 +190,15 @@ export function SchedulePanel({
     return (
         <YStack gap="$3">
             <RunningTimer running={running} onState={onState} onError={onError} />
+            {warnings.length > 0 && (
+                <YStack role="status" gap="$1">
+                    {warnings.map((warning, index) => (
+                        <Paragraph key={`${index}:${warning}`} color="#f3c969" size="$3">
+                            {warning}
+                        </Paragraph>
+                    ))}
+                </YStack>
+            )}
 
             <div
                 ref={workspace}
@@ -301,10 +312,7 @@ export function SchedulePanel({
                                 onError(null);
                                 try {
                                     const backend = await clipperBackend();
-                                    await backend.startActual(
-                                        occurrence.item_id,
-                                        occurrence.occurrence_key,
-                                    );
+                                    await backend.startActual(occurrence.plan_context);
                                     onState(await backend.getState());
                                 } catch (caught) {
                                     onError(formatBackendError(caught));
@@ -1442,7 +1450,7 @@ function ScheduleComposer({
                         "This block changed on another device. Cancel and reopen it before saving.",
                     );
                 }
-                await backend.updateScheduleItem(editing.id, item);
+                await backend.updateScheduleItem(editing.id, item, editing.revision);
             } else {
                 await backend.createScheduleItem(item);
             }

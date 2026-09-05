@@ -468,11 +468,16 @@ async fn update_schedule_item(
     backend: State<'_, DesktopBackend>,
     object_id: String,
     item: ScheduleItem,
+    expected_revision: u64,
 ) -> CommandResult<String> {
     Ok(backend
         .daemon
         .send_result::<String>(DaemonCommand::UpdateScheduleItem(
-            UpdateScheduleItemParams { object_id, item },
+            UpdateScheduleItemParams {
+                object_id,
+                item,
+                expected_revision,
+            },
         ))
         .await?)
 }
@@ -512,14 +517,12 @@ async fn expand_schedule(
 #[tauri::command]
 async fn start_actual(
     backend: State<'_, DesktopBackend>,
-    item_id: Option<String>,
-    occurrence_key: Option<String>,
+    plan_context: Option<String>,
 ) -> CommandResult<String> {
     Ok(backend
         .daemon
         .send_result::<String>(DaemonCommand::StartActual(StartActualParams {
-            item_id,
-            occurrence_key,
+            plan_context,
         }))
         .await?)
 }

@@ -617,6 +617,15 @@ the "domain logic plus UI" target.
 
 ### (A) Encrypted objects gain mutation (`revision: u64`)
 
+> Historical proposal, superseded by the implemented envelope design. Current
+> envelopes start at format version 1 and object revision 1; append uses
+> `POST /api/objects/{id}/revisions`, not the proposed PUT. Exact same-head reads
+> are allowed, while rollback and same-revision replacement are rejected.
+> Native SQLite stores accepted anchors separately from cached records; the
+> proposed `PendingUpdate` marker and kind registry are not implemented.
+> See [object-envelopes.md](object-envelopes.md) for current guarantees and the
+> separate revision-specific historical-read path.
+
 Changes to the design above:
 
 - **Envelope/AAD**: `ObjectEnvelopeBodyV1` gains `revision: u64` (garde

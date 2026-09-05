@@ -318,6 +318,14 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
             post(routes::objects::revise_object),
         )
         .route(
+            "/api/objects/{id}/revisions/{revision}",
+            get(routes::objects::get_object_revision),
+        )
+        .route(
+            "/api/objects/{id}/revisions/{revision}/payloads/{payload_id}",
+            get(routes::objects::download_revision_payload),
+        )
+        .route(
             "/api/objects/{id}",
             get(routes::objects::get_object).delete(routes::objects::purge_object),
         )

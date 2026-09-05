@@ -236,6 +236,7 @@ pub struct LocalVisibleState {
     pub schedule_items: Vec<ScheduleItemView>,
     pub calendar_sources: Vec<CalendarSourceView>,
     pub running_actual: Option<ActualView>,
+    pub running_plan: Option<clipper_schedule::PlannedRef>,
 }
 
 #[derive(Debug, Default)]
@@ -1259,10 +1260,15 @@ impl LocalStore {
     async fn schedule_items_inner(&self) -> Result<Vec<ScheduleItemView>, LocalStoreError> {
         let mut records = self.all_memory_records().await;
         sort_records_desc(&mut records);
-        Ok(records
-            .iter()
-            .filter_map(schedule_item_view_from_record)
-            .collect())
+        let mut views = Vec::new();
+        for record in &records {
+            if let Some(head) = self.local_head(&record.id).await?
+                && let Some(view) = schedule_item_view_from_record(record, head.revision)
+            {
+                views.push(view);
+            }
+        }
+        Ok(views)
     }
 
     async fn calendar_sources_inner(&self) -> Result<Vec<CalendarSourceView>, LocalStoreError> {
@@ -1300,38 +1306,43 @@ impl LocalStore {
     ///
     /// Lives in visible state rather than behind a windowed call: a running
     /// timer is relevant on every screen, and there is at most one.
-    async fn running_actual_inner(&self) -> Option<ActualView> {
+    async fn running_actual_inner(
+        &self,
+    ) -> Option<(ActualView, Option<clipper_schedule::PlannedRef>)> {
         let records = self.all_memory_records().await;
-        let titles: HashMap<clipper_schedule::ScheduleItemId, String> = records
-            .iter()
-            .filter_map(|record| match &record.data {
-                LocalObjectData::Schedule(schedule) => schedule.record.planned_title(),
-                LocalObjectData::Clipboard(_)
-                | LocalObjectData::File(_)
-                | LocalObjectData::Collab(_) => None,
-            })
-            .map(|(id, title)| (id, title.to_string()))
-            .collect();
-
-        records.iter().find_map(|record| {
+        for record in &records {
             let LocalObjectData::Schedule(schedule) = &record.data else {
-                return None;
+                continue;
             };
             let ScheduleRecord::Actual(actual) = &schedule.record else {
-                return None;
+                continue;
             };
             if !matches!(actual.span, clipper_schedule::ActualSpan::Running { .. }) {
-                return None;
+                continue;
             }
-            let title = match actual.planned {
-                Some(planned) => titles
-                    .get(&planned.item)
-                    .cloned()
-                    .unwrap_or_else(|| "Unavailable block".to_string()),
-                None => "Unplanned".to_string(),
+            let mut title = if actual.planned.is_some() {
+                "Historical plan unavailable".to_string()
+            } else {
+                "Unplanned".to_string()
             };
-            Some(actual_view(&record.id, actual, &title))
-        })
+            // Current content is also historical content when the complete pin
+            // matches. This avoids a placeholder on ordinary offline restarts.
+            if let Some(planned) = actual.planned
+                && let Some(target) = records
+                    .iter()
+                    .find(|entry| entry.id == planned.schedule.object_id.to_string())
+                && let LocalObjectData::Schedule(schedule) = &target.data
+                && let Ok(Some(head)) = self.local_head(&target.id).await
+                && head.revision == planned.schedule.revision
+                && head.parent_hash == planned.schedule.body_hash
+                && let Some((id, name)) = schedule.record.planned_title()
+                && id == planned.item
+            {
+                title = name.to_string();
+            }
+            return Some((actual_view(&record.id, actual, &title), actual.planned));
+        }
+        None
     }
 
     /// Where the local copy of an object sits in its chain.
@@ -1438,23 +1449,6 @@ impl LocalStore {
         Ok(records)
     }
 
-    /// Every schedule record currently cached, in whatever form it takes.
-    ///
-    /// Expansion needs the series *and* its overrides together, so this returns
-    /// the records rather than the display views.
-    pub async fn schedule_records(&self) -> Vec<ScheduleRecord> {
-        self.all_memory_records()
-            .await
-            .iter()
-            .filter_map(|record| match &record.data {
-                LocalObjectData::Schedule(schedule) => Some(schedule.record.clone()),
-                LocalObjectData::Clipboard(_)
-                | LocalObjectData::File(_)
-                | LocalObjectData::Collab(_) => None,
-            })
-            .collect()
-    }
-
     async fn decrypt_clipboard_record_preview(
         &self,
         record: &StoredPresentObjectRecord,
@@ -1547,6 +1541,7 @@ impl LocalStore {
         &self,
         visible_clipboard_limit: usize,
     ) -> Result<LocalVisibleState, LocalStoreError> {
+        let running = self.running_actual_inner().await;
         Ok(LocalVisibleState {
             clipboard_items: self
                 .recent_clipboard_items_inner(visible_clipboard_limit)
@@ -1555,7 +1550,8 @@ impl LocalStore {
             collab_docs: self.collab_items_inner().await?,
             schedule_items: self.schedule_items_inner().await?,
             calendar_sources: self.calendar_sources_inner().await?,
-            running_actual: self.running_actual_inner().await,
+            running_plan: running.as_ref().and_then(|(_, planned)| *planned),
+            running_actual: running.map(|(view, _)| view),
         })
     }
 
@@ -2270,14 +2266,17 @@ fn decrypt_file_record(
 
 /// Render a cached schedule record as a list row, skipping records that are
 /// not series definitions — an override or an actual has no row of its own.
-fn schedule_item_view_from_record(record: &LocalObjectRecord) -> Option<ScheduleItemView> {
+fn schedule_item_view_from_record(
+    record: &LocalObjectRecord,
+    revision: u64,
+) -> Option<ScheduleItemView> {
     let LocalObjectData::Schedule(schedule) = &record.data else {
         return None;
     };
     schedule
         .record
         .as_item()
-        .map(|item| item_view(item, &record.id, &record.created_at))
+        .map(|item| item_view(item, &record.id, &record.created_at, revision))
 }
 
 fn sort_records_desc(records: &mut [LocalObjectRecord]) {

@@ -602,10 +602,10 @@ pub struct ObjectPayloadDescriptor {
 pub struct ObjectListItem {
     pub id: ObjectId,
     pub kind: ObjectKind,
-    /// Which revision of the object this is. Always the head — the list never
-    /// serves history — but stated so a client can compare it against the one
-    /// it already holds and refuse to move backwards, and against the envelope
-    /// body, which carries the same number under the signature.
+    /// The returned revision: the current head for list/get, or the requested
+    /// historical revision for the revision endpoint. Clients compare this to
+    /// the signed envelope and either their current head or an exact history
+    /// pin; an intentional history read must never replace the current head.
     pub revision: u64,
     /// The seq at which this revision was published. It advances when the
     /// object is edited, which is how an incremental sync learns about an edit

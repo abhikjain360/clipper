@@ -31,8 +31,9 @@ pub use ingest::{
     SourceId, SourceKind,
 };
 pub use item::{
-    ActualId, ActualRecord, ActualSpan, Occurrence, OccurrenceOrigin, OccurrenceOverride,
-    OverrideChange, OverrideId, PlannedRef, RecurrenceId, ScheduleItem, ScheduleItemId,
+    ActualId, ActualRecord, ActualSpan, ObjectRevisionRef, Occurrence, OccurrenceException,
+    OccurrenceOrigin, OccurrenceOverride, OverrideChange, OverrideId, PlannedRef, RecurrenceId,
+    ScheduleItem, ScheduleItemId,
 };
 pub use recurrence::{
     Cadence, Frequency, MonthDay, MonthlyRule, NthWeekday, RawRule, Recurrence, RecurrenceEnd,

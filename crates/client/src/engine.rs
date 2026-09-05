@@ -36,9 +36,13 @@ use crate::{
     schedule::{
         OccurrenceLabel, ScheduleRecord, actual_view, decrypt_schedule_meta,
         decrypt_schedule_payload, encrypt_schedule_meta, encrypt_schedule_payload,
-        ingested_as_series, occurrence_key, occurrence_view, parse_occurrence_key, zone_or_utc,
+        ingested_as_series, occurrence_key, occurrence_view, zone_or_utc,
     },
 };
+
+#[path = "schedule_context.rs"]
+mod schedule_context;
+use schedule_context::revision_ref;
 
 const INLINE_OBJECT_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 /// Shown for time logged against nothing planned.
@@ -132,6 +136,8 @@ pub struct SyncEngine {
     suppressed_payload: RwLock<Option<([u8; 32], web_time::Instant)>>,
     /// Serialize this device's timer commands across UI/IPC callers.
     actual_write: Mutex<()>,
+    schedule_history: Mutex<HashMap<(u64, clipper_schedule::ObjectRevisionRef), ScheduleRecord>>,
+    history_epoch: std::sync::atomic::AtomicU64,
 }
 
 /// Secrets a browser client needs to resume a session after a page reload
@@ -173,6 +179,8 @@ impl SyncEngine {
             ws_restart_rx,
             suppressed_payload: RwLock::new(None),
             actual_write: Mutex::new(()),
+            schedule_history: Mutex::new(HashMap::new()),
+            history_epoch: std::sync::atomic::AtomicU64::new(0),
         }))
     }
 
@@ -432,10 +440,15 @@ impl SyncEngine {
         signing_identity: DeviceSigningIdentity,
     ) -> Result<(), ClientError> {
         let cache_key = *encryption_key;
-        self.local_store
-            .set_profile(profile_id_from_encryption_key(&encryption_key));
-
-        *self.encryption_key.write().await = Some(encryption_key);
+        {
+            let mut active_key = self.encryption_key.write().await;
+            self.history_epoch.fetch_add(1, Ordering::SeqCst);
+            self.schedule_history.lock().await.clear();
+            self.local_store.clear_memory().await;
+            self.local_store
+                .set_profile(profile_id_from_encryption_key(&encryption_key));
+            *active_key = Some(encryption_key);
+        }
         *self.device_signing_key.write().await = Some(signing_identity.signing_secret_key);
         *self.device_identity_wrapping_key.write().await = Some(device_identity_wrapping_key);
 
@@ -518,10 +531,16 @@ impl SyncEngine {
             warn!(%error, "Server-side logout failed; clearing local session anyway");
         }
         self.api.clear_token();
-        *self.encryption_key.write().await = None;
+        {
+            let mut active_key = self.encryption_key.write().await;
+            self.history_epoch.fetch_add(1, Ordering::SeqCst);
+            *active_key = None;
+            self.schedule_history.lock().await.clear();
+        }
         *self.device_signing_key.write().await = None;
         *self.device_identity_wrapping_key.write().await = None;
         self.local_store.clear_memory().await;
+        self.schedule_history.lock().await.clear();
         {
             let mut state = self.state.write().await;
             *state = AppState::default();
@@ -570,10 +589,16 @@ impl SyncEngine {
                 warn!(%error, "Removing current device failed server-side; clearing local session anyway");
             }
             self.api.clear_token();
-            *self.encryption_key.write().await = None;
+            {
+                let mut active_key = self.encryption_key.write().await;
+                self.history_epoch.fetch_add(1, Ordering::SeqCst);
+                *active_key = None;
+                self.schedule_history.lock().await.clear();
+            }
             *self.device_signing_key.write().await = None;
             *self.device_identity_wrapping_key.write().await = None;
             self.local_store.clear_memory().await;
+            self.schedule_history.lock().await.clear();
             *self.state.write().await = AppState::default();
             self.bump_version();
             info!("Removed the current device; local session cleared");
@@ -1182,10 +1207,7 @@ impl SyncEngine {
     /// payload, so `object_init` completes the object without a second
     /// round-trip. The meta says only which kind of record this is; the record
     /// itself is in the payload.
-    pub async fn create_schedule_record(
-        &self,
-        record: ScheduleRecord,
-    ) -> Result<String, ClientError> {
+    async fn create_schedule_record(&self, record: ScheduleRecord) -> Result<String, ClientError> {
         let object_id = uuid::Uuid::now_v7().to_string();
         self.write_schedule_record(&object_id, record, EnvelopePlacement::Create)
             .await?;
@@ -1399,42 +1421,33 @@ impl SyncEngine {
 
     // ── Actuals ──
 
-    /// Start the timer.
-    ///
-    /// `against` names the occurrence this is time for, as `(item id,
-    /// occurrence key)`. Omit it for unplanned work — that is worth recording
-    /// too, and is exactly the case a planner tends to lose.
-    ///
-    /// Only one timer runs at a time: starting a second stops the first, which
-    /// is what a person means by starting something else.
-    pub async fn start_actual(&self, against: Option<(&str, &str)>) -> Result<String, ClientError> {
-        let planned = match against {
-            Some((item_id, occurrence_key)) => {
-                let item = item_id
-                    .parse::<uuid::Uuid>()
-                    .map(clipper_schedule::ScheduleItemId)
-                    .map_err(|source| ClientError::InvalidId {
-                        kind: "schedule item id",
-                        source,
-                    })?;
-                let recurrence_id = parse_occurrence_key(occurrence_key).ok_or_else(|| {
-                    ClientError::InvalidArgument(format!(
-                        "occurrence key {occurrence_key:?} is not recognised"
-                    ))
-                })?;
-                Some(clipper_schedule::PlannedRef {
-                    item,
-                    recurrence_id,
-                })
-            }
-            None => None,
-        };
-
+    /// Start unplanned time, or time against the exact context rendered by the calendar.
+    /// Validate the plan before stopping another timer.
+    pub async fn start_actual(&self, plan_context: Option<&str>) -> Result<String, ClientError> {
+        let planned: Option<clipper_schedule::PlannedRef> = plan_context
+            .map(|text| {
+                if text.len() > 8192 {
+                    return Err(ClientError::InvalidArgument(
+                        "Plan context is too large".into(),
+                    ));
+                }
+                serde_json::from_str(text)
+                    .map_err(|e| ClientError::InvalidArgument(format!("Invalid plan context: {e}")))
+            })
+            .transpose()?;
         let _write = self.actual_write.lock().await;
+        if let Some(planned) = &planned {
+            self.schedule_revision(planned.schedule).await?;
+            let records = self.local_store.schedule_records_with_heads().await?;
+            self.validate_plan_context(planned, &records).await?;
+            // History lookups may yield to sync. Revalidate current heads before
+            // any timer mutation rather than silently adopting a newer plan.
+            let refreshed = self.local_store.schedule_records_with_heads().await?;
+            self.validate_plan_context(planned, &refreshed).await?;
+        }
         if let Some(running) = self.running_actual().await {
             self.stop_actual_inner(&running.0).await?;
         }
-
         self.create_schedule_record(ScheduleRecord::Actual(Box::new(
             clipper_schedule::ActualRecord {
                 id: clipper_schedule::ActualId::new(),
@@ -1501,100 +1514,96 @@ impl SyncEngine {
         let from = parse_instant(from, "actuals window start")?;
         let to = parse_instant(to, "actuals window end")?;
         Window::new(from, to).map_err(|error| ClientError::InvalidArgument(error.to_string()))?;
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
         let records = self.local_store.schedule_records_with_ids().await;
-        let titles = self.series_titles(&records);
-
-        let mut out: Vec<ActualView> = records
-            .iter()
-            .filter_map(|(object_id, record)| {
-                let ScheduleRecord::Actual(actual) = record else {
-                    return None;
-                };
-                let (start, end) = match actual.span {
-                    clipper_schedule::ActualSpan::Running { started } => {
-                        (started, chrono::Utc::now())
-                    }
-                    clipper_schedule::ActualSpan::Complete(span) => (span.start, span.end),
-                };
-                if start >= to || end <= from {
-                    return None;
-                }
-                let title = actual
-                    .planned
-                    .map(|planned| {
-                        titles
-                            .get(&planned.item)
-                            .cloned()
-                            .unwrap_or_else(|| "Unavailable block".into())
-                    })
-                    .unwrap_or_else(|| UNPLANNED_TITLE.to_string());
-                Some(actual_view(object_id, actual, &title))
-            })
-            .collect();
+        let mut out = Vec::new();
+        for (object_id, record) in &records {
+            let ScheduleRecord::Actual(actual) = record else {
+                continue;
+            };
+            let (start, end) = match actual.span {
+                clipper_schedule::ActualSpan::Running { started } => (started, chrono::Utc::now()),
+                clipper_schedule::ActualSpan::Complete(span) => (span.start, span.end),
+            };
+            if start >= to || end <= from {
+                continue;
+            }
+            out.push(actual_view(
+                object_id,
+                actual,
+                &self.actual_title(actual).await,
+            ));
+        }
         out.sort_by(|a, b| a.start.cmp(&b.start));
+        let mut state = self.state.write().await;
+        if self.history_epoch.load(Ordering::SeqCst) != epoch {
+            return Err(ClientError::NotAuthenticated);
+        }
+        if let Some(running) = &mut state.running_actual
+            && let Some(resolved) = out
+                .iter()
+                .find(|entry| entry.id == running.id && entry.running)
+            && running.title != resolved.title
+        {
+            running.title = resolved.title.clone();
+            drop(state);
+            self.bump_version();
+        }
         Ok(out)
     }
 
     /// The running timer as `(object id, view)`, if one is running.
     async fn running_actual(&self) -> Option<(String, ActualView)> {
         let records = self.local_store.schedule_records_with_ids().await;
-        let titles = self.series_titles(&records);
-        records.iter().find_map(|(object_id, record)| {
+        for (object_id, record) in &records {
             let ScheduleRecord::Actual(actual) = record else {
-                return None;
+                continue;
             };
-            if !matches!(actual.span, clipper_schedule::ActualSpan::Running { .. }) {
-                return None;
+            if matches!(actual.span, clipper_schedule::ActualSpan::Running { .. }) {
+                return Some((object_id.clone(), actual_view(object_id, actual, "")));
             }
-            let title = actual
-                .planned
-                .map(|planned| {
-                    titles
-                        .get(&planned.item)
-                        .cloned()
-                        .unwrap_or_else(|| "Unavailable block".into())
-                })
-                .unwrap_or_else(|| UNPLANNED_TITLE.to_string());
-            Some((object_id.clone(), actual_view(object_id, actual, &title)))
-        })
-    }
-
-    /// Series titles by series id.
-    ///
-    /// An actual stores a reference rather than a copy of the title, so that
-    /// renaming a block does not rewrite what history says about it — the name
-    /// is resolved fresh at render time.
-    fn series_titles(
-        &self,
-        records: &[(String, ScheduleRecord)],
-    ) -> HashMap<clipper_schedule::ScheduleItemId, String> {
-        records
-            .iter()
-            .filter_map(|(_, record)| record.planned_title())
-            .map(|(id, title)| (id, title.to_string()))
-            .collect()
+        }
+        None
     }
 
     /// Replace a schedule series with an edited version.
     ///
-    /// Append a revision while preserving both the object and series ids, so
-    /// overrides and logged time continue to refer to the same plan.
+    /// Preserve identity while appending a new definition. The expected revision
+    /// comes from the editor, not from whatever head arrived just before saving.
     pub async fn update_schedule_item(
         &self,
         object_id: &str,
         item: ScheduleItem,
+        expected_revision: u64,
     ) -> Result<String, ClientError> {
-        let existing = self
-            .local_store
-            .schedule_records_with_heads()
-            .await?
-            .into_iter()
-            .find(|(id, record, _)| id == object_id && record.as_item().is_some());
+        let records = self.local_store.schedule_records_with_heads().await?;
+        let existing = records
+            .iter()
+            .find(|(id, record, _)| id == object_id && record.as_item().is_some())
+            .cloned();
         let Some((_, previous, head)) = existing else {
             return Err(ClientError::ItemNotFound {
                 id: object_id.to_string(),
             });
         };
+        if head.revision != expected_revision {
+            return Err(ClientError::InvalidArgument(
+                "This schedule changed since the editor opened; reopen it before saving".into(),
+            ));
+        }
+        if !previous
+            .as_item()
+            .expect("series")
+            .exceptions_compatible_with(&item)
+            && records.iter().any(|(_, record, _)| {
+                matches!(record,
+                ScheduleRecord::Override(entry) if entry.base.object_id.to_string() == object_id)
+            })
+        {
+            return Err(ClientError::InvalidArgument(
+                "This schedule has occurrence overrides. Resolve them before changing its timing or recurrence".into(),
+            ));
+        }
         let previous_series = previous
             .as_item()
             .expect("filtered to series records above")
@@ -1690,6 +1699,7 @@ impl SyncEngine {
         to: &str,
         observer_zone: &str,
     ) -> Result<Vec<OccurrenceView>, ClientError> {
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
         let from = parse_instant(from, "expansion window start")?;
         let to = parse_instant(to, "expansion window end")?;
         let window = Window::new(from, to)
@@ -1699,31 +1709,22 @@ impl SyncEngine {
             observer: zone_or_utc(observer_zone),
         };
 
-        let records = self.local_store.schedule_records().await;
-        let overrides: Vec<OccurrenceOverride> = records
-            .iter()
-            .filter_map(|record| match record {
-                ScheduleRecord::Override(entry) => Some((**entry).clone()),
-                ScheduleRecord::Item(_)
-                | ScheduleRecord::Actual(_)
-                | ScheduleRecord::Source(_)
-                | ScheduleRecord::Ingested(_) => None,
-            })
-            .collect();
+        let records = self.local_store.schedule_records_with_heads().await?;
         let source_names: HashMap<SourceId, String> = records
             .iter()
-            .filter_map(|record| record.as_source())
+            .filter_map(|(_, record, _)| record.as_source())
             .map(|source| (source.id, source.name.clone()))
             .collect();
 
         let engine = RruleEngine::new();
         let mut out = Vec::new();
+        let mut warnings = Vec::new();
 
-        for record in &records {
+        for (object_id, record, head) in &records {
             // An owned block and an ingested event expand identically; only
             // their labelling differs.
-            let (series, label_source, cancelled, provider_overrides) = match record {
-                ScheduleRecord::Item(item) => (Cow::Borrowed(&**item), None, false, &[][..]),
+            let (series, label_source, cancelled) = match record {
+                ScheduleRecord::Item(item) => (Cow::Borrowed(&**item), None, false),
                 ScheduleRecord::Ingested(event) => {
                     let Some(source_name) = source_names.get(&event.source) else {
                         // Removing a source hides its events, while retaining
@@ -1734,7 +1735,6 @@ impl SyncEngine {
                         Cow::Owned(ingested_as_series(event)),
                         Some(source_name.as_str()),
                         event.status == IngestedStatus::Cancelled,
-                        event.overrides.as_slice(),
                     )
                 }
                 ScheduleRecord::Override(_)
@@ -1742,13 +1742,19 @@ impl SyncEngine {
                 | ScheduleRecord::Source(_) => continue,
             };
             let all_day = matches!(series.span, ScheduleSpan::AllDay { .. });
-            // Provider exceptions belong to this upstream series. Explicit
-            // local overrides, when available, take precedence for the same key.
-            let effective_overrides: Vec<_> = provider_overrides
-                .iter()
-                .chain(&overrides)
-                .cloned()
-                .collect();
+            let pin = revision_ref(object_id, *head)?;
+            let effective = match self
+                .effective_exceptions(&series, pin, record, &records)
+                .await
+            {
+                Ok(entries) => entries,
+                Err(error) => {
+                    warnings.push(format!("{}: {}", series.title, error));
+                    continue;
+                }
+            };
+            let effective_overrides: Vec<_> =
+                effective.iter().map(|(entry, _)| entry.clone()).collect();
             match engine.overlapping_occurrences(&series, &effective_overrides, &expansion) {
                 Ok(occurrences) => out.extend(occurrences.iter().map(|occurrence| {
                     occurrence_view(
@@ -1759,15 +1765,37 @@ impl SyncEngine {
                             source: label_source,
                             cancelled,
                         },
+                        &clipper_schedule::PlannedRef {
+                            item: series.id,
+                            recurrence_id: occurrence.recurrence_id,
+                            schedule: pin,
+                            override_revision: effective
+                                .iter()
+                                .find(|(entry, _)| entry.recurrence_id == occurrence.recurrence_id)
+                                .and_then(|(_, pin)| *pin),
+                            observer: expansion.observer,
+                            span: occurrence.span,
+                        },
                     )
                 })),
                 // One malformed series must not blank the whole calendar.
                 Err(error) => {
+                    warnings.push(format!("{}: {}", series.title, error));
                     warn!(item = %series.id, "Failed to expand schedule series: {}", error)
                 }
             }
         }
         out.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| a.title.cmp(&b.title)));
+        warnings.sort();
+        let mut state = self.state.write().await;
+        if self.history_epoch.load(Ordering::SeqCst) != epoch {
+            return Err(ClientError::NotAuthenticated);
+        }
+        if state.schedule_warnings != warnings {
+            state.schedule_warnings = warnings;
+            drop(state);
+            self.bump_version();
+        }
         Ok(out)
     }
 
@@ -1792,23 +1820,10 @@ impl SyncEngine {
         }
         let until = now + chrono::TimeDelta::hours(i64::from(within_hours.max(1)));
 
-        let records = self.local_store.schedule_records().await;
-        let overrides: Vec<OccurrenceOverride> = records
-            .iter()
-            .filter_map(|record| match record {
-                ScheduleRecord::Override(entry) => Some((**entry).clone()),
-                // Listed rather than wildcarded so a new record kind has to be
-                // considered here, which is the point of an exhaustive match.
-                ScheduleRecord::Item(_)
-                | ScheduleRecord::Actual(_)
-                | ScheduleRecord::Source(_)
-                | ScheduleRecord::Ingested(_) => None,
-            })
-            .collect();
-
+        let records = self.local_store.schedule_records_with_heads().await?;
         let engine = RruleEngine::new();
         let mut alarms = Vec::new();
-        for record in &records {
+        for (object_id, record, head) in &records {
             let Some(item) = record.as_item() else {
                 continue;
             };
@@ -1823,6 +1838,17 @@ impl SyncEngine {
                     .map_err(|error| ClientError::InvalidArgument(error.to_string()))?,
                 observer: zone_or_utc(observer_zone),
             };
+            let effective = match self
+                .effective_exceptions(item, revision_ref(object_id, *head)?, record, &records)
+                .await
+            {
+                Ok(entries) => entries,
+                Err(error) => {
+                    warn!(item = %item.id, %error, "Skipping alarms for a schedule with unresolved exceptions");
+                    continue;
+                }
+            };
+            let overrides: Vec<_> = effective.into_iter().map(|(entry, _)| entry).collect();
             match engine.occurrences(item, &overrides, &expansion) {
                 Ok(occurrences) => alarms.extend(
                     clipper_schedule::plan_alarms(item, &occurrences, now)
@@ -2199,7 +2225,22 @@ impl SyncEngine {
         Ok(())
     }
 
-    async fn publish_visible_state(&self, visible: LocalVisibleState) {
+    async fn publish_visible_state(&self, mut visible: LocalVisibleState) {
+        // No network work here: publication must not wait for historical reads
+        // while newer sync snapshots are ready to publish.
+        if let (Some(view), Some(planned)) = (&mut visible.running_actual, visible.running_plan) {
+            let epoch = self.history_epoch.load(Ordering::SeqCst);
+            if let Some(record) = self
+                .schedule_history
+                .lock()
+                .await
+                .get(&(epoch, planned.schedule))
+                && let Some((id, title)) = record.planned_title()
+                && id == planned.item
+            {
+                view.title = title.to_string();
+            }
+        }
         {
             let mut state = self.state.write().await;
             state.clipboard_items = visible.clipboard_items;
@@ -4153,6 +4194,36 @@ mod tests {
             source_device_signing_public_key: Some(public_key.to_vec()),
             envelope: ObjectEnvelope { body, signature },
         }
+    }
+
+    #[test]
+    fn historical_reads_require_the_exact_pinned_signed_body() {
+        let mut item = signed_item_with_payload_count(1);
+        let key = crypto::generate_device_signing_secret_key();
+        item.kind = ObjectKind::Schedule;
+        item.envelope.body.object_type = ObjectKind::Schedule;
+        item.source_device_signing_public_key =
+            Some(crypto::device_signing_public_key(&key).to_vec());
+        item.envelope.signature =
+            crypto::sign_object_envelope_body(&key, &item.envelope.body).unwrap();
+        let pin = clipper_schedule::ObjectRevisionRef {
+            object_id: item.id,
+            revision: item.revision,
+            body_hash: crypto::object_envelope_parent_hash(&item.envelope.body).unwrap(),
+        };
+        schedule_context::verify_pin(&item, pin).unwrap();
+        let mut wrong = pin;
+        wrong.revision += 1;
+        assert!(schedule_context::verify_pin(&item, wrong).is_err());
+        wrong = pin;
+        wrong.object_id = uuid::Uuid::new_v4().into();
+        assert!(schedule_context::verify_pin(&item, wrong).is_err());
+        // Even a correctly re-signed replacement is not the accepted content.
+        item.created_at = "2027-01-01T00:00:00Z".into();
+        item.envelope.body.created_at = item.created_at.clone();
+        item.envelope.signature =
+            crypto::sign_object_envelope_body(&key, &item.envelope.body).unwrap();
+        assert!(schedule_context::verify_pin(&item, pin).is_err());
     }
 
     #[test]

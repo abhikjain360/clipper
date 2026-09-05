@@ -142,12 +142,18 @@ pub fn decrypt_schedule_payload(
 }
 
 /// Render a series for a list.
-pub fn item_view(item: &ScheduleItem, object_id: &str, created_at: &str) -> ScheduleItemView {
+pub fn item_view(
+    item: &ScheduleItem,
+    object_id: &str,
+    created_at: &str,
+    revision: u64,
+) -> ScheduleItemView {
     ScheduleItemView {
         // The *object* id, not the series id: this is what edits and deletes
         // address. The series id lives inside `definition_json` and survives an
-        // edit, so overrides and logged time are not orphaned.
+        // edit. Revision pins preserve meaning; stable IDs alone do not.
         id: object_id.to_string(),
+        revision,
         title: item.title.clone(),
         recurrence: item.recurrence.summary(),
         time_summary: item.time_summary(),
@@ -170,8 +176,8 @@ pub struct OccurrenceLabel<'a> {
 
 /// Render a record of time spent.
 ///
-/// `title` is resolved by the caller, which has every series in hand; an actual
-/// stores only a reference so that renaming a block does not rewrite history.
+/// `title` comes from the pinned historical definition, or explicitly reports
+/// that it is unavailable. It is never substituted with the current title.
 pub fn actual_view(
     object_id: &str,
     actual: &clipper_schedule::ActualRecord,
@@ -239,10 +245,15 @@ pub fn parse_occurrence_key(key: &str) -> Option<clipper_schedule::RecurrenceId>
 }
 
 /// Render one computed occurrence for a grid.
-pub fn occurrence_view(occurrence: &Occurrence, label: OccurrenceLabel<'_>) -> OccurrenceView {
+pub fn occurrence_view(
+    occurrence: &Occurrence,
+    label: OccurrenceLabel<'_>,
+    context: &clipper_schedule::PlannedRef,
+) -> OccurrenceView {
     OccurrenceView {
         item_id: occurrence.item.to_string(),
         occurrence_key: occurrence_key(&occurrence.recurrence_id),
+        plan_context: serde_json::to_string(context).expect("plan context is serializable"),
         title: label.title.to_string(),
         start: to_rfc3339(occurrence.span.start),
         end: to_rfc3339(occurrence.span.end),
@@ -387,4 +398,12 @@ mod tests {
         assert_eq!(zone_or_utc("Europe/Berlin"), Tz::Europe__Berlin);
         assert_eq!(zone_or_utc("Mars/Olympus_Mons"), Tz::UTC);
     }
+}
+
+/// The exact definition and exception recorded when a timer started.
+#[derive(Debug, Clone)]
+pub struct RecordedPlan {
+    pub item: ScheduleItem,
+    pub exception: Option<clipper_schedule::OccurrenceException>,
+    pub context: clipper_schedule::PlannedRef,
 }

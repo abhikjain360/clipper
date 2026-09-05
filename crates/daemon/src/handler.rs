@@ -749,7 +749,7 @@ async fn cmd_update_schedule_item(
     engine: &Arc<SyncEngine>,
 ) -> DaemonResponse {
     match engine
-        .update_schedule_item(&params.object_id, params.item)
+        .update_schedule_item(&params.object_id, params.item, params.expected_revision)
         .await
     {
         Ok(object_id) => json_success(id, object_id),
@@ -787,11 +787,7 @@ async fn cmd_start_actual(
     params: StartActualParams,
     engine: &Arc<SyncEngine>,
 ) -> DaemonResponse {
-    let against = params
-        .item_id
-        .as_deref()
-        .zip(params.occurrence_key.as_deref());
-    match engine.start_actual(against).await {
+    match engine.start_actual(params.plan_context.as_deref()).await {
         Ok(object_id) => json_success(id, object_id),
         Err(e) => client_error(id, e),
     }

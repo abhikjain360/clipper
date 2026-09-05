@@ -650,6 +650,61 @@ impl ApiClient {
         Self::postcard_response(resp).await
     }
 
+    /// Fetch a pinned historical revision. Callers must verify its identity and
+    /// envelope hash and must not install it as the current object head.
+    pub async fn get_object_revision(
+        &self,
+        object_id: &str,
+        revision: u64,
+    ) -> Result<ObjectListItem, ClientError> {
+        let url = self.api_url(&["objects", object_id, "revisions", &revision.to_string()])?;
+        let resp = self
+            .http
+            .get(url)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .send()
+            .await?;
+        Self::postcard_response(resp).await
+    }
+
+    pub async fn download_object_revision_payload(
+        &self,
+        object_id: &str,
+        revision: u64,
+        payload_id: &str,
+        expected_ciphertext_size: i64,
+    ) -> Result<Vec<u8>, ClientError> {
+        let expected_ciphertext_size = expected_body_size(expected_ciphertext_size)?;
+        let url = self.api_url(&[
+            "objects",
+            object_id,
+            "revisions",
+            &revision.to_string(),
+            "payloads",
+            payload_id,
+        ])?;
+        let resp = self
+            .http
+            .get(url)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .send()
+            .await?;
+        let resp = Self::checked_response(resp).await?;
+        let bytes = read_response_body_limited(resp, expected_ciphertext_size).await?;
+        if bytes.len() != expected_ciphertext_size {
+            return Err(ClientError::UnexpectedResponse(
+                "Historical payload size differs from its descriptor".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+
     pub async fn download_object_payload(
         &self,
         object_id: &str,

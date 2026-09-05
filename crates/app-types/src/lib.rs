@@ -94,6 +94,8 @@ pub enum ConnectionStatus {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ScheduleItemView {
     pub id: String,
+    /// Revision of the definition opened by the editor, used to reject stale saves.
+    pub revision: u64,
     pub title: String,
     /// Human-readable cadence, e.g. "Every weekday" or "Every 2 weeks on Tue".
     pub recurrence: String,
@@ -131,6 +133,8 @@ pub struct OccurrenceView {
     /// against the right one. Opaque to every layer above the engine.
     #[serde(default)]
     pub occurrence_key: String,
+    /// Opaque serialized plan references and resolved span used to start a timer.
+    pub plan_context: String,
     pub title: String,
     /// Absolute start, RFC 3339 in UTC.
     pub start: String,
@@ -242,6 +246,9 @@ pub struct AppState {
     /// window the UI is showing, so they come from a separate windowed call.
     #[serde(default)]
     pub schedule_items: Vec<ScheduleItemView>,
+    /// Plans omitted from expansion because their definitions or exceptions could not be resolved.
+    #[serde(default)]
+    pub schedule_warnings: Vec<String>,
     /// Calendar feeds this account pulls from.
     #[serde(default)]
     pub calendar_sources: Vec<CalendarSourceView>,

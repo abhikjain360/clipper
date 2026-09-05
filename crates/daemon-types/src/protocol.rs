@@ -221,6 +221,7 @@ pub struct CreateScheduleItemParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateScheduleItemParams {
     pub object_id: String,
+    pub expected_revision: u64,
     pub item: clipper_schedule::ScheduleItem,
 }
 
@@ -252,11 +253,10 @@ pub struct AddCalendarSourceParams {
     pub url: String,
 }
 
-/// Start the timer. Both fields absent means unplanned work.
+/// Start the timer. An absent plan context means unplanned work.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartActualParams {
-    pub item_id: Option<String>,
-    pub occurrence_key: Option<String>,
+    pub plan_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

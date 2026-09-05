@@ -189,6 +189,7 @@ function mapAppState(state: NativeAppState): AppState {
     calendar_sources: state.calendarSources.map(mapCalendarSourceView),
     running_actual: state.runningActual ? mapActualView(state.runningActual) : null,
     schedule_items: state.scheduleItems.map(mapScheduleItemView),
+    schedule_warnings: state.scheduleWarnings,
     saved_profile: state.savedProfile
       ? {
           device_name: state.savedProfile.deviceName,
@@ -259,6 +260,7 @@ function mapScheduleItemView(item: NativeScheduleItemView): ScheduleItemView {
     has_alarm: item.hasAlarm,
     id: item.id,
     recurrence: item.recurrence,
+    revision: numberFromBigInt(item.revision),
     time_summary: item.timeSummary,
     title: item.title,
   };

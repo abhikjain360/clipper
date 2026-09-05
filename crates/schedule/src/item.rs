@@ -6,6 +6,7 @@
 //! different lifetimes — an actual outlives the meeting it was logged against.
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use chrono_tz::Tz;
 use clipper_api_types::ObjectId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -77,6 +78,34 @@ pub struct ScheduleItem {
     pub alarm: Option<crate::alarm::AlarmPolicy>,
 }
 
+impl ScheduleItem {
+    /// Whether exceptions authored against this definition can apply unchanged
+    /// to another definition. Cosmetic and alarm edits preserve the occurrence
+    /// structure; changing the span or recurrence requires an explicit decision.
+    pub fn exceptions_compatible_with(&self, other: &Self) -> bool {
+        self.id == other.id && self.span == other.span && self.recurrence == other.recurrence
+    }
+}
+
+/// The exact immutable envelope accepted for an encrypted schedule object.
+/// The hash disambiguates signed replacements using the same revision number;
+/// it is the envelope body hash, not a hash of the decrypted schedule data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ObjectRevisionRef {
+    pub object_id: ObjectId,
+    pub revision: u64,
+    pub body_hash: [u8; 32],
+}
+
+/// A separately stored exception, anchored to the definition it was authored
+/// against. Callers must check compatibility before applying it to a newer
+/// definition; the recurrence engine receives only validated exceptions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OccurrenceOverride {
+    pub base: ObjectRevisionRef,
+    pub exception: OccurrenceException,
+}
+
 /// Which occurrence of a series something refers to.
 ///
 /// RFC 5545's `RECURRENCE-ID`, and deliberately not a bare instant. A floating
@@ -94,10 +123,15 @@ pub enum RecurrenceId {
 
 /// One occurrence that deviates from its series.
 ///
+/// This is the pure expansion input, also embedded in imported calendar
+/// objects. Standalone persisted exceptions use [`OccurrenceOverride`] to
+/// retain their base revision; embedded provider exceptions share the imported
+/// object’s revision.
+///
 /// Exists only for occurrences that actually differ — the other 364 days of the
 /// year have no record at all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OccurrenceOverride {
+pub struct OccurrenceException {
     pub id: OverrideId,
     pub item: ScheduleItemId,
     /// The occurrence this replaces, identified by where the *rule* put it.
@@ -135,6 +169,16 @@ pub struct ActualRecord {
 pub struct PlannedRef {
     pub item: ScheduleItemId,
     pub recurrence_id: RecurrenceId,
+    /// Schedule definition accepted when recording began. For an imported
+    /// event, this also pins its embedded provider exceptions.
+    pub schedule: ObjectRevisionRef,
+    /// Present only when a standalone, locally authored exception applied.
+    pub override_revision: Option<ObjectRevisionRef>,
+    /// Floating and date-only plans depend on the observer's timezone.
+    pub observer: Tz,
+    /// Effective planned bounds when recording began. Retained independently
+    /// of later travel and timezone database changes.
+    pub span: ResolvedSpan,
 }
 
 /// A timer writes twice and only twice: once on start, once on stop.
@@ -164,6 +208,6 @@ pub struct Occurrence {
 pub enum OccurrenceOrigin {
     /// Straight from the recurrence rule.
     Rule,
-    /// The rule placed it; an override moved it.
+    /// An exception supplied this span (including provider-added dates).
     Overridden(OverrideId),
 }

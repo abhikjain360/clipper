@@ -25,7 +25,7 @@ use crate::recurrence::RawRule;
 #[cfg(not(target_family = "wasm"))]
 use crate::time::{BlockDuration, TimedStart};
 use crate::{
-    item::OccurrenceOverride,
+    item::OccurrenceException,
     recurrence::{Recurrence, RecurrenceError},
     time::{ScheduleSpan, TimeError},
 };
@@ -104,7 +104,7 @@ pub struct IngestedEvent {
     /// the event and recurrence position, so refreshing an unchanged feed does
     /// not manufacture a new revision.
     #[serde(default)]
-    pub overrides: Vec<OccurrenceOverride>,
+    pub overrides: Vec<OccurrenceException>,
     pub status: IngestedStatus,
 }
 
@@ -461,7 +461,7 @@ fn recurrence_overrides(
     exceptions: &[&calcard::icalendar::ICalendarComponent],
     event_id: Uuid,
     master_span: &ScheduleSpan,
-) -> Result<Vec<OccurrenceOverride>, IngestError> {
+) -> Result<Vec<OccurrenceException>, IngestError> {
     use std::collections::BTreeMap;
 
     let item = ScheduleItemId(event_id);
@@ -534,9 +534,9 @@ fn make_override(
     item: ScheduleItemId,
     recurrence_id: RecurrenceId,
     change: OverrideChange,
-) -> OccurrenceOverride {
+) -> OccurrenceException {
     let stable_name = format!("{recurrence_id:?}");
-    OccurrenceOverride {
+    OccurrenceException {
         id: OverrideId(Uuid::new_v5(&event_id, stable_name.as_bytes())),
         item,
         recurrence_id,

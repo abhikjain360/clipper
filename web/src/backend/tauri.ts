@@ -48,10 +48,9 @@ export function tauriBackend(): ClipperBackend {
         downloadFileToDialog: (fileId, defaultFilename) =>
             invoke<boolean>("download_file_to_dialog", { fileId, defaultFilename }),
         deleteFile: (fileId) => invoke<void>("delete_file", { fileId }),
-        startActual: (itemId, occurrenceKey) =>
+        startActual: (planContext) =>
             invoke<string>("start_actual", {
-                itemId: itemId ?? null,
-                occurrenceKey: occurrenceKey ?? null,
+                planContext: planContext ?? null,
             }),
         stopActual: (objectId) => invoke<string>("stop_actual", { objectId }),
         actualsBetween: (from, to) => invoke<ActualView[]>("actuals_between", { from, to }),
@@ -60,8 +59,8 @@ export function tauriBackend(): ClipperBackend {
             invoke<IngestReport>("sync_calendar_source", { objectId }),
         createScheduleItem: (item: ScheduleItem) =>
             invoke<string>("create_schedule_item", { item }),
-        updateScheduleItem: (objectId, item) =>
-            invoke<string>("update_schedule_item", { objectId, item }),
+        updateScheduleItem: (objectId, item, expectedRevision) =>
+            invoke<string>("update_schedule_item", { objectId, item, expectedRevision }),
         deleteScheduleObject: (objectId) => invoke<void>("delete_schedule_object", { objectId }),
         expandSchedule: (from, to, observerZone) =>
             invoke<OccurrenceView[]>("expand_schedule", { from, to, observerZone }),
