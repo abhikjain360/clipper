@@ -748,3 +748,41 @@ fn a_raw_rule_serializes_under_the_same_tag() {
         "an unparseable rule must be rejected on deserialize too"
     );
 }
+
+/// A raw rule is one property, and expansion splices it verbatim after
+/// `RRULE:` against the item's real DTSTART and zone. Validation parses a whole
+/// `RRuleSet`, so a value carrying its own line break used to validate as the
+/// probe's DTSTART plus a bonus property, and that property then went live
+/// against a start it was never checked with. Both smuggling shapes matter: an
+/// `EXDATE` silently deletes occurrences, a second `RRULE` silently adds them.
+#[test]
+fn a_raw_rule_cannot_smuggle_a_second_property() {
+    use clipper_schedule::RawRule;
+
+    for smuggled in [
+        "FREQ=DAILY;COUNT=10\nEXDATE:20240102T090000Z",
+        "FREQ=DAILY;COUNT=2\nRRULE:FREQ=MONTHLY;COUNT=5",
+        "FREQ=DAILY;COUNT=2\rEXDATE:20240102T090000Z",
+    ] {
+        assert!(
+            RawRule::new(smuggled).is_err(),
+            "a folded line must not validate: {smuggled:?}"
+        );
+        assert!(
+            serde_json::from_value::<Recurrence>(
+                serde_json::json!({"kind": "raw", "rule": smuggled})
+            )
+            .is_err(),
+            "a synced record must not carry a folded line either: {smuggled:?}"
+        );
+    }
+
+    // The legitimate value is unaffected: only control characters are refused,
+    // and surrounding whitespace is still trimmed rather than rejected.
+    assert_eq!(
+        RawRule::new("  RRULE:FREQ=DAILY;COUNT=2  ")
+            .expect("a padded rule stays valid")
+            .as_str(),
+        "FREQ=DAILY;COUNT=2"
+    );
+}
