@@ -6,7 +6,7 @@
 //! different lifetimes — an actual outlives the meeting it was logged against.
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
-use clipper_api_types::ObjectKind;
+use clipper_api_types::ObjectId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -69,19 +69,12 @@ pub struct ScheduleItem {
     /// A block may point at another Clipper object, or be bare labelled
     /// time. Optional so that no task subsystem is required for the schedule to
     /// be useful.
-    pub reference: Option<ObjectRef>,
+    pub reference: Option<ObjectId>,
     /// When this block should raise an alarm. Absent means silent, which is the
     /// default — most blocks are a record of intent, not a reason to wake
     /// someone.
     #[serde(default)]
     pub alarm: Option<crate::alarm::AlarmPolicy>,
-}
-
-/// A pointer to another Clipper object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObjectRef {
-    pub kind: ObjectKind,
-    pub id: Uuid,
 }
 
 /// Which occurrence of a series something refers to.
