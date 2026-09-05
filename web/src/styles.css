@@ -36,6 +36,45 @@ body {
     overflow-wrap: anywhere;
     pointer-events: none;
 }
+
+.event-card {
+    cursor: pointer;
+}
+.event-card:hover {
+    border-color: #526171 !important;
+}
+.event-card-title {
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    padding: 0;
+    text-align: left;
+    cursor: pointer;
+}
+.event-card-title:focus-visible {
+    outline: 2px solid #8bbcff;
+    outline-offset: 4px;
+}
+.calendar-now {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: #ff625e;
+    z-index: 5;
+    pointer-events: none;
+}
+.calendar-now::before {
+    content: "";
+    position: absolute;
+    left: -4px;
+    top: -3px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ff625e;
+}
 .event-hover strong {
     display: block;
     font-size: 14px;
