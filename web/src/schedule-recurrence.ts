@@ -52,7 +52,7 @@ export function isWeekdaySet(days: Weekday[]): boolean {
 /// Rebuild the recurrence from the repeat row's coarser controls.
 ///
 /// The row names a cadence unit, and for weekly its weekdays. Everything else a
-/// stored rule carries — when it stops, which day its week starts on, how many
+/// stored rule carries — when it stops, how many
 /// periods it skips — has no control here, so it is carried over from
 /// `previous` instead of reset. Losing an end date because someone toggled one
 /// weekday is data loss about a field the form never showed.
@@ -70,8 +70,6 @@ export function buildRecurrence(
 ): Recurrence {
     const carried = previous?.kind === "every" ? previous : null;
     const end: RecurrenceEnd = carried?.end ?? { when: "never" };
-    const weekStart: Weekday =
-        carried?.frequency.unit === "weekly" ? carried.frequency.week_start : "mon";
     const intervalFor = (unit: Frequency["unit"]): number =>
         carried?.frequency.unit === unit ? carried.interval : 1;
 
@@ -96,7 +94,6 @@ export function buildRecurrence(
                 frequency: {
                     unit: "weekly",
                     weekdays: ["mon", "tue", "wed", "thu", "fri"],
-                    week_start: weekStart,
                 },
                 interval: intervalFor("weekly"),
                 end,
@@ -104,7 +101,7 @@ export function buildRecurrence(
         case "weekly":
             return {
                 kind: "every",
-                frequency: { unit: "weekly", weekdays: days, week_start: weekStart },
+                frequency: { unit: "weekly", weekdays: days },
                 interval: intervalFor("weekly"),
                 end,
             };

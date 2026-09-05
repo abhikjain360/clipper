@@ -693,7 +693,6 @@ fn the_wire_format_is_self_describing() {
         },
         recurrence: Recurrence::Every(Cadence::each(Frequency::Weekly {
             weekdays: WeekdaySet::weekdays(),
-            week_start: chrono::Weekday::Mon,
         })),
         reference: None,
         alarm: None,
@@ -712,10 +711,6 @@ fn the_wire_format_is_self_describing() {
         json["recurrence"]["frequency"]["weekdays"],
         serde_json::json!(["mon", "tue", "wed", "thu", "fri"]),
         "a weekday set travels as day names, never as its internal bitmask"
-    );
-    assert_eq!(
-        json["recurrence"]["frequency"]["week_start"], "mon",
-        "a lone weekday is spelled the same way a weekday set spells its members"
     );
 
     let back: ScheduleItem = serde_json::from_value(json).expect("round trip");

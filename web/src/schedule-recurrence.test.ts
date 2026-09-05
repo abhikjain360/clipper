@@ -15,7 +15,7 @@ function repeating(recurrence: Recurrence): Extract<Recurrence, { kind: "every" 
 
 const fortnightly: Recurrence = {
     kind: "every",
-    frequency: { unit: "weekly", weekdays: ["tue"], week_start: "sun" },
+    frequency: { unit: "weekly", weekdays: ["tue"] },
     interval: 2,
     end: { when: "after", value: 10 },
 };
@@ -73,7 +73,6 @@ test("a cadence the row cannot express reports custom, not once", () => {
             frequency: {
                 unit: "weekly",
                 weekdays: ["mon", "tue", "wed", "thu", "fri"],
-                week_start: "mon",
             },
             interval: 1,
             end: { when: "never" },
@@ -89,8 +88,8 @@ test("rebuilding carries over the end condition the row cannot show", () => {
     const edited = buildRecurrence("weekly", ["tue", "thu"], "2026-09-08", fortnightly);
     assert.deepEqual(edited, {
         kind: "every",
-        frequency: { unit: "weekly", weekdays: ["tue", "thu"], week_start: "sun" },
-        // Same unit, so the period count and the week start both survive.
+        frequency: { unit: "weekly", weekdays: ["tue", "thu"] },
+        // Same unit, so the period count survives.
         interval: 2,
         end: { when: "after", value: 10 },
     });
@@ -122,7 +121,7 @@ test("once clears the rule and a fresh block gets plain defaults", () => {
     assert.deepEqual(buildRecurrence("once", [], "2026-09-08", fortnightly), { kind: "once" });
     assert.deepEqual(buildRecurrence("weekly", ["wed"], "2026-09-08", null), {
         kind: "every",
-        frequency: { unit: "weekly", weekdays: ["wed"], week_start: "mon" },
+        frequency: { unit: "weekly", weekdays: ["wed"] },
         interval: 1,
         end: { when: "never" },
     });
