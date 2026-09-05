@@ -5,6 +5,8 @@ import type {
     ClipperBackend,
     CollabItem,
     DeviceInfo,
+    OccurrenceView,
+    ScheduleItem,
 } from "@clipper/shared";
 
 type RawClipboardPayload = {
@@ -44,6 +46,11 @@ export function tauriBackend(): ClipperBackend {
         downloadFileToDialog: (fileId, defaultFilename) =>
             invoke<boolean>("download_file_to_dialog", { fileId, defaultFilename }),
         deleteFile: (fileId) => invoke<void>("delete_file", { fileId }),
+        createScheduleItem: (item: ScheduleItem) =>
+            invoke<string>("create_schedule_item", { item }),
+        deleteScheduleObject: (objectId) => invoke<void>("delete_schedule_object", { objectId }),
+        expandSchedule: (from, to, observerZone) =>
+            invoke<OccurrenceView[]>("expand_schedule", { from, to, observerZone }),
         createCollabDoc: () => invoke<CollabItem>("create_collab_doc"),
         deleteCollabDoc: (objectId) => invoke<void>("delete_collab_doc", { objectId }),
         renameCollabDoc: (objectId, title) =>

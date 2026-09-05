@@ -7,7 +7,7 @@ use std::{
 
 use clipper_client::{
     api_client::ClientError,
-    engine::{SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
+    engine::{ScheduleItem, SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
 };
 use hmac::{Hmac, Mac};
 use rand::RngExt;
@@ -27,8 +27,9 @@ use crate::{
     protocol::{
         AuthChallenge, AuthenticateResult, ClipboardPayloadResult, CopyToLocalResult,
         DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, DeviceListResult,
-        IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams, RegisterParams,
-        RegisterResult, UploadFileResult, ipc_client_auth_message, ipc_daemon_auth_message,
+        ExpandScheduleParams, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION,
+        LoginParams, RegisterParams, RegisterResult, UploadFileResult, ipc_client_auth_message,
+        ipc_daemon_auth_message,
     },
 };
 
@@ -426,6 +427,15 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 DaemonCommand::GetCollabDocMeta(params) => {
                     cmd_get_collab_doc_meta(id, params.object_id, &engine).await
                 }
+                DaemonCommand::CreateScheduleItem(params) => {
+                    cmd_create_schedule_item(id, params.item, &engine).await
+                }
+                DaemonCommand::DeleteScheduleObject(params) => {
+                    cmd_delete_schedule_object(id, params.object_id, &engine).await
+                }
+                DaemonCommand::ExpandSchedule(params) => {
+                    cmd_expand_schedule(id, params, &engine).await
+                }
                 DaemonCommand::Authenticate(_)
                 | DaemonCommand::Login(_)
                 | DaemonCommand::Register(_)
@@ -701,6 +711,42 @@ async fn cmd_delete_collab_doc(
 ) -> DaemonResponse {
     match engine.delete_collab_doc(&object_id).await {
         Ok(()) => DaemonResponse::success(id, None),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_create_schedule_item(
+    id: String,
+    item: ScheduleItem,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.create_schedule_item(item).await {
+        Ok(object_id) => json_success(id, object_id),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_delete_schedule_object(
+    id: String,
+    object_id: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.delete_schedule_object(&object_id).await {
+        Ok(()) => DaemonResponse::success(id, None),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_expand_schedule(
+    id: String,
+    params: ExpandScheduleParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine
+        .expand_schedule(&params.from, &params.to, &params.observer_zone)
+        .await
+    {
+        Ok(occurrences) => json_success(id, occurrences),
         Err(e) => client_error(id, e),
     }
 }

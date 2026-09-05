@@ -83,6 +83,14 @@ pub enum DaemonCommand {
     DeleteCollabDoc(DeleteCollabDocParams),
     RenameCollabDoc(RenameCollabDocParams),
     GetCollabDocMeta(GetCollabDocMetaParams),
+    /// Create a schedule series.
+    ///
+    /// Carries the domain type rather than a flattened draft: a recurrence rule
+    /// does not survive being reduced to strings, and one representation cannot
+    /// drift from another.
+    CreateScheduleItem(CreateScheduleItemParams),
+    DeleteScheduleObject(DeleteScheduleObjectParams),
+    ExpandSchedule(ExpandScheduleParams),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +201,31 @@ pub struct DeleteCollabDocParams {
 pub struct RenameCollabDocParams {
     pub object_id: String,
     pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateScheduleItemParams {
+    pub item: clipper_schedule::ScheduleItem,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteScheduleObjectParams {
+    pub object_id: String,
+}
+
+/// Ask for every occurrence in a window.
+///
+/// The window is the caller's, not a fixed horizon: a week grid and an alarm
+/// scheduler want very different spans (see `docs/schedule-plan.md`, D4).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpandScheduleParams {
+    /// RFC 3339 instant, inclusive.
+    pub from: String,
+    /// RFC 3339 instant, exclusive.
+    pub to: String,
+    /// IANA zone the caller is in. Resolves floating and all-day spans, which
+    /// carry no zone of their own.
+    pub observer_zone: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

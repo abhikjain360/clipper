@@ -87,6 +87,7 @@ pub struct ObjectRef {
 /// for both would make an override recorded in Berlin fail to match the same
 /// occurrence expanded in Tokyo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "at", rename_all = "snake_case")]
 pub enum RecurrenceId {
     Floating(NaiveDateTime),
     Instant(DateTime<Utc>),
@@ -109,6 +110,7 @@ pub struct OccurrenceOverride {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "change", content = "span", rename_all = "snake_case")]
 pub enum OverrideChange {
     /// This occurrence does not happen. RFC 5545's `EXDATE`.
     Cancelled,
@@ -143,6 +145,7 @@ pub struct PlannedRef {
 /// minute. Elapsed time for a running timer is derived from `started`, not
 /// stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum ActualSpan {
     Running { started: DateTime<Utc> },
     Complete(ResolvedSpan),
@@ -159,6 +162,7 @@ pub struct Occurrence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "origin", content = "override_id", rename_all = "snake_case")]
 pub enum OccurrenceOrigin {
     /// Straight from the recurrence rule.
     Rule,
