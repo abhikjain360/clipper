@@ -981,6 +981,7 @@ version = "0.1.0"
 dependencies = [
  "clipper-api-types",
  "clipper-app-types",
+ "clipper-schedule",
  "dirs",
  "libc",
  "serde",
@@ -996,6 +997,7 @@ dependencies = [
  "clipper-app-types",
  "clipper-client",
  "clipper-daemon-types",
+ "clipper-schedule",
  "dirs",
  "hmac",
  "rand 0.10.2",
@@ -1046,6 +1048,7 @@ dependencies = [
  "clipper-api-types",
  "rrule",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "uuid",
 ]

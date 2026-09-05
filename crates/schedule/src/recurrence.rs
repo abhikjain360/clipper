@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 /// The complete repeat behaviour of a block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Recurrence {
     /// Happens once. The overwhelming majority of ingested meetings.
     Once,
@@ -59,6 +60,7 @@ impl Cadence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "unit", rename_all = "snake_case")]
 pub enum Frequency {
     /// Every N days.
     Daily,
@@ -67,20 +69,30 @@ pub enum Frequency {
         weekdays: WeekdaySet,
         /// Which day the week starts on. Changes which occurrences fall in
         /// which interval when `interval > 1`, so it is not cosmetic.
+        #[serde(with = "weekday_name")]
         week_start: Weekday,
     },
     /// Every N months, on a day picked by ordinal or by weekday.
     Monthly(MonthlyRule),
     /// Every N years, in a fixed month, on a day of that month.
-    Yearly { month: Month, day: MonthDay },
+    Yearly {
+        #[serde(with = "month_name")]
+        month: Month,
+        day: MonthDay,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "by", rename_all = "snake_case")]
 pub enum MonthlyRule {
     /// The 15th; the last day; the second-to-last day.
     OnDay(MonthDay),
     /// The second Tuesday; the last Friday.
-    OnWeekday { nth: NthWeekday, weekday: Weekday },
+    OnWeekday {
+        nth: NthWeekday,
+        #[serde(with = "weekday_name")]
+        weekday: Weekday,
+    },
 }
 
 /// A day of the month, countable from either end.
@@ -88,6 +100,7 @@ pub enum MonthlyRule {
 /// Counting from the end is how "the last day of the month" works without
 /// special-casing February.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "from", content = "day", rename_all = "snake_case")]
 pub enum MonthDay {
     /// 1..=31, counting forwards. Months without the day are skipped, per
     /// RFC 5545: `BYMONTHDAY=31` simply does not occur in April.
@@ -124,6 +137,7 @@ impl MonthDay {
 
 /// Which occurrence of a weekday within a month, countable from either end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "from", content = "nth", rename_all = "snake_case")]
 pub enum NthWeekday {
     /// 1..=5. One is the first such weekday in the month.
     FromStart(u8),
@@ -165,8 +179,114 @@ impl NthWeekday {
 ///
 /// Non-empty by construction: a weekly rule with no days would expand to
 /// nothing, silently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WeekdaySet(u8);
+
+/// Serialized as a list of day names, never as the internal bitmask — the bit
+/// layout is an implementation detail and no consumer should have to know it.
+impl Serialize for WeekdaySet {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.iter().count()))?;
+        for day in self.iter() {
+            seq.serialize_element(serde_weekday_name(day))?;
+        }
+        seq.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for WeekdaySet {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let names = Vec::<String>::deserialize(deserializer)?;
+        let days = names
+            .iter()
+            .map(|name| serde_weekday_from_name(name))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::de::Error::custom)?;
+        Self::new(&days).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Spell a lone weekday the same way [`WeekdaySet`] spells its members.
+///
+/// chrono's own `Weekday` serialization is `"Mon"`; mixing that with the
+/// lowercase names in a weekday set would put two spellings in one JSON object
+/// and make every consumer handle both.
+mod weekday_name {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::{Weekday, serde_weekday_from_name, serde_weekday_name};
+
+    pub fn serialize<S: Serializer>(day: &Weekday, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(serde_weekday_name(*day))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Weekday, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        serde_weekday_from_name(&name).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Spell a month in lower case, matching the weekday convention above rather
+/// than chrono's own `"February"`.
+mod month_name {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::Month;
+
+    const NAMES: [&str; 12] = [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+
+    pub fn serialize<S: Serializer>(month: &Month, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(NAMES[(month.number_from_month() - 1) as usize])
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Month, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        NAMES
+            .iter()
+            .position(|candidate| *candidate == name)
+            .and_then(|index| Month::try_from(index as u8 + 1).ok())
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown month {name:?}")))
+    }
+}
+
+fn serde_weekday_name(day: Weekday) -> &'static str {
+    match day {
+        Weekday::Mon => "mon",
+        Weekday::Tue => "tue",
+        Weekday::Wed => "wed",
+        Weekday::Thu => "thu",
+        Weekday::Fri => "fri",
+        Weekday::Sat => "sat",
+        Weekday::Sun => "sun",
+    }
+}
+
+fn serde_weekday_from_name(name: &str) -> Result<Weekday, String> {
+    match name {
+        "mon" => Ok(Weekday::Mon),
+        "tue" => Ok(Weekday::Tue),
+        "wed" => Ok(Weekday::Wed),
+        "thu" => Ok(Weekday::Thu),
+        "fri" => Ok(Weekday::Fri),
+        "sat" => Ok(Weekday::Sat),
+        "sun" => Ok(Weekday::Sun),
+        other => Err(format!("unknown weekday {other:?}")),
+    }
+}
 
 impl WeekdaySet {
     pub fn new(days: &[Weekday]) -> Result<Self, RecurrenceError> {
@@ -216,6 +336,7 @@ impl WeekdaySet {
 
 /// When a repeating block stops repeating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "when", content = "value", rename_all = "snake_case")]
 pub enum RecurrenceEnd {
     Never,
     /// After this many occurrences in total, counting the first.

@@ -15,7 +15,12 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
 /// A start that has a time of day.
+///
+/// Tagged rather than positional: this shape is the wire format for the UI, the
+/// IPC boundary, and the encrypted payload on disk, all of which are read back
+/// by hand often enough to be worth making self-describing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "at", rename_all = "snake_case")]
 pub enum TimedStart {
     /// Wall-clock time with no zone. Follows the observer: 07:00 is 07:00
     /// wherever you wake up. This is what an alarm wants.
@@ -52,6 +57,7 @@ impl TimedStart {
 /// ingesting all-day events, and coercing a date into an instant silently moves
 /// it across a border.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScheduleSpan {
     Timed {
         start: TimedStart,

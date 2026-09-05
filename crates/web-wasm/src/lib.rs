@@ -1,7 +1,9 @@
 use std::sync::{Arc, LazyLock, RwLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use clipper_client::engine::{AppState, ClipboardPayload, SyncEngine, TEXT_CLIPBOARD_MIME_TYPE};
+use clipper_client::engine::{
+    AppState, ClipboardPayload, ScheduleItem, SyncEngine, TEXT_CLIPBOARD_MIME_TYPE,
+};
 use js_sys::{Object, Promise, Reflect, Uint8Array};
 use tokio::sync::watch;
 use wasm_bindgen::prelude::*;
@@ -342,6 +344,50 @@ pub fn delete_file(file_id: String) -> Promise {
             .await
             .map_err(js_error)?;
         Ok(JsValue::UNDEFINED)
+    })
+}
+
+/// Create a schedule series from its JSON form.
+///
+/// The item crosses as JSON rather than as flattened arguments because a
+/// recurrence rule does not reduce to a handful of strings without losing
+/// something. `packages/shared` owns the matching TypeScript shape.
+#[wasm_bindgen(js_name = createScheduleItem)]
+pub fn create_schedule_item(item: JsValue) -> Promise {
+    ok_promise(async move {
+        let item: ScheduleItem = serde_wasm_bindgen::from_value(item).map_err(js_error)?;
+        let object_id = engine_or_error()?
+            .create_schedule_item(item)
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::from_str(&object_id))
+    })
+}
+
+#[wasm_bindgen(js_name = deleteScheduleObject)]
+pub fn delete_schedule_object(object_id: String) -> Promise {
+    ok_promise(async move {
+        engine_or_error()?
+            .delete_schedule_object(&object_id)
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::UNDEFINED)
+    })
+}
+
+/// Expand every series into the occurrences that fall in `[from, to)`.
+///
+/// `observer_zone` is an IANA name; it resolves floating and all-day spans,
+/// which have no zone of their own.
+#[wasm_bindgen(js_name = expandSchedule)]
+pub fn expand_schedule(from: String, to: String, observer_zone: String) -> Promise {
+    ok_promise(async move {
+        let occurrences = engine_or_error()?
+            .expand_schedule(&from, &to, &observer_zone)
+            .await
+            .map_err(js_error)?;
+        let value = serde_wasm_bindgen::to_value(&occurrences).map_err(js_error)?;
+        Ok(value)
     })
 }
 
