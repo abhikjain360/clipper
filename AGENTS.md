@@ -1,5 +1,12 @@
 # Agent Notes
 
+## Scheduler status
+
+- For outstanding scheduler work and undecided behavior, start with
+  `docs/scheduler-backlog.md`. Keep it updated when scheduler work lands or a
+  product decision changes. `docs/scheduler-review.md` holds QA evidence and
+  `docs/schedule-plan.md` holds the detailed design/history.
+
 ## Environment
 
 - Use the project environment from the checked-in `.envrc`. The shell hooks

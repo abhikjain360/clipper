@@ -284,6 +284,10 @@ old QA recordings/overrides before exercising the new historical comparisons.
 
 ## Remaining scope and limits
 
+The maintained checklist of open decisions, missing workflows and follow-up
+work is [scheduler-backlog.md](scheduler-backlog.md). In particular, exception
+resolution after a timing/recurrence edit has backend guards but no resolution UI.
+
 - No Google/Zoho OAuth connector or outward publishing. ICS refresh is manual
   and native; per-client source opt-in and background sync are future work.
 - No mobile schedule-management UI, single-occurrence override UI, undo/history

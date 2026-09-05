@@ -195,7 +195,10 @@ defect.
 
 ## Open Decisions
 
-All resolved. See the [Decision Log](#decision-log) for D1-D11.
+The initial D1-D11 decisions are resolved; see the [Decision Log](#decision-log).
+Later open decisions and unfinished workflows are tracked in the maintained
+[scheduler backlog](scheduler-backlog.md), including exception resolution after
+schedule edits. This does not mean every scheduler product decision is settled.
 
 One item still needs an answer from the repo owner, and it gates the shape of
 the Google connector rather than the design:
@@ -1197,6 +1200,9 @@ waits on the owner's OAuth consent screen, and D9 already treats ICS as the
 supported fallback.
 
 ## Next Steps
+
+Start with [scheduler-backlog.md](scheduler-backlog.md) for the maintained list
+of outstanding work and decisions. The following is supporting context.
 
 1. Owner QA using [`scheduler-review.md`](scheduler-review.md), followed by a
    walkthrough of the changes and merge review. D6 history retention is settled;
