@@ -1100,15 +1100,54 @@ battery-optimisation exemptions set by hand.
 custom cadences, alarms, and calendar ingest all work; editing and the
 planned-versus-actual timer landed after milestone 1.
 
-What remains: the D6 revision layer, the mobile schedule UI, publish, and a UI
-for single-occurrence overrides (the engine and record type support them, but
-nothing creates one yet — "skip today's gym" has no button).
+What remains: the mobile schedule UI, publish, a UI for single-occurrence
+overrides (the engine and record type support them, but nothing creates one yet
+— "skip today's gym" has no button), and undo, which D6 now makes possible
+without another format change but which has no button either.
 
-**D6 was deliberately not attempted.** D11 says the envelope change is the one
-place where fast generation is a liability, because a wrong AAD projection
-fails silently rather than loudly. It wants a reviewed change, not an
-unsupervised one. Until then an edit is a create followed by a delete, which
-D11 anticipated and which works.
+**D6 landed on 2026-09-08**, after the owner settled the retention question and
+asked for the parent link. It was deliberately skipped the night before, on the
+grounds that a wrong AAD projection fails silently — that premise no longer
+holds, because the projection was made to fail loudly first. In order:
+
+1. `core: make the envelope AAD projection fail loudly` — the guard, landed on
+   its own so the change it protects could be read against it. Verified by
+   breaking it both ways.
+2. `envelope: v2 — revisions chained by parent hash` — the format only.
+   Nothing wrote a revision above 1 yet.
+3. `server: split object identity from its content, and give content a chain` —
+   `objects` keeps identity and a head pointer; `object_revisions` holds every
+   sealed byte; payloads hang off a revision. Two routes: `POST
+   /api/objects/{id}/revisions` appends, `DELETE /api/objects/{id}` became
+   purge and refuses an object that has not been tombstoned.
+4. `client: edit by revision, delete by tombstone, and check the chain` — plus
+   the two checks that need local state: no rollback, and continuity against
+   the held head.
+5. `d6: fix what only a live run could show` — see below.
+
+**What the live run caught that nothing else did.** A shadowed
+`OBJECT_ENVELOPE_VERSION_V2` in the client, still holding 1 after the shared
+one became 2 — two constants, one name, two crates, and a compiler with no
+opinion. A listing that returned payloads from *every* revision, because the
+query still filtered on object id alone. A WS handler that ignored `updated`
+for everything but collab, so an edit never reached a second device live (and
+one that had been ignoring `deleted` for schedule since the night before).
+`delete_file` still calling DELETE, which is purge now. None of these are
+type errors and none had a unit test that would have failed.
+
+Verified end to end against a live server and through the web UI: create, edit
+keeping the object id, a second device pulling and decrypting revision 2, an
+edit arriving over the socket, a stale device's write refused with 409, delete
+leaving nothing on a cold device, and a file deleted the same way.
+
+**Not built, and deliberately.** The per-kind retention table. Schedule records
+are a few hundred bytes, so keeping every revision of one costs nothing worth
+managing; files have no rename path at all today, so nothing creates a file
+revision that carries a payload, and the duplicate-blob problem the retention
+bullet warns about is latent rather than live. Building the policy now would be
+designing against predicted edit patterns instead of observed ones, which is
+the error D11 exists to prevent. The quota already counts revisions, so when
+the first kind does need pruning the accounting is already right.
 
 Bugs the build found that reading had not, beyond those listed above:
 
@@ -1128,9 +1167,8 @@ Bugs the build found that reading had not, beyond those listed above:
 and volume ramp, the flashlight, the upcoming-notification lead window,
 skip-next, timers, and the clock widget. abnormalarm stays installed.
 
-Two things milestone 1 deliberately does not have, so their absence is not a
-gap to be surprised by: editing a block (an edit is delete-then-create until
-D6 lands), and any Google or Zoho connector beyond a plain ICS URL — that one
+One thing milestone 1 deliberately does not have, so its absence is not a gap
+to be surprised by: any Google or Zoho connector beyond a plain ICS URL. That
 waits on the owner's OAuth consent screen, and D9 already treats ICS as the
 supported fallback.
 
