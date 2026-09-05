@@ -362,6 +362,7 @@ export function SchedulePanel({
                         onState={onState}
                         onError={onError}
                     />
+                    <CalendarSources sources={sources} onState={onState} onError={onError} />
                     <H2 size="$5">Events</H2>
                     <SeriesList
                         items={items}
@@ -369,7 +370,6 @@ export function SchedulePanel({
                         onState={onState}
                         onError={onError}
                     />
-                    <CalendarSources sources={sources} onState={onState} onError={onError} />
                 </aside>
             </div>
             <Dialog

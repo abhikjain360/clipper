@@ -36,25 +36,27 @@ export function CalendarDatePicker({
                     {children}
                 </Button>
             </DatePicker.Trigger>
-            <DatePicker.Content width={340} maxW="calc(100vw - 24px)">
-                <DatePicker.Content.Arrow />
-                {open && (
-                    <>
-                        <DatePickerBody config={config} />
-                        <Button
-                            size="$2"
-                            onPress={() => {
-                                const today = new Date();
-                                today.setHours(0, 0, 0, 0);
-                                onChange(today);
-                                setOpen(false);
-                            }}
-                        >
-                            Today
-                        </Button>
-                    </>
-                )}
-            </DatePicker.Content>
+            {open && (
+                <DatePicker.Content width={340} maxW="calc(100vw - 24px)">
+                    <DatePicker.Content.Arrow />
+                    {open && (
+                        <>
+                            <DatePickerBody config={config} />
+                            <Button
+                                size="$2"
+                                onPress={() => {
+                                    const today = new Date();
+                                    today.setHours(0, 0, 0, 0);
+                                    onChange(today);
+                                    setOpen(false);
+                                }}
+                            >
+                                Today
+                            </Button>
+                        </>
+                    )}
+                </DatePicker.Content>
+            )}
         </DatePicker>
     );
 }
