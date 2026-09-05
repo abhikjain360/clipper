@@ -24,6 +24,7 @@ import {
     useRef,
     useState,
     type ReactNode,
+    type CSSProperties,
 } from "react";
 import {
     Button,
@@ -103,6 +104,38 @@ export function SchedulePanel({
     onState: (state: AppState) => void;
     onError: (error: string | null) => void;
 }) {
+    const workspace = useRef<HTMLDivElement>(null);
+    const [sidebarWidth, setSidebarWidth] = useState(() => {
+        try {
+            const saved = Number(localStorage.getItem("clipper.schedule.sidebar-width"));
+            return Number.isFinite(saved) && saved >= 300 ? Math.min(saved, 720) : 360;
+        } catch {
+            return 360;
+        }
+    });
+    const [maxSidebarWidth, setMaxSidebarWidth] = useState(720);
+    const [resizing, setResizing] = useState(false);
+    const drag = useRef<{ x: number; width: number } | null>(null);
+    const displayedWidth = Math.min(sidebarWidth, maxSidebarWidth);
+    useEffect(() => {
+        const node = workspace.current;
+        if (!node) return;
+        const observer = new ResizeObserver(() =>
+            setMaxSidebarWidth(Math.max(300, Math.min(720, node.clientWidth - 560))),
+        );
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, []);
+    useEffect(() => {
+        if (resizing) return;
+        try {
+            localStorage.setItem("clipper.schedule.sidebar-width", String(sidebarWidth));
+        } catch {
+            /* Layout still works when storage is unavailable. */
+        }
+    }, [sidebarWidth, resizing]);
+    const resizeSidebar = (width: number) =>
+        setSidebarWidth(Math.round(Math.max(300, Math.min(maxSidebarWidth, width))));
     const [editing, setEditing] = useState<ScheduleItemView | null>(null);
     const [view, setView] = useState<CalendarView>("week");
     const [selectedDate, setSelectedDate] = useState(() => startOfDay(new Date()));
@@ -154,7 +187,11 @@ export function SchedulePanel({
         <YStack gap="$3">
             <RunningTimer running={running} onState={onState} onError={onError} />
 
-            <div className="schedule-workspace">
+            <div
+                ref={workspace}
+                className={`schedule-workspace${resizing ? " is-resizing" : ""}`}
+                style={{ "--sidebar-width": `${displayedWidth}px` } as CSSProperties}
+            >
                 <Card
                     bg="#171a1d"
                     p="$3"
@@ -256,6 +293,45 @@ export function SchedulePanel({
                     )}
                 </Card>
 
+                <div
+                    className="schedule-divider"
+                    role="separator"
+                    aria-label="Resize event list"
+                    aria-orientation="vertical"
+                    aria-valuemin={300}
+                    aria-valuemax={maxSidebarWidth}
+                    aria-valuenow={displayedWidth}
+                    tabIndex={0}
+                    onPointerDown={(event) => {
+                        if (event.button !== 0) return;
+                        event.preventDefault();
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        drag.current = { x: event.clientX, width: displayedWidth };
+                        setResizing(true);
+                    }}
+                    onPointerMove={(event) => {
+                        if (drag.current)
+                            resizeSidebar(drag.current.width + drag.current.x - event.clientX);
+                    }}
+                    onPointerUp={(event) => {
+                        drag.current = null;
+                        setResizing(false);
+                        event.currentTarget.releasePointerCapture(event.pointerId);
+                    }}
+                    onLostPointerCapture={() => {
+                        drag.current = null;
+                        setResizing(false);
+                    }}
+                    onKeyDown={(event) => {
+                        const step = event.shiftKey ? 50 : 10;
+                        if (event.key === "ArrowLeft") resizeSidebar(displayedWidth + step);
+                        else if (event.key === "ArrowRight") resizeSidebar(displayedWidth - step);
+                        else if (event.key === "Home") resizeSidebar(300);
+                        else if (event.key === "End") resizeSidebar(maxSidebarWidth);
+                        else return;
+                        event.preventDefault();
+                    }}
+                />
                 <aside className="schedule-sidebar" aria-label="Schedule events">
                     <ScheduleComposer
                         editing={null}
