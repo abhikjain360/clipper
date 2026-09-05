@@ -943,6 +943,44 @@ first-usable milestone, and no non-goals, which invites scope expansion; and
 decisions are not ranked by reversibility — D4 and D6 are one-way doors carrying
 the same "Settled" stamp as D5, which invites override in its own text.
 
+## Build log
+
+Branch `schedule-module`, started 2026-09-08. Commits, in order:
+
+1. `schedule: add the recurrence engine crate` — D11 step 1.
+2. `server: admit schedule as an object kind` — migration, deletability, and
+   the `"file"` delete-event fix.
+3. `client: sync schedule records end to end` — create, delete, live
+   materialize, reconciliation, windowed expansion.
+4. `schedule: expose the schedule through IPC, wasm, Tauri and the shared types`
+   — plus a self-describing wire format, pinned by a test.
+5. `web: add the schedule grid` — week view, composer, series list.
+6. `server: fix a second hardcoded delete kind, and test both`.
+
+**Verified against a live local server**, not just in unit tests: the migration
+applied cleanly to the existing dev database (collab docs survived); a cold
+second device pulled a series back and decrypted it; and a floating 07:00 series
+expanded to 05:00Z for a Berlin observer and 22:00Z the previous day for a Tokyo
+one — the same wall-clock morning at different instants, which is the property
+D5 exists to protect. The web UI was driven headlessly through CDP (the laptop
+display was asleep, so screenshots had to bypass it): login, create, render,
+delete.
+
+Three things the build changed about the plan:
+
+- **`RecurrenceId` cannot be an instant.** A floating series has to be
+  identified by wall-clock time or an override recorded in one zone silently
+  fails to match the same occurrence in another. It is an enum.
+- **The hardcoded `"file"` delete kind appeared twice**, not once — the
+  `event_log` row and the WebSocket broadcast. Reading the handler found one;
+  the regression test found the other on its first run.
+- **The serialized form is three contracts at once** — TypeScript, IPC, and the
+  ciphertext at rest — so it is tagged and self-describing rather than
+  positional, with a test pinning the shape.
+
+Not started: ingest (D11 step 4), the D6 revision layer, mobile UI, alarm
+absorption, publish.
+
 ## Next Steps
 
 Owner-gated, and nothing in the build waits on them:
