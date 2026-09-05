@@ -1,19 +1,22 @@
 use std::{collections::BTreeMap, num::NonZeroU32};
 
 use chrono::{Datelike, NaiveDateTime, TimeZone, Utc, Weekday};
+use clipper_api_types::ObjectId;
 
 use super::{
-    Cadence, Frequency, MonthDay, MonthlyRule, NthWeekday, RawRule, Recurrence, RecurrenceEnd,
-    RecurrenceError, WeekdaySet,
+    Cadence, Frequency, MonthDay, MonthlyRule, NthWeekday, Recurrence, RecurrenceEnd,
+    RecurrenceError, ValidatedRrule, WeekdaySet,
 };
 
 pub(super) fn convert(
     rule: String,
     local_start: NaiveDateTime,
+    import: ObjectId,
+    uid: String,
 ) -> Result<Recurrence, RecurrenceError> {
-    let raw = RawRule::new(rule)?;
+    let raw = ValidatedRrule::new(rule)?;
     let Some(cadence) = cadence(raw.as_str(), local_start) else {
-        return Ok(Recurrence::Raw { rule: raw });
+        return Ok(Recurrence::Imported { import, uid });
     };
     Ok(Recurrence::Every(cadence))
 }
@@ -191,15 +194,28 @@ mod tests {
             .unwrap()
     }
     fn converted(rule: &str) -> Cadence {
-        match convert(rule.into(), start()).unwrap() {
+        match convert(
+            rule.into(),
+            start(),
+            ObjectId::from(uuid::Uuid::nil()),
+            "uid".into(),
+        )
+        .unwrap()
+        {
             Recurrence::Every(value) => value,
             other => panic!("expected cadence, got {other:?}"),
         }
     }
     fn raw(rule: &str) {
         assert!(matches!(
-            convert(rule.into(), start()).unwrap(),
-            Recurrence::Raw { .. }
+            convert(
+                rule.into(),
+                start(),
+                ObjectId::from(uuid::Uuid::nil()),
+                "uid".into()
+            )
+            .unwrap(),
+            Recurrence::Imported { .. }
         ));
     }
 

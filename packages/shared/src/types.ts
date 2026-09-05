@@ -80,7 +80,8 @@ export type RecurrenceEnd =
 
 export type Recurrence =
   | { kind: "once" }
-  | { kind: "every"; frequency: Frequency; interval: number; end: RecurrenceEnd };
+  | { kind: "every"; frequency: Frequency; interval: number; end: RecurrenceEnd }
+  | { kind: "imported"; import: string; uid: string };
 
 /// A start with a time of day. Floating follows the device — a 07:00 alarm is
 /// 07:00 wherever you wake up — while zoned stays pinned to its IANA zone.

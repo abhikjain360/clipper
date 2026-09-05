@@ -2,20 +2,21 @@
 //!
 //! Rules Clipper understands are modelled as typed cadences. Imported RFC 5545
 //! `RRULE` values are converted when their complete meaning fits those types;
-//! otherwise their validated string form is retained verbatim. Every typed
+//! otherwise the stored recurrence points back to the import snapshot that
+//! contains the provider rule. Every typed
 //! constructor below validates, so an out-of-range weekday ordinal or an empty
 //! weekday set cannot be built.
 //!
 //! Ingest is the exception, and it has its own variant rather than a loophole.
-//! A provider can send a rule this enum cannot express, and [`Recurrence::Raw`]
-//! carries it verbatim — validated at construction, expanded as-is, and never
-//! editable in Clipper, because Clipper does not understand its structure. The
-//! type says which rules are understood and which are passed through, which is
-//! the property that matters; a bare string field everywhere would say nothing.
+//! A provider can send a rule this enum cannot express, and
+//! [`Recurrence::Imported`] identifies the original event without copying the
+//! rule into each persisted event. Expansion resolves and validates the rule
+//! from the raw import snapshot at runtime.
 
 use std::{num::NonZeroU32, str::FromStr};
 
 use chrono::{DateTime, Month, Utc, Weekday};
+use clipper_api_types::ObjectId;
 use serde::{Deserialize, Serialize};
 
 mod imported_rule;
@@ -28,36 +29,36 @@ pub enum Recurrence {
     Once,
     /// Repeats on a cadence Clipper understands and can edit.
     Every(Cadence),
-    /// An RFC 5545 rule ingested from a provider that [`Cadence`] cannot
-    /// express. Expanded verbatim and read-only: Clipper can show when it
-    /// happens without claiming to understand why.
+    /// An imported RFC 5545 rule that [`Cadence`] cannot express.
     ///
-    /// A struct variant rather than a newtype because serde cannot internally
-    /// tag a newtype wrapping a string — and `{"kind":"raw","rule":"…"}` reads
-    /// better than a bare string would anyway.
-    Raw { rule: RawRule },
+    /// The raw rule remains in the complete import file. These two fields find
+    /// the master `VEVENT` inside that immutable snapshot, so persisted domain
+    /// state does not duplicate opaque provider syntax.
+    Imported { import: ObjectId, uid: String },
 }
 
 impl Recurrence {
     /// Converts a validated imported `RRULE` to an editable cadence when doing
-    /// so is lossless, retaining the original rule otherwise.
+    /// so is lossless, retaining a reference to its import snapshot otherwise.
     pub fn from_imported_rule(
         rule: impl Into<String>,
         local_start: chrono::NaiveDateTime,
+        import: ObjectId,
+        uid: impl Into<String>,
     ) -> Result<Self, RecurrenceError> {
-        imported_rule::convert(rule.into(), local_start)
+        imported_rule::convert(rule.into(), local_start, import, uid.into())
     }
 }
 
-/// An RFC 5545 `RRULE` value, validated on the way in.
+/// A runtime-only RFC 5545 `RRULE` value, validated on the way in.
 ///
-/// Parsing at construction rather than at expansion means an unparseable feed
-/// is rejected where it arrives, not hours later when an alarm fails to fire.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct RawRule(String);
+/// This type is deliberately not serializable. Persisted recurrence state uses
+/// [`Recurrence::Imported`]; clients recover this value from the complete raw
+/// snapshot just before expansion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedRrule(String);
 
-impl RawRule {
+impl ValidatedRrule {
     pub fn new(rule: impl Into<String>) -> Result<Self, RecurrenceError> {
         let rule = rule.into();
         let trimmed = rule.trim().trim_start_matches("RRULE:").trim().to_string();
@@ -104,20 +105,6 @@ impl RawRule {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl TryFrom<String> for RawRule {
-    type Error = RecurrenceError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl From<RawRule> for String {
-    fn from(value: RawRule) -> Self {
-        value.0
     }
 }
 

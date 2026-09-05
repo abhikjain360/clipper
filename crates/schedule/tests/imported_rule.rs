@@ -1,11 +1,19 @@
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use clipper_schedule::{
-    BlockDuration, Expansion, RawRule, Recurrence, RecurrenceEngine, RruleEngine, ScheduleItem,
-    ScheduleItemId, ScheduleSpan, TimedStart, Window,
+    BlockDuration, Expansion, ImportedRuleResolver, Recurrence, RecurrenceEngine, RruleEngine,
+    ScheduleItem, ScheduleItemId, ScheduleSpan, TimedStart, Window,
 };
 
-fn starts(rule: Recurrence, local: NaiveDateTime) -> Vec<chrono::DateTime<Utc>> {
+fn import_id() -> clipper_api_types::ObjectId {
+    uuid::Uuid::from_u128(0x1111).into()
+}
+
+fn starts(
+    rule: Recurrence,
+    local: NaiveDateTime,
+    imported_rules: ImportedRuleResolver,
+) -> Vec<chrono::DateTime<Utc>> {
     let item = ScheduleItem {
         id: ScheduleItemId::new(),
         title: "import comparison".into(),
@@ -20,7 +28,7 @@ fn starts(rule: Recurrence, local: NaiveDateTime) -> Vec<chrono::DateTime<Utc>> 
         reference: None,
         alarm: None,
     };
-    RruleEngine::new()
+    RruleEngine::with_imported_rules(imported_rules)
         .occurrences(
             &item,
             &[],
@@ -50,22 +58,34 @@ fn converted_cadences_have_the_same_occurrences_as_the_imported_rule() {
         "FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29;COUNT=3",
         "FREQ=DAILY;UNTIL=20240201T090000Z",
     ] {
-        let converted = Recurrence::from_imported_rule(rule, local).unwrap();
+        let converted =
+            Recurrence::from_imported_rule(rule, local, import_id(), "event@example.com").unwrap();
         assert!(matches!(converted, Recurrence::Every(_)), "{rule}");
-        let raw = Recurrence::Raw {
-            rule: RawRule::new(rule).unwrap(),
+        let imported = Recurrence::Imported {
+            import: import_id(),
+            uid: "event@example.com".into(),
         };
-        assert_eq!(starts(raw, local), starts(converted, local), "{rule}");
+        let mut resolver = ImportedRuleResolver::new();
+        resolver
+            .insert(import_id(), "event@example.com", rule)
+            .unwrap();
+        assert_eq!(
+            starts(imported, local, resolver),
+            starts(converted, local, ImportedRuleResolver::new()),
+            "{rule}"
+        );
     }
 }
 
 #[test]
-fn unsupported_rules_retain_the_exact_validated_value() {
+fn unsupported_rules_retain_only_the_import_reference() {
     let local = NaiveDateTime::parse_from_str("20240110T090000", "%Y%m%dT%H%M%S").unwrap();
     let rule = "FREQ=WEEKLY;BYDAY=MO;WKST=SU";
-    let Recurrence::Raw { rule: retained } = Recurrence::from_imported_rule(rule, local).unwrap()
+    let Recurrence::Imported { import, uid } =
+        Recurrence::from_imported_rule(rule, local, import_id(), "event@example.com").unwrap()
     else {
         panic!("unsupported rule was converted")
     };
-    assert_eq!(retained.as_str(), rule);
+    assert_eq!(import, import_id());
+    assert_eq!(uid, "event@example.com");
 }

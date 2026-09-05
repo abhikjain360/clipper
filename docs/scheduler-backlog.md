@@ -56,8 +56,8 @@ If code and these notes disagree, verify the code and correct the notes.
 - [ ] Add undo/history browsing UI; retained revisions are infrastructure, not
   an implemented undo feature.
 - [ ] Expose richer recurrence controls supported by the domain/parser but
-  missing from the composer. Align the shared TypeScript recurrence union with
-  Rust's `Raw` variant; safe preservation of an existing rule is not full UI support.
+  missing from the composer. Preserving an existing recurrence does not provide
+  controls for editing it.
 - [ ] Build mobile schedule-management UI. Responsive browser QA does not cover
   the separate React Native app.
 - [ ] Implement per-client source opt-in and automatic/background refresh.
@@ -88,9 +88,10 @@ If code and these notes disagree, verify the code and correct the notes.
   do not establish vendor battery-management reliability.
 - [ ] Restore a working Android lint run: the latest attempt crashed inside
   Worklets' Kotlin analysis. The alarm build and targeted emulator QA passed.
-- [ ] Assess exotic sparse raw recurrence behavior if supporting such rules:
-  upstream iteration limits can produce incomplete results. Existing generated
-  history/window bounds also intentionally reject overly dense expansion.
+- [ ] Assess exotic sparse imported recurrence behavior: raw rules resolve from
+  the saved ICS snapshot, while upstream iteration limits can produce incomplete
+  results. Existing generated history/window bounds also intentionally reject
+  overly dense expansion.
 
 ## Existing boundaries, not promises of future fixes
 

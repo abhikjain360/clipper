@@ -9,7 +9,7 @@ use chrono::{NaiveDate, NaiveTime, Weekday};
 use chrono_tz::Tz;
 use clipper_schedule::{
     Frequency, IngestedStatus, Recurrence, RecurrenceEnd, ScheduleSpan, SourceId, TimedStart,
-    WeekdaySet, parse_ics,
+    WeekdaySet, parse_ics, parse_imported_recurrence_rules,
 };
 
 const FEED: &str = "\
@@ -66,12 +66,16 @@ END:VEVENT\r\n\
 END:VCALENDAR\r\n";
 
 fn parse() -> clipper_schedule::IngestOutcome {
-    parse_ics(FEED, SourceId(uuid_fixture())).expect("the feed parses")
+    parse_ics(FEED, SourceId(uuid_fixture()), import_fixture()).expect("the feed parses")
 }
 
 /// A fixed source id, so derived event ids are stable across runs.
 fn uuid_fixture() -> uuid::Uuid {
     uuid::Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888)
+}
+
+fn import_fixture() -> clipper_api_types::ObjectId {
+    uuid::Uuid::from_u128(0xaaaa_bbbb_cccc_dddd_eeee_ffff_0000_1111).into()
 }
 
 fn event(uid: &str) -> clipper_schedule::IngestedEvent {
@@ -236,9 +240,13 @@ fn ids_are_stable_across_passes_and_distinct_per_source() {
         "ids must not change between passes"
     );
 
-    let other_source = parse_ics(FEED, SourceId(uuid::Uuid::from_u128(0xDEAD_BEEF)))
-        .expect("parses")
-        .events;
+    let other_source = parse_ics(
+        FEED,
+        SourceId(uuid::Uuid::from_u128(0xDEAD_BEEF)),
+        import_fixture(),
+    )
+    .expect("parses")
+    .events;
     assert!(
         other_source
             .iter()
@@ -301,13 +309,14 @@ fn garbage_and_incomplete_calendars_are_rejected_but_an_empty_snapshot_is_valid(
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n",
     ] {
         assert!(
-            parse_ics(invalid, source).is_err(),
+            parse_ics(invalid, source, import_fixture()).is_err(),
             "must reject {invalid:?} instead of treating it as an empty snapshot"
         );
     }
 
     let empty = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n";
-    let outcome = parse_ics(empty, source).expect("an explicit empty snapshot is valid");
+    let outcome =
+        parse_ics(empty, source, import_fixture()).expect("an explicit empty snapshot is valid");
     assert!(outcome.events.is_empty());
     assert!(outcome.skipped.is_empty());
 }
@@ -316,7 +325,7 @@ fn garbage_and_incomplete_calendars_are_rejected_but_an_empty_snapshot_is_valid(
 fn parser_has_an_input_size_ceiling() {
     let mut oversized = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n".to_string();
     oversized.push_str(&" ".repeat(8 * 1024 * 1024));
-    assert!(parse_ics(&oversized, SourceId(uuid_fixture())).is_err());
+    assert!(parse_ics(&oversized, SourceId(uuid_fixture()), import_fixture()).is_err());
 }
 
 #[test]
@@ -326,7 +335,8 @@ UID:unknown-zone@example.com\r\nSUMMARY:Unknown zone\r\n\
 DTSTART;TZID=Mars/Olympus_Mons:20260908T090000\r\n\
 DTEND;TZID=Mars/Olympus_Mons:20260908T100000\r\n\
 END:VEVENT\r\nEND:VCALENDAR\r\n";
-    let outcome = parse_ics(feed, SourceId(uuid_fixture())).expect("the feed itself parses");
+    let outcome = parse_ics(feed, SourceId(uuid_fixture()), import_fixture())
+        .expect("the feed itself parses");
     assert!(outcome.events.is_empty());
     assert_eq!(outcome.skipped.len(), 1);
     assert!(outcome.skipped[0].reason.contains("Mars/Olympus_Mons"));
@@ -340,7 +350,7 @@ DTEND:20260115T150000Z\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\n\
 UID:dst@example.com\r\nDTSTART;TZID=Europe/Berlin:20260329T013000\r\n\
 DTEND;TZID=Europe/Berlin:20260329T033000\r\nEND:VEVENT\r\n\
 END:VCALENDAR\r\n";
-    let outcome = parse_ics(feed, SourceId(uuid_fixture())).expect("feed parses");
+    let outcome = parse_ics(feed, SourceId(uuid_fixture()), import_fixture()).expect("feed parses");
     assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
     for event in outcome.events {
         let ScheduleSpan::Timed { duration, .. } = event.span else {
@@ -357,7 +367,7 @@ UID:timed-duration@example.com\r\nDTSTART:20260908T090000Z\r\n\
 DURATION:PT1H45M\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\n\
 UID:day-duration@example.com\r\nDTSTART;VALUE=DATE:20260908\r\n\
 DURATION:P2D\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-    let outcome = parse_ics(feed, SourceId(uuid_fixture())).expect("feed parses");
+    let outcome = parse_ics(feed, SourceId(uuid_fixture()), import_fixture()).expect("feed parses");
     assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
 
     let timed = outcome
@@ -398,7 +408,7 @@ BEGIN:VEVENT\r\nUID:series@example.com\r\nRECURRENCE-ID:20260904T090000Z\r\n\
 STATUS:CANCELLED\r\nEND:VEVENT\r\n\
 END:VCALENDAR\r\n";
     let source = SourceId(uuid_fixture());
-    let event = parse_ics(feed, source)
+    let event = parse_ics(feed, source, import_fixture())
         .expect("feed parses")
         .events
         .pop()
@@ -406,7 +416,7 @@ END:VCALENDAR\r\n";
     assert_eq!(event.overrides.len(), 4);
     assert_eq!(
         event,
-        parse_ics(feed, source)
+        parse_ics(feed, source, import_fixture())
             .expect("second pass parses")
             .events
             .pop()
@@ -450,7 +460,7 @@ UID:range@example.com\r\nDTSTART:20260901T090000Z\r\nRRULE:FREQ=DAILY\r\n\
 END:VEVENT\r\nBEGIN:VEVENT\r\nUID:range@example.com\r\n\
 RECURRENCE-ID;RANGE=THISANDFUTURE:20260903T090000Z\r\n\
 DTSTART:20260903T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-    let outcome = parse_ics(feed, SourceId(uuid_fixture())).expect("feed parses");
+    let outcome = parse_ics(feed, SourceId(uuid_fixture()), import_fixture()).expect("feed parses");
     assert!(
         outcome.events.is_empty(),
         "the affected series is unsafe to show"
@@ -467,7 +477,7 @@ fn exdate_takes_precedence_over_the_same_rdate() {
 UID:collision@example.com\r\nDTSTART:20260901T090000Z\r\n\
 RRULE:FREQ=DAILY;COUNT=2\r\nRDATE:20260905T090000Z\r\n\
 EXDATE:20260905T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-    let event = parse_ics(feed, SourceId(uuid_fixture()))
+    let event = parse_ics(feed, SourceId(uuid_fixture()), import_fixture())
         .expect("feed parses")
         .events
         .pop()
@@ -489,7 +499,7 @@ DTEND:20260901T093000Z\r\nRRULE:FREQ=DAILY;COUNT=2\r\nEND:VEVENT\r\n\
 BEGIN:VEVENT\r\nUID:overnight-series@example.com\r\n\
 RECURRENCE-ID:20260902T090000Z\r\nDTSTART:20260903T233000Z\r\n\
 DTEND:20260904T013000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-    let event = parse_ics(feed, SourceId(uuid_fixture()))
+    let event = parse_ics(feed, SourceId(uuid_fixture()), import_fixture())
         .expect("feed parses")
         .events
         .pop()
@@ -517,5 +527,85 @@ DTEND:20260904T013000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
     assert_eq!(
         overlapping[0].span.end,
         from + chrono::TimeDelta::minutes(90)
+    );
+}
+
+#[test]
+fn an_unsupported_rule_is_resolved_from_the_referenced_snapshot() {
+    use chrono::{TimeZone, Utc};
+    use clipper_schedule::{
+        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, Window,
+    };
+
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:opaque@example.com\r\nDTSTART:20260101T090000Z\r\n\
+DTEND:20260101T093000Z\r\nRRULE:FREQ=DAILY;COUNT=2;BYHOUR=9\r\n\
+END:VEVENT\r\nEND:VCALENDAR\r\n";
+    let import = import_fixture();
+    let event = parse_ics(feed, SourceId(uuid_fixture()), import)
+        .expect("snapshot parses")
+        .events
+        .pop()
+        .expect("event parses");
+    assert_eq!(event.import, Some(import));
+    assert_eq!(
+        event.recurrence,
+        Recurrence::Imported {
+            import,
+            uid: "opaque@example.com".into(),
+        }
+    );
+
+    let rules = parse_imported_recurrence_rules(feed, import).expect("rules resolve");
+    assert_eq!(
+        rules
+            .lookup(import, "opaque@example.com")
+            .expect("opaque rule")
+            .as_str(),
+        "FREQ=DAILY;COUNT=2;BYHOUR=9"
+    );
+    let item = ScheduleItem {
+        id: ScheduleItemId(event.id),
+        title: event.title,
+        span: event.span,
+        recurrence: event.recurrence,
+        reference: None,
+        alarm: None,
+    };
+    let occurrences = RruleEngine::with_imported_rules(rules)
+        .occurrences(
+            &item,
+            &[],
+            &Expansion {
+                window: Window::new(
+                    Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                    Utc.with_ymd_and_hms(2026, 1, 4, 0, 0, 0).unwrap(),
+                )
+                .unwrap(),
+                observer: Tz::UTC,
+            },
+        )
+        .expect("resolved rule expands");
+    assert_eq!(occurrences.len(), 2);
+}
+
+#[test]
+fn runtime_rule_extraction_rejects_ambiguous_master_uids_and_rrules() {
+    let duplicate_uid = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:same@example.com\r\nDTSTART:20260101T090000Z\r\n\
+END:VEVENT\r\nBEGIN:VEVENT\r\nUID:same@example.com\r\n\
+DTSTART:20260102T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    assert!(
+        parse_imported_recurrence_rules(duplicate_uid, import_fixture()).is_err(),
+        "a UID must identify exactly one master inside its snapshot"
+    );
+
+    let multiple_rules = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:two-rules@example.com\r\nDTSTART:20260101T090000Z\r\n\
+RRULE:FREQ=DAILY;COUNT=2\r\nRRULE:FREQ=WEEKLY;COUNT=2\r\n\
+END:VEVENT\r\nEND:VCALENDAR\r\n";
+    assert!(
+        parse_imported_recurrence_rules(multiple_rules, import_fixture()).is_err(),
+        "multiple RRULE properties cannot be resolved by UID alone"
     );
 }

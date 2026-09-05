@@ -23,12 +23,12 @@ pub mod summary;
 pub mod time;
 
 pub use alarm::{AlarmPolicy, PlannedAlarm, plan_alarms};
-pub use engine::{EngineError, Expansion, RecurrenceEngine, RruleEngine, Window};
-#[cfg(not(target_family = "wasm"))]
-pub use ingest::parse_ics;
+pub use engine::{
+    EngineError, Expansion, ImportedRuleResolver, RecurrenceEngine, RruleEngine, Window,
+};
 pub use ingest::{
     CalendarSource, IngestError, IngestOutcome, IngestedEvent, IngestedStatus, SkippedEvent,
-    SourceId, SourceKind,
+    SourceId, SourceKind, parse_ics, parse_imported_recurrence_rules,
 };
 pub use item::{
     ActualId, ActualRecord, ActualSpan, ObjectRevisionRef, Occurrence, OccurrenceOrigin,
@@ -36,7 +36,7 @@ pub use item::{
     RecurrenceId, ScheduleItem, ScheduleItemId,
 };
 pub use recurrence::{
-    Cadence, Frequency, MonthDay, MonthlyRule, NthWeekday, RawRule, Recurrence, RecurrenceEnd,
-    RecurrenceError, WeekdaySet,
+    Cadence, Frequency, MonthDay, MonthlyRule, NthWeekday, Recurrence, RecurrenceEnd,
+    RecurrenceError, ValidatedRrule, WeekdaySet,
 };
 pub use time::{BlockDuration, ResolvedSpan, ScheduleSpan, TimeError, TimedStart};

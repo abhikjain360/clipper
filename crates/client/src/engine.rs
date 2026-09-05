@@ -139,6 +139,7 @@ pub struct SyncEngine {
     /// Serialize this device's timer commands across UI/IPC callers.
     actual_write: Mutex<()>,
     calendar_write: Mutex<()>,
+    import_rules: Mutex<std::collections::VecDeque<calendar_import::CachedImportRules>>,
     schedule_history: Mutex<HashMap<(u64, clipper_schedule::ObjectRevisionRef), ScheduleRecord>>,
     history_epoch: std::sync::atomic::AtomicU64,
 }
@@ -185,6 +186,7 @@ impl SyncEngine {
             calendar_write: Mutex::new(()),
             schedule_history: Mutex::new(HashMap::new()),
             history_epoch: std::sync::atomic::AtomicU64::new(0),
+            import_rules: Mutex::new(std::collections::VecDeque::new()),
         }))
     }
 
@@ -451,6 +453,7 @@ impl SyncEngine {
             let mut active_key = self.encryption_key.write().await;
             self.history_epoch.fetch_add(1, Ordering::SeqCst);
             self.schedule_history.lock().await.clear();
+            self.import_rules.lock().await.clear();
             self.local_store.clear_memory().await;
             self.local_store
                 .set_profile(profile_id_from_encryption_key(&encryption_key));
@@ -544,6 +547,7 @@ impl SyncEngine {
             self.history_epoch.fetch_add(1, Ordering::SeqCst);
             *active_key = None;
             self.schedule_history.lock().await.clear();
+            self.import_rules.lock().await.clear();
         }
         *self.device_signing_key.write().await = None;
         *self.device_identity_wrapping_key.write().await = None;
@@ -603,6 +607,7 @@ impl SyncEngine {
                 self.history_epoch.fetch_add(1, Ordering::SeqCst);
                 *active_key = None;
                 self.schedule_history.lock().await.clear();
+                self.import_rules.lock().await.clear();
             }
             *self.device_signing_key.write().await = None;
             *self.device_identity_wrapping_key.write().await = None;
@@ -1756,15 +1761,15 @@ impl SyncEngine {
             .map(|source| (source.id, source))
             .collect();
 
-        let engine = RruleEngine::new();
         let mut out = Vec::new();
         let mut warnings = Vec::new();
+        let mut unavailable_imports = HashMap::<ObjectId, String>::new();
 
         let ready_sources = calendar_import::ready_sources(&records);
         for source in source_names.values() {
             if source.active_import.is_some() && !ready_sources.contains(&source.id) {
                 warnings.push(format!(
-                    "{}: waiting for the complete imported calendar",
+                    "{}: waiting for a complete, consistent imported calendar",
                     source.name
                 ));
             }
@@ -1796,6 +1801,24 @@ impl SyncEngine {
                 | ScheduleRecord::Source(_) => continue,
             };
             let all_day = matches!(series.span, ScheduleSpan::AllDay { .. });
+            let imported = match &series.recurrence {
+                clipper_schedule::Recurrence::Imported { import, .. } => Some(*import),
+                _ => None,
+            };
+            if let Some(error) = imported.and_then(|id| unavailable_imports.get(&id)) {
+                warnings.push(format!("{}: {}", series.title, error));
+                continue;
+            }
+            let engine = match self.recurrence_engine(&series.recurrence).await {
+                Ok(engine) => engine,
+                Err(error) => {
+                    if let Some(import) = imported {
+                        unavailable_imports.insert(import, error.to_string());
+                    }
+                    warnings.push(format!("{}: {}", series.title, error));
+                    continue;
+                }
+            };
             let pin = revision_ref(object_id, *head)?;
             let effective = match self
                 .effective_overrides(&series, pin, record, &records)
@@ -1875,7 +1898,6 @@ impl SyncEngine {
         let until = now + chrono::TimeDelta::hours(i64::from(within_hours.max(1)));
 
         let records = self.local_store.schedule_records_with_heads().await?;
-        let engine = RruleEngine::new();
         let mut alarms = Vec::new();
         for (object_id, record, head) in &records {
             let Some(item) = record.as_item() else {
@@ -1883,6 +1905,13 @@ impl SyncEngine {
             };
             let Some(policy) = item.alarm else {
                 continue;
+            };
+            let engine = match self.recurrence_engine(&item.recurrence).await {
+                Ok(engine) => engine,
+                Err(error) => {
+                    warn!(item = %item.id, %error, "Skipping alarms with unavailable recurrence");
+                    continue;
+                }
             };
             // Bound the window by fire time, not event time. For a two-hour
             // lead, tomorrow's 01:00 event must be included in today's alarms.
@@ -3393,27 +3422,13 @@ fn encrypted_clipboard_from_init(
 
 /// Parse a fetched feed.
 ///
-/// Split out so the browser build can drop the iCalendar parser entirely: it
-/// can never fetch a feed anyway, and the parser pulls a transitive dependency
-/// that needs a wasm randomness backend this workspace does not configure.
-#[cfg(not(target_family = "wasm"))]
 fn parse_calendar_feed(
     text: &str,
     source: clipper_schedule::SourceId,
+    import: ObjectId,
 ) -> Result<clipper_schedule::IngestOutcome, ClientError> {
-    clipper_schedule::parse_ics(text, source)
+    clipper_schedule::parse_ics(text, source, import)
         .map_err(|error| ClientError::Other(format!("calendar feed: {error}")))
-}
-
-#[cfg(target_family = "wasm")]
-fn parse_calendar_feed(
-    _text: &str,
-    _source: clipper_schedule::SourceId,
-) -> Result<clipper_schedule::IngestOutcome, ClientError> {
-    // Unreachable: `fetch_calendar_feed` refuses first on this target.
-    Err(ClientError::Unsupported(
-        "Calendar feeds are parsed on the desktop and mobile apps".into(),
-    ))
 }
 
 /// Largest calendar feed the client will read. A feed is a remote document

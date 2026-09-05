@@ -1093,7 +1093,7 @@ function CalendarSources({
                     <Text fontWeight="600">{pending.source.name}</Text>
                     <Paragraph>
                         {pending.action === "raw"
-                            ? "Permanently delete the original feed file? Parsed events and recordings stay. Original provider fields will no longer be available."
+                            ? "Permanently delete the original feed file? One-off events, supported recurring events, and recordings stay. Events with unsupported recurrence rules will be hidden with a warning because their original rule will no longer be available."
                             : pending.action === "remove"
                               ? "Remove this calendar and permanently delete its imported events and original feeds? Recordings and local overrides stay, but their old imported plans will be unavailable."
                               : "Replace this calendar with a new import? After a successful import, previous imported events and original feeds are permanently deleted. Recordings and local overrides stay, but their old imported plans will be unavailable. A failed import keeps the current calendar."}

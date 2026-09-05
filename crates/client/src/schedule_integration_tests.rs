@@ -658,6 +658,172 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
             .iter()
             .any(|event| event.source.as_deref() == Some("Personal"))
     );
+
+    // Unsupported imported rules are resolved from the encrypted snapshot at
+    // runtime. Keep this source separate so the replacement/deletion checks
+    // above continue to exercise the ordinary one-event feed.
+    *feed.write().await = concat!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n",
+        "BEGIN:VEVENT\r\nUID:cadence-1\r\nSUMMARY:Cadence meeting\r\n",
+        "DTSTART:20260908T090000Z\r\nDTEND:20260908T100000Z\r\n",
+        "RRULE:FREQ=DAILY;COUNT=3\r\nEND:VEVENT\r\n",
+        "BEGIN:VEVENT\r\nUID:unsupported-1\r\nSUMMARY:Split-hour meeting\r\n",
+        "DTSTART:20260908T090000Z\r\nDTEND:20260908T100000Z\r\n",
+        "RRULE:FREQ=DAILY;COUNT=6;BYHOUR=9,17\r\nEND:VEVENT\r\n",
+        "END:VCALENDAR\r\n",
+    )
+    .into();
+    let unsupported_source = first
+        .add_calendar_source("Unsupported", &feed_url)
+        .await
+        .expect("unsupported source");
+    assert_eq!(
+        first
+            .sync_calendar_source(&unsupported_source)
+            .await
+            .expect("unsupported source sync")
+            .added,
+        2
+    );
+    let unsupported_source_id = first
+        .local_store
+        .schedule_records_with_ids()
+        .await
+        .into_iter()
+        .find_map(|(id, record)| {
+            (id == unsupported_source)
+                .then(|| record.as_source().map(|source| source.id))
+                .flatten()
+        })
+        .expect("stored unsupported source");
+    let unsupported_records = first.local_store.schedule_records_with_ids().await;
+    let unsupported_event = unsupported_records
+        .iter()
+        .find_map(|(_, record)| {
+            let event = record.as_ingested()?;
+            (event.source == unsupported_source_id && event.uid == "unsupported-1").then_some(event)
+        })
+        .expect("unsupported imported event");
+    let (unsupported_import, unsupported_uid) = match &unsupported_event.recurrence {
+        Recurrence::Imported { import, uid } => (*import, uid.as_str()),
+        recurrence => panic!("expected imported recurrence, got {recurrence:?}"),
+    };
+    assert_eq!(unsupported_uid, "unsupported-1");
+    let unsupported_occurrences = first
+        .expand_schedule(from, "2026-09-11T00:00:00Z", "UTC")
+        .await
+        .expect("unsupported recurrence expands");
+    let split_starts: Vec<_> = unsupported_occurrences
+        .iter()
+        .filter(|event| {
+            event.source.as_deref() == Some("Unsupported") && event.title == "Split-hour meeting"
+        })
+        .map(|event| event.start.as_str())
+        .collect();
+    assert_eq!(
+        split_starts,
+        [
+            "2026-09-08T09:00:00Z",
+            "2026-09-08T17:00:00Z",
+            "2026-09-09T09:00:00Z",
+            "2026-09-09T17:00:00Z",
+            "2026-09-10T09:00:00Z",
+            "2026-09-10T17:00:00Z",
+        ]
+    );
+    let split_occurrence = unsupported_occurrences
+        .iter()
+        .find(|event| event.title == "Split-hour meeting")
+        .expect("unsupported occurrence for timer");
+    let split_actual = first
+        .start_actual(Some(&split_occurrence.plan_context))
+        .await
+        .expect("start unsupported recurrence timer");
+    first
+        .stop_actual(&split_actual)
+        .await
+        .expect("stop unsupported recurrence timer");
+
+    // Clearing the parsed-rule cache must still leave native offline expansion
+    // working from the ciphertext cached by the local store.
+    first.import_rules.lock().await.clear();
+    let import_head = first
+        .local_head(&unsupported_import.to_string())
+        .await
+        .expect("raw import head");
+    assert!(
+        first
+            .local_store
+            .import_file_ciphertext(&unsupported_import.to_string(), import_head)
+            .await
+            .expect("cached raw import")
+            .is_some(),
+        "native cache stores the complete encrypted raw import"
+    );
+    assert!(
+        first
+            .expand_schedule(from, to, "UTC")
+            .await
+            .expect("offline unsupported recurrence expansion")
+            .iter()
+            .any(|event| event.title == "Split-hour meeting"),
+        "clearing the parsed-rule cache reuses the encrypted import"
+    );
+    let saved_token = first.api.token().expect("authenticated token");
+    first.api.clear_token();
+    first.import_rules.lock().await.clear();
+    assert!(
+        first
+            .expand_schedule(from, to, "UTC")
+            .await
+            .expect("offline unsupported recurrence expansion")
+            .iter()
+            .any(|event| event.title == "Split-hour meeting"),
+        "native encrypted cache supports expansion without an API token"
+    );
+    first.api.restore_token(saved_token);
+    assert!(!first.import_rules.lock().await.is_empty());
+
+    first
+        .delete_file(&unsupported_import.to_string())
+        .await
+        .expect("delete unsupported raw import");
+    let after_unsupported_delete = first
+        .expand_schedule(from, to, "UTC")
+        .await
+        .expect("calendar after unsupported raw deletion");
+    assert!(
+        after_unsupported_delete
+            .iter()
+            .all(|event| event.title != "Split-hour meeting"),
+        "unsupported recurrence is omitted when its raw import is gone"
+    );
+    assert!(
+        after_unsupported_delete
+            .iter()
+            .any(|event| event.title == "Cadence meeting"),
+        "stored cadence remains usable after raw import deletion"
+    );
+    assert!(
+        first
+            .get_state()
+            .await
+            .schedule_warnings
+            .iter()
+            .any(
+                |warning| warning.contains("Split-hour meeting") && warning.contains("unavailable")
+            ),
+        "missing raw import produces a warning"
+    );
+    assert!(
+        first
+            .local_store
+            .schedule_records_with_ids()
+            .await
+            .into_iter()
+            .any(|(id, record)| id == split_actual && matches!(record, ScheduleRecord::Actual(_))),
+        "recording survives unsupported raw import deletion"
+    );
     first
         .delete_schedule_object(&source)
         .await
@@ -703,6 +869,10 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
         .delete_schedule_object(&personal_source)
         .await
         .expect("remove independent source");
+    first
+        .delete_schedule_object(&unsupported_source)
+        .await
+        .expect("remove unsupported source");
     feed_task.abort();
 
     let file = first
@@ -850,7 +1020,7 @@ fn imported_source_readiness_requires_a_complete_active_batch() {
         events: vec![event_id],
     };
     let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:ready\r\nSUMMARY:Ready\r\nDTSTART:20260908T090000Z\r\nDTEND:20260908T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-    let mut event = clipper_schedule::parse_ics(feed, source_id)
+    let mut event = clipper_schedule::parse_ics(feed, source_id, raw_id)
         .expect("valid feed")
         .events
         .pop()
@@ -886,6 +1056,33 @@ fn imported_source_readiness_requires_a_complete_active_batch() {
         ),
     ];
     assert!(calendar_import::ready_sources(&complete).contains(&source_id));
+
+    for (target, uid, valid) in [
+        (raw_id, event.uid.clone(), true),
+        (
+            ObjectId::from(uuid::Uuid::new_v4()),
+            event.uid.clone(),
+            false,
+        ),
+        (raw_id, "another-event".into(), false),
+    ] {
+        let mut candidate = event.clone();
+        candidate.recurrence = Recurrence::Imported {
+            import: target,
+            uid,
+        };
+        let mut records = complete.clone();
+        records[1].1 = ScheduleRecord::Ingested(Box::new(candidate.clone()));
+        assert_eq!(
+            calendar_import::ready_sources(&records).contains(&source_id),
+            valid
+        );
+        let source = records[0].1.as_source().unwrap();
+        assert_eq!(
+            source.contains_event(&event_id.to_string(), &candidate),
+            valid
+        );
+    }
 
     let incomplete = vec![(
         "source".into(),

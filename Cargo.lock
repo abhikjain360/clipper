@@ -1082,6 +1082,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "clipper-api-types",
+ "getrandom 0.3.4",
  "rrule",
  "serde",
  "serde_json",
