@@ -979,6 +979,7 @@ dependencies = [
  "opaque-ke",
  "postcard",
  "rand 0.10.2",
+ "rand 0.8.7",
  "serde",
  "sha2",
  "thiserror 2.0.20",
@@ -3979,9 +3980,9 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "opaque-ke"
-version = "4.1.0-pre.2"
+version = "4.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c65d1dc9028caf5939b337f655a78dc1bbb5867686e5041cb36f5d5e8b5a9ce"
+checksum = "ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a"
 dependencies = [
  "argon2",
  "curve25519-dalek",

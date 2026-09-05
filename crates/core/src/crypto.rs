@@ -419,7 +419,7 @@ pub fn opaque_register(
 /// Sample a fresh `opaque_server_setup = oprf_seed ‖ sk_S ‖ fake_sk` for one
 /// user and return it serialized. See `docs/opaque.md`.
 pub fn opaque_new_server_setup() -> Vec<u8> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = opaque_rand::rngs::OsRng;
     opaque_ke::ServerSetup::<ClipperOpaqueCipherSuite>::new(&mut rng)
         .serialize()
         .to_vec()
@@ -433,7 +433,7 @@ pub fn opaque_new_server_setup() -> Vec<u8> {
 /// and must be held until `opaque_client_register_finish`.
 /// See `docs/opaque.md`.
 pub fn opaque_client_register_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = opaque_rand::rngs::OsRng;
     let start =
         opaque_ke::ClientRegistration::<ClipperOpaqueCipherSuite>::start(&mut rng, passphrase)
             .map_err(opaque_error)?;
@@ -457,7 +457,7 @@ pub fn opaque_client_register_finish(
     passphrase: &[u8],
     registration_response: &[u8],
 ) -> Result<OpaqueRegistrationFinish, CryptoError> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = opaque_rand::rngs::OsRng;
     let client_registration =
         opaque_ke::ClientRegistration::<ClipperOpaqueCipherSuite>::deserialize(client_state)
             .map_err(opaque_error)?;
@@ -533,7 +533,7 @@ pub fn opaque_server_register_finish(registration_upload: &[u8]) -> Result<Vec<u
 /// `ke1 = nonce_C ‖ X_C`, plus `state_C = (r, pw, x_C, nonce_C, ke1)`.
 /// See `docs/opaque.md`.
 pub fn opaque_client_login_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = opaque_rand::rngs::OsRng;
     let start = opaque_ke::ClientLogin::<ClipperOpaqueCipherSuite>::start(&mut rng, passphrase)
         .map_err(opaque_error)?;
 
@@ -562,7 +562,7 @@ pub fn opaque_client_login_finish(
     passphrase: &[u8],
     credential_response: &[u8],
 ) -> Result<OpaqueLoginFinish, CryptoError> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = opaque_rand::rngs::OsRng;
     let client_login =
         opaque_ke::ClientLogin::<ClipperOpaqueCipherSuite>::deserialize(client_state)
             .map_err(opaque_error)?;
@@ -609,7 +609,7 @@ pub fn opaque_server_login_start(
     credential_request: &[u8],
     credential_identifier: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = opaque_rand::rngs::OsRng;
     let server_setup =
         opaque_ke::ServerSetup::<ClipperOpaqueCipherSuite>::deserialize(server_setup)
             .map_err(opaque_error)?;

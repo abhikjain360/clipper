@@ -220,11 +220,6 @@ choice) and a recommendation.
     at once. Same-user local DoS only (the daemon is same-user-trusted by design).
     _Decision:_ add a handshake timeout + accept cap, or accept as same-user-local.
 
-19. **`opaque-ke` is a pre-release dependency** (`4.1.0-pre.2`). No advisory, exact-
-    pinned, usage verified correct. _Decision:_ accept-and-track vs. block release
-    until a stable/audited version; re-pin and re-run `nix run .#audit` before
-    deployment.
-
 ## Accepted / residual risks
 
 Known and acknowledged; not currently being fixed.
