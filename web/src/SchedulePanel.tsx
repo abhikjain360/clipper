@@ -145,64 +145,78 @@ export function SchedulePanel({
         <YStack gap="$3">
             <RunningTimer running={running} onState={onState} onError={onError} />
 
-            <ScheduleComposer
-                editing={editing}
-                onDone={() => setEditing(null)}
-                onState={onState}
-                onError={onError}
-            />
-
-            <Card bg="#171a1d" p="$3" gap="$3" style={{ borderColor: "#252b31", borderWidth: 1 }}>
-                <XStack items="center" justify="space-between" gap="$2" flexWrap="wrap">
-                    <XStack items="center" gap="$2">
-                        <H2 size="$5">{weekLabel(weekStart)}</H2>
-                        {loading && <Spinner size="small" />}
+            <div className="schedule-workspace">
+                <Card
+                    bg="#171a1d"
+                    p="$3"
+                    gap="$3"
+                    style={{ borderColor: "#252b31", borderWidth: 1 }}
+                >
+                    <XStack items="center" justify="space-between" gap="$2" flexWrap="wrap">
+                        <XStack items="center" gap="$2">
+                            <H2 size="$5">{weekLabel(weekStart)}</H2>
+                            {loading && <Spinner size="small" />}
+                        </XStack>
+                        <XStack gap="$2">
+                            <Button
+                                size="$2"
+                                icon={<ChevronLeft size={16} />}
+                                onPress={() => setWeekStart(addDays(weekStart, -7))}
+                                aria-label="Previous week"
+                            />
+                            <Button size="$2" onPress={() => setWeekStart(startOfWeek(new Date()))}>
+                                Today
+                            </Button>
+                            <Button
+                                size="$2"
+                                icon={<ChevronRight size={16} />}
+                                onPress={() => setWeekStart(addDays(weekStart, 7))}
+                                aria-label="Next week"
+                            />
+                        </XStack>
                     </XStack>
-                    <XStack gap="$2">
-                        <Button
-                            size="$2"
-                            icon={<ChevronLeft size={16} />}
-                            onPress={() => setWeekStart(addDays(weekStart, -7))}
-                            aria-label="Previous week"
-                        />
-                        <Button size="$2" onPress={() => setWeekStart(startOfWeek(new Date()))}>
-                            Today
-                        </Button>
-                        <Button
-                            size="$2"
-                            icon={<ChevronRight size={16} />}
-                            onPress={() => setWeekStart(addDays(weekStart, 7))}
-                            aria-label="Next week"
-                        />
-                    </XStack>
-                </XStack>
 
-                <WeekGrid
-                    weekStart={weekStart}
-                    occurrences={occurrences}
-                    actuals={actuals}
-                    onStart={async (occurrence) => {
-                        if (starting) return;
-                        setStarting(true);
-                        onError(null);
-                        try {
-                            const backend = await clipperBackend();
-                            await backend.startActual(
-                                occurrence.item_id,
-                                occurrence.occurrence_key,
-                            );
-                            onState(await backend.getState());
-                        } catch (caught) {
-                            onError(formatBackendError(caught));
-                        } finally {
-                            setStarting(false);
-                        }
-                    }}
-                />
-            </Card>
+                    <WeekGrid
+                        weekStart={weekStart}
+                        occurrences={occurrences}
+                        actuals={actuals}
+                        onStart={async (occurrence) => {
+                            if (starting) return;
+                            setStarting(true);
+                            onError(null);
+                            try {
+                                const backend = await clipperBackend();
+                                await backend.startActual(
+                                    occurrence.item_id,
+                                    occurrence.occurrence_key,
+                                );
+                                onState(await backend.getState());
+                            } catch (caught) {
+                                onError(formatBackendError(caught));
+                            } finally {
+                                setStarting(false);
+                            }
+                        }}
+                    />
+                </Card>
 
-            <SeriesList items={items} onEdit={setEditing} onState={onState} onError={onError} />
-            <CalendarSources sources={sources} onState={onState} onError={onError} />
+                <aside className="schedule-sidebar" aria-label="Schedule events">
+                    <ScheduleComposer
+                        editing={editing}
+                        onDone={() => setEditing(null)}
+                        onState={onState}
+                        onError={onError}
+                    />
+                    <H2 size="$5">Events</H2>
+                    <SeriesList
+                        items={items}
+                        onEdit={setEditing}
+                        onState={onState}
+                        onError={onError}
+                    />
+                    <CalendarSources sources={sources} onState={onState} onError={onError} />
+                </aside>
+            </div>
         </YStack>
     );
 }
@@ -261,8 +275,17 @@ function WeekGrid({
         // A little headroom above the first block so it does not sit flush
         // against the top edge.
         node.scrollTop = Math.max(0, ((firstMinute - 30) / 60) * HOUR_HEIGHT);
-        setGutter(node.offsetWidth - node.clientWidth);
     }, [firstMinute, occurrences.length]);
+
+    useEffect(() => {
+        const node = scroller.current;
+        if (!(node instanceof HTMLElement)) return;
+        const measure = () => setGutter(node.offsetWidth - node.clientWidth);
+        const observer = new ResizeObserver(measure);
+        observer.observe(node);
+        measure();
+        return () => observer.disconnect();
+    }, []);
 
     return (
         // Horizontal scroll lives here rather than on the page: a seven-day grid
@@ -270,11 +293,13 @@ function WeekGrid({
         <YStack style={{ overflowX: "auto" }}>
             <YStack minW={720}>
                 <XStack pr={gutter}>
-                    <YStack width={56} />
+                    <YStack width={56} style={{ flexShrink: 0 }} />
                     {days.map((day) => (
                         <YStack
                             key={day.toISOString()}
                             flex={1}
+                            flexBasis={0}
+                            minW={0}
                             items="center"
                             py="$1"
                             style={{
@@ -294,7 +319,13 @@ function WeekGrid({
 
                 {allDay.length > 0 && (
                     <XStack pr={gutter} style={{ borderTopColor: "#252b31", borderTopWidth: 1 }}>
-                        <YStack width={56} items="flex-end" pr="$2" py="$1">
+                        <YStack
+                            width={56}
+                            style={{ flexShrink: 0 }}
+                            items="flex-end"
+                            pr="$2"
+                            py="$1"
+                        >
                             <Text fontSize={11} color="#8b949e">
                                 all day
                             </Text>
@@ -303,6 +334,8 @@ function WeekGrid({
                             <YStack
                                 key={day.toISOString()}
                                 flex={1}
+                                flexBasis={0}
+                                minW={0}
                                 gap={2}
                                 p={2}
                                 style={{ borderLeftColor: "#252b31", borderLeftWidth: 1 }}
@@ -325,11 +358,11 @@ function WeekGrid({
                     style={{
                         borderTopColor: "#252b31",
                         borderTopWidth: 1,
-                        maxHeight: 520,
+                        maxHeight: "max(320px, calc(100dvh - 240px))",
                         overflowY: "auto",
                     }}
                 >
-                    <YStack width={56}>
+                    <YStack width={56} style={{ flexShrink: 0 }}>
                         {Array.from({ length: 24 }, (_, hour) => (
                             <YStack key={hour} height={HOUR_HEIGHT} items="flex-end" pr="$2">
                                 <Text fontSize={11} color="#8b949e">
@@ -342,6 +375,8 @@ function WeekGrid({
                         <YStack
                             key={day.toISOString()}
                             flex={1}
+                            flexBasis={0}
+                            minW={0}
                             height={DAY_HEIGHT}
                             style={{
                                 position: "relative",

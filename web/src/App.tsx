@@ -379,6 +379,48 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                     <H2 size="$7">Clipper</H2>
                     <ConnectionBadge status={state.connection_status} />
                 </XStack>
+                <XStack gap="$2" flexWrap="wrap" minW={0} maxW="100%" aria-label="Main navigation">
+                    <Button
+                        size="$3"
+                        theme={location === "/" ? "blue" : undefined}
+                        icon={<Clipboard size={16} />}
+                        onPress={() => setLocation("/")}
+                    >
+                        Clipboard
+                    </Button>
+                    <Button
+                        size="$3"
+                        theme={location === "/files" ? "blue" : undefined}
+                        icon={<Folder size={16} />}
+                        onPress={() => setLocation("/files")}
+                    >
+                        Files
+                    </Button>
+                    <Button
+                        size="$3"
+                        theme={location.startsWith("/collab") ? "blue" : undefined}
+                        icon={<FileText size={16} />}
+                        onPress={() => setLocation("/collab")}
+                    >
+                        Collab Docs
+                    </Button>
+                    <Button
+                        size="$3"
+                        theme={location === "/schedule" ? "blue" : undefined}
+                        icon={<CalendarClock size={16} />}
+                        onPress={() => setLocation("/schedule")}
+                    >
+                        Schedule
+                    </Button>
+                    <Button
+                        size="$3"
+                        theme={location === "/devices" ? "blue" : undefined}
+                        icon={<Smartphone size={16} />}
+                        onPress={() => setLocation("/devices")}
+                    >
+                        Devices
+                    </Button>
+                </XStack>
                 <XStack items="center" gap="$2">
                     <Button
                         size="$3"
@@ -394,45 +436,14 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                 </XStack>
             </XStack>
 
-            <YStack width="100%" maxW={1100} self="center" p="$4" gap="$3" flex={1}>
-                <XStack gap="$2" flexWrap="wrap">
-                    <Button
-                        theme={location === "/" ? "blue" : undefined}
-                        icon={<Clipboard size={16} />}
-                        onPress={() => setLocation("/")}
-                    >
-                        Clipboard
-                    </Button>
-                    <Button
-                        theme={location === "/files" ? "blue" : undefined}
-                        icon={<Folder size={16} />}
-                        onPress={() => setLocation("/files")}
-                    >
-                        Files
-                    </Button>
-                    <Button
-                        theme={location.startsWith("/collab") ? "blue" : undefined}
-                        icon={<FileText size={16} />}
-                        onPress={() => setLocation("/collab")}
-                    >
-                        Collab Docs
-                    </Button>
-                    <Button
-                        theme={location === "/schedule" ? "blue" : undefined}
-                        icon={<CalendarClock size={16} />}
-                        onPress={() => setLocation("/schedule")}
-                    >
-                        Schedule
-                    </Button>
-                    <Button
-                        theme={location === "/devices" ? "blue" : undefined}
-                        icon={<Smartphone size={16} />}
-                        onPress={() => setLocation("/devices")}
-                    >
-                        Devices
-                    </Button>
-                </XStack>
-
+            <YStack
+                width="100%"
+                maxW={location === "/schedule" ? undefined : 1100}
+                self="center"
+                p="$3"
+                gap="$3"
+                flex={1}
+            >
                 {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
 
                 <Switch>
