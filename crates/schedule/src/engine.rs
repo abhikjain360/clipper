@@ -25,41 +25,13 @@ use crate::{
         ScheduleItem,
     },
     recurrence::{Cadence, Frequency, MonthlyRule, Recurrence, RecurrenceEnd, ValidatedRrule},
-    time::{ScheduleSpan, TimeError, TimedStart},
+    time::{ScheduleSpan, TimeError, TimeRange, TimedStart},
 };
-
-/// A half-open instant range, `[from, to)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Window {
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-}
-
-impl Window {
-    pub fn new(from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Self, EngineError> {
-        if to <= from {
-            return Err(EngineError::EmptyWindow { from, to });
-        }
-        Ok(Self { from, to })
-    }
-
-    pub fn from(&self) -> DateTime<Utc> {
-        self.from
-    }
-
-    pub fn to(&self) -> DateTime<Utc> {
-        self.to
-    }
-
-    pub fn contains(&self, instant: DateTime<Utc>) -> bool {
-        instant >= self.from && instant < self.to
-    }
-}
 
 /// Where and when to expand.
 #[derive(Debug, Clone, Copy)]
 pub struct Expansion {
-    pub window: Window,
+    pub window: TimeRange,
     /// Resolves floating and all-day spans, which carry no zone of their own.
     /// A floating 07:00 alarm expands to 07:00 *here*.
     pub observer: Tz,
@@ -92,18 +64,15 @@ pub trait RecurrenceEngine {
         let lookback = maximum_lookback(item, overrides)?;
         let from = expansion
             .window
-            .from()
+            .start()
             .checked_sub_signed(lookback)
             .ok_or(TimeError::DateOverflow)?;
         let widened = Expansion {
-            window: Window::new(from, expansion.window.to())?,
+            window: TimeRange::new(from, expansion.window.end())?,
             observer: expansion.observer,
         };
         let mut occurrences = self.occurrences(item, overrides, &widened)?;
-        occurrences.retain(|occurrence| {
-            occurrence.span.start < expansion.window.to()
-                && expansion.window.from() < occurrence.span.end
-        });
+        occurrences.retain(|occurrence| occurrence.span.overlaps(&expansion.window));
         Ok(occurrences)
     }
 
@@ -121,13 +90,13 @@ pub trait RecurrenceEngine {
         observer: Tz,
     ) -> Result<Option<Occurrence>, EngineError> {
         let expansion = Expansion {
-            window: Window::new(after, after + within)?,
+            window: TimeRange::new(after, after + within)?,
             observer,
         };
         Ok(self
             .occurrences(item, overrides, &expansion)?
             .into_iter()
-            .find(|occurrence| occurrence.span.start > after))
+            .find(|occurrence| occurrence.span.start() > after))
     }
 }
 
@@ -220,7 +189,7 @@ impl RruleEngine {
             // A one-off needs no expansion library at all.
             Recurrence::Once => {
                 let resolved = item.span.resolve(expansion.observer)?;
-                return Ok(if expansion.window.contains(resolved.start) {
+                return Ok(if expansion.window.contains(resolved.start()) {
                     vec![(
                         recurrence_id(item, item.span.local_start(), expansion),
                         item.span.clone(),
@@ -260,7 +229,7 @@ impl RruleEngine {
         const MAX_SCANNED_CANDIDATES: u16 = u16::MAX;
         let before = expansion
             .window
-            .to()
+            .end()
             .checked_sub_signed(TimeDelta::nanoseconds(1))
             .expect("a non-empty window cannot end at chrono's minimum")
             .with_timezone(&set.get_dt_start().timezone());
@@ -274,7 +243,7 @@ impl RruleEngine {
         let mut spans = Vec::new();
         for occurrence in result.dates {
             let instant = occurrence.with_timezone(&Utc);
-            if instant < expansion.window.from() {
+            if instant < expansion.window.start() {
                 continue;
             }
             if spans.len() >= self.max_candidates {
@@ -356,7 +325,7 @@ impl RecurrenceEngine for RruleEngine {
                     OverrideChange::Cancelled => continue,
                     OverrideChange::Rescheduled(moved) => {
                         let resolved = moved.resolve(expansion.observer)?;
-                        if expansion.window.contains(resolved.start) {
+                        if expansion.window.contains(resolved.start()) {
                             out.push(Occurrence {
                                 item: item.id,
                                 recurrence_id,
@@ -386,7 +355,7 @@ impl RecurrenceEngine for RruleEngine {
                 continue;
             };
             let resolved = moved.resolve(expansion.observer)?;
-            if expansion.window.contains(resolved.start) {
+            if expansion.window.contains(resolved.start()) {
                 out.push(Occurrence {
                     item: item.id,
                     recurrence_id: entry.recurrence_id,
@@ -396,7 +365,7 @@ impl RecurrenceEngine for RruleEngine {
             }
         }
 
-        out.sort_by_key(|occurrence| occurrence.span.start);
+        out.sort_by_key(|occurrence| occurrence.span.start());
         Ok(out)
     }
 }
@@ -523,11 +492,6 @@ fn ical_weekday(day: Weekday) -> &'static str {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EngineError {
-    #[error("expansion window is empty: {from} is not before {to}")]
-    EmptyWindow {
-        from: DateTime<Utc>,
-        to: DateTime<Utc>,
-    },
     #[error("recurrence rule was rejected by the expansion library: {0}")]
     RuleRejected(String),
     #[error("imported recurrence rule {uid:?} is unavailable in snapshot {import}")]
