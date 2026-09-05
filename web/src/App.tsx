@@ -375,7 +375,8 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
     ];
     const navigation = (expanded: boolean, mobile = false) => (
         <>
-            <Button
+            <button
+                className="nav-collapse-toggle"
                 aria-label={
                     mobile
                         ? "Close navigation"
@@ -383,11 +384,16 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                           ? "Collapse navigation"
                           : "Expand navigation"
                 }
-                icon={expanded ? <PanelLeftClose size={20} /> : <Menu size={20} />}
-                onPress={() => (mobile ? mobileNav.current?.close() : setNavExpanded(!navExpanded))}
+                onClick={() => (mobile ? mobileNav.current?.close() : setNavExpanded(!navExpanded))}
             >
-                {expanded ? "Close navigation" : null}
-            </Button>
+                {mobile ? (
+                    <X size={20} />
+                ) : expanded ? (
+                    <PanelLeftClose size={20} />
+                ) : (
+                    <Menu size={20} />
+                )}
+            </button>
             <nav aria-label="Main navigation" className="nav-destinations">
                 {destinations.map(({ path, label, icon: Icon }) => (
                     <Button
