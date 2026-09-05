@@ -451,13 +451,18 @@ function TimedBlock({
     lanes: number;
 }) {
     const { top, height } = bandGeometry(occurrence, day);
+    const label = `${occurrence.title}, ${clockRange(occurrence)}${
+        occurrence.source ? `, from ${occurrence.source}` : ""
+    }${occurrence.cancelled ? ", cancelled" : ""}`;
 
     return (
-        <YStack
-            px={4}
-            py={1}
+        <div
             style={{
                 position: "absolute",
+                display: "flex",
+                flexDirection: "column",
+                padding: "1px 4px",
+                cursor: "pointer",
                 top,
                 height,
                 left: `calc(${(lane / lanes) * 100}% + 2px)`,
@@ -469,20 +474,21 @@ function TimedBlock({
                 borderLeftWidth: 3,
                 opacity: occurrence.cancelled ? 0.55 : 1,
             }}
-            aria-label={`${occurrence.title}, ${clockRange(occurrence)}${
-                occurrence.source ? `, from ${occurrence.source}` : ""
-            }${occurrence.cancelled ? ", cancelled" : ""}`}
-            onPress={() => onStart(occurrence)}
-            cursor="pointer"
+            aria-label={label}
+            title={label}
+            onClick={() => onStart(occurrence)}
         >
-            <Text
-                fontSize={11}
-                lineHeight={13}
-                numberOfLines={1}
-                textDecorationLine={occurrence.cancelled ? "line-through" : "none"}
-            >
-                {occurrence.title}
-            </Text>
+            {/* One complete 13px line plus 1px padding above and below. */}
+            {height >= 15 && (
+                <Text
+                    fontSize={11}
+                    lineHeight={13}
+                    numberOfLines={1}
+                    textDecorationLine={occurrence.cancelled ? "line-through" : "none"}
+                >
+                    {occurrence.title}
+                </Text>
+            )}
             {height >= 34 && (
                 <Text fontSize={10} lineHeight={12} color="#8b949e" numberOfLines={1}>
                     {occurrence.source
@@ -490,7 +496,7 @@ function TimedBlock({
                         : clockRange(occurrence)}
                 </Text>
             )}
-        </YStack>
+        </div>
     );
 }
 
