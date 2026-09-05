@@ -912,7 +912,7 @@ pub async fn complete_object(
 /// same shape — stage inline payloads, insert the revision, reserve quota,
 /// publish if nothing needs uploading. What is different is the front: this one
 /// has a head to follow, so it hashes that head and requires the incoming
-/// envelope to name it. That check is the optimistic concurrency from D6. A
+/// envelope to name it. That check enforces optimistic concurrency. A
 /// device that missed an edit signs against the old head, computes the old
 /// parent hash, and is refused with `ObjectRevisionConflict` rather than
 /// silently overwriting the edit it never saw.
@@ -2001,7 +2001,7 @@ pub async fn download_payload(
 ///
 /// The reversible half is a tombstone revision through `revise_object`, and
 /// this refuses to run until that has happened. Splitting them is what makes
-/// undoing a delete possible at all (D6): a tombstone leaves the history
+/// undoing a delete possible at all: a tombstone leaves the history
 /// standing, so an object can be brought back by appending a revision that
 /// restores an earlier one. Once purged there is nothing to restore from.
 pub async fn purge_object(
@@ -3682,7 +3682,7 @@ mod tests {
         )
     }
 
-    /// The D6 acceptance set: what a chain has to do beyond compiling.
+    /// Revision-chain acceptance tests: what a chain has to do beyond compiling.
     mod revisions {
         use super::*;
 

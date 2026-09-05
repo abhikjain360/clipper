@@ -1,18 +1,18 @@
 //! Scheduling domain types and recurrence expansion for Clipper.
 //!
 //! Pure: no I/O, no crypto, no storage. Everything here is computable from its
-//! inputs, which is what makes it the first thing built (`docs/schedule-plan.md`,
-//! D11) — it can be confirmed correct by running it.
+//! inputs, so recurrence and time behavior can be tested without running a
+//! server or a platform UI.
 //!
 //! Three shapes matter, and they are separate types on purpose:
 //!
-//! - [`ScheduleItem`] is a *series*, stored once however often it repeats (D7).
+//! - [`ScheduleItem`] is a *series*, stored once however often it repeats.
 //! - [`OccurrenceOverride`] exists only for occurrences that deviate.
 //! - [`ActualRecord`] is what really happened, kept apart from what was planned
-//!   so that logged time survives the plan changing under it (D2).
+//!   so that logged time survives the plan changing under it.
 //!
 //! Occurrences are computed, never stored, and always within a caller-supplied
-//! window (D4).
+//! window.
 
 pub mod alarm;
 pub mod engine;

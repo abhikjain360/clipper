@@ -1,7 +1,7 @@
 //! When a block starts and how long it lasts.
 //!
 //! RFC 5545 distinguishes three kinds of start and conflating them breaks the
-//! alarm path (`docs/schedule-plan.md`, D5). A floating 07:00 alarm follows the
+//! alarm path. A floating 07:00 alarm follows the
 //! device across timezones; a zoned meeting stays pinned to the zone it was
 //! scheduled in; an all-day event has no instant at all.
 //!
@@ -53,8 +53,8 @@ impl TimedStart {
 
 /// A block's extent in time.
 ///
-/// Splitting timed from all-day at the type level is deliberate: D9 commits to
-/// ingesting all-day events, and coercing a date into an instant silently moves
+/// Splitting timed from all-day preserves imported all-day events:
+/// coercing a date into an instant silently moves
 /// it across a border.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -123,7 +123,7 @@ impl ScheduleSpan {
 
 /// How long a timed block lasts.
 ///
-/// Stored in minutes because the UI grid snaps to 5 or 10 of them (D5), but
+/// Stored in minutes because the UI grid snaps to 5 or 10 of them, but
 /// ingested events are not grid-aligned so any positive count is legal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockDuration(NonZeroU32);

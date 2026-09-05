@@ -329,17 +329,17 @@ pub struct ClipboardMeta {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ScheduleRecordKind {
-    /// A series definition — stored once however often it repeats (D7).
+    /// A series definition — stored once however often it repeats.
     Item,
     /// One occurrence that deviates from its series.
     Override,
-    /// Time actually spent, as opposed to time planned (D2).
+    /// Time actually spent, as opposed to time planned.
     Actual,
     /// A calendar Clipper pulls events from. Holds the feed URL, which for an
     /// iCalendar source *is* the credential — hence encrypted like everything
-    /// else (D4).
+    /// else.
     Source,
-    /// An event as a provider describes it: the upstream-owned layer of D10,
+    /// An event as a provider describes it: the upstream-owned record,
     /// written only by the sync worker and read-only to the owner.
     Ingested,
 }
@@ -372,8 +372,8 @@ pub enum ObjectKind {
     Collab,
     /// A schedule record: a series definition, a single-occurrence override, or
     /// a log of time actually spent. All three share one kind deliberately —
-    /// separate kinds would each cost the full plumbing toll (see
-    /// `docs/schedule-plan.md`, D3) and would tell the server which is which.
+    /// separate kinds would duplicate routing and storage plumbing and tell the
+    /// server which is which.
     /// The discriminant lives in the encrypted meta instead, as
     /// [`ScheduleRecordKind`].
     Schedule,
@@ -390,7 +390,7 @@ pub enum ObjectEventType {
     ///
     /// For a collab doc that is a rename, the one thing the server can see. For
     /// every other kind it means a new revision was published — the ciphertext
-    /// is still immutable, but which ciphertext is current has moved (D6). A
+    /// is still immutable, but which ciphertext is current has moved. A
     /// client reacts the same way to both: refetch the object.
     Updated,
     Deleted,
@@ -411,7 +411,7 @@ pub enum ObjectEnvelopeOperation {
     /// A tombstone rather than an erasure: the chain behind it survives, so the
     /// object can be brought back by appending a `Revise` that restores an
     /// earlier revision's content. Actually reclaiming the bytes is a separate,
-    /// irreversible purge. See D6 in `docs/schedule-plan.md`.
+    /// irreversible purge.
     Delete,
 }
 
@@ -816,7 +816,7 @@ pub enum ApiErrorCode {
     /// A revision did not follow the object's current head — wrong number,
     /// wrong parent hash, or a create where a revise belongs.
     ///
-    /// This is the optimistic-concurrency rejection from D6: the losing writer
+    /// This is an optimistic-concurrency rejection: the losing writer
     /// gets it, and its job is to refetch the head and rebase, not to retry the
     /// same bytes.
     ObjectRevisionConflict,

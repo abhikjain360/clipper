@@ -248,7 +248,7 @@ fn object_aad(
         envelope_version: *envelope_version,
         // Bound so a ciphertext cannot be replayed at a different point in the
         // chain: without this, revision 3's sealed meta would open as revision
-        // 9's, which is exactly the rollback D6 is trying to make detectable.
+        // 9's, which is exactly the rollback that revision authentication must detect.
         revision: *revision,
         parent_hash: *parent_hash,
         source_device_id: *source_device_id,

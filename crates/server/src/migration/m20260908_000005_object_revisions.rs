@@ -2,9 +2,9 @@
 //!
 //! Until now an object *was* a row: one id, one sealed blob, no way to change
 //! it. Editing meant creating a new object and deleting the old one, which
-//! works but loses the fact that the two are the same thing. D6 in
-//! `docs/schedule-plan.md` makes an object a stable id with a chain of
-//! revisions behind it, each its own immutable, individually-signed envelope.
+//! works but loses the fact that the two are the same thing. This migration
+//! makes an object a stable id with a chain of revisions behind it, each its
+//! own immutable, individually-signed envelope.
 //!
 //! So `objects` keeps only what does not change — id, owner, kind — plus a
 //! pointer at the head of the chain, and all content moves to
@@ -14,9 +14,8 @@
 //! **This migration destroys every encrypted object.** Collab documents
 //! survive — see the note beside their re-insert below.
 //!
-//! For everything else: There is no copy step: the
-//! envelope format changed in the same breath (v1 to v2 — the body gained
-//! `revision` and `parent_hash`, and postcard encodes positionally), so no
+//! There is no copy step for encrypted objects: the envelope body gained
+//! `revision` and `parent_hash`, and postcard encodes positionally, so no
 //! existing row can be read back by the new client anyway. Rewriting them was
 //! not possible either, since only a client holding the user's key can sign an
 //! envelope. The owner sanctioned recreating the database rather than
@@ -213,8 +212,8 @@ impl MigrationTrait for Migration {
 
         // `updated` stops being collab's private event. Publishing a revision
         // changes which ciphertext is current, and that is exactly what an
-        // `updated` event is for; before D6 an encrypted object could only be
-        // created or deleted, so the check said so. Clipboard still cannot: it
+        // `updated` event is for; before this migration an encrypted object could
+        // only be created or deleted. Clipboard still cannot be revised: it
         // expires passively and is replaced rather than revised.
         db.execute_unprepared("ALTER TABLE event_log RENAME TO event_log_old")
             .await?;

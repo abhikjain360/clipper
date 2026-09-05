@@ -232,7 +232,7 @@ pub struct DeleteScheduleObjectParams {
 /// Ask for every occurrence in a window.
 ///
 /// The window is the caller's, not a fixed horizon: a week grid and an alarm
-/// scheduler want very different spans (see `docs/schedule-plan.md`, D4).
+/// scheduler want very different spans.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpandScheduleParams {
     /// RFC 3339 instant, inclusive.

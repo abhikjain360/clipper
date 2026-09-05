@@ -621,7 +621,7 @@ impl LocalStore {
     /// an object already held locally. A create event for one of those is a
     /// duplicate and is ignored, which was right while objects were immutable.
     /// An update event for one means the content changed underneath the same
-    /// id, so it has to be fetched again (D6).
+    /// id, so it has to be fetched again.
     pub async fn mark_pending_update(
         &self,
         kind: ObjectKind,
@@ -1118,7 +1118,7 @@ impl LocalStore {
     /// signed and still names the revision this device accepted. Deleting the
     /// record would take that anchor with it, so a payload file that goes
     /// missing for any reason — a crash between the two writes of a delete, a
-    /// partially restored backup, a stray cleaner — would quietly undo D6's
+    /// partially restored backup, a stray cleaner — would quietly undo
     /// rollback protection for that object, and a server that noticed could
     /// then replay an older revision unchallenged.
     ///

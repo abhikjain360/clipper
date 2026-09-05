@@ -1,6 +1,6 @@
 //! Turning a recurrence rule into concrete occurrences.
 //!
-//! Expansion is client-side and always bounded by an explicit window (D4): the
+//! Expansion is client-side and always bounded by an explicit window: the
 //! caller decides how far to look, because a phone expanding tomorrow's alarms
 //! and a desktop rendering a month have different appetites. There is no
 //! unbounded scan anywhere in this module.

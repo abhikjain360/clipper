@@ -1,12 +1,12 @@
 //! Calendar sources, and the events pulled from them.
 //!
-//! This is the "original" layer of `docs/schedule-plan.md`'s D10: fields owned
+//! These are the original calendar fields owned
 //! upstream, written only by the sync worker, never edited in Clipper. The
 //! owner's plan for an ingested event is a separate record, so a refresh that
 //! replaces the original wholesale cannot clobber anything the owner wrote.
 //!
 //! Parsing lives here because it is pure. Fetching does not — that needs I/O and
-//! belongs to whichever client holds the source (D4).
+//! belongs to whichever client holds the source.
 
 #[cfg(not(target_family = "wasm"))]
 use std::{collections::HashMap, num::NonZeroU32};
@@ -63,8 +63,7 @@ impl std::fmt::Display for SourceId {
 /// A calendar Clipper pulls events from.
 ///
 /// Stored as an encrypted object like everything else, which matters here: an
-/// iCalendar feed URL *is* the credential, so it must never be server-visible
-/// (D4).
+/// iCalendar feed URL *is* the credential, so it must never be server-visible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalendarSource {
     pub id: SourceId,
@@ -72,7 +71,7 @@ pub struct CalendarSource {
     pub name: String,
     pub kind: SourceKind,
     /// Whether this client should sync it. Per-client, because each device
-    /// decides which sources it is responsible for (D4).
+    /// decides which sources it is responsible for.
     pub enabled: bool,
 }
 
@@ -80,13 +79,13 @@ pub struct CalendarSource {
 #[serde(tag = "protocol", rename_all = "snake_case")]
 pub enum SourceKind {
     /// A read-only iCalendar feed at a private URL. No OAuth and no admin
-    /// approval, which is why D9 keeps it as the fallback for a work calendar
+    /// approval, making it a fallback for a work calendar
     /// whose Workspace blocks third-party apps. It is coarser than the API:
     /// polling only, and it carries no RSVP or attendee detail.
     Ics { url: String },
 }
 
-/// An event as the provider describes it. Read-only in Clipper (D10).
+/// An event as the provider describes it. Read-only in Clipper.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IngestedEvent {
     /// Derived from `(source, uid)` rather than random, so re-ingesting a feed
@@ -124,7 +123,7 @@ impl IngestedEvent {
 pub enum IngestedStatus {
     Confirmed,
     Tentative,
-    /// Cancelled upstream. Tombstoned rather than erased (D10) so that time
+    /// Cancelled upstream. Tombstoned rather than erased so that time
     /// already logged against the meeting survives it.
     Cancelled,
 }
@@ -151,7 +150,7 @@ pub struct SkippedEvent {
 /// organizes it, has accepted it, or it has no attendees, and drops all-day
 /// events entirely — rules that suit an alarm app. A planner wants the
 /// opposite: every invite visible, all-day included, with RSVP shown as a
-/// property rather than used as a filter (D9).
+/// property rather than used as a filter.
 ///
 /// Not built for wasm: a page cannot fetch a third-party calendar URL, so the
 /// browser only ever displays events another device ingested.

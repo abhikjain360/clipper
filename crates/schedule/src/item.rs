@@ -1,6 +1,6 @@
 //! The stored schedule entities.
 //!
-//! Three record types, following D2 and D7: a series definition, an override
+//! Three record types: a series definition, an override
 //! for the occurrences that deviate from it, and an actual for what really
 //! happened. They are separate because they have different writers and
 //! different lifetimes — an actual outlives the meeting it was logged against.
@@ -56,7 +56,7 @@ id_type!(
 
 /// A planned block, and the rule for how it repeats.
 ///
-/// One record per *series*, not per occurrence (D7). A daily alarm for a year
+/// One record per *series*, not per occurrence. A daily alarm for a year
 /// is this struct once, not 365 times.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduleItem {
@@ -66,7 +66,7 @@ pub struct ScheduleItem {
     /// from the recurrence rule and their length from here.
     pub span: ScheduleSpan,
     pub recurrence: Recurrence,
-    /// D2: a block may point at another Clipper object, or be bare labelled
+    /// A block may point at another Clipper object, or be bare labelled
     /// time. Optional so that no task subsystem is required for the schedule to
     /// be useful.
     pub reference: Option<ObjectRef>,
@@ -123,7 +123,7 @@ pub enum OverrideChange {
     Rescheduled(ScheduleSpan),
 }
 
-/// Time actually spent, as opposed to time planned (D2).
+/// Time actually spent, as opposed to time planned.
 ///
 /// Always a concrete one-off, never a rule. Separate from the plan so that
 /// logged time survives the meeting being cancelled, and so that a plan can be
@@ -144,7 +144,7 @@ pub struct PlannedRef {
     pub recurrence_id: RecurrenceId,
 }
 
-/// A timer writes twice and only twice: once on start, once on stop (D2).
+/// A timer writes twice and only twice: once on start, once on stop.
 ///
 /// Persisting progress on a tick would multiply retained revisions by the
 /// minute. Elapsed time for a running timer is derived from `started`, not
@@ -157,7 +157,7 @@ pub enum ActualSpan {
 }
 
 /// A computed instance of a series. Never stored — clients expand what they
-/// need for the window they are showing (D4, D7).
+/// need for the window they are showing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Occurrence {
     pub item: ScheduleItemId,
