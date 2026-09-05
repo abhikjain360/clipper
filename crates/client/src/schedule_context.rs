@@ -1,4 +1,7 @@
-//! Revision-aware schedule reads. Historical reads never advance a sync head.
+//! Reading a schedule object at a pinned revision.
+//!
+//! A historical read never advances a sync head.
+
 use clipper_schedule::{ObjectRevisionRef, OccurrenceOverrideData, PlannedRef};
 
 use super::*;
@@ -43,8 +46,9 @@ pub(super) fn verify_pin(item: &ObjectListItem, pin: ObjectRevisionRef) -> Resul
 }
 
 impl SyncEngine {
-    /// Load exactly the accepted historical content, without treating it as a
-    /// candidate current head. The cache is bounded, memory-only and session-scoped.
+    /// Loads exactly the content accepted at `pin`, never treating it as a
+    /// candidate current head. The cache behind this is bounded, memory-only
+    /// and dropped with the session.
     pub(super) async fn schedule_revision(
         &self,
         pin: ObjectRevisionRef,
@@ -169,8 +173,9 @@ impl SyncEngine {
         Ok(entries)
     }
 
-    /// Validate against one coherent local snapshot. A stale or fabricated UI
-    /// context must not stop the existing timer or silently select another plan.
+    /// Checks the context against one coherent local snapshot. A stale or
+    /// fabricated UI context must not stop the running timer, and must not
+    /// quietly select a different plan.
     pub(super) async fn validate_plan_context(
         &self,
         planned: &PlannedRef,
@@ -255,8 +260,9 @@ impl SyncEngine {
         }
     }
 
-    /// Retrieve the immutable definition and override for an actual. The
-    /// captured resolved span remains authoritative across travel/tzdb changes.
+    /// The immutable definition and override an actual was recorded against.
+    /// Its captured span stays authoritative across travel and timezone
+    /// database changes.
     pub async fn recorded_plan(
         &self,
         actual_id: &str,
@@ -354,8 +360,9 @@ mod tests {
                 .name,
             "First account's private calendar"
         );
-        // Even if an in-flight old request left a cache entry behind, the next
-        // session cannot retrieve it. No API token is installed in this test.
+        // An in-flight request from the old session may leave a cache entry
+        // behind. The next session still cannot read it. This test installs
+        // no API token, so a miss cannot be served from the network either.
         engine.history_epoch.fetch_add(1, Ordering::SeqCst);
         *engine.encryption_key.write().await = Some(Zeroizing::new([3; 32]));
         assert!(matches!(

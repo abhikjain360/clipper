@@ -1879,12 +1879,11 @@ impl SyncEngine {
 
     /// Every alarm due in the next `within_hours`, soonest first.
     ///
-    /// The platform registers these as one-shot exact alarms and never
-    /// recomputes a recurrence itself — this crate is the only place a rule is
-    /// expanded, so there is no second implementation to drift.
+    /// The platform registers each as a one-shot exact alarm and never expands
+    /// a recurrence itself, so there is only one implementation of a rule.
     ///
-    /// Ingested events do not raise alarms automatically; imported calendar
-    /// data does not grant permission to ring on this device.
+    /// An ingested event never rings on its own. Importing a calendar is not
+    /// permission to ring on this device.
     pub async fn next_alarms(
         &self,
         within_hours: u32,
@@ -1957,8 +1956,8 @@ impl SyncEngine {
 
     /// Register a calendar to pull events from.
     pub async fn add_calendar_source(&self, name: &str, url: &str) -> Result<String, ClientError> {
-        // Reject a URL the fetcher could never use, at the point the user can
-        // still fix the typo.
+        // Reject a URL the fetcher could never use, while the user is still
+        // here to fix the typo.
         let mut parsed = url::Url::parse(url)
             .map_err(|error| ClientError::InvalidArgument(format!("calendar URL: {error}")))?;
         if !matches!(parsed.scheme(), "http" | "https" | "webcal") {

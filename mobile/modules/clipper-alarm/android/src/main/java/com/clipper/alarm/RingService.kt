@@ -21,10 +21,11 @@ import android.util.Log
  * Holds a ringing alarm alive.
  *
  * A foreground service rather than an activity alone, because an activity can
- * be swiped away or never shown while the sound must keep going until it is
+ * be swiped away or never shown, while the sound has to keep going until it is
  * dismissed or the ten-minute auto-silence window expires. The `mediaPlayback`
- * type permits audio from the background; its notification carries a full-screen intent, which
- * is how the ring screen appears over the lock screen.
+ * type permits audio from the background. Its notification carries a
+ * full-screen intent, which is how the ring screen appears over the lock
+ * screen.
  *
  * A wake lock guards the gap between the alarm firing and the screen coming on.
  * Without it the device can return to sleep mid-start on some vendors.

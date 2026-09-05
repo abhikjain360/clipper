@@ -1,9 +1,9 @@
 //! Parsing a real-shaped iCalendar feed.
 //!
-//! The fixture is deliberately awkward: a zoned meeting, a UTC one, a floating
-//! one, a single-day and a multi-day all-day event, a recurring series, a
-//! cancellation, and two entries that cannot be read at all. Every one of those
-//! shapes appears in an ordinary Google or Zoho export.
+//! The fixture holds a zoned meeting, a UTC one, a floating one, a single-day
+//! and a multi-day all-day event, a recurring series, a cancellation, and two
+//! entries that cannot be read at all. Every one of those appears in an
+//! ordinary Google or Zoho export.
 
 use chrono::{NaiveDate, NaiveTime, Weekday};
 use chrono_tz::Tz;
@@ -92,8 +92,7 @@ fn readable_events_are_kept_and_unreadable_ones_are_reported() {
     assert_eq!(outcome.events.len(), 6, "six events are readable");
     assert_eq!(outcome.skipped.len(), 2, "two cannot be read");
 
-    // Skipping must be explicit. A feed that silently drops entries is worse
-    // than one that says which it could not read.
+    // An entry that cannot be read is reported, never dropped silently.
     let reasons: Vec<&str> = outcome
         .skipped
         .iter()
@@ -138,7 +137,7 @@ fn a_z_suffix_is_utc_rather_than_floating() {
     assert_eq!(duration.minutes(), 60);
 }
 
-/// RFC 5545 floating time — no TZID, no Z — means the same thing Clipper's
+/// RFC 5545 floating time, with no TZID and no Z, means what Clipper's
 /// floating means, so it maps straight across.
 #[test]
 fn a_bare_local_start_stays_floating() {
@@ -223,8 +222,8 @@ fn events_without_a_rule_happen_once() {
     assert_eq!(event("utc-call@example.com").recurrence, Recurrence::Once);
 }
 
-/// Re-ingesting the same feed must update events in place rather than pile up
-/// duplicates, which is what a derived id buys.
+/// Re-ingesting the same feed updates events in place instead of piling up
+/// duplicates, because each id is derived from its source and provider uid.
 #[test]
 fn ids_are_stable_across_passes_and_distinct_per_source() {
     let first = parse();
@@ -255,7 +254,7 @@ fn ids_are_stable_across_passes_and_distinct_per_source() {
     );
 }
 
-/// The whole point of `Raw`: a rule Clipper cannot model still expands.
+/// A rule Clipper cannot model still expands, through its import snapshot.
 #[test]
 fn an_ingested_series_expands() {
     use chrono::{TimeZone, Utc};

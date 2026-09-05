@@ -1,9 +1,9 @@
 //! The stored schedule entities.
 //!
-//! Three record types: a series definition, an override
-//! for the occurrences that deviate from it, and an actual for what really
-//! happened. They are separate because they have different writers and
-//! different lifetimes — an actual outlives the meeting it was logged against.
+//! Three record types: a series definition, an override for one occurrence
+//! that differs from it, and an actual for what happened. They stay separate
+//! because they have different writers and different lifetimes. An actual
+//! outlives the meeting it was logged against.
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use chrono_tz::Tz;
@@ -57,8 +57,8 @@ id_type!(
 
 /// A planned block, and the rule for how it repeats.
 ///
-/// One record per *series*, not per occurrence. A daily alarm for a year
-/// is this struct once, not 365 times.
+/// One record per series, not per occurrence. A daily alarm for a year is this
+/// struct once, not 365 times.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduleItem {
     pub id: ScheduleItemId,
@@ -67,29 +67,27 @@ pub struct ScheduleItem {
     /// from the recurrence rule and their length from here.
     pub span: ScheduleSpan,
     pub recurrence: Recurrence,
-    /// A block may point at another Clipper object, or be bare labelled
-    /// time. Optional so that no task subsystem is required for the schedule to
-    /// be useful.
+    /// The Clipper object this block is time for. Absent means bare labelled
+    /// time, so the schedule works without any task subsystem.
     pub reference: Option<ObjectId>,
-    /// When this block should raise an alarm. Absent means silent, which is the
-    /// default — most blocks are a record of intent, not a reason to wake
-    /// someone.
+    /// When this block rings. Absent means silent.
     #[serde(default)]
     pub alarm: Option<crate::alarm::AlarmPolicy>,
 }
 
 impl ScheduleItem {
-    /// Whether overrides authored against this definition can apply unchanged
-    /// to another definition. Cosmetic and alarm edits preserve the occurrence
-    /// structure; changing the span or recurrence requires an explicit decision.
+    /// Whether overrides written against this definition still apply to
+    /// `other` unchanged. A title or alarm edit leaves the occurrence structure
+    /// intact. A span or recurrence edit does not, and needs a decision from
+    /// the caller.
     pub fn overrides_compatible_with(&self, other: &Self) -> bool {
         self.id == other.id && self.span == other.span && self.recurrence == other.recurrence
     }
 }
 
 /// The exact immutable envelope accepted for an encrypted schedule object.
-/// The hash disambiguates signed replacements using the same revision number;
-/// it is the envelope body hash, not a hash of the decrypted schedule data.
+/// `body_hash` separates two signed replacements that share a revision number.
+/// It hashes the envelope body, not the decrypted schedule data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ObjectRevisionRef {
     pub object_id: ObjectId,
@@ -97,9 +95,9 @@ pub struct ObjectRevisionRef {
     pub body_hash: [u8; 32],
 }
 
-/// A separately stored override, anchored to the definition it was authored
-/// against. Callers must check compatibility before applying it to a newer
-/// definition; the recurrence engine receives only validated overrides.
+/// An override stored on its own, anchored to the definition it was written
+/// against. Callers check compatibility before applying it to a newer
+/// definition, so the recurrence engine only ever receives checked overrides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OccurrenceOverride {
     pub base: ObjectRevisionRef,
@@ -108,11 +106,11 @@ pub struct OccurrenceOverride {
 
 /// Which occurrence of a series something refers to.
 ///
-/// RFC 5545's `RECURRENCE-ID`, and deliberately not a bare instant. A floating
-/// series is identified by wall-clock time because that is what is stable when
-/// the observer moves; a zoned series by its absolute instant. Using an instant
-/// for both would make an override recorded in Berlin fail to match the same
-/// occurrence expanded in Tokyo.
+/// RFC 5545's `RECURRENCE-ID`, not a bare instant. A floating series is
+/// identified by wall-clock time, which holds still when the observer moves. A
+/// zoned series is identified by its instant. With an instant for both, an
+/// override recorded in Berlin would not match the same occurrence expanded in
+/// Tokyo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "at", rename_all = "snake_case")]
 pub enum RecurrenceId {
@@ -121,22 +119,20 @@ pub enum RecurrenceId {
     Date(NaiveDate),
 }
 
-/// One occurrence that deviates from its series.
+/// One occurrence that differs from its series.
 ///
-/// This is the pure expansion input, also embedded in imported calendar
-/// objects. Standalone persisted overrides use [`OccurrenceOverride`] to
-/// retain their base revision; embedded provider overrides share the imported
-/// object’s revision.
+/// This is what the engine expands against. An imported calendar object embeds
+/// it and it shares that object's revision. A locally authored override is
+/// stored on its own as [`OccurrenceOverride`], which adds a base revision.
 ///
-/// Exists only for occurrences that actually differ — the other 364 days of the
-/// year have no record at all.
+/// Only a differing occurrence gets one. The other 364 days of the year have
+/// no record at all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OccurrenceOverrideData {
     pub id: OverrideId,
     pub item: ScheduleItemId,
-    /// The occurrence this replaces, identified by where the *rule* put it.
-    /// Stays fixed when the override moves the occurrence, which is what lets
-    /// the two be matched back up.
+    /// The occurrence this replaces, named by where the rule put it. Moving
+    /// the occurrence does not change it, so the two still match up.
     pub recurrence_id: RecurrenceId,
     pub change: OverrideChange,
 }
@@ -152,14 +148,14 @@ pub enum OverrideChange {
 
 /// Time actually spent, as opposed to time planned.
 ///
-/// Always a concrete one-off, never a rule. Separate from the plan so that
-/// logged time survives the meeting being cancelled, and so that a plan can be
-/// edited without rewriting history.
+/// Always a concrete one-off, never a rule. It sits apart from the plan, so
+/// logged time survives the meeting being cancelled and editing a plan does
+/// not rewrite history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActualRecord {
     pub id: ActualId,
-    /// What this was time *against*, if anything. Unplanned work is still worth
-    /// recording, so this is optional.
+    /// The occurrence this time was spent against. Absent for unplanned work,
+    /// which is still worth recording.
     pub planned: Option<PlannedRef>,
     pub span: ActualSpan,
 }
@@ -176,16 +172,15 @@ pub struct PlannedRef {
     pub override_revision: Option<ObjectRevisionRef>,
     /// Floating and date-only plans depend on the observer's timezone.
     pub observer: Tz,
-    /// Effective planned bounds when recording began. Retained independently
-    /// of later travel and timezone database changes.
+    /// The planned bounds in effect when recording began. Later travel and
+    /// timezone database changes do not move them.
     pub span: TimeRange,
 }
 
 /// A timer writes twice and only twice: once on start, once on stop.
 ///
-/// Persisting progress on a tick would multiply retained revisions by the
-/// minute. Elapsed time for a running timer is derived from `started`, not
-/// stored.
+/// Writing progress on every tick would add a retained revision every minute.
+/// Elapsed time for a running timer is computed from `started`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ActualSpan {
@@ -193,8 +188,8 @@ pub enum ActualSpan {
     Complete(TimeRange),
 }
 
-/// A computed instance of a series. Never stored — clients expand what they
-/// need for the window they are showing.
+/// A computed instance of a series. Never stored: a client expands what it
+/// needs for the window it is showing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Occurrence {
     pub item: ScheduleItemId,

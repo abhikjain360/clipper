@@ -1,13 +1,13 @@
 //! Sealing schedule records into objects, and rendering them for display.
 //!
-//! A schedule object mirrors clipboard: a small encrypted meta saying what the
-//! payload is, plus one inline payload holding the record itself. Records are a
-//! few hundred bytes, so the payload always travels inline and the object is
-//! complete the moment `object_init` returns.
+//! A schedule object has the same shape as a clipboard one: a small encrypted
+//! meta saying what the payload is, plus one payload holding the record. A
+//! record is a few hundred bytes, so the payload always travels inline and the
+//! object is complete the moment `object_init` returns.
 //!
-//! The server sees an object of kind `schedule` and nothing else. Whether it
-//! holds a plan, an override, or a log of time actually spent is inside the
-//! ciphertext (`ScheduleRecordKind`), which is the point.
+//! The server sees an object of kind `schedule` and nothing more. Whether it
+//! holds a plan, an override, or a log of time spent is `ScheduleRecordKind`,
+//! inside the ciphertext.
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
@@ -23,8 +23,9 @@ use clipper_schedule::{Occurrence, OccurrenceOrigin, ScheduleItem, ScheduleSpan}
 
 /// A schedule record, in the form it is serialized into an object payload.
 ///
-/// One enum rather than three payload shapes so the meta's discriminant and the
-/// payload cannot disagree: deserializing checks the tag either way.
+/// One tagged enum rather than a payload shape per kind, so the meta's
+/// discriminant and the payload cannot disagree. Deserializing checks the tag
+/// either way.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "record", rename_all = "snake_case")]
 pub enum ScheduleRecord {
@@ -149,9 +150,9 @@ pub fn item_view(
     revision: u64,
 ) -> ScheduleItemView {
     ScheduleItemView {
-        // The *object* id, not the series id: this is what edits and deletes
-        // address. The series id lives inside `definition_json` and survives an
-        // edit. Revision pins preserve meaning; stable IDs alone do not.
+        // The object id, not the series id. Edits and deletes address this
+        // one. The series id lives inside `definition_json` and survives an
+        // edit.
         id: object_id.to_string(),
         revision,
         title: item.title.clone(),
@@ -164,8 +165,8 @@ pub fn item_view(
     }
 }
 
-/// How an occurrence should be labelled: what it is called, where it came
-/// from, and whether the provider has since cancelled it.
+/// How an occurrence is labelled: what it is called, where it came from, and
+/// whether the provider has cancelled it.
 pub struct OccurrenceLabel<'a> {
     pub title: &'a str,
     pub all_day: bool,
@@ -176,8 +177,8 @@ pub struct OccurrenceLabel<'a> {
 
 /// Render a record of time spent.
 ///
-/// `title` comes from the pinned historical definition, or explicitly reports
-/// that it is unavailable. It is never substituted with the current title.
+/// `title` comes from the pinned historical definition, or says it is
+/// unavailable. The current title is never put in its place.
 pub fn actual_view(
     object_id: &str,
     actual: &clipper_schedule::ActualRecord,
@@ -206,10 +207,9 @@ pub fn actual_view(
 
 /// A stable string for one occurrence of a series.
 ///
-/// Layers above the engine need a key they can put in an intent extra or a
-/// button handler and compare later; they have no reason to understand the
-/// three ways an occurrence can be identified, only that the same occurrence
-/// yields the same string.
+/// Platform and UI layers put this key in an intent extra or a button handler
+/// and compare it later. They never need the three ways an occurrence can be
+/// identified, only that the same occurrence gives the same string.
 pub fn occurrence_key(recurrence_id: &clipper_schedule::RecurrenceId) -> String {
     match recurrence_id {
         clipper_schedule::RecurrenceId::Floating(local) => format!("floating:{local:?}"),
@@ -222,8 +222,8 @@ pub fn occurrence_key(recurrence_id: &clipper_schedule::RecurrenceId) -> String 
 
 /// Parse a key produced by [`occurrence_key`].
 ///
-/// The platform and UI layers carry occurrence identity as an opaque string;
-/// this is the only place that has to understand its shape.
+/// The platform and UI layers carry occurrence identity as an opaque string.
+/// This is the only place that reads its shape.
 pub fn parse_occurrence_key(key: &str) -> Option<clipper_schedule::RecurrenceId> {
     let (kind, value) = key.split_once(':')?;
     match kind {
@@ -266,10 +266,10 @@ pub fn occurrence_view(
 
 /// Present an ingested event to the expansion engine.
 ///
-/// The engine expands series; an ingested event has a span and a rule, so it is
-/// one in all but name. Building a transient [`ScheduleItem`] beats making the
-/// engine generic over two nearly identical shapes. The id is the event's own
-/// derived id, so it stays stable across refreshes.
+/// The engine expands series. An ingested event has a span and a rule, so this
+/// wraps it in a throwaway [`ScheduleItem`] rather than making the engine
+/// generic over two near-identical shapes. The id is the event's own derived
+/// id, so it stays stable across refreshes.
 pub fn ingested_as_series(event: &clipper_schedule::IngestedEvent) -> ScheduleItem {
     ScheduleItem {
         id: clipper_schedule::ScheduleItemId(event.id),
@@ -287,8 +287,7 @@ fn to_rfc3339(instant: DateTime<Utc>) -> String {
 
 /// Render a calendar source for a list.
 ///
-/// `event_count` is supplied rather than derived because the caller already has
-/// every record in hand.
+/// The caller passes `event_count` because it already holds every record.
 pub fn source_view(
     object_id: &str,
     source: &clipper_schedule::CalendarSource,
@@ -315,9 +314,9 @@ pub fn source_view(
 
 /// Strip everything after the host and path root.
 ///
-/// A private iCalendar address is a bearer credential — anyone with the URL can
-/// read the calendar — so the UI shows where a feed lives without showing how to
-/// reach it.
+/// A private iCalendar address is a bearer credential: anyone holding the URL
+/// can read the calendar. The UI shows where a feed lives without showing how
+/// to reach it.
 fn redact_url(url: &str) -> String {
     match url::Url::parse(url) {
         Ok(parsed) => match parsed.host_str() {
@@ -330,8 +329,9 @@ fn redact_url(url: &str) -> String {
 
 /// Resolve an IANA zone name, falling back to UTC.
 ///
-/// A shell reports its own zone and can get it wrong (a browser on a device
-/// with a bad locale, say). Falling back beats refusing to render a calendar.
+/// Each shell reports its own zone and can get it wrong, such as a browser on
+/// a device with a bad locale. Falling back beats refusing to render the
+/// calendar.
 pub fn zone_or_utc(name: &str) -> Tz {
     name.parse().unwrap_or(Tz::UTC)
 }

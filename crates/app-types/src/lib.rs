@@ -39,11 +39,11 @@ pub struct DecryptedFileItem {
 /// server-visible (its Y.Doc content is not end-to-end encrypted), so its
 /// metadata arrives as plaintext with nothing to decrypt.
 ///
-/// `title` is empty for a doc that has never been renamed — clients render their
-/// own placeholder. `share_url` is the server-built public link, absent when the
-/// server has no `public_web_url` configured; clients cannot construct it
-/// themselves because the web frontend and the API are separate origins (and the
-/// desktop/mobile shells have no web origin at all).
+/// `title` is empty for a doc that has never been renamed, and clients render
+/// their own placeholder. `share_url` is the server-built public link, absent
+/// when the server has no `public_web_url` configured. No client can build it:
+/// the web frontend and the API are separate origins, and the desktop and
+/// mobile shells have no web origin at all.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct CollabItem {
@@ -86,10 +86,10 @@ pub enum ConnectionStatus {
 
 /// A schedule series, rendered for a list.
 ///
-/// Deliberately pre-formatted strings rather than structured time: this crate
-/// stays free of chrono and of the schedule domain crate so its UniFFI records
-/// remain primitive, and every shell renders the same text without reimplementing
-/// the formatting three times.
+/// Carries pre-formatted strings rather than structured time. That keeps this
+/// crate free of chrono and of the schedule domain crate, so its UniFFI
+/// records stay primitive, and every shell shows the same text without
+/// writing the formatting three times.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ScheduleItemView {
@@ -113,16 +113,16 @@ pub struct ScheduleItemView {
     /// Every other field here is formatted for display and cannot be turned
     /// back into a record, but editing needs the record itself. Carrying it
     /// costs a few hundred bytes and saves a round-trip through five layers of
-    /// IPC; it is a string because this crate's types must stay primitive to
-    /// cross UniFFI. Consumers parse it with the `ScheduleItem` type in
-    /// `packages/shared`, which mirrors it exactly.
+    /// IPC. It is a string because this crate's types stay primitive to cross
+    /// UniFFI. Parse it with the `ScheduleItem` type in `packages/shared`,
+    /// which mirrors it exactly.
     #[serde(default)]
     pub definition_json: String,
 }
 
 /// One computed instance of a series, ready to place on a grid.
 ///
-/// Occurrences are never stored — a client expands the window it is showing and
+/// Occurrences are never stored. A client expands the window it is showing and
 /// throws the result away.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -146,8 +146,8 @@ pub struct OccurrenceView {
     /// the UI can mark it as changed.
     pub overridden: bool,
     /// Name of the calendar this came from, or `None` for a block the user
-    /// authored. An ingested event's origin stays visible because its
-    /// core fields are read-only here.
+    /// authored. An ingested event's core fields are read-only, so the UI
+    /// shows its origin.
     #[serde(default)]
     pub source: Option<String>,
     /// Cancelled upstream. Shown rather than hidden, because time already
@@ -178,9 +178,9 @@ pub struct ActualView {
 
 /// One alarm the platform should register.
 ///
-/// Every field the ring screen needs is here rather than looked up, because on
-/// Android this has to work before the device is unlocked — at which point the
-/// encrypted store cannot be read at all.
+/// Every field the ring screen needs is here rather than looked up. On Android
+/// this has to work before the device is unlocked, where the encrypted store
+/// cannot be read at all.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AlarmView {
@@ -213,7 +213,8 @@ pub struct CalendarSourceView {
     pub enabled: bool,
     /// Events currently held from this source.
     pub event_count: u32,
-    /// Exact raw snapshot; the reference remains meaningful after its file is deleted.
+    /// The exact raw snapshot. The reference still names it after the file
+    /// itself is deleted.
     pub raw_import_file_id: Option<String>,
     pub raw_import_available: bool,
 }
@@ -248,7 +249,8 @@ pub struct AppState {
     /// window the UI is showing, so they come from a separate windowed call.
     #[serde(default)]
     pub schedule_items: Vec<ScheduleItemView>,
-    /// Plans omitted from expansion because their definitions or exceptions could not be resolved.
+    /// Plans left out of expansion because their definitions or exceptions
+    /// could not be resolved.
     #[serde(default)]
     pub schedule_warnings: Vec<String>,
     /// Calendar feeds this account pulls from.
@@ -279,10 +281,10 @@ pub struct AuthenticatedSession {
     pub username: String,
     pub device_id: String,
     pub device_name: String,
-    /// The server this session is with. Every shell reaches the API through the
-    /// engine, so nothing needed this until the collab Y-sync WebSocket — which
-    /// the UI layer opens itself and therefore has to address by hand. The
-    /// compiled-in default is not a substitute: the user picks a server at login.
+    /// The server this session is with. Every shell reaches the API through
+    /// the engine, except the collab Y-sync WebSocket, which the UI layer
+    /// opens itself and so has to address by hand. The compiled-in default
+    /// will not do, because the user picks a server at login.
     pub server_url: String,
 }
 

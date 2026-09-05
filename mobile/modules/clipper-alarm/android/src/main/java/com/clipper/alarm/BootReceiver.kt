@@ -11,13 +11,13 @@ import android.util.Log
  *
  * `LOCKED_BOOT_COMPLETED` is the one that matters. It arrives while the device
  * is still at the lock screen, before credential-protected storage is
- * available — so re-arming reads the device-protected mirror and nothing else.
- * Waiting for `BOOT_COMPLETED` would mean a device rebooted overnight has no
- * alarms registered until someone unlocks it, which defeats the purpose.
+ * available, so re-arming reads the device-protected mirror and nothing else.
+ * Waiting for `BOOT_COMPLETED` would leave a device that rebooted overnight
+ * with no alarms registered until someone unlocks it.
  *
  * On Xiaomi and HyperOS this only runs if the app has not been force-stopped
- * and Autostart is allowed. That is a one-time setup the user has to do by
- * hand; no amount of code substitutes for it.
+ * and Autostart is allowed. The user has to grant that once, by hand. No code
+ * here can stand in for it.
  */
 class BootReceiver : BroadcastReceiver() {
 
