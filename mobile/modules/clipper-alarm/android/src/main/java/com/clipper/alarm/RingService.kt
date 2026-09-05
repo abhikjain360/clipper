@@ -10,7 +10,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.os.Process
 import android.util.Log
@@ -20,8 +22,8 @@ import android.util.Log
  *
  * A foreground service rather than an activity alone, because an activity can
  * be swiped away or never shown while the sound must keep going until it is
- * deliberately dismissed. The `mediaPlayback` type is what permits audio from
- * the background; the notification it posts carries a full-screen intent, which
+ * dismissed or the ten-minute auto-silence window expires. The `mediaPlayback`
+ * type permits audio from the background; its notification carries a full-screen intent, which
  * is how the ring screen appears over the lock screen.
  *
  * A wake lock guards the gap between the alarm firing and the screen coming on.
@@ -29,6 +31,11 @@ import android.util.Log
  */
 class RingService : Service() {
 
+    private val handler = Handler(Looper.getMainLooper())
+    private val autoSilence = Runnable {
+        Log.i(TAG, "Unanswered alarm silenced after ten minutes")
+        stopRinging()
+    }
     private var ringer: Ringer? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -63,6 +70,12 @@ class RingService : Service() {
         acquireWakeLock()
         startForegroundWithNotification(label, itemId, occurrenceKey)
 
+        isRinging = true
+        // A newly delivered alarm gets a full ring window; dismiss/destroy
+        // removes the old callback so it cannot silence a later alarm.
+        handler.removeCallbacks(autoSilence)
+        handler.postDelayed(autoSilence, AUTO_SILENCE_MS)
+
         if (ringer == null) {
             ringer = Ringer(this).also { it.start(vibrate = true) }
         }
@@ -87,6 +100,9 @@ class RingService : Service() {
     }
 
     private fun stopRinging() {
+        handler.removeCallbacks(autoSilence)
+        isRinging = false
+        stoppedListeners.toList().forEach { it() }
         ringer?.stop()
         ringer = null
         wakeLock?.let { if (it.isHeld) runCatching { it.release() } }
@@ -96,7 +112,7 @@ class RingService : Service() {
     }
 
     private fun acquireWakeLock() {
-        if (wakeLock != null) return
+        wakeLock?.let { if (it.isHeld) it.release() }
         val power = getSystemService(PowerManager::class.java) ?: return
         wakeLock = power
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "clipper:alarm")
@@ -144,6 +160,7 @@ class RingService : Service() {
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
             .setCategory(Notification.CATEGORY_ALARM)
             .setOngoing(true)
+            .setContentIntent(fullScreen)
             .setFullScreenIntent(fullScreen, true)
             .addAction(
                 Notification.Action.Builder(null, "Dismiss", dismiss).build(),
@@ -167,11 +184,15 @@ class RingService : Service() {
         private const val NOTIFICATION_ID = 4711
         private const val DEFAULT_LABEL = "Alarm"
 
-        /**
-         * A ringing alarm nobody answers should not hold the CPU awake forever.
-         * Ten minutes is well past any alarm a person is going to respond to.
-         */
-        private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1000L
+        // Keep the CPU awake through the auto-silence callback, with a bounded
+        // safety timeout if cleanup fails.
+        private const val AUTO_SILENCE_MS = 10 * 60 * 1000L
+        private const val WAKE_LOCK_TIMEOUT_MS = AUTO_SILENCE_MS + 30_000L
+
+        // Service and activity lifecycle callbacks run on the main thread.
+        internal var isRinging = false
+            private set
+        internal val stoppedListeners = mutableSetOf<() -> Unit>()
 
         fun start(context: Context, label: String, itemId: String, occurrenceKey: String) {
             val intent = Intent(context, RingService::class.java).apply {
