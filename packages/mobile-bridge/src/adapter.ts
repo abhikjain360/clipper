@@ -8,6 +8,7 @@ import {
   type DecryptedClipboardItem,
   type DecryptedFileItem,
   type DeviceInfo as NativeDeviceInfo,
+  type ScheduleItemView as NativeScheduleItemView,
 } from "./generated/clipper_app_types";
 import {
   MobileClipperClient,
@@ -22,6 +23,7 @@ import type {
   ConnectionStatus,
   DeviceInfo,
   FileItem,
+  ScheduleItemView,
 } from "@clipper/shared";
 
 export interface CreateMobileBackendOptions {
@@ -92,6 +94,21 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     removeDevice: async (deviceId) => client.removeDevice(deviceId),
     renameCollabDoc: async (objectId, title) =>
       mapCollabItem(await client.renameCollabDoc(objectId, title)),
+    // Schedule editing is not on mobile yet: the web and desktop grid comes
+    // first (docs/schedule-plan.md, D11), and these three carry the schedule
+    // domain types, which UniFFI cannot express without flattening them into
+    // strings. Series still *sync* to this device and appear in
+    // `state.scheduleItems` — only creating and expanding are missing. These
+    // throw rather than silently no-op so a premature caller is obvious.
+    createScheduleItem: async () => {
+      throw new Error("Creating schedule items is not available on mobile yet");
+    },
+    deleteScheduleObject: async () => {
+      throw new Error("Deleting schedule items is not available on mobile yet");
+    },
+    expandSchedule: async () => {
+      throw new Error("Expanding the schedule is not available on mobile yet");
+    },
     // Browser-only session resume (see the web client). The mobile app resumes
     // from the OS keystore via its own flow, so these are inert here and exist
     // only to satisfy the shared backend contract.
@@ -123,6 +140,7 @@ function mapAppState(state: NativeAppState): AppState {
     connection_status: mapConnectionStatus(state.connectionStatus),
     error: state.error ?? null,
     files: state.files.map(mapFileItem),
+    schedule_items: state.scheduleItems.map(mapScheduleItemView),
     saved_profile: state.savedProfile
       ? {
           device_name: state.savedProfile.deviceName,
@@ -148,6 +166,17 @@ function mapCollabItem(item: NativeCollabItem): CollabItem {
     share_url: item.shareUrl ?? null,
     title: item.title,
     updated_at: item.updatedAt,
+  };
+}
+
+function mapScheduleItemView(item: NativeScheduleItemView): ScheduleItemView {
+  return {
+    all_day: item.allDay,
+    created_at: item.createdAt,
+    id: item.id,
+    recurrence: item.recurrence,
+    time_summary: item.timeSummary,
+    title: item.title,
   };
 }
 

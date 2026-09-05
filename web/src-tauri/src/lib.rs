@@ -4,13 +4,15 @@ mod ipc_secret;
 
 use std::{path::PathBuf, sync::OnceLock};
 
-use clipper_app_types::{AppState, CollabItem, DeviceInfo};
+use clipper_app_types::{AppState, CollabItem, DeviceInfo, OccurrenceView};
 use clipper_daemon_types::{
-    ClipboardPayloadParams, ClipboardPayloadResult, DaemonCommand, DeleteCollabDocParams,
-    DeleteFileParams, DeviceListResult, DownloadFileParams, GetCollabDocMetaParams, LoginParams,
-    RegisterParams, RegisterResult, RemoveDeviceParams, RenameCollabDocParams,
-    SendClipboardPayloadParams, UploadFileParams, UploadFileResult,
+    ClipboardPayloadParams, ClipboardPayloadResult, CreateScheduleItemParams, DaemonCommand,
+    DeleteCollabDocParams, DeleteFileParams, DeleteScheduleObjectParams, DeviceListResult,
+    DownloadFileParams, ExpandScheduleParams, GetCollabDocMetaParams, LoginParams, RegisterParams,
+    RegisterResult, RemoveDeviceParams, RenameCollabDocParams, SendClipboardPayloadParams,
+    UploadFileParams, UploadFileResult,
 };
+use clipper_schedule::ScheduleItem;
 use daemon_client::{DaemonClient, DaemonClientError};
 use serde::{Deserialize, Serialize, Serializer};
 use tauri::{Manager, State};
@@ -131,6 +133,9 @@ pub fn run() {
             delete_file,
             create_collab_doc,
             delete_collab_doc,
+            create_schedule_item,
+            delete_schedule_object,
+            expand_schedule,
             rename_collab_doc,
             get_collab_doc_meta,
             list_devices,
@@ -429,6 +434,56 @@ async fn delete_file(backend: State<'_, DesktopBackend>, file_id: String) -> Com
         .send_ok(DaemonCommand::DeleteFile(DeleteFileParams { file_id }))
         .await?;
     Ok(())
+}
+
+/// Create a schedule series.
+///
+/// The item arrives as the domain type rather than as flattened fields: a
+/// recurrence rule does not survive being reduced to strings, and serde keeps
+/// the TypeScript shape honest.
+#[tauri::command]
+async fn create_schedule_item(
+    backend: State<'_, DesktopBackend>,
+    item: ScheduleItem,
+) -> CommandResult<String> {
+    Ok(backend
+        .daemon
+        .send_result::<String>(DaemonCommand::CreateScheduleItem(
+            CreateScheduleItemParams { item },
+        ))
+        .await?)
+}
+
+#[tauri::command]
+async fn delete_schedule_object(
+    backend: State<'_, DesktopBackend>,
+    object_id: String,
+) -> CommandResult<()> {
+    backend
+        .daemon
+        .send_ok(DaemonCommand::DeleteScheduleObject(
+            DeleteScheduleObjectParams { object_id },
+        ))
+        .await?;
+    Ok(())
+}
+
+/// Expand every series into the occurrences falling in `[from, to)`.
+#[tauri::command]
+async fn expand_schedule(
+    backend: State<'_, DesktopBackend>,
+    from: String,
+    to: String,
+    observer_zone: String,
+) -> CommandResult<Vec<OccurrenceView>> {
+    Ok(backend
+        .daemon
+        .send_result::<Vec<OccurrenceView>>(DaemonCommand::ExpandSchedule(ExpandScheduleParams {
+            from,
+            to,
+            observer_zone,
+        }))
+        .await?)
 }
 
 #[tauri::command]

@@ -437,3 +437,46 @@ fn invalid_domain_values_cannot_be_constructed() {
         Err(RecurrenceError::ZeroInterval)
     );
 }
+
+/// The serialized form is three things at once: the TypeScript contract, the
+/// IPC payload, and the ciphertext on disk. Pin it, so a stray serde attribute
+/// cannot silently change a format that encrypted records are already written
+/// in.
+#[test]
+fn the_wire_format_is_self_describing() {
+    let item = ScheduleItem {
+        id: ScheduleItemId::new(),
+        title: "Gym".to_string(),
+        span: ScheduleSpan::Timed {
+            start: TimedStart::Floating(local("20260610T070000")),
+            duration: BlockDuration::from_minutes(45).expect("non-zero"),
+        },
+        recurrence: Recurrence::Every(Cadence::each(Frequency::Weekly {
+            weekdays: WeekdaySet::weekdays(),
+            week_start: chrono::Weekday::Mon,
+        })),
+        reference: None,
+    };
+
+    let json = serde_json::to_value(&item).expect("serialize");
+    assert_eq!(json["span"]["kind"], "timed");
+    assert_eq!(json["span"]["start"]["kind"], "floating");
+    assert_eq!(json["span"]["start"]["at"], "2026-06-10T07:00:00");
+    assert_eq!(json["span"]["duration"], 45);
+    assert_eq!(json["recurrence"]["kind"], "every");
+    assert_eq!(json["recurrence"]["interval"], 1);
+    assert_eq!(json["recurrence"]["end"]["when"], "never");
+    assert_eq!(json["recurrence"]["frequency"]["unit"], "weekly");
+    assert_eq!(
+        json["recurrence"]["frequency"]["weekdays"],
+        serde_json::json!(["mon", "tue", "wed", "thu", "fri"]),
+        "a weekday set travels as day names, never as its internal bitmask"
+    );
+    assert_eq!(
+        json["recurrence"]["frequency"]["week_start"], "mon",
+        "a lone weekday is spelled the same way a weekday set spells its members"
+    );
+
+    let back: ScheduleItem = serde_json::from_value(json).expect("round trip");
+    assert_eq!(back, item);
+}
