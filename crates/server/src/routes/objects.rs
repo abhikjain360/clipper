@@ -484,6 +484,7 @@ pub async fn upload_payload(
             sea_orm::sea_query::Expr::value(now),
         )
         .filter(object_payloads::Column::ObjectId.eq(object_uuid))
+        .filter(object_payloads::Column::Revision.eq(object.revision))
         .filter(object_payloads::Column::PayloadId.eq(payload_uuid))
         .filter(object_payloads::Column::Status.eq("pending"))
         .exec(state.db())
@@ -519,7 +520,15 @@ pub async fn upload_payload(
 
     if let Err(response) = stream_body_to_payload_file(body, expected_size, &tmp_path).await {
         _ = tokio::fs::remove_file(&tmp_path).await;
-        reset_payload_status(&state, object_uuid, payload_uuid, "uploading", "pending").await;
+        reset_payload_status(
+            &state,
+            object_uuid,
+            object.revision,
+            payload_uuid,
+            "uploading",
+            "pending",
+        )
+        .await;
         return Err(response);
     }
 
@@ -534,7 +543,15 @@ pub async fn upload_payload(
             "Failed to rename tmp payload to final path",
         );
         _ = tokio::fs::remove_file(&tmp_path).await;
-        reset_payload_status(&state, object_uuid, payload_uuid, "uploading", "pending").await;
+        reset_payload_status(
+            &state,
+            object_uuid,
+            object.revision,
+            payload_uuid,
+            "uploading",
+            "pending",
+        )
+        .await;
         return Err(ApiError::from_code_with_message(
             ApiErrorCode::Storage,
             "Object payload storage error",
@@ -552,6 +569,7 @@ pub async fn upload_payload(
             sea_orm::sea_query::Expr::value(now),
         )
         .filter(object_payloads::Column::ObjectId.eq(object_uuid))
+        .filter(object_payloads::Column::Revision.eq(object.revision))
         .filter(object_payloads::Column::PayloadId.eq(payload_uuid))
         .filter(object_payloads::Column::Status.eq("uploading"))
         .exec(state.db())
@@ -636,27 +654,9 @@ pub async fn complete_object(
     let object = object_for_upload(&state, auth.user_id, auth.device_id, object_uuid).await?;
     let kind = parse_object_kind(object_uuid, &object.kind)?;
 
-    if object.status == "complete" {
-        let created_seq = object.created_seq.ok_or_else(|| {
-            error!(
-                object_id = %object_uuid,
-                revision = object.revision,
-                user_id = %auth.user_id,
-                "Complete revision is missing created_seq",
-            );
-            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-        })?;
-        debug!(
-            object_id = %object_uuid,
-            user_id = %auth.user_id,
-            device_id = %auth.device_id,
-            "Accepted idempotent complete_object for already complete object",
-        );
-        return Ok(Postcard(ObjectCompleteResponse { created_seq }));
-    }
-
     let payloads = object_payloads::Entity::find()
         .filter(object_payloads::Column::ObjectId.eq(object_uuid))
+        .filter(object_payloads::Column::Revision.eq(object.revision))
         .into_partial_model::<PayloadCompletionRow>()
         .all(state.db())
         .await
@@ -780,6 +780,30 @@ pub async fn complete_object(
         }
     }
 
+    // A completion URL does not carry a revision number. Verify the request's
+    // payload set against the newest revision before accepting an idempotent
+    // retry, or a stale retry after a later same-device edit could be told that
+    // the later head was its own successful completion.
+    if object.status == "complete" {
+        let created_seq = object.created_seq.ok_or_else(|| {
+            error!(
+                object_id = %object_uuid,
+                revision = object.revision,
+                user_id = %auth.user_id,
+                "Complete revision is missing created_seq",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+        debug!(
+            object_id = %object_uuid,
+            revision = object.revision,
+            user_id = %auth.user_id,
+            device_id = %auth.device_id,
+            "Accepted idempotent complete_object for already complete revision",
+        );
+        return Ok(Postcard(ObjectCompleteResponse { created_seq }));
+    }
+
     let now = Utc::now().to_rfc3339();
     let txn = state.db().begin().await.map_err(|e| {
         error!(error = %e, "Failed to begin complete_object transaction");
@@ -796,6 +820,7 @@ pub async fn complete_object(
             sea_orm::sea_query::Expr::value(now.clone()),
         )
         .filter(object_payloads::Column::ObjectId.eq(object_uuid))
+        .filter(object_payloads::Column::Revision.eq(object.revision))
         .exec(&txn)
         .await
         .map_err(|e| {
@@ -812,6 +837,14 @@ pub async fn complete_object(
     // connection.
     let created_seq = state.next_event_seq();
 
+    let tombstone = object.operation == ObjectEnvelopeOperation::Delete;
+    let event_type = match object.operation {
+        ObjectEnvelopeOperation::Create => ObjectEventType::Created,
+        ObjectEnvelopeOperation::Delete => ObjectEventType::Deleted,
+        ObjectEnvelopeOperation::Revise if object.was_tombstoned => ObjectEventType::Created,
+        ObjectEnvelopeOperation::Revise => ObjectEventType::Updated,
+    };
+
     // The source-device check already happened in `object_for_upload`, which
     // resolved this revision; here the `status = 'pending'` filter inside the
     // helper is what rejects a double completion.
@@ -821,7 +854,7 @@ pub async fn complete_object(
         object_uuid,
         object.revision,
         created_seq,
-        false,
+        tombstone,
     )
     .await
     {
@@ -836,8 +869,16 @@ pub async fn complete_object(
         return Err(error);
     }
 
-    let inserted =
-        insert_created_event(&txn, auth.user_id, kind, object_uuid, &now, created_seq).await?;
+    let inserted = insert_object_event(
+        &txn,
+        auth.user_id,
+        kind,
+        object_uuid,
+        &now,
+        created_seq,
+        event_type,
+    )
+    .await?;
 
     txn.commit().await.map_err(|e| {
         error!(
@@ -848,15 +889,15 @@ pub async fn complete_object(
         ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
-    broadcast_created(
-        &state,
-        auth.user_id,
-        auth.device_id,
-        inserted.seq,
-        kind,
-        &object_id,
-        &now,
-    );
+    state.broadcast_ws_event(WsBroadcast {
+        user_id: auth.user_id,
+        source_device_id: auth.device_id,
+        seq: inserted.seq,
+        event_type,
+        object_kind: kind,
+        object_id: object_uuid.into(),
+        created_at: now.clone(),
+    });
     if kind == ObjectKind::Clipboard {
         spawn_clipboard_trim(state.clone(), auth.user_id);
     }
@@ -1378,12 +1419,14 @@ struct ListedPayloadRow {
 struct ObjectUploadRow {
     id: Uuid,
     kind: String,
+    deleted_at: Option<String>,
 }
 
 #[derive(Debug, DerivePartialModel)]
 #[sea_orm(entity = "object_revisions::Entity", from_query_result)]
 struct RevisionUploadRow {
     revision: i64,
+    operation: String,
     source_device_id: Option<Uuid>,
     status: String,
     created_seq: Option<i64>,
@@ -1396,6 +1439,8 @@ struct UploadTarget {
     object_id: Uuid,
     kind: String,
     revision: i64,
+    operation: ObjectEnvelopeOperation,
+    was_tombstoned: bool,
     status: String,
     created_seq: Option<i64>,
 }
@@ -1966,6 +2011,35 @@ pub async fn purge_object(
 ) -> Result<Postcard<ObjectDeleteResponse>, ApiError> {
     let object_uuid =
         Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
+
+    // Take SQLite's write lock before inspecting the chain or its quota usage.
+    // Otherwise a concurrent revision can reserve bytes after the reads below
+    // and then be cascade-deleted here without those bytes being released.
+    let txn = state.db().begin().await.map_err(|e| {
+        error!(error = %e, "Failed to begin purge_object transaction");
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+    })?;
+    let locked = objects::Entity::update_many()
+        .col_expr(
+            objects::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::col(objects::Column::UpdatedAt).into(),
+        )
+        .filter(objects::Column::Id.eq(object_uuid))
+        .filter(objects::Column::UserId.eq(auth.user_id))
+        .exec(&txn)
+        .await
+        .map_err(|e| {
+            error!(object_id = %object_uuid, error = %e, "Failed to lock object for purge");
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+    if locked.rows_affected != 1 {
+        _ = txn.rollback().await;
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::ObjectNotFound,
+            "Object not found",
+        ));
+    }
+
     let (kind, deleted_at, published_seq) = objects::Entity::find_by_id(object_uuid)
         .filter(objects::Column::UserId.eq(auth.user_id))
         .select_only()
@@ -1973,7 +2047,7 @@ pub async fn purge_object(
         .column(objects::Column::DeletedAt)
         .column(objects::Column::PublishedSeq)
         .into_tuple::<(String, Option<String>, Option<i64>)>()
-        .one(state.db())
+        .one(&txn)
         .await
         .map_err(|e| {
             error!(
@@ -2032,7 +2106,7 @@ pub async fn purge_object(
         .column(object_payloads::Column::CiphertextPath)
         .column(object_payloads::Column::CiphertextSize)
         .into_tuple()
-        .all(state.db())
+        .all(&txn)
         .await
         .map_err(|e| {
             error!(
@@ -2061,11 +2135,6 @@ pub async fn purge_object(
         .iter()
         .map(|(payload_path, _)| state.objects_dir().join(payload_path))
         .collect();
-
-    let txn = state.db().begin().await.map_err(|e| {
-        error!(error = %e, "Failed to begin delete_object transaction");
-        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-    })?;
 
     let deleted = objects::Entity::delete_by_id(object_uuid)
         .exec(&txn)
@@ -2433,10 +2502,22 @@ async fn object_for_upload(
         ));
     }
 
+    let operation = revision.operation.parse().map_err(|_| {
+        error!(
+            object_id = %object_id,
+            revision = revision.revision,
+            operation = %revision.operation,
+            "Object revision has unknown operation",
+        );
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+    })?;
+
     Ok(UploadTarget {
         object_id: object.id,
         kind: object.kind,
         revision: revision.revision,
+        operation,
+        was_tombstoned: object.deleted_at.is_some(),
         status: revision.status,
         created_seq: revision.created_seq,
     })
@@ -3052,6 +3133,7 @@ async fn stream_body_to_payload_file(
 async fn reset_payload_status(
     state: &AppState,
     object_id: Uuid,
+    revision: i64,
     payload_id: Uuid,
     from: &str,
     to: &str,
@@ -3067,6 +3149,7 @@ async fn reset_payload_status(
             sea_orm::sea_query::Expr::value(now),
         )
         .filter(object_payloads::Column::ObjectId.eq(object_id))
+        .filter(object_payloads::Column::Revision.eq(revision))
         .filter(object_payloads::Column::PayloadId.eq(payload_id))
         .filter(object_payloads::Column::Status.eq(from))
         .exec(state.db())
@@ -3074,6 +3157,7 @@ async fn reset_payload_status(
     {
         warn!(
             object_id = %object_id,
+            revision,
             payload_id = %payload_id,
             from = from,
             to = to,
@@ -3534,6 +3618,70 @@ mod tests {
         .map(|Postcard(resp)| resp)
     }
 
+    /// Begin a non-inline revision and return the payload needed to finish it.
+    async fn begin_streamed_revision(
+        state: &AppState,
+        user_id: Uuid,
+        device_id: Uuid,
+        object_id: &str,
+        kind: ObjectKind,
+        ciphertext: &[u8],
+        signing_secret_key: &[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
+    ) -> (ObjectPayloadComplete, ObjectInitResponse) {
+        let object_uuid: Uuid = object_id.parse().expect("object id");
+        let (head_revision, parent_hash) = head_of(state, object_uuid).await;
+        let payload_id: clipper_core::models::ObjectPayloadId = Uuid::now_v7().into();
+        let meta_nonce = vec![10_u8; XCHACHA20_NONCE_BYTES];
+        let meta_ciphertext = b"streamed revision metadata".to_vec();
+        let payload_nonce = vec![11_u8; XCHACHA20_NONCE_BYTES];
+        let payload_hash = sha256(ciphertext).to_vec();
+        let envelope = signed_envelope_at(
+            object_uuid.into(),
+            kind,
+            head_revision + 1,
+            Some(parent_hash),
+            ObjectEnvelopeOperation::Revise,
+            meta_nonce.clone(),
+            &meta_ciphertext,
+            vec![ObjectEnvelopePayloadV2 {
+                id: payload_id,
+                nonce: payload_nonce.clone(),
+                ciphertext_size: ciphertext.len() as i64,
+                sha256_ciphertext: payload_hash.clone(),
+            }],
+            device_id,
+            signing_secret_key,
+        );
+        let response = revise_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path(object_id.to_string()),
+            postcard(ObjectReviseRequest {
+                meta_nonce,
+                meta_ciphertext,
+                payloads: vec![ObjectPayloadInit {
+                    id: payload_id,
+                    nonce: payload_nonce,
+                    ciphertext_size: ciphertext.len() as i64,
+                    sha256_ciphertext: payload_hash.clone(),
+                    inline_ciphertext: None,
+                }],
+                envelope,
+            }),
+        )
+        .await
+        .expect("begin streamed revision")
+        .0;
+        (
+            ObjectPayloadComplete {
+                id: payload_id,
+                ciphertext_size: ciphertext.len() as i64,
+                sha256_ciphertext: payload_hash,
+            },
+            response,
+        )
+    }
+
     /// The D6 acceptance set: what a chain has to do beyond compiling.
     mod revisions {
         use super::*;
@@ -3618,6 +3766,97 @@ mod tests {
                 "signed and stated agree"
             );
             assert!(after[0].envelope.body.parent_hash.is_some());
+        }
+
+        #[tokio::test]
+        async fn a_streamed_revision_completes_only_its_payloads_and_emits_updated() {
+            let (state, _dir) = test_state().await;
+            let (user_id, device_id, object_id, key) = seeded(&state).await;
+            let ciphertext = b"streamed second revision";
+            let (payload, response) = begin_streamed_revision(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                ciphertext,
+                &key,
+            )
+            .await;
+            assert!(matches!(response, ObjectInitResponse::Pending { .. }));
+
+            let mut rx = state.subscribe_ws_broadcasts(user_id);
+            upload_payload(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path((object_id.clone(), payload.id.to_string())),
+                Body::from(ciphertext.to_vec()),
+            )
+            .await
+            .expect("upload revised payload");
+            complete_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path(object_id.clone()),
+                postcard(ObjectCompleteRequest {
+                    payloads: vec![payload],
+                }),
+            )
+            .await
+            .expect("complete streamed revision");
+
+            let broadcast = rx.try_recv().expect("revision broadcast");
+            assert_eq!(broadcast.event_type, ObjectEventType::Updated);
+            let after = listed(&state, user_id, device_id).await;
+            assert_eq!(after.len(), 1);
+            assert_eq!(after[0].revision, 2);
+
+            let object_uuid = object_id.parse::<Uuid>().expect("object id");
+            let (old_id, old_size, old_hash) = object_payloads::Entity::find()
+                .filter(object_payloads::Column::ObjectId.eq(object_uuid))
+                .filter(object_payloads::Column::Revision.eq(GENESIS_REVISION))
+                .select_only()
+                .column(object_payloads::Column::PayloadId)
+                .column(object_payloads::Column::CiphertextSize)
+                .column(object_payloads::Column::Sha256Ciphertext)
+                .into_tuple::<(Uuid, i64, Vec<u8>)>()
+                .one(state.db())
+                .await
+                .expect("query genesis payload")
+                .expect("genesis payload");
+            let stale_retry = complete_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path(object_id.clone()),
+                postcard(ObjectCompleteRequest {
+                    payloads: vec![ObjectPayloadComplete {
+                        id: old_id.into(),
+                        ciphertext_size: old_size,
+                        sha256_ciphertext: old_hash,
+                    }],
+                }),
+            )
+            .await
+            .expect_err("a revision-one retry must not impersonate completed revision two");
+            assert_eq!(
+                stale_retry.body().code,
+                ApiErrorCode::MissingPayloadCompletion,
+            );
+
+            let statuses: Vec<(i64, String)> = object_payloads::Entity::find()
+                .filter(object_payloads::Column::ObjectId.eq(object_uuid))
+                .order_by(object_payloads::Column::Revision, Order::Asc)
+                .select_only()
+                .column(object_payloads::Column::Revision)
+                .column(object_payloads::Column::Status)
+                .into_tuple()
+                .all(state.db())
+                .await
+                .expect("payload statuses");
+            assert_eq!(
+                statuses,
+                vec![(1, "complete".into()), (2, "complete".into())]
+            );
         }
 
         #[tokio::test]

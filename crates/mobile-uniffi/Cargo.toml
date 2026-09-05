@@ -17,6 +17,7 @@ thiserror.workspace = true
 # runtime of its own.
 uniffi = { workspace = true, features = ["tokio"] }
 zeroize.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

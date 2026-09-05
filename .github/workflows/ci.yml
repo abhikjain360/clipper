@@ -75,6 +75,10 @@ jobs:
         run: nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: nix develop --command cargo test --workspace --locked
+      - name: Live scheduler sync regression
+        run: |
+          nix develop --command cargo build -p clipper-server --locked
+          nix develop --command cargo test -p clipper-client --locked live_schedule -- --ignored
 
   wasm-check:
     needs: gate

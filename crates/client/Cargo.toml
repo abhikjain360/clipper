@@ -31,6 +31,7 @@ tracing.workspace = true
 url = "2.5.8"
 uuid = { workspace = true, features = ["js", "v7"] }
 zeroize.workspace = true
+web-time = "1.1.0"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 rand.workspace = true

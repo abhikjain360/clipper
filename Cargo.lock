@@ -959,6 +959,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "web-time",
  "webpki-roots 1.0.9",
  "wl-clipboard-rs",
  "zeroize",
@@ -1060,6 +1061,7 @@ dependencies = [
 name = "clipper-mobile-uniffi"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "clipper-app-types",
  "clipper-client",
  "dirs",

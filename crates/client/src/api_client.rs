@@ -806,7 +806,7 @@ impl ApiClient {
 /// WebSocket path. Built explicitly because reqwest's own rustls wiring would
 /// otherwise pull aws-lc-rs and the platform verifier.
 #[cfg(not(target_family = "wasm"))]
-fn default_tls_config() -> rustls::ClientConfig {
+pub(crate) fn default_tls_config() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut config = rustls::ClientConfig::builder()
