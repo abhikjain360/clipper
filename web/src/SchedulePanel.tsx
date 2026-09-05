@@ -1156,8 +1156,8 @@ function SeriesList({
                     p="$3"
                     style={{ borderColor: "#252b31", borderWidth: 1 }}
                 >
-                    <XStack items="center" justify="space-between" gap="$3" flexWrap="wrap">
-                        <YStack flex={1} minW={200}>
+                    <XStack items="flex-start" justify="space-between" gap="$3">
+                        <YStack flex={1} minW={0} style={{ overflowWrap: "anywhere" }}>
                             <button
                                 className="event-card-title"
                                 onClick={(event) => {
@@ -1182,7 +1182,7 @@ function SeriesList({
                                 {item.has_alarm && <AlarmClock size={12} color="#d0a33a" />}
                             </XStack>
                         </YStack>
-                        <XStack gap="$2">
+                        <XStack gap="$2" style={{ flexShrink: 0 }}>
                             <Button
                                 size="$2"
                                 icon={deleting === item.id ? <Spinner /> : <Trash2 size={14} />}
