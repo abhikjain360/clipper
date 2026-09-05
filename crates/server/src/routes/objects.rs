@@ -10,10 +10,11 @@ use chrono::{Duration, Utc};
 use clipper_core::{
     crypto::{self, SHA256_BYTES},
     models::{
-        ApiErrorCode, ObjectCompleteRequest, ObjectCompleteResponse, ObjectDeleteResponse,
-        ObjectEnvelopeOperation, ObjectEventType, ObjectId, ObjectInitRequest, ObjectInitResponse,
-        ObjectKind, ObjectListCursor, ObjectListItem, ObjectListResponse, ObjectPayloadDescriptor,
-        ObjectPayloadInit, ObjectPayloadUpload, OkResponse,
+        ApiErrorCode, OBJECT_ENVELOPE_VERSION_V2, ObjectCompleteRequest, ObjectCompleteResponse,
+        ObjectDeleteResponse, ObjectEnvelopeOperation, ObjectEventType, ObjectId,
+        ObjectInitRequest, ObjectInitResponse, ObjectKind, ObjectListCursor, ObjectListItem,
+        ObjectListResponse, ObjectPayloadDescriptor, ObjectPayloadInit, ObjectPayloadUpload,
+        OkResponse,
     },
 };
 use clipper_fs_txn::FsTransaction;
@@ -1240,7 +1241,7 @@ async fn object_list_items(
             );
             ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
-        let envelope: clipper_core::models::ObjectEnvelopeV1 =
+        let envelope: clipper_core::models::ObjectEnvelopeV2 =
             postcard::from_bytes(&object.envelope).map_err(|e| {
                 error!(
                     object_id = %object.id,
@@ -1602,9 +1603,14 @@ async fn validate_object_init_envelope(
     let object_id = req.id.into_uuid();
     if body.object_id != req.id
         || body.object_type != req.kind
-        || body.object_version != 1
+        || body.envelope_version != OBJECT_ENVELOPE_VERSION_V2
         || body.source_device_id.into_uuid() != device_id
+        // Init still means genesis. The revision write path is a separate
+        // route; a `Revise` or `Delete` arriving here has no parent to check
+        // against, so it is refused rather than silently treated as a create.
         || body.operation != ObjectEnvelopeOperation::Create
+        || body.revision != 1
+        || body.parent_hash.is_some()
         || body.meta_nonce != req.meta_nonce
     {
         debug!(
@@ -1714,7 +1720,7 @@ async fn validate_object_init_envelope(
 fn validate_envelope_payload(
     object_id: Uuid,
     payload: &ObjectPayloadInit,
-    envelope_payload: &clipper_core::models::ObjectEnvelopePayloadV1,
+    envelope_payload: &clipper_core::models::ObjectEnvelopePayloadV2,
 ) -> Result<(), ApiError> {
     if envelope_payload.nonce != payload.nonce
         || envelope_payload.ciphertext_size != payload.ciphertext_size
@@ -2370,8 +2376,8 @@ mod tests {
     use clipper_core::{
         crypto::{self, XCHACHA20_NONCE_BYTES, sha256},
         models::{
-            ObjectEnvelopeBodyV1, ObjectEnvelopeOperation, ObjectEnvelopePayloadV1,
-            ObjectEnvelopeV1, ObjectPayloadComplete, ObjectPayloadInit,
+            ObjectEnvelopeBodyV2, ObjectEnvelopeOperation, ObjectEnvelopePayloadV2,
+            ObjectEnvelopeV2, ObjectPayloadComplete, ObjectPayloadInit,
         },
     };
     use sea_orm::{ConnectionTrait, Database, PaginatorTrait};
@@ -2584,7 +2590,7 @@ mod tests {
             kind,
             meta_nonce.clone(),
             &meta_ciphertext,
-            vec![ObjectEnvelopePayloadV1 {
+            vec![ObjectEnvelopePayloadV2 {
                 id: payload_id.parse().expect("payload id"),
                 nonce: payload_nonce.clone(),
                 ciphertext_size: ciphertext.len() as i64,
@@ -2614,14 +2620,16 @@ mod tests {
         kind: ObjectKind,
         meta_nonce: Vec<u8>,
         meta_ciphertext: &[u8],
-        payloads: Vec<ObjectEnvelopePayloadV1>,
+        payloads: Vec<ObjectEnvelopePayloadV2>,
         device_id: Uuid,
         signing_secret_key: &[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
-    ) -> ObjectEnvelopeV1 {
-        let body = ObjectEnvelopeBodyV1 {
+    ) -> ObjectEnvelopeV2 {
+        let body = ObjectEnvelopeBodyV2 {
             object_id,
             object_type: kind,
-            object_version: 1,
+            envelope_version: OBJECT_ENVELOPE_VERSION_V2,
+            revision: 1,
+            parent_hash: None,
             source_device_id: device_id.into(),
             created_at: Utc::now().to_rfc3339(),
             operation: ObjectEnvelopeOperation::Create,
@@ -2629,7 +2637,7 @@ mod tests {
             sha256_meta_ciphertext: sha256(meta_ciphertext).to_vec(),
             payloads,
         };
-        ObjectEnvelopeV1 {
+        ObjectEnvelopeV2 {
             signature: crypto::sign_object_envelope_body(signing_secret_key, &body)
                 .expect("sign envelope"),
             body,
@@ -2871,7 +2879,7 @@ mod tests {
         ];
         let envelope_payloads = payloads
             .iter()
-            .map(|(id, ciphertext)| ObjectEnvelopePayloadV1 {
+            .map(|(id, ciphertext)| ObjectEnvelopePayloadV2 {
                 id: (*id).into(),
                 nonce: vec![2_u8; XCHACHA20_NONCE_BYTES],
                 ciphertext_size: ciphertext.len() as i64,
@@ -2955,7 +2963,7 @@ mod tests {
             ObjectKind::File,
             meta_nonce.clone(),
             &meta_ciphertext,
-            vec![ObjectEnvelopePayloadV1 {
+            vec![ObjectEnvelopePayloadV2 {
                 id: payload_id.into(),
                 nonce: vec![2_u8; XCHACHA20_NONCE_BYTES],
                 ciphertext_size: ciphertext.len() as i64,
