@@ -28,8 +28,8 @@ use crate::{
         AddCalendarSourceParams, AuthChallenge, AuthenticateResult, ClipboardPayloadResult,
         CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse,
         DeviceListResult, ExpandScheduleParams, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES,
-        IPC_AUTH_VERSION, LoginParams, RegisterParams, RegisterResult, UploadFileResult,
-        ipc_client_auth_message, ipc_daemon_auth_message,
+        IPC_AUTH_VERSION, LoginParams, RegisterParams, RegisterResult, UpdateScheduleItemParams,
+        UploadFileResult, ipc_client_auth_message, ipc_daemon_auth_message,
     },
 };
 
@@ -430,6 +430,9 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 DaemonCommand::CreateScheduleItem(params) => {
                     cmd_create_schedule_item(id, params.item, &engine).await
                 }
+                DaemonCommand::UpdateScheduleItem(params) => {
+                    cmd_update_schedule_item(id, params, &engine).await
+                }
                 DaemonCommand::DeleteScheduleObject(params) => {
                     cmd_delete_schedule_object(id, params.object_id, &engine).await
                 }
@@ -727,6 +730,20 @@ async fn cmd_create_schedule_item(
     engine: &Arc<SyncEngine>,
 ) -> DaemonResponse {
     match engine.create_schedule_item(item).await {
+        Ok(object_id) => json_success(id, object_id),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_update_schedule_item(
+    id: String,
+    params: UpdateScheduleItemParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine
+        .update_schedule_item(&params.object_id, params.item)
+        .await
+    {
         Ok(object_id) => json_success(id, object_id),
         Err(e) => client_error(id, e),
     }

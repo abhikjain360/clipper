@@ -52,6 +52,8 @@ export function tauriBackend(): ClipperBackend {
             invoke<IngestReport>("sync_calendar_source", { objectId }),
         createScheduleItem: (item: ScheduleItem) =>
             invoke<string>("create_schedule_item", { item }),
+        updateScheduleItem: (objectId, item) =>
+            invoke<string>("update_schedule_item", { objectId, item }),
         deleteScheduleObject: (objectId) => invoke<void>("delete_schedule_object", { objectId }),
         expandSchedule: (from, to, observerZone) =>
             invoke<OccurrenceView[]>("expand_schedule", { from, to, observerZone }),

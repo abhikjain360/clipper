@@ -10,8 +10,8 @@ use clipper_daemon_types::{
     CreateScheduleItemParams, DaemonCommand, DeleteCollabDocParams, DeleteFileParams,
     DeleteScheduleObjectParams, DeviceListResult, DownloadFileParams, ExpandScheduleParams,
     GetCollabDocMetaParams, LoginParams, RegisterParams, RegisterResult, RemoveDeviceParams,
-    RenameCollabDocParams, SendClipboardPayloadParams, SyncCalendarSourceParams, UploadFileParams,
-    UploadFileResult,
+    RenameCollabDocParams, SendClipboardPayloadParams, SyncCalendarSourceParams,
+    UpdateScheduleItemParams, UploadFileParams, UploadFileResult,
 };
 use clipper_schedule::ScheduleItem;
 use daemon_client::{DaemonClient, DaemonClientError};
@@ -135,6 +135,7 @@ pub fn run() {
             create_collab_doc,
             delete_collab_doc,
             create_schedule_item,
+            update_schedule_item,
             delete_schedule_object,
             expand_schedule,
             add_calendar_source,
@@ -453,6 +454,20 @@ async fn create_schedule_item(
         .daemon
         .send_result::<String>(DaemonCommand::CreateScheduleItem(
             CreateScheduleItemParams { item },
+        ))
+        .await?)
+}
+
+#[tauri::command]
+async fn update_schedule_item(
+    backend: State<'_, DesktopBackend>,
+    object_id: String,
+    item: ScheduleItem,
+) -> CommandResult<String> {
+    Ok(backend
+        .daemon
+        .send_result::<String>(DaemonCommand::UpdateScheduleItem(
+            UpdateScheduleItemParams { object_id, item },
         ))
         .await?)
 }

@@ -89,6 +89,7 @@ pub enum DaemonCommand {
     /// does not survive being reduced to strings, and one representation cannot
     /// drift from another.
     CreateScheduleItem(CreateScheduleItemParams),
+    UpdateScheduleItem(UpdateScheduleItemParams),
     DeleteScheduleObject(DeleteScheduleObjectParams),
     ExpandSchedule(ExpandScheduleParams),
     AddCalendarSource(AddCalendarSourceParams),
@@ -207,6 +208,16 @@ pub struct RenameCollabDocParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateScheduleItemParams {
+    pub item: clipper_schedule::ScheduleItem,
+}
+
+/// Replace a series with an edited version.
+///
+/// `object_id` names the object being replaced; `item.id` must be the same
+/// series id it already had, so overrides and logged time are not orphaned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateScheduleItemParams {
+    pub object_id: String,
     pub item: clipper_schedule::ScheduleItem,
 }
 

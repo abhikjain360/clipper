@@ -3,6 +3,7 @@ import {
     CalendarClock,
     ChevronLeft,
     ChevronRight,
+    Pencil,
     Plus,
     RefreshCw,
     Trash2,
@@ -75,6 +76,7 @@ export function SchedulePanel({
     onState: (state: AppState) => void;
     onError: (error: string | null) => void;
 }) {
+    const [editing, setEditing] = useState<ScheduleItemView | null>(null);
     const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()));
     const [occurrences, setOccurrences] = useState<OccurrenceView[]>([]);
     const [loading, setLoading] = useState(false);
@@ -108,7 +110,12 @@ export function SchedulePanel({
 
     return (
         <YStack gap="$3">
-            <ScheduleComposer onState={onState} onError={onError} />
+            <ScheduleComposer
+                editing={editing}
+                onDone={() => setEditing(null)}
+                onState={onState}
+                onError={onError}
+            />
 
             <Card bg="#171a1d" p="$3" gap="$3" style={{ borderColor: "#252b31", borderWidth: 1 }}>
                 <XStack items="center" justify="space-between" gap="$2" flexWrap="wrap">
@@ -138,7 +145,12 @@ export function SchedulePanel({
                 <WeekGrid weekStart={weekStart} occurrences={occurrences} />
             </Card>
 
-            <SeriesList items={items} onState={onState} onError={onError} />
+            <SeriesList
+                items={items}
+                onEdit={setEditing}
+                onState={onState}
+                onError={onError}
+            />
             <CalendarSources sources={sources} onState={onState} onError={onError} />
         </YStack>
     );
@@ -531,10 +543,12 @@ function CalendarSources({
 
 function SeriesList({
     items,
+    onEdit,
     onState,
     onError,
 }: {
     items: ScheduleItemView[];
+    onEdit: (item: ScheduleItemView) => void;
     onState: (state: AppState) => void;
     onError: (error: string | null) => void;
 }) {
@@ -585,16 +599,19 @@ function SeriesList({
                                 {item.recurrence} · {item.time_summary}
                             </Text>
                         </YStack>
-                        <Button
-                            size="$2"
-                            icon={
-                                deleting === item.id ? <Spinner /> : <Trash2 size={14} />
-                            }
-                            disabled={deleting === item.id}
-                            onPress={() => void remove(item.id)}
-                        >
-                            Delete
-                        </Button>
+                        <XStack gap="$2">
+                            <Button size="$2" icon={<Pencil size={14} />} onPress={() => onEdit(item)}>
+                                Edit
+                            </Button>
+                            <Button
+                                size="$2"
+                                icon={deleting === item.id ? <Spinner /> : <Trash2 size={14} />}
+                                disabled={deleting === item.id}
+                                onPress={() => void remove(item.id)}
+                            >
+                                Delete
+                            </Button>
+                        </XStack>
                     </XStack>
                 </Card>
             ))}
@@ -603,9 +620,14 @@ function SeriesList({
 }
 
 function ScheduleComposer({
+    editing,
+    onDone,
     onState,
     onError,
 }: {
+    /** The block being edited, or null to compose a new one. */
+    editing: ScheduleItemView | null;
+    onDone: () => void;
     onState: (state: AppState) => void;
     onError: (error: string | null) => void;
 }) {
@@ -620,6 +642,52 @@ function ScheduleComposer({
     const [repeat, setRepeat] = useState<RepeatChoice>("once");
     const [alarm, setAlarm] = useState(false);
     const [alarmLead, setAlarmLead] = useState("0");
+    // The series id is preserved across an edit so overrides and logged time
+    // keep pointing at the same series; only the object carrying it changes.
+    const [seriesId, setSeriesId] = useState<string | null>(null);
+
+    // Load an existing block into the form, once per block.
+    //
+    // Keyed on a ref rather than on the effect's dependencies: a sync push
+    // re-renders this panel, and re-running the load would overwrite whatever
+    // the owner had typed since opening it. Depending on the callbacks would be
+    // worse still — their identity changes every render.
+    const loadedObjectId = useRef<string | null>(null);
+    useEffect(() => {
+        if (!editing) {
+            loadedObjectId.current = null;
+            return;
+        }
+        if (loadedObjectId.current === editing.id) return;
+        loadedObjectId.current = editing.id;
+
+        const parsed = parseDefinition(editing.definition_json);
+        if (!parsed) {
+            onError("That block could not be opened for editing");
+            onDone();
+            return;
+        }
+        setSeriesId(parsed.id);
+        setTitle(parsed.title);
+        setAlarm(parsed.alarm != null);
+        setAlarmLead(String(parsed.alarm?.minutes_before ?? 0));
+        setRepeat(repeatChoiceOf(parsed.recurrence));
+        setDays(weekdaysOf(parsed.recurrence) ?? ["mon", "wed", "fri"]);
+        if (parsed.span.kind === "all_day") {
+            setAllDay(true);
+            setDate(parsed.span.start);
+        } else {
+            setAllDay(false);
+            setFloating(parsed.span.start.kind === "floating");
+            const local = parsed.span.start.kind === "floating"
+                ? parsed.span.start.at
+                : parsed.span.start.at.local;
+            setDate(local.slice(0, 10));
+            setTime(local.slice(11, 16));
+            setDuration(String(parsed.span.duration));
+        }
+        setOpen(true);
+    }, [editing, onDone, onError]);
     const [days, setDays] = useState<Weekday[]>(["mon", "wed", "fri"]);
 
     async function submit() {
@@ -637,7 +705,7 @@ function ScheduleComposer({
         setBusy(true);
         try {
             const item: ScheduleItem = {
-                id: crypto.randomUUID(),
+                id: seriesId ?? crypto.randomUUID(),
                 title: title.trim() || "Untitled",
                 span: allDay
                     ? { kind: "all_day", start: date, days: 1 }
@@ -658,15 +726,25 @@ function ScheduleComposer({
                     : null,
             };
             const backend = await clipperBackend();
-            await backend.createScheduleItem(item);
+            if (editing) {
+                await backend.updateScheduleItem(editing.id, item);
+            } else {
+                await backend.createScheduleItem(item);
+            }
             onState(await backend.getState());
-            setTitle("");
-            setOpen(false);
+            reset();
         } catch (caught) {
             onError(formatBackendError(caught));
         } finally {
             setBusy(false);
         }
+    }
+
+    function reset() {
+        setTitle("");
+        setSeriesId(null);
+        setOpen(false);
+        onDone();
     }
 
     if (!open) {
@@ -789,9 +867,9 @@ function ScheduleComposer({
                     icon={busy ? <Spinner /> : undefined}
                     onPress={() => void submit()}
                 >
-                    Create
+                    {editing ? "Save" : "Create"}
                 </Button>
-                <Button disabled={busy} onPress={() => setOpen(false)}>
+                <Button disabled={busy} onPress={reset}>
                     Cancel
                 </Button>
             </XStack>
@@ -824,6 +902,48 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
             {children}
         </YStack>
     );
+}
+
+/// Read back a stored record. A record this build cannot parse is reported
+/// rather than silently replaced with a default, which would quietly rewrite
+/// the owner's block on save.
+function parseDefinition(json: string): ScheduleItem | null {
+    try {
+        const parsed = JSON.parse(json) as ScheduleItem;
+        return parsed.span && parsed.recurrence ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+/// Map a stored recurrence back onto the form's coarser choices.
+///
+/// The form offers a handful of common cadences while the record can express
+/// more, so anything outside them opens as "once" and the owner is told rather
+/// than silently downgraded on save.
+function repeatChoiceOf(recurrence: Recurrence): RepeatChoice {
+    if (recurrence.kind !== "every" || recurrence.interval !== 1) return "once";
+    switch (recurrence.frequency.unit) {
+        case "daily":
+            return "daily";
+        case "weekly":
+            return isWeekdaySet(recurrence.frequency.weekdays) ? "weekdays" : "weekly";
+        case "monthly":
+            return recurrence.frequency.by === "on_day" ? "monthly" : "once";
+        default:
+            return "once";
+    }
+}
+
+function weekdaysOf(recurrence: Recurrence): Weekday[] | null {
+    return recurrence.kind === "every" && recurrence.frequency.unit === "weekly"
+        ? recurrence.frequency.weekdays
+        : null;
+}
+
+function isWeekdaySet(days: Weekday[]): boolean {
+    const workweek: Weekday[] = ["mon", "tue", "wed", "thu", "fri"];
+    return days.length === workweek.length && workweek.every((day) => days.includes(day));
 }
 
 function buildRecurrence(choice: RepeatChoice, days: Weekday[], date: string): Recurrence {

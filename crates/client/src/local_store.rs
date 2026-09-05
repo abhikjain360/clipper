@@ -1825,7 +1825,7 @@ fn schedule_item_view_from_record(record: &LocalObjectRecord) -> Option<Schedule
     schedule
         .record
         .as_item()
-        .map(|item| item_view(item, &record.created_at))
+        .map(|item| item_view(item, &record.id, &record.created_at))
 }
 
 fn sort_records_desc(records: &mut [LocalObjectRecord]) {

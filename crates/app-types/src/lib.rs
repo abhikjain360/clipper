@@ -102,6 +102,16 @@ pub struct ScheduleItemView {
     /// Whether this series is all-day rather than timed.
     pub all_day: bool,
     pub created_at: String,
+    /// The exact record, serialized.
+    ///
+    /// Every other field here is formatted for display and cannot be turned
+    /// back into a record, but editing needs the record itself. Carrying it
+    /// costs a few hundred bytes and saves a round-trip through five layers of
+    /// IPC; it is a string because this crate's types must stay primitive to
+    /// cross UniFFI. Consumers parse it with the `ScheduleItem` type in
+    /// `packages/shared`, which mirrors it exactly.
+    #[serde(default)]
+    pub definition_json: String,
 }
 
 /// One computed instance of a series, ready to place on a grid.
