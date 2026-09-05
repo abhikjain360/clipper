@@ -3504,6 +3504,7 @@ mod tests {
         ObjectListItem {
             id: object_id,
             kind: ObjectKind::Clipboard,
+            revision: 1,
             created_seq: 1,
             meta_nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
             meta_ciphertext: Vec::new(),

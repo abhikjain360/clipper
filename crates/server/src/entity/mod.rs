@@ -5,6 +5,7 @@ pub mod collab_docs;
 pub mod devices;
 pub mod event_log;
 pub mod object_payloads;
+pub mod object_revisions;
 pub mod objects;
 pub mod server_config;
 pub mod sessions;

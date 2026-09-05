@@ -377,9 +377,12 @@ pub enum ObjectKind {
 #[strum(serialize_all = "snake_case")]
 pub enum ObjectEventType {
     Created,
-    /// A server-visible object's metadata changed in place. Only collab docs
-    /// can be updated (a rename); encrypted objects are immutable, so their
-    /// lifecycle is create/delete only.
+    /// The object's current content changed.
+    ///
+    /// For a collab doc that is a rename, the one thing the server can see. For
+    /// every other kind it means a new revision was published — the ciphertext
+    /// is still immutable, but which ciphertext is current has moved (D6). A
+    /// client reacts the same way to both: refetch the object.
     Updated,
     Deleted,
 }
@@ -463,6 +466,30 @@ pub struct ObjectEnvelopeV2 {
     pub body: ObjectEnvelopeBodyV2,
     #[garde(length(equal = OBJECT_ENVELOPE_SIGNATURE_BYTES))]
     pub signature: Vec<u8>,
+}
+
+/// Write the next revision of an object that already exists.
+///
+/// The same shape as `ObjectInitRequest` minus `id` and `kind`, both of which
+/// are already settled: the id is in the path, and an object's kind never
+/// changes. Everything about *where* this lands in the chain — the revision
+/// number, the parent hash, whether it is a tombstone — is inside the signed
+/// envelope rather than repeated here, so the server checks one authority
+/// rather than reconciling two.
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct ObjectReviseRequest {
+    #[garde(length(equal = XCHACHA20_NONCE_BYTES))]
+    pub meta_nonce: Vec<u8>,
+    #[garde(skip)]
+    pub meta_ciphertext: Vec<u8>,
+    #[garde(
+        dive,
+        length(max = MAX_OBJECT_PAYLOAD_ENTRIES),
+        custom(validate_unique_init_payload_ids)
+    )]
+    pub payloads: Vec<ObjectPayloadInit>,
+    #[garde(dive)]
+    pub envelope: ObjectEnvelopeV2,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -566,6 +593,14 @@ pub struct ObjectPayloadDescriptor {
 pub struct ObjectListItem {
     pub id: ObjectId,
     pub kind: ObjectKind,
+    /// Which revision of the object this is. Always the head — the list never
+    /// serves history — but stated so a client can compare it against the one
+    /// it already holds and refuse to move backwards, and against the envelope
+    /// body, which carries the same number under the signature.
+    pub revision: u64,
+    /// The seq at which this revision was published. It advances when the
+    /// object is edited, which is how an incremental sync learns about an edit
+    /// without re-pulling everything.
     pub created_seq: i64,
     pub meta_nonce: Vec<u8>,
     pub meta_ciphertext: Vec<u8>,
@@ -769,6 +804,16 @@ pub enum ApiErrorCode {
     ObjectForbidden,
     ObjectDeleteUnsupported,
     ObjectNotReadyToComplete,
+    /// A revision did not follow the object's current head — wrong number,
+    /// wrong parent hash, or a create where a revise belongs.
+    ///
+    /// This is the optimistic-concurrency rejection from D6: the losing writer
+    /// gets it, and its job is to refetch the head and rebase, not to retry the
+    /// same bytes.
+    ObjectRevisionConflict,
+    /// A purge was asked for on an object that is not tombstoned. Deleting is
+    /// reversible and purging is not, so the two are separate steps.
+    ObjectNotTombstoned,
     DuplicateObjectPayloadId,
     ObjectPayloadNotFound,
     ObjectPayloadAlreadyUploaded,
@@ -810,6 +855,8 @@ impl ApiErrorCode {
             Self::ObjectAlreadyExists => "Object already exists",
             Self::ObjectForbidden => "Forbidden",
             Self::ObjectDeleteUnsupported => "Object cannot be deleted this way",
+            Self::ObjectRevisionConflict => "Object revision does not follow the current head",
+            Self::ObjectNotTombstoned => "Object must be deleted before it can be purged",
             Self::ObjectNotReadyToComplete => "Object is not ready to complete",
             Self::DuplicateObjectPayloadId => "Duplicate object payload id",
             Self::ObjectPayloadNotFound => "Object payload not found",
@@ -861,6 +908,8 @@ impl ApiErrorCode {
             Self::Conflict
             | Self::ObjectAlreadyExists
             | Self::ObjectNotReadyToComplete
+            | Self::ObjectRevisionConflict
+            | Self::ObjectNotTombstoned
             | Self::ObjectPayloadAlreadyUploaded
             | Self::ObjectPayloadUploadInProgress
             | Self::ObjectPayloadNotUploaded => 409,

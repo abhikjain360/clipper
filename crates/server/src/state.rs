@@ -22,7 +22,7 @@ use crate::{
     auth::AuthInfo,
     collab_sync::{CollabRoom, MAX_CONNS_PER_ROOM},
     config::ServerConfig,
-    entity::{event_log, objects},
+    entity::{event_log, object_revisions, objects},
     error::ServerResult,
     migration,
     rate_limit::RateLimiter,
@@ -162,7 +162,8 @@ impl AppState {
     /// persisted, so a restart (or a wall clock that jumped backward) can never
     /// reissue a value at or below one a client has already observed.
     ///
-    /// Seqs are assigned both to `event_log` rows and to `objects.created_seq`,
+    /// Seqs are assigned both to `event_log` rows and to
+    /// `object_revisions.created_seq`,
     /// so seeding from `event_log` alone is unsafe: `cleanup_old_events` prunes
     /// the log after a retention window, so a surviving object's `created_seq`
     /// can outlive its log row. After such pruning a restart could otherwise
@@ -176,11 +177,16 @@ impl AppState {
             .into_tuple()
             .one(self.db())
             .await?;
-        let max_object_seq: Option<i64> = objects::Entity::find()
-            .filter(objects::Column::CreatedSeq.is_not_null())
+        // Every revision holds a seq, not only the head, and a superseded one
+        // is retained (D6). Seeding from `objects.published_seq` would still be
+        // correct today — a chain's head always carries its largest seq — but
+        // it would quietly stop being correct the moment retention starts
+        // pruning heads, so read the revisions themselves.
+        let max_object_seq: Option<i64> = object_revisions::Entity::find()
+            .filter(object_revisions::Column::CreatedSeq.is_not_null())
             .select_only()
-            .column(objects::Column::CreatedSeq)
-            .order_by_desc(objects::Column::CreatedSeq)
+            .column(object_revisions::Column::CreatedSeq)
+            .order_by_desc(object_revisions::Column::CreatedSeq)
             .into_tuple::<Option<i64>>()
             .one(self.db())
             .await?
@@ -652,30 +658,46 @@ mod tests {
             .await
             .expect("disable fk");
 
-        // A surviving object whose event_log row was pruned: a created_seq far
+        // A surviving revision whose event_log row was pruned: a created_seq far
         // above the current wall clock, with no matching event_log entry.
         let future_seq = Utc::now().timestamp_micros() + 1_000_000_000_000;
         let now = Utc::now().to_rfc3339();
+        let object_id = Uuid::now_v7();
         objects::ActiveModel {
-            id: Set(Uuid::now_v7()),
+            id: Set(object_id),
             user_id: Set(Uuid::now_v7()),
             kind: Set("file".to_string()),
-            // A file object: empty-but-present ciphertext columns satisfy the
-            // objects XOR check (collab_doc_id stays null).
-            meta_ciphertext: Set(Some(Vec::new())),
-            meta_nonce: Set(Some(Vec::new())),
             created_at: Set(now.clone()),
             updated_at: Set(now.clone()),
             expires_at: Set(None),
-            source_device_id: Set(None),
-            envelope: Set(Some(Vec::new())),
-            status: Set("complete".to_string()),
-            created_seq: Set(Some(future_seq)),
+            head_revision: Set(Some(1)),
+            published_seq: Set(Some(future_seq)),
+            deleted_at: Set(None),
             collab_doc_id: Set(None),
         }
         .insert(state.db())
         .await
         .expect("insert object");
+
+        // The seq the seeder actually reads lives on the revision; the object's
+        // `published_seq` mirrors it.
+        object_revisions::ActiveModel {
+            object_id: Set(object_id),
+            revision: Set(1),
+            operation: Set("create".to_string()),
+            parent_hash: Set(None),
+            meta_ciphertext: Set(Vec::new()),
+            meta_nonce: Set(Vec::new()),
+            envelope: Set(Vec::new()),
+            source_device_id: Set(None),
+            created_at: Set(now.clone()),
+            stored_at: Set(now.clone()),
+            status: Set("complete".to_string()),
+            created_seq: Set(Some(future_seq)),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert revision");
 
         // Re-seed as a fresh process would on restart.
         state.seed_event_seq().await.expect("reseed");

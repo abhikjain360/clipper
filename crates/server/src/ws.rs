@@ -424,13 +424,15 @@ pub(crate) async fn get_latest_seq(state: &AppState, user_id: Uuid) -> Result<i6
         .into_tuple::<i64>()
         .one(state.db())
         .await?;
+    // Tombstoned objects are included deliberately: their seq was published,
+    // and a watermark that skipped them would move backwards when the newest
+    // thing a user did was a delete.
     let latest_object_seq: Option<i64> = objects::Entity::find()
         .filter(objects::Column::UserId.eq(user_id))
-        .filter(objects::Column::Status.eq("complete"))
-        .filter(objects::Column::CreatedSeq.is_not_null())
-        .order_by(objects::Column::CreatedSeq, Order::Desc)
+        .filter(objects::Column::PublishedSeq.is_not_null())
+        .order_by(objects::Column::PublishedSeq, Order::Desc)
         .select_only()
-        .column(objects::Column::CreatedSeq)
+        .column(objects::Column::PublishedSeq)
         .into_tuple::<Option<i64>>()
         .one(state.db())
         .await?
