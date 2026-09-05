@@ -32,6 +32,7 @@ fn daily_at(start: TimedStart) -> ScheduleItem {
         },
         recurrence: Recurrence::Every(Cadence::each(Frequency::Daily)),
         reference: None,
+        alarm: None,
     }
 }
 
@@ -327,6 +328,7 @@ fn all_day_spans_whole_local_days() {
         },
         recurrence: Recurrence::Once,
         reference: None,
+        alarm: None,
     };
 
     let resolved = item
@@ -356,6 +358,7 @@ fn one_off_items_expand_to_themselves() {
         },
         recurrence: Recurrence::Once,
         reference: None,
+        alarm: None,
     };
 
     let inside = expand(
@@ -456,6 +459,7 @@ fn the_wire_format_is_self_describing() {
             week_start: chrono::Weekday::Mon,
         })),
         reference: None,
+        alarm: None,
     };
 
     let json = serde_json::to_value(&item).expect("serialize");
