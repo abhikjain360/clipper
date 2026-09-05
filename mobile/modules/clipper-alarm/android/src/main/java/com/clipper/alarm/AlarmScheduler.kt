@@ -84,9 +84,13 @@ class AlarmScheduler(private val context: Context) {
     }
 
     fun cancelAll() {
-        // Cancel the whole request-code range rather than only what the current
-        // mirror lists: a plan that shrank must not leave orphaned alarms armed.
-        for (index in 0 until MAX_REGISTERED) {
+        // Sweep the whole index space the previous plan could have used, not
+        // just MAX_REGISTERED of it. A request code is the alarm's index in the
+        // mirror, and entries already in the past are skipped rather than
+        // armed — so a plan whose first entries have expired arms indices well
+        // beyond MAX_REGISTERED, and a narrower sweep would strand them.
+        val span = maxOf(MAX_REGISTERED, AlarmMirror.load(context).size)
+        for (index in 0 until span) {
             pendingIntentOrNull(index)?.let {
                 alarmManager.cancel(it)
                 it.cancel()

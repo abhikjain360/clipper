@@ -179,8 +179,11 @@ function ClipperApp() {
   // reconciliation is pure waste. The pushed plan is compared against the last
   // one as well, since two different schedules can still produce identical
   // alarms.
+  // Keyed on the stored record, not the formatted summary. Toggling an alarm
+  // changes neither the recurrence text nor the time text, so a summary-based
+  // key would leave the registry stale exactly when it matters most.
   const scheduleKey = state?.schedule_items
-    .map((item) => `${item.id}:${item.recurrence}:${item.time_summary}`)
+    .map((item) => `${item.id}:${item.definition_json}`)
     .join("|") ?? "";
   const lastPushedPlan = useRef<string | null>(null);
 

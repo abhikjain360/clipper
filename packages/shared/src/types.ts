@@ -123,6 +123,8 @@ export type ScheduleItemView = {
   recurrence: string;
   time_summary: string;
   all_day: boolean;
+  // Whether this series raises an alarm.
+  has_alarm: boolean;
   created_at: string;
   // The exact record, serialized. The formatted fields above cannot be turned
   // back into one, and editing needs it. Parse with ScheduleItem.

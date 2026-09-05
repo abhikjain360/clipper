@@ -774,9 +774,12 @@ function SeriesList({
                     <XStack items="center" justify="space-between" gap="$3" flexWrap="wrap">
                         <YStack flex={1} minW={200}>
                             <Text>{item.title || "Untitled"}</Text>
-                            <Text fontSize={12} color="#8b949e">
-                                {item.recurrence} · {item.time_summary}
-                            </Text>
+                            <XStack items="center" gap="$2">
+                                <Text fontSize={12} color="#8b949e">
+                                    {item.recurrence} · {item.time_summary}
+                                </Text>
+                                {item.has_alarm && <AlarmClock size={12} color="#d0a33a" />}
+                            </XStack>
                         </YStack>
                         <XStack gap="$2">
                             <Button size="$2" icon={<Pencil size={14} />} onPress={() => onEdit(item)}>
