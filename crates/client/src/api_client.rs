@@ -531,6 +531,31 @@ impl ApiClient {
         Self::postcard_response(resp).await
     }
 
+    /// `POST /api/objects/{id}/revisions` — append the next revision.
+    ///
+    /// Returns the same shape as init, because the rest of the write is the
+    /// same: complete straight away if every payload rode inline, otherwise
+    /// upload URLs to fill in first.
+    pub async fn object_revise(
+        &self,
+        object_id: &str,
+        req: &ObjectReviseRequest,
+    ) -> Result<ObjectInitResponse, ClientError> {
+        let resp = self
+            .http
+            .post(self.api_url(&["objects", object_id, "revisions"])?)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .header("Content-Type", POSTCARD_CONTENT_TYPE)
+            .body(Self::postcard_body(req)?)
+            .send()
+            .await?;
+
+        Self::postcard_response(resp).await
+    }
+
     pub async fn object_upload_payload(
         &self,
         object_id: &str,
