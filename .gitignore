@@ -24,6 +24,7 @@ lcov.info
 node_modules/
 web/.tamagui/
 web/dist/
+web/dist-tauri/
 web/node_modules/
 web/src-tauri/gen/
 web/src/generated/
