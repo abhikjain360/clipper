@@ -194,6 +194,8 @@ export type CalendarSourceView = {
   location: string;
   enabled: boolean;
   event_count: number;
+  raw_import_file_id: string | null;
+  raw_import_available: boolean;
 };
 
 /// What one pass over a calendar feed did.

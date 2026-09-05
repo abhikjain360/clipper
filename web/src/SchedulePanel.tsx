@@ -949,6 +949,25 @@ function CalendarSources({
     const [url, setUrl] = useState("");
     const [busy, setBusy] = useState<string | null>(null);
     const canSync = isTauriRuntime();
+    const [pending, setPending] = useState<{
+        source: CalendarSourceView;
+        action: "sync" | "remove" | "raw";
+    } | null>(null);
+
+    async function deleteRaw(source: CalendarSourceView) {
+        if (!source.raw_import_file_id) return;
+        setBusy(source.id);
+        onError(null);
+        try {
+            const backend = await clipperBackend();
+            await backend.deleteFile(source.raw_import_file_id);
+            onState(await backend.getState());
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        } finally {
+            setBusy(null);
+        }
+    }
 
     async function add() {
         onError(null);
@@ -979,8 +998,8 @@ function CalendarSources({
             const parts = [
                 report.added > 0 ? `${report.added} added` : null,
                 report.updated > 0 ? `${report.updated} updated` : null,
-                report.tombstoned > 0 ? `${report.tombstoned} cancelled` : null,
-                report.skipped.length > 0 ? `${report.skipped.length} unreadable` : null,
+                report.tombstoned > 0 ? `${report.tombstoned} previous events removed` : null,
+                report.skipped.length > 0 ? report.skipped.join("; ") : null,
             ].filter(Boolean);
             onError(
                 parts.length > 0
@@ -1021,13 +1040,14 @@ function CalendarSources({
 
             {adding && (
                 <YStack gap="$2">
-                    <XStack gap="$2" flexWrap="wrap" items="flex-end">
+                    <YStack gap="$2" minW={0} width="100%">
                         <Field label="Name">
                             <Input
                                 value={name}
                                 onChangeText={setName}
                                 placeholder="Work"
-                                width={160}
+                                width="100%"
+                                minW={0}
                             />
                         </Field>
                         <Field label="iCalendar URL (secret address)">
@@ -1035,10 +1055,11 @@ function CalendarSources({
                                 value={url}
                                 onChangeText={setUrl}
                                 placeholder="https://calendar.google.com/calendar/ical/…/basic.ics"
-                                width={380}
+                                width="100%"
+                                minW={0}
                             />
                         </Field>
-                    </XStack>
+                    </YStack>
                     <Paragraph fontSize={12} color="#8b949e">
                         The URL is stored encrypted — the server never sees it. Anyone holding it
                         can read the calendar, so treat it like a password. Feed refresh runs in the
@@ -1067,6 +1088,35 @@ function CalendarSources({
                 </Paragraph>
             )}
 
+            {pending && (
+                <YStack gap="$2" p="$3" bg="#242a31" rounded="$3" role="alert">
+                    <Text fontWeight="600">{pending.source.name}</Text>
+                    <Paragraph>
+                        {pending.action === "raw"
+                            ? "Permanently delete the original feed file? Parsed events and recordings stay. Original provider fields will no longer be available."
+                            : pending.action === "remove"
+                              ? "Remove this calendar and permanently delete its imported events and original feeds? Recordings and local overrides stay, but their old imported plans will be unavailable."
+                              : "Replace this calendar with a new import? After a successful import, previous imported events and original feeds are permanently deleted. Recordings and local overrides stay, but their old imported plans will be unavailable. A failed import keeps the current calendar."}
+                    </Paragraph>
+                    <XStack gap="$2">
+                        <Button
+                            size="$2"
+                            onPress={() => {
+                                const choice = pending;
+                                setPending(null);
+                                if (choice.action === "sync") void sync(choice.source.id);
+                                else if (choice.action === "remove") void remove(choice.source.id);
+                                else void deleteRaw(choice.source);
+                            }}
+                        >
+                            Confirm {pending.action === "sync" ? "replacement" : "deletion"}
+                        </Button>
+                        <Button size="$2" onPress={() => setPending(null)}>
+                            Cancel
+                        </Button>
+                    </XStack>
+                </YStack>
+            )}
             {sources.map((source) => (
                 <XStack
                     key={source.id}
@@ -1079,22 +1129,34 @@ function CalendarSources({
                         <Text>{source.name}</Text>
                         <Text fontSize={12} color="#8b949e">
                             {source.protocol} · {source.location} · {source.event_count} events
+                            {source.raw_import_file_id && !source.raw_import_available
+                                ? " · Original import unavailable"
+                                : ""}
                         </Text>
                     </YStack>
-                    <XStack gap="$2">
+                    <XStack gap="$2" flexWrap="wrap">
+                        {source.raw_import_file_id && source.raw_import_available && (
+                            <Button
+                                size="$2"
+                                disabled={busy !== null}
+                                onPress={() => setPending({ source, action: "raw" })}
+                            >
+                                Delete original feed
+                            </Button>
+                        )}
                         <Button
                             size="$2"
                             icon={busy === source.id ? <Spinner /> : <RefreshCw size={14} />}
-                            disabled={!canSync || busy === source.id}
-                            onPress={() => void sync(source.id)}
+                            disabled={!canSync || busy !== null}
+                            onPress={() => setPending({ source, action: "sync" })}
                         >
                             Sync
                         </Button>
                         <Button
                             size="$2"
                             icon={<Trash2 size={14} />}
-                            disabled={busy === source.id}
-                            onPress={() => void remove(source.id)}
+                            disabled={busy !== null}
+                            onPress={() => setPending({ source, action: "remove" })}
                         >
                             Remove
                         </Button>

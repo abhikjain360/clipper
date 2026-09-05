@@ -21,8 +21,6 @@ use uuid::Uuid;
 #[cfg(not(target_family = "wasm"))]
 use crate::item::{OverrideChange, OverrideId, RecurrenceId, ScheduleItemId};
 #[cfg(not(target_family = "wasm"))]
-use crate::recurrence::RawRule;
-#[cfg(not(target_family = "wasm"))]
 use crate::time::{BlockDuration, TimedStart};
 use crate::{
     item::OccurrenceOverrideData,
@@ -73,6 +71,30 @@ pub struct CalendarSource {
     /// Whether this client should sync it. Per-client, because each device
     /// decides which sources it is responsible for.
     pub enabled: bool,
+    /// Only this complete batch contributes events to the current calendar.
+    pub active_import: Option<CalendarImport>,
+    /// A staged batch to resume after an interrupted upload.
+    pub pending_import: Option<CalendarImport>,
+    /// Superseded batches awaiting irreversible cleanup.
+    pub retired_imports: Vec<CalendarImport>,
+}
+
+/// One source fetch, stored once as an encrypted file, with its parsed event objects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalendarImport {
+    pub object_id: clipper_api_types::ObjectId,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+    pub events: Vec<clipper_api_types::ObjectId>,
+}
+
+impl CalendarSource {
+    pub fn contains_event(&self, object_id: &str, event: &IngestedEvent) -> bool {
+        self.id == event.source
+            && self.active_import.as_ref().is_some_and(|batch| {
+                event.import == Some(batch.object_id)
+                    && batch.events.iter().any(|id| id.to_string() == object_id)
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +114,9 @@ pub struct IngestedEvent {
     /// updates each event in place instead of duplicating it.
     pub id: Uuid,
     pub source: SourceId,
+    /// Complete original feed. A missing/deleted target does not invalidate the parsed event.
+    /// Together with `uid` this identifies the original series and its provider overrides.
+    pub import: Option<clipper_api_types::ObjectId>,
     /// The provider's own identifier. Stable across edits, and stable across
     /// calendars for the same meeting, which is what makes cross-source
     /// deduplication possible later.
@@ -258,9 +283,10 @@ fn event_from_component(
 
     let span = span_from(&start, end.as_ref(), duration.as_ref(), None)?;
     let recurrence = match rrule_text(component) {
-        Some(rule) => Recurrence::Raw {
-            rule: RawRule::new(rule)?,
-        },
+        Some(rule) => Recurrence::from_imported_rule(
+            rule,
+            start.date.and_time(start.time.unwrap_or_default()),
+        )?,
         None => Recurrence::Once,
     };
     let overrides = recurrence_overrides(component, overrides, id, &span)?;
@@ -268,6 +294,7 @@ fn event_from_component(
     Ok(IngestedEvent {
         id,
         source,
+        import: None,
         title: text_property(component, "SUMMARY").unwrap_or_else(|| "(no title)".to_string()),
         description: text_property(component, "DESCRIPTION"),
         span,

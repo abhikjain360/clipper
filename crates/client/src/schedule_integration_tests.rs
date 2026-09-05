@@ -8,6 +8,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use chrono::Utc;
 use clipper_schedule::{AlarmPolicy, BlockDuration, Recurrence, ScheduleItemId, TimedStart};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -348,14 +349,87 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
             .added,
         1
     );
+    let first_source = first
+        .local_store
+        .schedule_records_with_ids()
+        .await
+        .into_iter()
+        .find_map(|(id, record)| {
+            (id == source)
+                .then(|| record.as_source().cloned())
+                .flatten()
+        })
+        .expect("stored source");
+    let first_import = first_source.active_import.clone().expect("active import");
+    assert_eq!(
+        first
+            .download_file_bytes(&first_import.object_id.to_string())
+            .await
+            .expect("raw calendar download"),
+        feed.read().await.as_bytes()
+    );
+    let mut interrupted_source = first_source.clone();
+    interrupted_source.pending_import = interrupted_source.active_import.take();
+    let interrupted_head = first.local_head(&source).await.expect("source head");
+    first
+        .write_schedule_record(
+            &source,
+            ScheduleRecord::Source(Box::new(interrupted_source)),
+            EnvelopePlacement::Revise(interrupted_head),
+        )
+        .await
+        .expect("simulate interrupted activation");
+    let original_feed = feed.read().await.clone();
+    *feed.write().await = "not the pending calendar".into();
+    first
+        .sync_calendar_source(&source)
+        .await
+        .expect("resume stored pending import");
+    *feed.write().await = original_feed;
+    let resumed_source = first
+        .local_store
+        .schedule_records_with_ids()
+        .await
+        .into_iter()
+        .find_map(|(id, record)| {
+            (id == source)
+                .then(|| record.as_source().cloned())
+                .flatten()
+        })
+        .expect("resumed source");
+    assert!(resumed_source.pending_import.is_none());
+    assert_eq!(
+        resumed_source
+            .active_import
+            .as_ref()
+            .map(|batch| batch.object_id),
+        Some(first_import.object_id),
+        "resume promotes the exact stored snapshot without fetching a new raw file"
+    );
     assert_eq!(
         first
             .sync_calendar_source(&source)
             .await
-            .expect("idempotent sync")
-            .unchanged,
+            .expect("replacement sync")
+            .added,
         1
     );
+    let replacement_source = first
+        .local_store
+        .schedule_records_with_ids()
+        .await
+        .into_iter()
+        .find_map(|(id, record)| {
+            (id == source)
+                .then(|| record.as_source().cloned())
+                .flatten()
+        })
+        .expect("replacement source");
+    let replacement_import = replacement_source
+        .active_import
+        .expect("replacement import");
+    assert_ne!(replacement_import.object_id, first_import.object_id);
+    assert_eq!(replacement_import.events.len(), 1);
     let imported = first
         .local_store
         .schedule_records_with_ids()
@@ -363,6 +437,9 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
         .into_iter()
         .find(|(_, record)| record.as_ingested().is_some())
         .expect("imported object");
+    let imported_event = imported.1.as_ingested().expect("ingested event");
+    assert_eq!(imported_event.import, Some(replacement_import.object_id));
+    let event_domain_id = imported_event.id;
     let basic_feed = feed.read().await.clone();
     *feed.write().await = basic_feed.replace(
         "DTEND:20260908T100000Z",
@@ -372,6 +449,15 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
         .sync_calendar_source(&source)
         .await
         .expect("provider overrides");
+    let recurring = first
+        .local_store
+        .schedule_records_with_ids()
+        .await
+        .into_iter()
+        .find_map(|(_, record)| record.as_ingested().cloned())
+        .expect("recurring import");
+    assert_eq!(recurring.id, event_domain_id);
+    assert!(matches!(recurring.recurrence, Recurrence::Every(_)));
     let imported_occurrences = first
         .expand_schedule(from, to, "UTC")
         .await
@@ -399,44 +485,111 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
         .await
         .replace("SUMMARY:Planning", "SUMMARY:Updated planning");
     *feed.write().await = updated_feed;
-    assert_eq!(
-        first
-            .sync_calendar_source(&source)
-            .await
-            .expect("updated feed")
-            .updated,
-        1
-    );
-    assert_eq!(
-        first
-            .local_head(&imported.0)
-            .await
-            .expect("import head")
-            .revision,
-        3
-    );
-    first.schedule_history.lock().await.clear();
-    let recorded_provider = first
-        .recorded_plan(&provider_actual)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(recorded_provider.item.title, "Planning");
-    assert_eq!(recorded_provider.context.schedule.revision, 2);
-    assert!(recorded_provider.context.override_revision.is_none());
-    assert!(
-        recorded_provider.override_data.is_some(),
-        "RDATE captured inside imported revision"
-    );
-
-    let valid_feed = feed.read().await.clone();
-    *feed.write().await = valid_feed.replace("DTSTART:20260908T090000Z", "DTSTART:invalid");
-    let partial = first
+    let updated = first
         .sync_calendar_source(&source)
         .await
-        .expect("partial parse reported");
-    assert!(!partial.skipped.is_empty());
-    assert_eq!(partial.tombstoned, 0);
+        .expect("updated feed");
+    assert_eq!(updated.added, 1);
+    assert_eq!(updated.tombstoned, 1);
+    first.schedule_history.lock().await.clear();
+    assert!(
+        first.recorded_plan(&provider_actual).await.is_err(),
+        "the imported plan revision was permanently purged"
+    );
+    assert!(
+        first
+            .local_store
+            .schedule_records_with_ids()
+            .await
+            .into_iter()
+            .any(
+                |(id, record)| id == provider_actual && matches!(record, ScheduleRecord::Actual(_))
+            ),
+        "recordings survive replacement of their imported plan"
+    );
+    let (mut poisoned_source, poisoned_head) = first
+        .local_store
+        .schedule_records_with_heads()
+        .await
+        .expect("schedule records")
+        .into_iter()
+        .find_map(|(id, record, head)| {
+            (id == source).then(|| record.as_source().cloned().map(|source| (source, head)))?
+        })
+        .expect("source to test cleanup ownership");
+    poisoned_source
+        .retired_imports
+        .push(clipper_schedule::ingest::CalendarImport {
+            object_id: uuid::Uuid::new_v4().into(),
+            fetched_at: Utc::now(),
+            events: vec![provider_actual.parse().expect("actual object id")],
+        });
+    first
+        .write_schedule_record(
+            &source,
+            ScheduleRecord::Source(Box::new(poisoned_source.clone())),
+            EnvelopePlacement::Revise(poisoned_head),
+        )
+        .await
+        .expect("store malformed retired manifest");
+    assert!(
+        first.sync_calendar_source(&source).await.is_err(),
+        "cleanup must reject an Actual named by a malformed import manifest"
+    );
+    assert!(
+        first
+            .local_store
+            .schedule_records_with_ids()
+            .await
+            .into_iter()
+            .any(
+                |(id, record)| id == provider_actual && matches!(record, ScheduleRecord::Actual(_))
+            ),
+        "rejected cleanup leaves the Actual untouched"
+    );
+    poisoned_source.retired_imports.clear();
+    let poisoned_head = first
+        .local_head(&source)
+        .await
+        .expect("poisoned source head");
+    first
+        .write_schedule_record(
+            &source,
+            ScheduleRecord::Source(Box::new(poisoned_source)),
+            EnvelopePlacement::Revise(poisoned_head),
+        )
+        .await
+        .expect("restore valid source manifest");
+
+    let valid_feed = feed.read().await.clone();
+    let active_before_failure = first
+        .local_store
+        .schedule_records_with_ids()
+        .await
+        .into_iter()
+        .find_map(|(id, record)| {
+            (id == source)
+                .then(|| record.as_source()?.active_import.clone())
+                .flatten()
+        })
+        .expect("active import before failed refresh");
+    *feed.write().await = valid_feed.replace("DTSTART:20260908T090000Z", "DTSTART:invalid");
+    assert!(first.sync_calendar_source(&source).await.is_err());
+    let active_after_failure = first
+        .local_store
+        .schedule_records_with_ids()
+        .await
+        .into_iter()
+        .find_map(|(id, record)| {
+            (id == source)
+                .then(|| record.as_source()?.active_import.clone())
+                .flatten()
+        })
+        .expect("active import after failed refresh");
+    assert_eq!(
+        active_after_failure.object_id,
+        active_before_failure.object_id
+    );
     assert!(
         first
             .expand_schedule(from, to, "UTC")
@@ -447,22 +600,63 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
     );
     *feed.write().await = "not a calendar".into();
     assert!(first.sync_calendar_source(&source).await.is_err());
-    *feed.write().await = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n".into();
-    assert_eq!(
+    *feed.write().await = valid_feed;
+    first
+        .delete_file(&active_before_failure.object_id.to_string())
+        .await
+        .expect("delete raw import only");
+    assert!(
         first
-            .sync_calendar_source(&source)
+            .expand_schedule(from, to, "UTC")
             .await
-            .expect("removed upstream")
-            .tombstoned,
-        1
+            .expect("calendar survives raw deletion")
+            .iter()
+            .any(|event| event.title == "Updated planning")
     );
-    assert_eq!(
+    let after_raw_delete = first
+        .sync_calendar_source(&source)
+        .await
+        .expect("replacement after raw-only deletion");
+    assert_eq!(after_raw_delete.added, 1);
+    assert_eq!(after_raw_delete.tombstoned, 1);
+    let active_after_raw_delete = first
+        .local_store
+        .schedule_records_with_ids()
+        .await
+        .into_iter()
+        .find_map(|(id, record)| {
+            (id == source)
+                .then(|| record.as_source()?.active_import.clone())
+                .flatten()
+        })
+        .expect("replacement import after raw deletion");
+    assert_ne!(
+        active_after_raw_delete.object_id,
+        active_before_failure.object_id
+    );
+    assert!(
         first
-            .local_head(&imported.0)
+            .expand_schedule(from, to, "UTC")
             .await
-            .expect("cancel head")
-            .revision,
-        4
+            .expect("replacement calendar after raw deletion")
+            .iter()
+            .any(|event| event.title == "Updated planning")
+    );
+    let personal_source = first
+        .add_calendar_source("Personal", &feed_url)
+        .await
+        .expect("independent source");
+    first
+        .sync_calendar_source(&personal_source)
+        .await
+        .expect("independent source sync");
+    assert!(
+        first
+            .expand_schedule(from, to, "UTC")
+            .await
+            .expect("both sources visible")
+            .iter()
+            .any(|event| event.source.as_deref() == Some("Personal"))
     );
     first
         .delete_schedule_object(&source)
@@ -474,8 +668,41 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
             .await
             .expect("hidden source")
             .iter()
-            .any(|event| event.title == "Updated planning")
+            .any(|event| event.source.as_deref() == Some("Work"))
     );
+    assert!(
+        first
+            .expand_schedule(from, to, "UTC")
+            .await
+            .expect("independent source retained")
+            .iter()
+            .any(|event| event.source.as_deref() == Some("Personal"))
+    );
+    assert!(
+        first
+            .local_store
+            .schedule_records_with_ids()
+            .await
+            .into_iter()
+            .filter_map(|(_, record)| record.as_ingested().cloned())
+            .all(|event| event.source != first_source.id),
+        "removed source event objects are purged"
+    );
+    assert!(
+        first
+            .local_store
+            .schedule_records_with_ids()
+            .await
+            .into_iter()
+            .any(
+                |(id, record)| id == provider_actual && matches!(record, ScheduleRecord::Actual(_))
+            ),
+        "recordings survive source removal"
+    );
+    first
+        .delete_schedule_object(&personal_source)
+        .await
+        .expect("remove independent source");
     feed_task.abort();
 
     let file = first
@@ -612,6 +839,72 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
 
 /// One connected workflow checks the relationships rather than mirroring each
 /// field assignment: edits, stale selections, overridden plans and deletion.
+#[test]
+fn imported_source_readiness_requires_a_complete_active_batch() {
+    let source_id = SourceId::new();
+    let raw_id: ObjectId = uuid::Uuid::new_v4().into();
+    let event_id: ObjectId = uuid::Uuid::new_v4().into();
+    let batch = clipper_schedule::ingest::CalendarImport {
+        object_id: raw_id,
+        fetched_at: Utc::now(),
+        events: vec![event_id],
+    };
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:ready\r\nSUMMARY:Ready\r\nDTSTART:20260908T090000Z\r\nDTEND:20260908T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let mut event = clipper_schedule::parse_ics(feed, source_id)
+        .expect("valid feed")
+        .events
+        .pop()
+        .expect("event");
+    event.import = Some(raw_id);
+    let head = LocalHead {
+        revision: 1,
+        parent_hash: [0; crypto::SHA256_BYTES],
+    };
+    let source_record = |active_import, pending_import| {
+        ScheduleRecord::Source(Box::new(CalendarSource {
+            id: source_id,
+            name: "Ready".into(),
+            kind: SourceKind::Ics {
+                url: "https://example.test/feed.ics".into(),
+            },
+            enabled: true,
+            active_import,
+            pending_import,
+            retired_imports: Vec::new(),
+        }))
+    };
+    let complete = vec![
+        (
+            "source".into(),
+            source_record(Some(batch.clone()), None),
+            head,
+        ),
+        (
+            event_id.to_string(),
+            ScheduleRecord::Ingested(Box::new(event.clone())),
+            head,
+        ),
+    ];
+    assert!(calendar_import::ready_sources(&complete).contains(&source_id));
+
+    let incomplete = vec![(
+        "source".into(),
+        source_record(Some(batch.clone()), None),
+        head,
+    )];
+    assert!(!calendar_import::ready_sources(&incomplete).contains(&source_id));
+
+    let staged = vec![
+        ("source".into(), source_record(None, Some(batch)), head),
+        (
+            event_id.to_string(),
+            ScheduleRecord::Ingested(Box::new(event)),
+            head,
+        ),
+    ];
+    assert!(!calendar_import::ready_sources(&staged).contains(&source_id));
+}
+
 async fn exercise_revision_aware_plans(engine: &SyncEngine) {
     use clipper_schedule::{
         ActualSpan, ObjectRevisionRef, OccurrenceOverride, OccurrenceOverrideData, OverrideChange,

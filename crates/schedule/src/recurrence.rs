@@ -1,10 +1,10 @@
 //! How a block repeats.
 //!
-//! Modelled as typed cadences rather than an RFC 5545 `RRULE` string. The
-//! string form exists only inside the engine adapter, where it is generated on
-//! the way to the expansion library — it is never a field, never parsed from
-//! user input, and never round-tripped. Every constructor below validates, so
-//! an out-of-range weekday ordinal or an empty weekday set cannot be built.
+//! Rules Clipper understands are modelled as typed cadences. Imported RFC 5545
+//! `RRULE` values are converted when their complete meaning fits those types;
+//! otherwise their validated string form is retained verbatim. Every typed
+//! constructor below validates, so an out-of-range weekday ordinal or an empty
+//! weekday set cannot be built.
 //!
 //! Ingest is the exception, and it has its own variant rather than a loophole.
 //! A provider can send a rule this enum cannot express, and [`Recurrence::Raw`]
@@ -17,6 +17,8 @@ use std::{num::NonZeroU32, str::FromStr};
 
 use chrono::{DateTime, Month, Utc, Weekday};
 use serde::{Deserialize, Serialize};
+
+mod imported_rule;
 
 /// The complete repeat behaviour of a block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +38,17 @@ pub enum Recurrence {
     Raw { rule: RawRule },
 }
 
+impl Recurrence {
+    /// Converts a validated imported `RRULE` to an editable cadence when doing
+    /// so is lossless, retaining the original rule otherwise.
+    pub fn from_imported_rule(
+        rule: impl Into<String>,
+        local_start: chrono::NaiveDateTime,
+    ) -> Result<Self, RecurrenceError> {
+        imported_rule::convert(rule.into(), local_start)
+    }
+}
+
 /// An RFC 5545 `RRULE` value, validated on the way in.
 ///
 /// Parsing at construction rather than at expansion means an unparseable feed
@@ -45,10 +58,6 @@ pub enum Recurrence {
 pub struct RawRule(String);
 
 impl RawRule {
-    /// A reference start used only to check that the rule parses. Any valid
-    /// instant works; the real `DTSTART` comes from the item being expanded.
-    const PROBE_DTSTART: &'static str = "DTSTART:20200101T000000Z";
-
     pub fn new(rule: impl Into<String>) -> Result<Self, RecurrenceError> {
         let rule = rule.into();
         let trimmed = rule.trim().trim_start_matches("RRULE:").trim().to_string();
@@ -67,9 +76,29 @@ impl RawRule {
                 "rule contains a control character".into(),
             ));
         }
-        let probe = format!("{}\nRRULE:{trimmed}", Self::PROBE_DTSTART);
-        rrule::RRuleSet::from_str(&probe)
-            .map_err(|error| RecurrenceError::UnparseableRule(error.to_string()))?;
+        // UNTIL must have the same value kind as DTSTART (or be UTC for a
+        // timed DTSTART). Try each legal imported DTSTART kind: the real start
+        // is supplied by the item during expansion.
+        let starts = [
+            "DTSTART:20200101T000000Z",
+            "DTSTART:20200101T000000",
+            "DTSTART:20200101",
+        ];
+        let mut last_error = None;
+        if !starts.iter().any(|start| {
+            let probe = format!("{start}\nRRULE:{trimmed}");
+            match rrule::RRuleSet::from_str(&probe) {
+                Ok(_) => true,
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    false
+                }
+            }
+        }) {
+            return Err(RecurrenceError::UnparseableRule(
+                last_error.unwrap_or_else(|| "invalid rule".to_string()),
+            ));
+        }
         Ok(Self(trimmed))
     }
 

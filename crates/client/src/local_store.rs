@@ -1275,17 +1275,6 @@ impl LocalStore {
         let mut records = self.all_memory_records().await;
         sort_records_desc(&mut records);
 
-        // How many events each source currently holds, so a list row can say
-        // whether a feed has actually produced anything.
-        let mut counts: HashMap<clipper_schedule::SourceId, u32> = HashMap::new();
-        for record in &records {
-            if let LocalObjectData::Schedule(schedule) = &record.data
-                && let Some(event) = schedule.record.as_ingested()
-            {
-                *counts.entry(event.source).or_default() += 1;
-            }
-        }
-
         Ok(records
             .iter()
             .filter_map(|record| {
@@ -1296,7 +1285,12 @@ impl LocalStore {
                 Some(source_view(
                     &record.id,
                     source,
-                    counts.get(&source.id).copied().unwrap_or(0),
+                    records.iter().filter(|record| {
+                        matches!(&record.data, LocalObjectData::Schedule(schedule)
+                            if schedule.record.as_ingested().is_some_and(|event| source.contains_event(&record.id, event)))
+                    }).count() as u32,
+                    source.active_import.as_ref().is_some_and(|batch| records.iter().any(|record|
+                        record.id == batch.object_id.to_string() && matches!(&record.data, LocalObjectData::File(_)))),
                 ))
             })
             .collect())

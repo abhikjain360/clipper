@@ -8,6 +8,7 @@ NOTE: Always use built in harness commands for reading and writing instead of ba
   `docs/scheduler-backlog.md`. Keep it updated when scheduler work lands or a
   product decision changes. `docs/scheduler-review.md` holds QA evidence and
   `docs/schedule-plan.md` holds the detailed design/history.
+  `docs/calendar-imports.md` specifies import snapshots, replacement and deletion.
 
 ## Environment
 

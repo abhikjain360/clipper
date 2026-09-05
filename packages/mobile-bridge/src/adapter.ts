@@ -245,6 +245,8 @@ function mapCalendarSourceView(source: NativeCalendarSourceView): CalendarSource
   return {
     enabled: source.enabled,
     event_count: source.eventCount,
+    raw_import_file_id: source.rawImportFileId ?? null,
+    raw_import_available: source.rawImportAvailable,
     id: source.id,
     location: source.location,
     name: source.name,

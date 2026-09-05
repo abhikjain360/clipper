@@ -191,12 +191,15 @@ impl SyncEngine {
         }
         if let ScheduleRecord::Ingested(event) = record
             && !records.iter().any(|(_, record, _)| {
-                record
-                    .as_source()
-                    .is_some_and(|source| source.id == event.source)
+                record.as_source().is_some_and(|source| {
+                    source.contains_event(id, event)
+                        && super::calendar_import::ready_sources(records).contains(&source.id)
+                })
             })
         {
-            return Err(invalid("This calendar source has been removed"));
+            return Err(invalid(
+                "This imported calendar has been replaced, removed, or is still syncing",
+            ));
         }
         let item =
             series(record).ok_or_else(|| invalid("The reference is not a schedule definition"))?;
@@ -331,6 +334,9 @@ mod tests {
                 url: "https://example.invalid/private".into(),
             },
             enabled: true,
+            active_import: None,
+            pending_import: None,
+            retired_imports: Vec::new(),
         }));
         engine
             .schedule_history

@@ -213,6 +213,9 @@ pub struct CalendarSourceView {
     pub enabled: bool,
     /// Events currently held from this source.
     pub event_count: u32,
+    /// Exact raw snapshot; the reference remains meaningful after its file is deleted.
+    pub raw_import_file_id: Option<String>,
+    pub raw_import_available: bool,
 }
 
 /// What one pass over a calendar feed did.
@@ -222,8 +225,7 @@ pub struct IngestReport {
     pub added: u32,
     pub updated: u32,
     pub unchanged: u32,
-    /// Present locally but gone from the feed, so marked cancelled rather than
-    /// erased — time logged against them has to survive.
+    /// Event objects retired by replacement. Recordings are never included.
     pub tombstoned: u32,
     /// Entries in the feed this client could not read. Reported rather than
     /// silently dropped.
