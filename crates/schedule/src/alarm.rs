@@ -5,10 +5,8 @@
 //! it ring. Android never recomputes a recurrence — it receives concrete
 //! instants and registers each as a one-shot exact alarm.
 //!
-//! abnormalarm computes its own next occurrence in Kotlin, which was right when
-//! Kotlin was the only place the rule existed. Here it would mean two recurrence
-//! implementations that must agree forever, and the one in this crate is the one
-//! with the bake-off corpus behind it.
+//! Keeping recurrence expansion here gives calendar views and platform alarms
+//! the same occurrence times, including timezone and DST handling.
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};

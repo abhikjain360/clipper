@@ -162,10 +162,9 @@ impl ResolvedSpan {
 
 /// Resolve a wall-clock time in a zone to an instant.
 ///
-/// DST edges follow `java.time`, which is what abnormalarm already does and
-/// therefore what the owner's alarms have behaved like for months: a time in a
-/// spring-forward gap shifts forward past the gap, and an ambiguous time in the
-/// autumn overlap takes the earlier (pre-transition) offset.
+/// A time in a spring-forward gap shifts forward by the offset change,
+/// preserving its position within the gap. An ambiguous time in the autumn
+/// overlap takes the earlier (pre-transition) offset.
 fn resolve_local(zone: Tz, local: NaiveDateTime) -> Option<DateTime<Utc>> {
     match zone.from_local_datetime(&local) {
         LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),

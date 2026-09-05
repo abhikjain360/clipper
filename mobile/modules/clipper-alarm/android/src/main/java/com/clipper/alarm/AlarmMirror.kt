@@ -54,8 +54,8 @@ data class PlannedAlarm(
  * schedule itself is ciphertext the app can only read once the user has
  * unlocked and logged in, but an alarm has to survive a reboot at 3am and ring
  * at 7am without either. Mirroring just the upcoming fire times — instants and
- * labels, no schedule, no keys — into storage the system unlocks at boot is the
- * whole trick. It is also how abnormalarm has always worked.
+ * labels, no schedule, no keys — into device-protected storage makes them
+ * available before the first unlock.
  *
  * Writes use `commit` rather than `apply`: this is the fallback that has to be
  * on disk before the process is killed, not eventually.

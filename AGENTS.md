@@ -1,5 +1,7 @@
 # Agent Notes
 
+NOTE: Always use built in harness commands for reading and writing instead of bash/python, whenever possible.
+
 ## Scheduler status
 
 - For outstanding scheduler work and undecided behavior, start with

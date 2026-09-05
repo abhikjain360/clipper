@@ -10,10 +10,9 @@ export type RepeatChoice = "once" | "daily" | "weekly" | "weekdays" | "monthly";
 ///
 /// A stored rule can be an every-two-weeks, a "second Tuesday", a yearly, or a
 /// provider rule Clipper only passes through. None of those is a pill, and
-/// calling them "Once" would be a lie the owner could act on — the Once pill
-/// would sit highlighted, and pressing it would look like a no-op while
-/// flattening the series. `custom` says the truth instead: the stored cadence
-/// is not one of these choices, and picking one replaces it.
+/// labelling them "Once" would incorrectly imply that the event never repeats.
+/// `custom` indicates that the stored cadence is outside these choices;
+/// selecting a supported cadence replaces the stored rule.
 export type RepeatSelection = RepeatChoice | "custom";
 
 /// Map a stored recurrence back onto the form's coarser choices.

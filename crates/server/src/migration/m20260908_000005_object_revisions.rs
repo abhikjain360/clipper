@@ -18,8 +18,7 @@
 //! `revision` and `parent_hash`, and postcard encodes positionally, so no
 //! existing row can be read back by the new client anyway. Rewriting them was
 //! not possible either, since only a client holding the user's key can sign an
-//! envelope. The owner sanctioned recreating the database rather than
-//! migrating; collab documents, users, devices and access keys are untouched.
+//! envelope. Collab documents, users, devices and access keys are preserved.
 //!
 //! Three columns on `objects` are denormalised from the chain —
 //! `head_revision`, `published_seq` and `deleted_at`. They exist because every

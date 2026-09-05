@@ -1,9 +1,5 @@
-//! The recurrence bake-off corpus, kept as permanent tests.
-//!
-//! These thirteen cadences come from abnormalarm's `NextOccurrenceTest`, the
-//! alarm app whose behaviour Clipper has to reproduce. They were used to choose
-//! between `rrule` and `calcard`: both engines pass all thirteen, and they
-//! diverge only at a DST gap, which is the fourteenth case below.
+//! Recurrence regression coverage for cadence, interval, end conditions,
+//! missing calendar dates, and DST gap resolution.
 //!
 //! Do not delete a case because it looks redundant with another. `monthday_31`
 //! and `monthly_31_skip` differ only in an explicit `INTERVAL=1`, and that is
@@ -288,11 +284,8 @@ fn until_past() {
 /// Case 14. 2026-03-29 02:30 does not exist in Europe/Berlin — the clocks jump
 /// 02:00 to 03:00.
 ///
-/// `rrule` shifts the occurrence forward to 03:30, which is what `java.time`
-/// does and therefore what abnormalarm has been doing on this device for
-/// months. `calcard` instead emits the nonexistent 02:30 as a floating time.
-/// This test is the reason `rrule` was chosen; if it ever starts failing, the
-/// alarm path has changed behaviour and the engine choice needs revisiting.
+/// The occurrence must shift forward to 03:30, preserving its position within
+/// the one-hour gap rather than emitting a nonexistent local time.
 #[test]
 fn dst_gap_shifts_forward_like_java() {
     let local =

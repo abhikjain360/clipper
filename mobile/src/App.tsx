@@ -751,7 +751,7 @@ function FilesPanel({
  * An alarm app that silently fails is worse than no alarm app, and on Android
  * there are two ways it can: the OS may refuse exact alarms, and a vendor may
  * kill the process before one fires. The first is visible here. The second is
- * not detectable from inside the app at all — it needs the owner to allow
+ * not detectable from inside the app at all — it needs the user to allow
  * autostart and exempt Clipper from battery optimisation by hand, which is why
  * that is written on the screen rather than assumed.
  */

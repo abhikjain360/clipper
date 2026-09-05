@@ -340,7 +340,7 @@ pub enum ScheduleRecordKind {
     /// else.
     Source,
     /// An event as a provider describes it: the upstream-owned record,
-    /// written only by the sync worker and read-only to the owner.
+    /// written only by the sync worker and read-only to the user.
     Ingested,
 }
 

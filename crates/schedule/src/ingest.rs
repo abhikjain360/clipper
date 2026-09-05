@@ -2,8 +2,8 @@
 //!
 //! These are the original calendar fields owned
 //! upstream, written only by the sync worker, never edited in Clipper. The
-//! owner's plan for an ingested event is a separate record, so a refresh that
-//! replaces the original wholesale cannot clobber anything the owner wrote.
+//! user's plan for an ingested event is a separate record, so a refresh that
+//! replaces the original wholesale cannot clobber anything the user wrote.
 //!
 //! Parsing lives here because it is pure. Fetching does not — that needs I/O and
 //! belongs to whichever client holds the source.
@@ -67,7 +67,7 @@ impl std::fmt::Display for SourceId {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalendarSource {
     pub id: SourceId,
-    /// What the owner calls it — "Work", "Gmail", "Zoho".
+    /// What the user calls it — "Work", "Gmail", "Zoho".
     pub name: String,
     pub kind: SourceKind,
     /// Whether this client should sync it. Per-client, because each device
@@ -146,11 +146,8 @@ pub struct SkippedEvent {
 
 /// Parse an iCalendar feed into events.
 ///
-/// Deliberately unfiltered. abnormalarm admits an event only if the owner
-/// organizes it, has accepted it, or it has no attendees, and drops all-day
-/// events entirely — rules that suit an alarm app. A planner wants the
-/// opposite: every invite visible, all-day included, with RSVP shown as a
-/// property rather than used as a filter.
+/// Includes all-day events and invites regardless of organizer or RSVP.
+/// Attendance status is retained as metadata rather than used as a filter.
 ///
 /// Not built for wasm: a page cannot fetch a third-party calendar URL, so the
 /// browser only ever displays events another device ingested.
