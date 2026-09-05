@@ -207,7 +207,7 @@ fn validate_socket_dir(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

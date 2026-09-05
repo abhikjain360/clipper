@@ -120,7 +120,7 @@ jobs:
             target
           key: cargo-${{ runner.os }}-udeps-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-udeps-
-      - run: nix run .#udeps
+      - run: nix develop --command nix run .#udeps
 
   audit:
     needs: gate
@@ -159,4 +159,4 @@ jobs:
       - name: Mobile lint and type check
         run: nix run .#mobile-check
       - name: Tauri no-bundle build
-        run: nix run .#tauri-build -- --no-bundle
+        run: nix develop --command nix run .#tauri-build -- --no-bundle
