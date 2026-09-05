@@ -7,9 +7,9 @@ use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use clipper_schedule::{
     BlockDuration, Cadence, EngineError, Expansion, Frequency, MonthDay, NthWeekday, Occurrence,
-    OccurrenceOrigin, OccurrenceOverride, OverrideChange, OverrideId, Recurrence, RecurrenceEngine,
-    RecurrenceError, RecurrenceId, RruleEngine, ScheduleItem, ScheduleItemId, ScheduleSpan,
-    TimeError, TimedStart, WeekdaySet, Window,
+    OccurrenceOrigin, OccurrenceOverride, OverrideChange, OverrideId, RawRule, Recurrence,
+    RecurrenceEngine, RecurrenceError, RecurrenceId, RruleEngine, ScheduleItem, ScheduleItemId,
+    ScheduleSpan, TimeError, TimedStart, WeekdaySet, Window,
 };
 
 fn local(text: &str) -> NaiveDateTime {
@@ -383,6 +383,199 @@ fn one_off_items_expand_to_themselves() {
     assert!(outside.is_empty());
 }
 
+#[test]
+fn a_half_hour_dst_gap_keeps_the_position_within_the_gap() {
+    let start = TimedStart::Zoned {
+        local: local("20261004T021500"),
+        zone: Tz::Australia__Lord_Howe,
+    };
+    let resolved = start.resolve(Tz::UTC).expect("gap shifts forward");
+    assert_eq!(
+        resolved
+            .with_timezone(&Tz::Australia__Lord_Howe)
+            .format("%Y-%m-%d %H:%M")
+            .to_string(),
+        "2026-10-04 02:45",
+        "Lord Howe advances by 30 minutes, so 02:15 becomes 02:45"
+    );
+}
+
+#[test]
+fn a_skipped_civil_date_shifts_by_the_full_transition() {
+    let start = TimedStart::Zoned {
+        local: local("20111230T120000"),
+        zone: Tz::Pacific__Apia,
+    };
+    let resolved = start.resolve(Tz::UTC).expect("date skip shifts forward");
+    assert_eq!(
+        resolved
+            .with_timezone(&Tz::Pacific__Apia)
+            .format("%Y-%m-%d %H:%M")
+            .to_string(),
+        "2011-12-31 12:00",
+        "Samoa's skipped Friday was a 24-hour gap"
+    );
+}
+
+#[test]
+fn a_narrow_window_does_not_count_decades_of_series_history() {
+    let item = daily_at(TimedStart::Zoned {
+        local: local("19900101T080000"),
+        zone: Tz::UTC,
+    });
+    let out = expand(
+        &item,
+        &[],
+        &Expansion {
+            window: window(utc(2026, 6, 10, 0, 0), utc(2026, 6, 12, 0, 0)),
+            observer: Tz::UTC,
+        },
+    );
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].span.start, utc(2026, 6, 10, 8, 0));
+}
+
+#[test]
+fn a_dense_old_rule_hits_the_history_scan_bound() {
+    let mut item = daily_at(TimedStart::Zoned {
+        local: local("20260101T000000"),
+        zone: Tz::UTC,
+    });
+    item.recurrence = Recurrence::Raw {
+        rule: RawRule::new("FREQ=MINUTELY").expect("valid raw rule"),
+    };
+
+    let result = RruleEngine::new().occurrences(
+        &item,
+        &[],
+        &Expansion {
+            window: window(utc(2026, 4, 1, 0, 0), utc(2026, 4, 1, 1, 0)),
+            observer: Tz::UTC,
+        },
+    );
+    assert_eq!(
+        result,
+        Err(EngineError::ScanLimitExceeded { limit: 65_535 })
+    );
+}
+
+#[test]
+fn an_impossible_finite_raw_rule_is_empty() {
+    let mut item = daily_at(TimedStart::Zoned {
+        local: local("20260101T000000"),
+        zone: Tz::UTC,
+    });
+    item.recurrence = Recurrence::Raw {
+        rule: RawRule::new("FREQ=YEARLY;COUNT=2;BYMONTH=2;BYMONTHDAY=30")
+            .expect("syntactically valid raw rule"),
+    };
+
+    let occurrences = RruleEngine::new()
+        .occurrences(
+            &item,
+            &[],
+            &Expansion {
+                window: window(utc(2030, 1, 1, 0, 0), utc(2031, 1, 1, 0, 0)),
+                observer: Tz::UTC,
+            },
+        )
+        .expect("an impossible finite rule has no occurrences");
+    assert!(occurrences.is_empty());
+}
+
+#[test]
+fn an_overnight_occurrence_overlaps_the_next_days_window() {
+    let item = ScheduleItem {
+        id: ScheduleItemId::new(),
+        title: "overnight".to_string(),
+        span: ScheduleSpan::Timed {
+            start: TimedStart::Zoned {
+                local: local("20260609T233000"),
+                zone: Tz::UTC,
+            },
+            duration: BlockDuration::from_minutes(120).expect("non-zero"),
+        },
+        recurrence: Recurrence::Once,
+        reference: None,
+        alarm: None,
+    };
+    let expansion = Expansion {
+        window: window(utc(2026, 6, 10, 0, 0), utc(2026, 6, 10, 1, 0)),
+        observer: Tz::UTC,
+    };
+
+    assert!(
+        RruleEngine::new()
+            .occurrences(&item, &[], &expansion)
+            .expect("expands")
+            .is_empty()
+    );
+    let overlapping = RruleEngine::new()
+        .overlapping_occurrences(&item, &[], &expansion)
+        .expect("overlap expansion succeeds");
+    assert_eq!(overlapping.len(), 1);
+    assert_eq!(overlapping[0].span.end, utc(2026, 6, 10, 1, 30));
+}
+
+#[test]
+fn a_multi_day_occurrence_overlaps_a_window_across_dst() {
+    let item = ScheduleItem {
+        id: ScheduleItemId::new(),
+        title: "dst weekend".to_string(),
+        span: ScheduleSpan::AllDay {
+            start: NaiveDate::from_ymd_opt(2026, 3, 28).expect("valid date"),
+            days: NonZeroU32::new(2).expect("non-zero"),
+        },
+        recurrence: Recurrence::Once,
+        reference: None,
+        alarm: None,
+    };
+    let expansion = Expansion {
+        window: window(utc(2026, 3, 29, 0, 0), utc(2026, 3, 29, 12, 0)),
+        observer: Tz::Europe__Berlin,
+    };
+
+    let overlapping = RruleEngine::new()
+        .overlapping_occurrences(&item, &[], &expansion)
+        .expect("overlap expansion succeeds");
+    assert_eq!(overlapping.len(), 1);
+    assert_eq!(
+        (overlapping[0].span.end - overlapping[0].span.start).num_hours(),
+        47,
+        "two local days around spring-forward last 47 elapsed hours"
+    );
+}
+
+#[test]
+fn a_longer_override_can_overlap_from_before_the_window() {
+    let item = daily_at(TimedStart::Zoned {
+        local: local("20260601T080000"),
+        zone: Tz::UTC,
+    });
+    let moved = OccurrenceOverride {
+        id: OverrideId::new(),
+        item: item.id,
+        recurrence_id: RecurrenceId::Instant(utc(2026, 6, 9, 8, 0)),
+        change: OverrideChange::Rescheduled(ScheduleSpan::Timed {
+            start: TimedStart::Zoned {
+                local: local("20260609T233000"),
+                zone: Tz::UTC,
+            },
+            duration: BlockDuration::from_minutes(120).expect("non-zero"),
+        }),
+    };
+    let expansion = Expansion {
+        window: window(utc(2026, 6, 10, 0, 0), utc(2026, 6, 10, 1, 0)),
+        observer: Tz::UTC,
+    };
+
+    let overlapping = RruleEngine::new()
+        .overlapping_occurrences(&item, &[moved], &expansion)
+        .expect("overlap expansion succeeds");
+    assert_eq!(overlapping.len(), 1);
+    assert_eq!(overlapping[0].span.start, utc(2026, 6, 9, 23, 30));
+}
+
 /// Running out of candidates is an error, never a short answer. A silently
 /// truncated expansion would drop alarms.
 #[test]
@@ -405,6 +598,50 @@ fn expansion_limit_errors_rather_than_truncating() {
         result,
         Err(EngineError::ExpansionLimitExceeded { limit: 5 })
     );
+}
+
+#[test]
+fn overlap_expansion_keeps_the_candidate_limit() {
+    let mut item = daily_at(TimedStart::Zoned {
+        local: local("20260101T080000"),
+        zone: Tz::UTC,
+    });
+    let ScheduleSpan::Timed { duration, .. } = &mut item.span else {
+        unreachable!();
+    };
+    *duration = BlockDuration::from_minutes(7 * 24 * 60).expect("non-zero");
+
+    let result = RruleEngine::with_max_candidates(5).overlapping_occurrences(
+        &item,
+        &[],
+        &Expansion {
+            window: window(utc(2026, 2, 1, 0, 0), utc(2026, 2, 2, 0, 0)),
+            observer: Tz::UTC,
+        },
+    );
+    assert_eq!(
+        result,
+        Err(EngineError::ExpansionLimitExceeded { limit: 5 })
+    );
+}
+
+#[test]
+fn exactly_the_candidate_limit_is_complete() {
+    let item = daily_at(TimedStart::Zoned {
+        local: local("20260101T080000"),
+        zone: Tz::UTC,
+    });
+    let occurrences = RruleEngine::with_max_candidates(5)
+        .occurrences(
+            &item,
+            &[],
+            &Expansion {
+                window: window(utc(2026, 1, 1, 0, 0), utc(2026, 1, 6, 0, 0)),
+                observer: Tz::UTC,
+            },
+        )
+        .expect("an exact-size result is complete");
+    assert_eq!(occurrences.len(), 5);
 }
 
 #[test]

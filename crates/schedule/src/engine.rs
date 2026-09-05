@@ -75,6 +75,36 @@ pub trait RecurrenceEngine {
         expansion: &Expansion,
     ) -> Result<Vec<Occurrence>, EngineError>;
 
+    /// Every occurrence whose half-open span intersects the expansion window.
+    ///
+    /// Calendar views need this rather than start-in-window semantics: an
+    /// overnight block that starts yesterday still occupies time today. The
+    /// widened rule window remains bounded by the longest relevant span, and
+    /// the regular candidate ceiling still applies to everything it produces.
+    fn overlapping_occurrences(
+        &self,
+        item: &ScheduleItem,
+        overrides: &[OccurrenceOverride],
+        expansion: &Expansion,
+    ) -> Result<Vec<Occurrence>, EngineError> {
+        let lookback = maximum_lookback(item, overrides)?;
+        let from = expansion
+            .window
+            .from()
+            .checked_sub_signed(lookback)
+            .ok_or(TimeError::DateOverflow)?;
+        let widened = Expansion {
+            window: Window::new(from, expansion.window.to())?,
+            observer: expansion.observer,
+        };
+        let mut occurrences = self.occurrences(item, overrides, &widened)?;
+        occurrences.retain(|occurrence| {
+            occurrence.span.start < expansion.window.to()
+                && expansion.window.from() < occurrence.span.end
+        });
+        Ok(occurrences)
+    }
+
     /// The first occurrence starting strictly after `after`, looking at most
     /// `within` ahead.
     ///
@@ -96,6 +126,39 @@ pub trait RecurrenceEngine {
             .occurrences(item, overrides, &expansion)?
             .into_iter()
             .find(|occurrence| occurrence.span.start > after))
+    }
+}
+
+/// A conservative elapsed-time bound for how far before a view an occurrence
+/// may start and still overlap it.
+fn maximum_lookback(
+    item: &ScheduleItem,
+    overrides: &[OccurrenceOverride],
+) -> Result<TimeDelta, TimeError> {
+    let mut lookback = span_lookback(&item.span)?;
+    for entry in overrides.iter().filter(|entry| entry.item == item.id) {
+        let OverrideChange::Rescheduled(span) = &entry.change else {
+            continue;
+        };
+        lookback = lookback.max(span_lookback(span)?);
+    }
+    Ok(lookback)
+}
+
+fn span_lookback(span: &ScheduleSpan) -> Result<TimeDelta, TimeError> {
+    match span {
+        ScheduleSpan::Timed { duration, .. } => {
+            TimeDelta::try_minutes(i64::from(duration.minutes())).ok_or(TimeError::DateOverflow)
+        }
+        ScheduleSpan::AllDay { days, .. } => {
+            // Local-midnight intervals vary at offset transitions. Two extra
+            // days conservatively cover the full IANA offset range, including
+            // date-line changes such as Samoa's skipped day.
+            let days = i64::from(days.get())
+                .checked_add(2)
+                .ok_or(TimeError::DateOverflow)?;
+            TimeDelta::try_days(days).ok_or(TimeError::DateOverflow)
+        }
     }
 }
 
@@ -165,21 +228,36 @@ impl RruleEngine {
         let set = rrule::RRuleSet::from_str(&text)
             .map_err(|source| EngineError::RuleRejected(source.to_string()))?;
 
+        // rrule's `after` filter does not fast-forward: it still generates all
+        // history. Collect from DTSTART through the requested end under the
+        // library's public hard cap and reject any truncation it reports.
+        // rrule 0.14 unfortunately does not propagate a nested rule iterator's
+        // empty-period stop into this bit; impossible sparse raw rules remain
+        // an upstream limitation, but generated history is strictly bounded.
+        const MAX_SCANNED_CANDIDATES: u16 = u16::MAX;
+        let before = expansion
+            .window
+            .to()
+            .checked_sub_signed(TimeDelta::nanoseconds(1))
+            .expect("a non-empty window cannot end at chrono's minimum")
+            .with_timezone(&set.get_dt_start().timezone());
+        let result = set.before(before).all(MAX_SCANNED_CANDIDATES);
+        if result.limited {
+            return Err(EngineError::ScanLimitExceeded {
+                limit: usize::from(MAX_SCANNED_CANDIDATES),
+            });
+        }
+
         let mut spans = Vec::new();
-        let mut seen = 0usize;
-        for occurrence in set.into_iter() {
-            seen += 1;
-            if seen > self.max_candidates {
+        for occurrence in result.dates {
+            let instant = occurrence.with_timezone(&Utc);
+            if instant < expansion.window.from() {
+                continue;
+            }
+            if spans.len() >= self.max_candidates {
                 return Err(EngineError::ExpansionLimitExceeded {
                     limit: self.max_candidates,
                 });
-            }
-            let instant = occurrence.with_timezone(&Utc);
-            if instant >= expansion.window.to() {
-                break;
-            }
-            if instant < expansion.window.from() {
-                continue;
             }
             let local = occurrence.naive_local();
             spans.push((
@@ -393,6 +471,8 @@ pub enum EngineError {
     RuleRejected(String),
     #[error("expansion produced more than {limit} candidates; narrow the window")]
     ExpansionLimitExceeded { limit: usize },
+    #[error("recurrence expansion scanned more than {limit} historical candidates")]
+    ScanLimitExceeded { limit: usize },
     #[error(transparent)]
     Time(#[from] TimeError),
 }

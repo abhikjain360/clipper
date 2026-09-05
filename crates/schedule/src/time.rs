@@ -10,7 +10,7 @@
 
 use std::num::NonZeroU32;
 
-use chrono::{DateTime, LocalResult, NaiveDate, NaiveDateTime, TimeDelta, TimeZone, Utc};
+use chrono::{DateTime, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeDelta, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -169,16 +169,35 @@ impl ResolvedSpan {
 fn resolve_local(zone: Tz, local: NaiveDateTime) -> Option<DateTime<Utc>> {
     match zone.from_local_datetime(&local) {
         LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
-        LocalResult::Ambiguous(earlier, _later) => Some(earlier.with_timezone(&Utc)),
-        // Spring-forward gap. No real transition exceeds a few hours, so probe
-        // forward rather than hard-coding an offset delta.
-        LocalResult::None => (1..=4).find_map(|hours| {
-            match zone.from_local_datetime(&(local + TimeDelta::hours(hours))) {
-                LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
-                LocalResult::Ambiguous(earlier, _) => Some(earlier.with_timezone(&Utc)),
-                LocalResult::None => None,
+        LocalResult::Ambiguous(first, second) => Some(first.min(second).with_timezone(&Utc)),
+        // Match java.time's gap rule: retain the position within the gap by
+        // shifting the wall clock by the transition's offset change. Looking
+        // only for the next valid whole hour gets half-hour transitions (Lord
+        // Howe) wrong, and a four-hour ceiling cannot cross Samoa's skipped
+        // date in 2011.
+        LocalResult::None => {
+            const SEARCH_MINUTES: i64 = 48 * 60;
+            let before = (1..=SEARCH_MINUTES)
+                .find_map(|minutes| one_local(zone, local - TimeDelta::minutes(minutes)))?;
+            let after = (1..=SEARCH_MINUTES)
+                .find_map(|minutes| one_local(zone, local + TimeDelta::minutes(minutes)))?;
+            let offset_change = i64::from(
+                after.offset().fix().local_minus_utc() - before.offset().fix().local_minus_utc(),
+            );
+            if offset_change <= 0 {
+                return None;
             }
-        }),
+            one_local(zone, local + TimeDelta::seconds(offset_change))
+                .map(|resolved| resolved.with_timezone(&Utc))
+        }
+    }
+}
+
+fn one_local(zone: Tz, local: NaiveDateTime) -> Option<DateTime<Tz>> {
+    match zone.from_local_datetime(&local) {
+        LocalResult::Single(dt) => Some(dt),
+        LocalResult::Ambiguous(first, second) => Some(first.min(second)),
+        LocalResult::None => None,
     }
 }
 
