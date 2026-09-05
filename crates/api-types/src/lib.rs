@@ -301,6 +301,41 @@ pub struct ClipboardMeta {
     pub size: Option<i64>,
 }
 
+// -- Schedule --
+
+/// Which schedule record an object holds.
+///
+/// Lives in the object's *encrypted* meta, not in `object_kind`, so the server
+/// cannot tell a plan from a record of what actually happened.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, Display, EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ScheduleRecordKind {
+    /// A series definition — stored once however often it repeats (D7).
+    Item,
+    /// One occurrence that deviates from its series.
+    Override,
+    /// Time actually spent, as opposed to time planned (D2).
+    Actual,
+}
+
+/// Encrypted metadata for a schedule object.
+///
+/// Deliberately tiny: it says only what the payload is and how to read it, so
+/// a client can route the payload to the right deserializer without guessing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleMeta {
+    pub record: ScheduleRecordKind,
+    /// Payload format version. Bumped when the serialized record shape changes
+    /// in a way older clients cannot read.
+    pub version: u16,
+}
+
+/// Current [`ScheduleMeta::version`].
+pub const SCHEDULE_PAYLOAD_VERSION: u16 = 1;
+
 // -- Objects --
 
 #[derive(
@@ -312,6 +347,13 @@ pub enum ObjectKind {
     Clipboard,
     File,
     Collab,
+    /// A schedule record: a series definition, a single-occurrence override, or
+    /// a log of time actually spent. All three share one kind deliberately —
+    /// separate kinds would each cost the full plumbing toll (see
+    /// `docs/schedule-plan.md`, D3) and would tell the server which is which.
+    /// The discriminant lives in the encrypted meta instead, as
+    /// [`ScheduleRecordKind`].
+    Schedule,
 }
 
 #[derive(
