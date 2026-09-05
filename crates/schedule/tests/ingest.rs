@@ -5,9 +5,12 @@
 //! cancellation, and two entries that cannot be read at all. Every one of those
 //! shapes appears in an ordinary Google or Zoho export.
 
-use chrono::{NaiveDate, NaiveTime};
+use chrono::{NaiveDate, NaiveTime, Weekday};
 use chrono_tz::Tz;
-use clipper_schedule::{IngestedStatus, Recurrence, ScheduleSpan, SourceId, TimedStart, parse_ics};
+use clipper_schedule::{
+    Frequency, IngestedStatus, Recurrence, RecurrenceEnd, ScheduleSpan, SourceId, TimedStart,
+    WeekdaySet, parse_ics,
+};
 
 const FEED: &str = "\
 BEGIN:VCALENDAR\r\n\
@@ -189,16 +192,26 @@ fn a_cancelled_event_is_tombstoned_not_dropped() {
 }
 
 #[test]
-fn an_ingested_rule_is_carried_verbatim() {
+fn a_representable_ingested_rule_becomes_an_editable_cadence() {
     let standup = event("standup@example.com");
-    let Recurrence::Raw { rule } = &standup.recurrence else {
-        panic!("an ingested rule stays raw rather than being remodelled");
+    let Recurrence::Every(cadence) = &standup.recurrence else {
+        panic!("a representable imported rule should become editable");
     };
-    let text = rule.as_str();
-    assert!(text.contains("FREQ=WEEKLY"), "got {text}");
-    for day in ["MO", "TU", "WE", "TH", "FR"] {
-        assert!(text.contains(day), "{day} missing from {text}");
-    }
+    assert_eq!(cadence.interval.get(), 1);
+    assert_eq!(cadence.end, RecurrenceEnd::Never);
+    assert_eq!(
+        cadence.frequency,
+        Frequency::Weekly {
+            weekdays: WeekdaySet::new(&[
+                Weekday::Mon,
+                Weekday::Tue,
+                Weekday::Wed,
+                Weekday::Thu,
+                Weekday::Fri,
+            ])
+            .expect("non-empty weekday set"),
+        }
+    );
 }
 
 #[test]

@@ -52,10 +52,10 @@ not become a surprise during QA.
   reconciliation. Rechecked incoming revisions under the storage lock, rejecting
   rollback, same-revision replacement, and incorrect immediate parent links.
   Snapshot pages must advance in order within their watermark.
-- Made calendar ingest update existing objects by revision, use deterministic
-  source/UID identities, and retain meetings when a feed is only partially parsed.
-  Explicitly empty calendars still cancel upstream-deleted events. Removing a
-  source hides its imported events while retaining history.
+- Calendar import storage now uses complete encrypted raw-feed snapshots and
+  staged batch replacement. Supported imported rules normalize to `Cadence`;
+  recordings survive irreversible old-import cleanup. See
+  [calendar-imports.md](calendar-imports.md) for behavior and recovery limits.
 - Added provider overrides (`EXDATE`, `RDATE`, `RECURRENCE-ID`), timed/date-only
   `DURATION`, absolute duration across time zones, and rejection of unknown zones.
   Fixed non-hour DST gaps and recurrence limits for old series. Malformed feeds,
@@ -141,6 +141,21 @@ provide a historical comparison for an actual, not a complete historical
 calendar. “Change this and all future occurrences” and effective-date series
 splits remain unimplemented. Actual manual entry, reassociation, correction and
 historical-detail UI also remain future work.
+
+## Import snapshot validation (2026-09-10)
+
+Workspace tests and Clippy with warnings denied passed. The rebuilt-server live
+integration test covers exact raw feed downloads, cadence conversion, replacing
+same-source batches, independent sources, recordings after purge, raw-only deletion,
+resuming a pending import without fetching, and refusing a cleanup target that is
+an Actual. A focused test covers complete/partial/pending batch visibility.
+Web and mobile lint/type checks passed, including regenerated bindings; the web
+unit suite passed. Chrome checks confirmed the calendar-source deletion explanation,
+Cancel control, and URL input fitting the sidebar after removing its fixed width.
+The original development API was still serving the older envelope format, so the
+UI check used a separate rebuilt local server rather than changing that process.
+See [calendar-imports.md](calendar-imports.md) for the new deletion policy and
+remaining recovery limits.
 
 ## Validation
 
@@ -316,7 +331,9 @@ resolution after a timing/recurrence edit has backend guards but no resolution U
   can lose anchors, and a hostile web origin can replace the checking code.
   Retained browser checks still help when an honest web client uses a separately
   operated API.
-- Whole-feed ingest and retained history still need a storage/retention policy.
+- Imported snapshots are replaced and old imported history is purged per
+  [calendar-imports.md](calendar-imports.md). Other retained history still needs
+  practical storage limits.
   The browser's localStorage quota is small. Feed and record bounds avoid
   unbounded single responses; they do not solve lifetime accumulation.
   SQLite removes the deleted-file scan cost, but native anchor rows still grow

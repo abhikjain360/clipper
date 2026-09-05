@@ -210,6 +210,17 @@ the Google connector rather than the design:
   nothing because D9 already makes work ingest-only. Quickest check is trying to
   authorize any third-party calendar app with that account.
 
+## Import replacement update (2026-09-10)
+
+The current [calendar import snapshot design](calendar-imports.md) supersedes
+older statements below about updating imported events in place and retaining
+withdrawn upstream events. Complete raw feeds are separate encrypted objects;
+parsed records reference their snapshot. A successful refresh activates a new
+batch and purges the previous batch from that source. Recordings/local plans and
+local overrides survive; references to purged imported plans become unavailable.
+Different sources may duplicate content. Cadence normalization preserves supported
+RRULEs; unsupported rules retain validated expansion data and the full raw source.
+
 ## Decision Log
 
 ### D1: Clipper is the hub; external calendars are not mirrors

@@ -35,11 +35,14 @@ If code and these notes disagree, verify the code and correct the notes.
 - [ ] **Cross-device timer conflicts.** Decide how users resolve simultaneous
   recordings started on different devices. Local commands are serialized;
   there is no global single-timer transaction.
-- [ ] **Ingest and storage growth.** Choose an ingest horizon and practical
-  storage/retention limits for feed content and accumulated revisions. Retaining
-  immutable history is already agreed; do not silently replace that decision
-  with pruning. Native anchor retention/expiry is a separate security tradeoff
-  that also needs an explicit decision before any pruning.
+- [ ] **Storage growth outside replaced imports.** Same-source refresh now
+  purges the previous imported batch; recordings remain. The settled flow is in
+  [calendar-imports.md](calendar-imports.md). Other immutable history is retained;
+  native anchor expiry/pruning still needs an explicit security decision.
+- [ ] **Import recovery UI.** Allow safe cancellation of a pending batch that
+  cannot finish, and clean raw files orphaned before their manifest was saved.
+  Pending batches currently resume on refresh. Overrides referencing a purged
+  import need the deferred explicit reattachment workflow.
 - [ ] **Connector-specific decisions.** Resolve cross-source duplicate primary
   bindings, whether RSVP writes are supported, and provider recurrence/override
   mapping before building connectors. See the
