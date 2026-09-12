@@ -122,8 +122,8 @@ pub enum RecurrenceId {
 
 /// One occurrence that differs from its series.
 ///
-/// This is what the engine expands against. An imported calendar object embeds
-/// it and it shares that object's revision. A locally authored override is
+/// The engine expands against this. An imported calendar object embeds it and
+/// it shares that object's revision. A locally authored override is
 /// stored on its own as [`OccurrenceOverride`], which adds a base revision.
 ///
 /// Only a differing occurrence gets one. The other 364 days of the year have

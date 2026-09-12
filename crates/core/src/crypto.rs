@@ -146,13 +146,13 @@ pub fn object_envelope_body_bytes(body: &ObjectEnvelopeBody) -> Result<Vec<u8>, 
     postcard::to_allocvec(body).map_err(|e| CryptoError::Signature(format!("postcard: {e}")))
 }
 
-/// SHA-256 of a revision's canonical body bytes — what its child carries as
+/// SHA-256 of a revision's canonical body bytes, which its child carries as
 /// `parent_hash`.
 ///
-/// Deliberately over the body rather than the signed envelope: the body is the
-/// canonical form both the signature and the AAD are already computed over, and
-/// Ed25519 is deterministic, so hashing the signature too would add a second
-/// representation of the same fact.
+/// Taken over the body, not the signed envelope. The body is the canonical
+/// form both the signature and the AAD are computed over, and Ed25519 is
+/// deterministic, so hashing the signature would add a second representation
+/// of the same fact.
 pub fn object_envelope_parent_hash(
     parent: &ObjectEnvelopeBody,
 ) -> Result<[u8; SHA256_BYTES], CryptoError> {
@@ -266,10 +266,10 @@ pub fn object_payload_aad(
 /// decryption error either: the ciphertext still decrypts and the signature
 /// still verifies. The only symptom is that a ciphertext becomes replayable
 /// into any context differing by exactly the missing field. Adding a field to
-/// `ObjectEnvelopeBody` must therefore break *this line*, so that binding it
-/// is a decision rather than an omission — and `mod object_aad` in the tests
-/// below is the other half of that guard, asserting field by field which ones
-/// actually made it in.
+/// `ObjectEnvelopeBody` must therefore break this line, so that binding it is
+/// a decision rather than an omission. `mod object_aad` in the tests below is
+/// the other half of that guard, asserting field by field which ones made it
+/// in.
 fn object_aad(
     body: &ObjectEnvelopeBody,
     payload_id: Option<ObjectPayloadId>,
