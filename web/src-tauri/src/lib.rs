@@ -817,6 +817,12 @@ async fn write_private_upload_file(
     file.write_all(bytes)
         .await
         .map_err(|e| CommandError::Client(format!("temp write: {e}")))?;
+    // `write_all` on a tokio file returns once the bytes are queued for the
+    // blocking pool, and dropping the handle does not wait for that write.
+    // The daemon opens this path as soon as it is returned, so wait here.
+    file.flush()
+        .await
+        .map_err(|e| CommandError::Client(format!("temp write: {e}")))?;
     Ok(path)
 }
 
@@ -897,5 +903,49 @@ mod tests {
 
         assert_eq!(path, upload_dir.join("_.._evil.pdf"));
         assert_eq!(path.parent(), Some(upload_dir));
+    }
+
+    /// The staging write must not return while its bytes are still queued
+    /// on tokio's blocking pool: the daemon reads the file right after.
+    ///
+    /// One blocking thread runs pool tasks in order. The first poll queues
+    /// the open; a blocker queued behind it then holds the thread, so the
+    /// write queued after that cannot run until the blocker is released.
+    #[test]
+    fn staging_write_returns_only_after_its_bytes_are_on_disk() {
+        use std::{future::Future, task::Poll, time::Duration};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let upload_dir = std::env::temp_dir().join(format!("clipper-test-{}", random_hex_suffix()));
+        std::fs::create_dir(&upload_dir).unwrap();
+
+        runtime.block_on(async {
+            let write = write_private_upload_file(&upload_dir, "report.pdf", b"uploaded bytes");
+            tokio::pin!(write);
+            let ready = std::future::poll_fn(|cx| Poll::Ready(write.as_mut().poll(cx).is_ready())).await;
+            assert!(!ready, "the open must go through the blocking pool");
+
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            started_rx.await.unwrap();
+
+            let early = tokio::time::timeout(Duration::from_millis(100), &mut write).await;
+            assert!(early.is_err(), "returned while the write was still queued: {early:?}");
+
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            let path = write.await.unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"uploaded bytes");
+        });
+
+        std::fs::remove_dir_all(&upload_dir).unwrap();
     }
 }
