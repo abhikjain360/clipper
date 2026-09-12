@@ -229,9 +229,9 @@ exercises revisions, timers, feeds, and two-client sync against an isolated serv
 
 ## Validation status for the revision-aware change
 
-Rust workspace tests pass: 445 in total after the second-pass fixes, including
-164 in the schedule crate (13 unit, 57 adversarial, 37 behaviour, 15 corpus, 2
-imported-rule, 35 ingest, 5 `UNTIL`) and 107 in the server. The live integration covers
+Rust workspace tests pass: 464 in total after the third-pass fixes, including
+170 in the schedule crate (13 unit, 58 adversarial, 37 behaviour, 15 corpus, 2
+imported-rule, 38 ingest, 7 `UNTIL`) and 110 in the server. The live integration covers
 pinned plans through edits, overridden/provider occurrences, stale selections,
 deleted history, and unchanged sync heads. Workspace Clippy, wasm/mobile bridge
 checks, web type/lint/tests and standalone web build also pass. The 2026-09-12
