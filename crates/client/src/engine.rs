@@ -2419,8 +2419,13 @@ impl SyncEngine {
 
     // ── Sync ──
 
+    /// Ask the live WebSocket to reconnect, which restarts reconciliation.
+    ///
+    /// The counter is bumped in place. Reading the old value with `borrow()`
+    /// inside the `send` call would hold the channel's read lock while `send`
+    /// takes its write lock, and the caller would block there forever.
     pub async fn refresh(&self) -> Result<(), ClientError> {
-        _ = self.ws_restart_tx.send(*self.ws_restart_tx.borrow() + 1);
+        self.ws_restart_tx.send_modify(|requested| *requested += 1);
         Ok(())
     }
 
@@ -4715,6 +4720,31 @@ mod tests {
             engine.next_alarms(3, "UTC").await.expect("alarms").is_empty(),
             "and no alarm of that account can still be read without a session",
         );
+    }
+
+
+    /// A refresh has to return. It runs on the caller's task — the daemon's
+    /// IPC handler, or the mobile and browser bridges — and a blocked one
+    /// takes that thread down with it. This test drives it on a thread of its
+    /// own, so a blocked refresh fails the test instead of hanging the binary.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn refresh_does_not_block_on_the_restart_channel() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", temp.path());
+        let (refreshed, refreshing) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime");
+            runtime.block_on(engine.refresh()).expect("refresh");
+            refreshed.send(()).expect("report the refresh");
+        });
+
+        refreshing
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("refresh must return rather than block on its own borrow");
     }
 
     const RETAIN_TEST_KEY: [u8; 32] = [7; 32];
