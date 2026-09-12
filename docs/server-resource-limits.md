@@ -195,17 +195,21 @@ user-scoped, with the device's sessions cascade-deleted — see
 ### What counts toward the quota
 
 The reserved byte amount for an object is computed by
-the init/revise handlers, which sum **only** the declared `ciphertext_size` of
-each payload in the revision request (with a per-payload
+the init/revise handlers, which sum the declared `ciphertext_size` of
+each payload in the revision request plus the length of the revision's
+`meta_ciphertext` (with a per-payload
 `>= 0` check and a checked add that rejects overflow as `PayloadTooLarge`).
 
 This means:
 
 - **Payload ciphertext bytes count.** This is the encrypted blob/clipboard
   content, whether inline or streamed.
-- **Object metadata ciphertext (`meta_ciphertext`) and the signed envelope do
-  not count** toward `storage_bytes`. They are separately bounded only by
-  `limits.max_object_meta_ciphertext_bytes` (default 64 KiB) per revision.
+- **Object metadata ciphertext (`meta_ciphertext`) bytes count.** Every stored
+  revision holds its metadata alongside its payloads, so a revision with no
+  payloads still reserves its metadata length. Metadata is separately bounded
+  by `limits.max_object_meta_ciphertext_bytes` (default 64 KiB) per revision.
+- **The signed envelope bytes do not count** toward `storage_bytes`. Only
+  payload and metadata ciphertext are charged.
 - A genesis revision increments `object_count` by exactly 1. Later revisions
   reserve their payload bytes with `objects_added = 0`, so retained history is
   charged without consuming another object slot.
@@ -262,7 +266,7 @@ never go negative) and is called whenever an object's bytes leave the system:
 - **Object purge** (`DELETE /api/objects/{id}`): after a signed tombstone has
   made the file or schedule object non-live, the purge transaction locks the
   object, removes its entire revision chain, and releases `object_count: 1`
-  plus every revision's payload bytes.
+  plus every revision's payload and metadata bytes.
 - **Clipboard trim** (`cleanup::trim_user_clipboard`, spawned after each
   clipboard init/complete and also run by the periodic cleanup loop): deletes
   clipboard objects beyond `clipboard.max_items` and releases their usage.
@@ -431,11 +435,9 @@ mistaken for safeguards that exist:
   Partly mitigated in the documented reverse-proxy deployment (proxies usually
   apply their own header/idle timeouts); enforce in-process or require the proxy.
 
-- **Metadata and envelope bytes are not charged to the storage quota.** Only
-  payload ciphertext counts toward `storage_bytes`. The number of metadata-only
-  bytes a user can accumulate is bounded only by `object_count`
-  (`max_object_meta_ciphertext_bytes` × `max_user_objects`), not by the
-  byte quota.
+- **Signed envelope bytes are not charged to the storage quota.** Payload and
+  metadata ciphertext count toward `storage_bytes`; the stored signed envelope
+  bytes do not.
 
 - **No global aggregate cap on live WebSocket connections.** The per-user cap
   (`max_user_ws_connections`) bounds each account, and the server ping / idle

@@ -98,7 +98,8 @@ happens only after the transaction holds SQLite's write lock.
 
 Payload rows are keyed by `(object_id, revision, payload_id)`. Streamed upload
 claim, completion, and status changes are scoped to that exact revision. Each
-revision's payload bytes count toward the user's storage-byte quota; additional
+revision's payload bytes and metadata ciphertext bytes count toward the user's
+storage-byte quota; additional
 revisions do not consume additional object-count quota. Orphan cleanup may
 remove incomplete revisions and releases only their reserved bytes. Completed
 history remains until the whole tombstoned object is purged.
