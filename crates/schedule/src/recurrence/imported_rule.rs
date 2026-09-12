@@ -116,16 +116,20 @@ fn cadence(rule: &str, local_start: NaiveDateTime) -> Option<Cadence> {
             if has_any(&fields, &["BYDAY", "WKST"]) {
                 return None;
             }
-            let month_number = fields
-                .get("BYMONTH")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(local_start.month() as u8);
-            if fields
-                .get("BYMONTH")
-                .is_some_and(|value| value.contains(','))
-            {
+            // BYMONTHDAY expands a yearly rule to every month, so without
+            // BYMONTH it is twelve days a year, not one.
+            if fields.contains_key("BYMONTHDAY") && !fields.contains_key("BYMONTH") {
                 return None;
             }
+            let month_number = match fields.get("BYMONTH") {
+                Some(value) => {
+                    if value.contains(',') {
+                        return None;
+                    }
+                    value.parse().ok()?
+                }
+                None => local_start.month() as u8,
+            };
             let month = chrono::Month::try_from(month_number).ok()?;
             let day = match fields.get("BYMONTHDAY") {
                 Some(value) if !value.contains(',') => parse_month_day(value)?,
