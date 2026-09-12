@@ -822,6 +822,45 @@ fn a_raw_rule_cannot_smuggle_a_second_property() {
     );
 }
 
+/// `rrule` 0.14 reads a `BYDAY` token by slicing its last two bytes, with no
+/// char-boundary check. A fetched feed can carry any bytes, so validation must
+/// refuse non-ASCII before the parser sees it: an error, never a panic.
+#[test]
+fn a_non_ascii_rule_is_refused_rather_than_crashing() {
+    for rule in [
+        "FREQ=WEEKLY;BYDAY=€",
+        "FREQ=WEEKLY;BYDAY=😀",
+        "FREQ=WEEKLY;BYDAY=2😀",
+        "FREQ=DAILY;COUNT=2;X-NOTE=café",
+    ] {
+        assert!(
+            matches!(
+                ValidatedRrule::new(rule),
+                Err(RecurrenceError::UnparseableRule(_))
+            ),
+            "a non-ASCII rule must be refused: {rule:?}"
+        );
+    }
+}
+
+/// An all-day recurring ICS event normally ends on a DATE, and a floating
+/// event on a local time. Both must validate, because expansion accepts both:
+/// what validates and what expands are the same set.
+#[test]
+fn every_until_value_kind_validates() {
+    for rule in [
+        "FREQ=WEEKLY;BYDAY=MO;UNTIL=20250203",
+        "FREQ=WEEKLY;BYDAY=MO;UNTIL=20250203T000000",
+        "FREQ=WEEKLY;BYDAY=MO;UNTIL=20250203T000000Z",
+        "FREQ=WEEKLY;BYDAY=MO;until=20250203",
+    ] {
+        assert!(
+            ValidatedRrule::new(rule).is_ok(),
+            "this UNTIL kind must validate: {rule:?}"
+        );
+    }
+}
+
 #[test]
 fn descriptive_edits_preserve_override_applicability() {
     let original = daily_at(TimedStart::Floating(local("20260915T070000")));
