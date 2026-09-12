@@ -4,7 +4,6 @@
     "slug": "clipper",
     "version": "0.1.0",
     "orientation": "portrait",
-    "scheme": "clipper",
     "userInterfaceStyle": "dark",
     "assetBundlePatterns": ["**/*"],
     "android": {

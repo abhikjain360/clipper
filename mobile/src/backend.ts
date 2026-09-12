@@ -68,11 +68,15 @@ export async function shareDownloadedFile(
   bytes: Uint8Array,
 ): Promise<void> {
   const file = new File(Paths.cache, safeCacheFilename(filename));
-  file.create({ intermediates: true, overwrite: true });
-  file.write(bytes);
+  try {
+    file.create({ intermediates: true, overwrite: true });
+    file.write(bytes);
 
-  if (await Sharing.isAvailableAsync()) {
-    await Sharing.shareAsync(file.uri, { mimeType });
+    if (await Sharing.isAvailableAsync()) {
+      await Sharing.shareAsync(file.uri, { mimeType });
+    }
+  } finally {
+    file.delete();
   }
 }
 
