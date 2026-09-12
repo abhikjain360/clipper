@@ -215,6 +215,17 @@ entity regeneration as a no-op; unused-dependency and dependency-audit checks
 with the same 13 filtered advisories; formatting with the pinned toolchains.
 Interactive QA on the polished build is recorded in the next section.
 
+A second pass followed the same day: a reviewer from a different model family
+read only the polish commits, checked every claimed fix against the code and
+reported seven defects plus one partial fix. All eight are fixed in the
+commits listed as R1 to R8 in the guide's Appendix A. The ones that matter
+for day-to-day use: a download that finished after a logout and login no
+longer lands in the next account's profile; a delayed 401 or a late
+WebSocket hello from a replaced session no longer signs the new session out
+or streams into it; a full account can delete again; desktop drag-and-drop
+uploads keep their filename. Validation after the second pass:
+445 workspace tests (164 in the schedule crate: 13 unit, 57 adversarial, 37 behaviour, 15 corpus, 2 imported-rule, 35 ingest, 5 `UNTIL`; 94 in the client plus the ignored live test; 107 in the server; 2 in the desktop shell), workspace Clippy with warnings denied, the wasm and web checks, and formatting with the pinned toolchains.
+
 ## QA of the polished build (2026-09-12)
 
 A fresh sandbox was used because objects and device records from the earlier
