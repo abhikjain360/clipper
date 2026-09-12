@@ -320,6 +320,14 @@ impl LocalStore {
         sync.generation
     }
 
+    /// The generation sync writes are currently fenced on.
+    ///
+    /// Lets a caller holding a generation ask whether it is still the current
+    /// one without attempting a write.
+    pub async fn current_generation(&self) -> u64 {
+        self.sync.lock().await.generation
+    }
+
     /// Account for an object a pass listed but did not write.
     ///
     /// A refused revision still proves the object is on the server, so the

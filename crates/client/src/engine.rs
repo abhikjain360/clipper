@@ -600,6 +600,29 @@ impl SyncEngine {
         true
     }
 
+    /// End a session the server has refused, named by the store `generation`
+    /// the refused request was issued under.
+    ///
+    /// A 401 can arrive long after the request that earned it, by which time
+    /// the user may have logged out and back in. Taking `calendar_write` makes
+    /// this a session change like login and logout, so it cannot interleave
+    /// with one, and the generation check then tells whether the refused
+    /// session is still the one installed. Callers that already hold
+    /// `calendar_write` must use [`SyncEngine::end_refused_session`] instead.
+    async fn end_refused_session_for(&self, generation: u64, error: &ClientError) -> bool {
+        if !session_refused(error) {
+            return false;
+        }
+        let _calendar = self.calendar_write.lock().await;
+        if self.local_store.current_generation().await != generation {
+            debug!("A later session replaced the refused one; keeping it signed in");
+            return false;
+        }
+        warn!("The server refused this session; signing out");
+        self.clear_local_session().await;
+        true
+    }
+
     /// Whether the session `epoch` names is still the installed one.
     ///
     /// Both login and logout bump `history_epoch` while holding the encryption
@@ -2361,7 +2384,7 @@ impl SyncEngine {
                 .await
             {
                 warn!("File snapshot failed: {}", error);
-                file_engine.end_refused_session(&error).await;
+                file_engine.end_refused_session_for(generation, &error).await;
             }
         });
 
@@ -2372,7 +2395,7 @@ impl SyncEngine {
                 .await
             {
                 warn!("Clipboard snapshot failed: {}", error);
-                clipboard_engine.end_refused_session(&error).await;
+                clipboard_engine.end_refused_session_for(generation, &error).await;
             }
         });
 
@@ -2383,7 +2406,7 @@ impl SyncEngine {
                 .await
             {
                 warn!("Collab doc snapshot failed: {}", error);
-                collab_engine.end_refused_session(&error).await;
+                collab_engine.end_refused_session_for(generation, &error).await;
             }
         });
 
@@ -2394,7 +2417,7 @@ impl SyncEngine {
                 .await
             {
                 warn!("Schedule snapshot failed: {}", error);
-                schedule_engine.end_refused_session(&error).await;
+                schedule_engine.end_refused_session_for(generation, &error).await;
             }
         });
     }
@@ -4550,6 +4573,63 @@ mod tests {
                 .map(|file| file.filename.clone()),
             Some("still-mine.txt".to_string()),
         );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_from_a_replaced_session_does_not_sign_out_the_new_one() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", temp.path());
+        open_session(&engine).await;
+        let refused = ClientError::Api {
+            status: 401,
+            error: ErrorResponse::new(ApiErrorCode::Unauthorized, "expired"),
+        };
+
+        // The snapshot request went out under this generation, and a new
+        // session claimed the store before its 401 came back.
+        let refused_generation = engine.local_store.start_generation().await;
+        let current_generation = engine.local_store.start_generation().await;
+        assert!(
+            !engine
+                .end_refused_session_for(refused_generation, &refused)
+                .await,
+            "a refusal aimed at a replaced session must not sign the new one out",
+        );
+        assert!(engine.get_state().await.session.is_some());
+
+        // A refusal that does belong to the current session still ends it.
+        assert!(
+            engine
+                .end_refused_session_for(current_generation, &refused)
+                .await,
+        );
+        assert!(engine.get_state().await.session.is_none());
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn a_refusal_waits_for_a_session_change_already_running() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", temp.path());
+        open_session(&engine).await;
+        let generation = engine.local_store.start_generation().await;
+        let refused = ClientError::Api {
+            status: 401,
+            error: ErrorResponse::new(ApiErrorCode::Unauthorized, "expired"),
+        };
+
+        let held = engine.calendar_write.lock().await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                engine.end_refused_session_for(generation, &refused),
+            )
+            .await
+            .is_err(),
+            "a refusal must not tear down a session while a login or logout is running",
+        );
+        drop(held);
+        assert!(engine.get_state().await.session.is_some());
     }
 
     #[tokio::test]
