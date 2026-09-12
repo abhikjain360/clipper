@@ -172,13 +172,38 @@ pub enum MonthlyRule {
 /// Counting from the end is how "the last day of the month" works without
 /// special-casing February.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "from", content = "day", rename_all = "snake_case")]
+#[serde(
+    tag = "from",
+    content = "day",
+    rename_all = "snake_case",
+    try_from = "MonthDayMirror"
+)]
 pub enum MonthDay {
     /// 1..=31, counting forwards. A month without that day is skipped:
     /// `BYMONTHDAY=31` does not occur in April.
     FromStart(u8),
     /// 1..=31, counting backwards. One is the last day of the month.
     FromEnd(u8),
+}
+
+/// Mirror for validated deserialization. Carries the same wire shape,
+/// then the constructors reject out-of-range days.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "from", content = "day", rename_all = "snake_case")]
+enum MonthDayMirror {
+    FromStart(u8),
+    FromEnd(u8),
+}
+
+impl TryFrom<MonthDayMirror> for MonthDay {
+    type Error = RecurrenceError;
+
+    fn try_from(mirror: MonthDayMirror) -> Result<Self, Self::Error> {
+        match mirror {
+            MonthDayMirror::FromStart(day) => Self::from_start(day),
+            MonthDayMirror::FromEnd(day) => Self::from_end(day),
+        }
+    }
 }
 
 impl MonthDay {
@@ -209,12 +234,37 @@ impl MonthDay {
 
 /// Which occurrence of a weekday within a month, countable from either end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "from", content = "nth", rename_all = "snake_case")]
+#[serde(
+    tag = "from",
+    content = "nth",
+    rename_all = "snake_case",
+    try_from = "NthWeekdayMirror"
+)]
 pub enum NthWeekday {
     /// 1..=5. One is the first such weekday in the month.
     FromStart(u8),
     /// 1..=5. One is the last such weekday in the month.
     FromEnd(u8),
+}
+
+/// Mirror for validated deserialization. Carries the same wire shape,
+/// then the constructors reject out-of-range ordinals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "from", content = "nth", rename_all = "snake_case")]
+enum NthWeekdayMirror {
+    FromStart(u8),
+    FromEnd(u8),
+}
+
+impl TryFrom<NthWeekdayMirror> for NthWeekday {
+    type Error = RecurrenceError;
+
+    fn try_from(mirror: NthWeekdayMirror) -> Result<Self, Self::Error> {
+        match mirror {
+            NthWeekdayMirror::FromStart(nth) => Self::from_start(nth),
+            NthWeekdayMirror::FromEnd(nth) => Self::from_end(nth),
+        }
+    }
 }
 
 impl NthWeekday {
