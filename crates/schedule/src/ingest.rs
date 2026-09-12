@@ -31,6 +31,7 @@ use crate::{
 const MAX_ICS_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COMPONENTS: usize = 50_000;
 const MAX_PROPERTIES: usize = 500_000;
+const MAX_OVERRIDES_PER_EVENT: usize = 10_000;
 
 /// Identifies a calendar source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -190,31 +191,16 @@ pub fn parse_ics(
     source: SourceId,
     import: ObjectId,
 ) -> Result<IngestOutcome, IngestError> {
-    use calcard::icalendar::ICalendarComponentType;
-
     let calendar = parse_calendar(text)?;
 
     let mut outcome = IngestOutcome::default();
-    let mut masters = Vec::new();
-    let mut overrides: HashMap<String, Vec<&calcard::icalendar::ICalendarComponent>> =
-        HashMap::new();
-
-    for component in &calendar.components {
-        if component.component_type != ICalendarComponentType::VEvent {
-            continue;
-        }
-        let uid = text_property(component, "UID");
-        if property(component, "RECURRENCE-ID").is_some() {
-            match uid {
-                Some(uid) => overrides.entry(uid).or_default().push(component),
-                None => outcome.skipped.push(SkippedEvent {
-                    uid: None,
-                    reason: IngestError::MissingUid.to_string(),
-                }),
-            }
-        } else {
-            masters.push((component, uid));
-        }
+    let (masters, mut overrides, missing_override_uids) =
+        partition_masters_and_overrides(&calendar);
+    for _ in 0..missing_override_uids {
+        outcome.skipped.push(SkippedEvent {
+            uid: None,
+            reason: IngestError::MissingUid.to_string(),
+        });
     }
 
     for (component, uid) in masters {
@@ -250,17 +236,11 @@ pub fn parse_imported_recurrence_rules(
     text: &str,
     import: ObjectId,
 ) -> Result<ImportedRuleResolver, IngestError> {
-    use calcard::icalendar::ICalendarComponentType;
-
     let calendar = parse_calendar(text)?;
     let mut resolver = ImportedRuleResolver::new();
     let mut master_uids = HashSet::new();
-    for component in &calendar.components {
-        if component.component_type != ICalendarComponentType::VEvent
-            || property(component, "RECURRENCE-ID").is_some()
-        {
-            continue;
-        }
+    let (masters, _, _) = partition_masters_and_overrides(&calendar);
+    for (component, _) in masters {
         let Some(uid) = text_property(component, "UID") else {
             continue;
         };
@@ -275,10 +255,45 @@ pub fn parse_imported_recurrence_rules(
     Ok(resolver)
 }
 
+/// Splits VEVENT components into masters and RECURRENCE-ID overrides.
+/// Returns the masters with their UIDs, the overrides by UID, and the
+/// count of overrides without a UID.
+#[allow(clippy::type_complexity)]
+fn partition_masters_and_overrides(
+    calendar: &calcard::icalendar::ICalendar,
+) -> (
+    Vec<(&calcard::icalendar::ICalendarComponent, Option<String>)>,
+    HashMap<String, Vec<&calcard::icalendar::ICalendarComponent>>,
+    usize,
+) {
+    use calcard::icalendar::ICalendarComponentType;
+
+    let mut masters = Vec::new();
+    let mut overrides: HashMap<String, Vec<&calcard::icalendar::ICalendarComponent>> =
+        HashMap::new();
+    let mut missing_override_uids = 0;
+    for component in &calendar.components {
+        if component.component_type != ICalendarComponentType::VEvent {
+            continue;
+        }
+        let uid = text_property(component, "UID");
+        if property(component, "RECURRENCE-ID").is_some() {
+            match uid {
+                Some(uid) => overrides.entry(uid).or_default().push(component),
+                None => missing_override_uids += 1,
+            }
+        } else {
+            masters.push((component, uid));
+        }
+    }
+    (masters, overrides, missing_override_uids)
+}
+
 fn parse_calendar(text: &str) -> Result<calcard::icalendar::ICalendar, IngestError> {
     use calcard::icalendar::ICalendar;
 
     validate_calendar_envelope(text)?;
+    validate_rrule_counts(text)?;
     let calendar =
         ICalendar::parse(text).map_err(|error| IngestError::Malformed(format!("{error:?}")))?;
     if calendar.components.len() > MAX_COMPONENTS {
@@ -317,6 +332,76 @@ fn validate_calendar_envelope(text: &str) -> Result<(), IngestError> {
         ));
     }
     Ok(())
+}
+
+/// Rejects RRULE values calcard would silently normalize.
+/// calcard drops INTERVAL=0 and COUNT=0 and strips the sign from
+/// negative values, which would turn an invalid rule into a different
+/// valid one. Check the raw text before parsing.
+fn validate_rrule_counts(text: &str) -> Result<(), IngestError> {
+    for line in unfold_content_lines(text) {
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
+        let (before, after) = line.split_at(colon);
+        let name = before.split(';').next().unwrap_or("").trim();
+        if !name.eq_ignore_ascii_case("RRULE") {
+            continue;
+        }
+        let value = &after[1..];
+        let mut interval_seen = false;
+        let mut count_seen = false;
+        for part in value.split(';') {
+            let Some((raw_key, raw_value)) = part.split_once('=') else {
+                continue;
+            };
+            let key = raw_key.trim().to_ascii_uppercase();
+            if key != "INTERVAL" && key != "COUNT" {
+                continue;
+            }
+            let seen = if key == "INTERVAL" {
+                &mut interval_seen
+            } else {
+                &mut count_seen
+            };
+            if *seen {
+                return Err(IngestError::Malformed(format!(
+                    "RRULE has duplicate {key}"
+                )));
+            }
+            *seen = true;
+            let number = raw_value.trim();
+            let all_zero = !number.is_empty()
+                && number.bytes().all(|byte| byte == b'0');
+            let all_digits =
+                !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit());
+            if !all_digits || all_zero {
+                return Err(IngestError::Malformed(format!(
+                    "RRULE has invalid {key}={raw_value}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Joins folded content lines. A line starting with a space or tab
+/// continues the previous line. Handles CRLF and LF.
+fn unfold_content_lines(text: &str) -> Vec<String> {
+    let mut unfolded: Vec<String> = Vec::new();
+    for raw in text.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if (line.starts_with(' ') || line.starts_with('\t')) && !unfolded.is_empty() {
+            let continued = &line[1..];
+            unfolded
+                .last_mut()
+                .expect("checked non-empty")
+                .push_str(continued);
+        } else {
+            unfolded.push(line.to_string());
+        }
+    }
+    unfolded
 }
 
 fn event_from_component(
@@ -532,6 +617,30 @@ fn recurrence_overrides(
 ) -> Result<Vec<OccurrenceOverrideData>, IngestError> {
     use std::collections::BTreeMap;
 
+    // Count values before building FeedTimes, so one huge EXDATE line
+    // cannot allocate hundreds of thousands of overrides first.
+    let rdate_count = recurrence_values_count(master, "RDATE");
+    if rdate_count > MAX_OVERRIDES_PER_EVENT {
+        return Err(IngestError::LimitExceeded(
+            "too many recurrence overrides for one event",
+        ));
+    }
+    let mut total = rdate_count;
+    total = total
+        .checked_add(overrides.len())
+        .filter(|total| *total <= MAX_OVERRIDES_PER_EVENT)
+        .ok_or(IngestError::LimitExceeded(
+            "too many recurrence overrides for one event",
+        ))?;
+    let exdate_count = recurrence_values_count(master, "EXDATE");
+    total = total
+        .checked_add(exdate_count)
+        .filter(|total| *total <= MAX_OVERRIDES_PER_EVENT)
+        .ok_or(IngestError::LimitExceeded(
+            "too many recurrence overrides for one event",
+        ))?;
+    let _ = total;
+
     let item = ScheduleItemId(event_id);
     let mut by_recurrence_id = BTreeMap::new();
 
@@ -645,6 +754,20 @@ fn span_at(master_span: &ScheduleSpan, time: &FeedTime) -> Result<ScheduleSpan, 
         }),
         _ => Err(IngestError::MismatchedDateType),
     }
+}
+
+/// Counts comma-separated values without building FeedTimes.
+fn recurrence_values_count(
+    component: &calcard::icalendar::ICalendarComponent,
+    name: &str,
+) -> usize {
+    component
+        .entries
+        .iter()
+        .filter(|entry| entry.name.as_str().eq_ignore_ascii_case(name))
+        .fold(0usize, |total, entry| {
+            total.saturating_add(entry.values.len())
+        })
 }
 
 fn recurrence_times(

@@ -952,3 +952,83 @@ fn time_ranges_use_half_open_boundaries() {
     assert!(crossing.overlaps(&range));
     assert!(range.overlaps(&range));
 }
+
+#[test]
+fn day_ordinals_serialize_in_the_current_wire_shape() {
+    let month = serde_json::to_string(&MonthDay::FromEnd(1)).expect("serialize");
+    assert_eq!(month, r#"{"from":"from_end","day":1}"#);
+    assert_eq!(
+        serde_json::from_str::<MonthDay>(&month).expect("round-trip"),
+        MonthDay::FromEnd(1)
+    );
+
+    let nth = serde_json::to_string(&NthWeekday::FromStart(2)).expect("serialize");
+    assert_eq!(nth, r#"{"from":"from_start","nth":2}"#);
+    assert_eq!(
+        serde_json::from_str::<NthWeekday>(&nth).expect("round-trip"),
+        NthWeekday::FromStart(2)
+    );
+}
+
+#[test]
+fn out_of_range_day_ordinals_fail_to_deserialize() {
+    for invalid in [
+        r#"{"from":"from_start","day":0}"#,
+        r#"{"from":"from_start","day":32}"#,
+        r#"{"from":"from_end","day":0}"#,
+        r#"{"from":"from_end","day":32}"#,
+        r#"{"from":"start","day":0}"#,
+        r#"{"from":"start","day":32}"#,
+    ] {
+        let error = serde_json::from_str::<MonthDay>(invalid)
+            .expect_err(&format!("{invalid} must not deserialize"));
+        let message = error.to_string();
+        assert!(
+            message.contains("out of range") || message.contains("unknown variant"),
+            "unexpected message for {invalid}: {message}"
+        );
+    }
+    for invalid in [
+        r#"{"from":"from_start","day":200}"#,
+        r#"{"from":"from_end","day":200}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<MonthDay>(invalid).is_err(),
+            "{invalid} must not deserialize"
+        );
+    }
+    let error = serde_json::from_str::<MonthDay>(r#"{"from":"from_start","day":0}"#)
+        .expect_err("day 0 must not deserialize");
+    assert!(
+        error
+            .to_string()
+            .contains(&RecurrenceError::MonthDayOutOfRange(0).to_string()),
+        "must keep the constructor message: {error}"
+    );
+}
+
+#[test]
+fn out_of_range_weekday_ordinals_fail_to_deserialize() {
+    for invalid in [
+        r#"{"from":"from_start","nth":0}"#,
+        r#"{"from":"from_start","nth":6}"#,
+        r#"{"from":"from_end","nth":6}"#,
+    ] {
+        let error = serde_json::from_str::<NthWeekday>(invalid)
+            .expect_err(&format!("{invalid} must not deserialize"));
+        assert!(
+            error.to_string().contains("out of range"),
+            "must report the ordinal range: {}",
+            error
+        );
+    }
+    assert!(serde_json::from_str::<NthWeekday>(r#"{"from":"start","nth":6}"#).is_err());
+    let error = serde_json::from_str::<NthWeekday>(r#"{"from":"from_start","nth":6}"#)
+        .expect_err("nth 6 must not deserialize");
+    assert!(
+        error
+            .to_string()
+            .contains(&RecurrenceError::WeekdayOrdinalOutOfRange(6).to_string()),
+        "must keep the constructor message: {error}"
+    );
+}
