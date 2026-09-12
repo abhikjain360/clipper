@@ -622,6 +622,28 @@ impl SyncEngine {
         true
     }
 
+    /// End a session the server has refused, named by the `epoch` the refused
+    /// request was issued under.
+    ///
+    /// The WebSocket loop holds an epoch and not a store generation: it is
+    /// refused during the handshake, before it has claimed one. Taking
+    /// `calendar_write` makes this a session change like login and logout, so
+    /// it cannot interleave with one, and the epoch check then tells whether
+    /// the refused session is still the installed one.
+    async fn end_refused_session_for_epoch(&self, epoch: u64, error: &ClientError) -> bool {
+        if !session_refused(error) {
+            return false;
+        }
+        let _calendar = self.calendar_write.lock().await;
+        if !self.session_is_current(epoch) {
+            debug!("A later session replaced the refused one; keeping it signed in");
+            return false;
+        }
+        warn!("The server refused this session; signing out");
+        self.clear_local_session().await;
+        true
+    }
+
     /// Whether the session `epoch` names is still the installed one.
     ///
     /// Both login and logout bump `history_epoch` while holding the encryption
@@ -3216,6 +3238,13 @@ impl SyncEngine {
                 }
                 Err(e) => {
                     warn!("WebSocket error: {}", e);
+                    // A 401 here is the server saying this device's token is
+                    // gone: removed from another device, or expired. Retrying
+                    // would keep the account's keys and decrypted records
+                    // resident until the process restarts.
+                    if self.end_refused_session_for_epoch(epoch, &e).await {
+                        return;
+                    }
                     // The state belongs to whichever session is installed now.
                     // A socket whose session has ended must not mark the next
                     // session disconnected.
@@ -3282,9 +3311,9 @@ impl SyncEngine {
             .body(())
             .map_err(|e| ClientError::WebSocket(e.to_string()))?;
 
-        let (ws_stream, _) = tokio_tungstenite::connect_async(request).await.map_err(
-            |e: tokio_tungstenite::tungstenite::Error| ClientError::WebSocket(e.to_string()),
-        )?;
+        let (ws_stream, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .map_err(websocket_handshake_error)?;
 
         let (mut write, mut read) = ws_stream.split();
 
@@ -3421,6 +3450,13 @@ impl SyncEngine {
                 }
                 Err(e) => {
                     warn!("WebSocket error: {}", e);
+                    // A 401 here is the server saying this device's token is
+                    // gone: removed from another device, or expired. Retrying
+                    // would keep the account's keys and decrypted records
+                    // resident until the process restarts.
+                    if self.end_refused_session_for_epoch(epoch, &e).await {
+                        return;
+                    }
                     // The state belongs to whichever session is installed now.
                     // A socket whose session has ended must not mark the next
                     // session disconnected.
@@ -4197,6 +4233,33 @@ fn is_not_found_error(error: &ClientError) -> bool {
 /// retry, not to sign out.
 fn session_refused(error: &ClientError) -> bool {
     matches!(error, ClientError::Api { status, .. } if *status == 401)
+}
+
+/// Turn a WebSocket handshake failure into the error the rest of the client
+/// reasons about.
+///
+/// A handshake the server rejected carries an HTTP response, and `/api/ws`
+/// sits behind the same auth middleware as every other private route: a
+/// revoked or expired token is answered with 401 there too. Flattening that
+/// into a string would lose the status, and the loop would keep retrying a
+/// session the server has already ended.
+#[cfg(not(target_family = "wasm"))]
+fn websocket_handshake_error(error: tokio_tungstenite::tungstenite::Error) -> ClientError {
+    use tokio_tungstenite::tungstenite;
+
+    let tungstenite::Error::Http(response) = error else {
+        return ClientError::WebSocket(error.to_string());
+    };
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(tungstenite::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    crate::api_client::api_error_from_parts(
+        status,
+        content_type,
+        response.body().as_deref().unwrap_or_default(),
+    )
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -5058,6 +5121,115 @@ mod tests {
         }));
         assert!(!session_refused(&ClientError::WebSocket("closed".into())));
         assert!(!session_refused(&ClientError::NotAuthenticated));
+    }
+
+    /// The handshake is the one place a 401 arrives as a tungstenite error
+    /// rather than an API response, and the status has to survive the
+    /// conversion or the loop retries a session the server has ended.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn a_refused_websocket_handshake_is_a_refused_session() {
+        use tokio_tungstenite::tungstenite;
+
+        let refused = tungstenite::http::Response::builder()
+            .status(401)
+            .header("content-type", "application/json")
+            .body(Some(
+                br#"{"code":"unauthorized","message":"Unauthorized"}"#.to_vec(),
+            ))
+            .expect("a rejected handshake response");
+        let error = websocket_handshake_error(tungstenite::Error::Http(Box::new(refused)));
+        assert!(
+            session_refused(&error),
+            "a 401 handshake must end the session instead of being retried: {error:?}",
+        );
+
+        // Everything else is still a reason to retry.
+        let unavailable = tungstenite::http::Response::builder()
+            .status(503)
+            .body(None)
+            .expect("a rejected handshake response");
+        assert!(!session_refused(&websocket_handshake_error(
+            tungstenite::Error::Http(Box::new(unavailable)),
+        )));
+        assert!(!session_refused(&websocket_handshake_error(
+            tungstenite::Error::ConnectionClosed,
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_websocket_refusal_from_a_replaced_session_does_not_sign_out_the_new_one() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", temp.path());
+        open_session(&engine).await;
+        let refused = ClientError::Api {
+            status: 401,
+            error: ErrorResponse::new(ApiErrorCode::Unauthorized, "expired"),
+        };
+
+        // The socket handshook under this epoch, and a new session was
+        // installed before its 401 came back.
+        let replaced = engine.history_epoch.load(Ordering::SeqCst);
+        engine.history_epoch.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            !engine
+                .end_refused_session_for_epoch(replaced, &refused)
+                .await,
+            "a refusal aimed at a replaced session must not sign the new one out",
+        );
+        assert!(engine.get_state().await.session.is_some());
+
+        // A refusal that does belong to the current session still ends it.
+        let current = engine.history_epoch.load(Ordering::SeqCst);
+        assert!(
+            engine
+                .end_refused_session_for_epoch(current, &refused)
+                .await,
+        );
+        assert!(engine.get_state().await.session.is_none());
+    }
+
+    /// A device whose token the owner revoked from another device is refused
+    /// at the upgrade. The loop has to sign out rather than sit on the keys
+    /// showing "logged in, disconnected".
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn a_websocket_the_server_refuses_ends_the_session() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listen");
+        let engine = SyncEngine::new_with_data_dir(
+            &format!("http://{}", listener.local_addr().expect("address")),
+            temp.path(),
+        );
+        open_session(&engine).await;
+        engine.api.restore_token("revoked".into());
+        let epoch = engine.history_epoch.load(Ordering::SeqCst);
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.expect("read") > 0);
+            socket
+                .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("refuse the upgrade");
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), engine.ws_loop(epoch))
+            .await
+            .expect("a refused socket must end the loop, not reconnect forever");
+        server.await.expect("server");
+
+        let state = engine.get_state().await;
+        assert!(
+            !state.is_logged_in(),
+            "a refused session must be torn down, not left disconnected",
+        );
+        assert!(engine.encryption_key.read().await.is_none());
     }
 
     #[tokio::test]
