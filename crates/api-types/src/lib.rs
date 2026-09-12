@@ -812,6 +812,7 @@ pub enum ApiErrorCode {
     ObjectAlreadyExists,
     ObjectForbidden,
     ObjectDeleteUnsupported,
+    ObjectReviseUnsupported,
     ObjectNotReadyToComplete,
     /// A revision did not follow the object's current head — wrong number,
     /// wrong parent hash, or a create where a revise belongs.
@@ -864,6 +865,7 @@ impl ApiErrorCode {
             Self::ObjectAlreadyExists => "Object already exists",
             Self::ObjectForbidden => "Forbidden",
             Self::ObjectDeleteUnsupported => "Object cannot be deleted this way",
+            Self::ObjectReviseUnsupported => "Object cannot be revised this way",
             Self::ObjectRevisionConflict => "Object revision does not follow the current head",
             Self::ObjectNotTombstoned => "Object must be deleted before it can be purged",
             Self::ObjectNotReadyToComplete => "Object is not ready to complete",
@@ -929,6 +931,7 @@ impl ApiErrorCode {
             Self::StorageQuotaExceeded => 507,
             Self::ObjectPayloadNotFound => 404,
             Self::ObjectDeleteUnsupported
+            | Self::ObjectReviseUnsupported
             | Self::DuplicateObjectPayloadId
             | Self::MissingObjectPayloads
             | Self::MissingPayloadCompletion

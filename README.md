@@ -201,7 +201,6 @@ max_pending_ws_tickets = 4096
 
 [limits]
 max_file_blob_bytes = 536870912
-max_file_meta_ciphertext_bytes = 65536
 max_object_meta_ciphertext_bytes = 65536
 max_user_storage_bytes = 10737418240
 max_user_objects = 10000

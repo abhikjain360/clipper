@@ -250,6 +250,13 @@ impl MigrationTrait for Migration {
                 ON event_log (user_id, seq)",
         )
         .await?;
+        // Rebuilt with the table above: `cleanup_old_events` filters on
+        // `created_at`, which would otherwise scan the whole log.
+        db.execute_unprepared(
+            "CREATE INDEX IF NOT EXISTS idx_event_log_created_at
+                ON event_log (created_at)",
+        )
+        .await?;
 
         Ok(())
     }

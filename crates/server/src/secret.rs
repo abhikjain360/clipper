@@ -90,13 +90,48 @@ fn load_root_from_env() -> Result<Zeroizing<[u8; SERVER_SECRET_BYTES]>, SecretLo
     let raw = match (env_value, file_path) {
         (Some(_), Some(_)) => return Err(SecretLoadError::BothEnvAndFileSet),
         (Some(v), None) => v,
-        (None, Some(path)) => std::fs::read_to_string(&path)
-            .map(Zeroizing::new)
-            .map_err(|source| SecretLoadError::FileRead { path, source })?,
+        (None, Some(path)) => {
+            warn_if_secret_file_exposed(&path);
+            std::fs::read_to_string(&path)
+                .map(Zeroizing::new)
+                .map_err(|source| SecretLoadError::FileRead { path, source })?
+        }
         (None, None) => return Err(SecretLoadError::NotSet),
     };
 
     decode_root(raw.trim())
+}
+
+/// Warn when the pepper file is readable beyond its owner or owned by another
+/// user. A warning only, never a startup failure: refusing to start over
+/// permissions could lock the operator out remotely.
+fn warn_if_secret_file_exposed(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return;
+        };
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 {
+            tracing::warn!(
+                path = %path.display(),
+                mode = format!("{:o}", mode & 0o777),
+                "CLIPPER_SERVER_SECRET_FILE is group/world-accessible; restrict it to owner-only (0600)",
+            );
+        }
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            tracing::warn!(
+                path = %path.display(),
+                "CLIPPER_SERVER_SECRET_FILE is not owned by the server user",
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 fn decode_root(s: &str) -> Result<Zeroizing<[u8; SERVER_SECRET_BYTES]>, SecretLoadError> {
@@ -180,5 +215,41 @@ mod tests {
     fn generate_root_base64_roundtrips() {
         let encoded = generate_root_base64();
         decode_root(&encoded).expect("generated secret decodes");
+    }
+
+    #[test]
+    fn secret_file_with_open_permissions_still_loads() {
+        // The permission check warns but never fails, so a 0644 file loads.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("clipper-server.secret");
+            std::fs::write(&path, format!("{}\n", generate_root_base64()))
+                .expect("write secret file");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod");
+
+            let prev_secret = std::env::var(ENV_SECRET).ok();
+            let prev_file = std::env::var(ENV_SECRET_FILE).ok();
+            // SAFETY: no other test in this binary reads these vars.
+            unsafe {
+                std::env::remove_var(ENV_SECRET);
+                std::env::set_var(ENV_SECRET_FILE, &path);
+            }
+            let loaded = ServerSecrets::load_from_env();
+            // SAFETY: same as above; restore what was there before.
+            unsafe {
+                match prev_secret {
+                    Some(value) => std::env::set_var(ENV_SECRET, value),
+                    None => std::env::remove_var(ENV_SECRET),
+                }
+                match prev_file {
+                    Some(value) => std::env::set_var(ENV_SECRET_FILE, value),
+                    None => std::env::remove_var(ENV_SECRET_FILE),
+                }
+            }
+            loaded.expect("a 0644 secret file still loads");
+        }
     }
 }

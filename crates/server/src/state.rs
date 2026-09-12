@@ -51,6 +51,11 @@ pub struct AppStateInner {
     /// are reserved in `try_acquire_ws_slot` and released when the returned guard
     /// drops; an entry is removed once its count returns to zero.
     ws_connections: std::sync::Mutex<HashMap<Uuid, u64>>,
+    /// Process-wide ceiling on live WebSocket connections
+    /// (`limits.max_ws_connections`), bounding total FD/task use across all
+    /// users. Acquired alongside the per-user slot in the WebSocket accept
+    /// path; the permit is held for the connection's lifetime.
+    ws_global_cap: Arc<tokio::sync::Semaphore>,
     /// Loaded collaborative document rooms, keyed by `collab_docs.id`. A room is
     /// created on the first WebSocket connection to a document and removed when
     /// the last connection closes (see `crate::collab_sync`).
@@ -249,6 +254,12 @@ impl AppState {
         let argon2_permits = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
+        // The config value is validated `>= 1` at startup; clamp defensively
+        // for states built directly (tests) and for platforms where u64 does
+        // not fit in a usize.
+        let ws_global_permits = usize::try_from(config.limits.max_ws_connections)
+            .unwrap_or(usize::MAX)
+            .clamp(1, tokio::sync::Semaphore::MAX_PERMITS);
         Self {
             inner: Arc::new(AppStateInner {
                 db,
@@ -258,6 +269,7 @@ impl AppState {
                 rate_limiter,
                 ws_channels: std::sync::Mutex::new(HashMap::new()),
                 ws_connections: std::sync::Mutex::new(HashMap::new()),
+                ws_global_cap: Arc::new(tokio::sync::Semaphore::new(ws_global_permits)),
                 collab_rooms: std::sync::Mutex::new(HashMap::new()),
                 auth_challenges: std::sync::Mutex::new(HashMap::new()),
                 pending_registrations: std::sync::Mutex::new(HashMap::new()),
@@ -314,6 +326,12 @@ impl AppState {
     /// running the hash so a registration burst cannot exhaust memory.
     pub fn argon2_semaphore(&self) -> Arc<tokio::sync::Semaphore> {
         self.inner.argon2_semaphore.clone()
+    }
+
+    /// Process-wide live-WebSocket-connection ceiling; acquire one permit per
+    /// connection alongside the per-user slot.
+    pub fn ws_global_cap(&self) -> Arc<tokio::sync::Semaphore> {
+        self.inner.ws_global_cap.clone()
     }
 
     pub fn objects_dir(&self) -> PathBuf {
@@ -880,5 +898,31 @@ mod tests {
         let _other_slot = state
             .try_acquire_ws_slot(other_user_id)
             .expect("other user slot");
+    }
+
+    #[tokio::test]
+    async fn ws_global_connection_cap_follows_config() {
+        assert_eq!(
+            ServerConfig::default().limits.max_ws_connections,
+            1024,
+            "process-wide default must stay 1024",
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::connect("sqlite::memory:").await.expect("db");
+        let mut config = ServerConfig::default();
+        config.server.data_dir = dir.path().to_path_buf();
+        config.limits.max_ws_connections = 2;
+        let state = AppState::open_with_db_and_config(db, config, ServerSecrets::test_fixture())
+            .await
+            .expect("state");
+
+        let cap = state.ws_global_cap();
+        assert_eq!(cap.available_permits(), 2);
+        let _first = cap.clone().try_acquire_owned().expect("first permit");
+        let _second = cap.clone().try_acquire_owned().expect("second permit");
+        assert!(
+            cap.try_acquire_owned().is_err(),
+            "the third connection must find no permit"
+        );
     }
 }

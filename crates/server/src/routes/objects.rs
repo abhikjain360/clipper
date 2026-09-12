@@ -572,16 +572,34 @@ pub async fn upload_payload(
         .filter(object_payloads::Column::PayloadId.eq(payload_uuid))
         .filter(object_payloads::Column::Status.eq("uploading"))
         .exec(state.db())
-        .await
-        .map_err(|e| {
+        .await;
+    let uploaded = match uploaded {
+        Ok(uploaded) => uploaded,
+        Err(e) => {
             error!(
                 object_id = %object_uuid,
                 payload_id = %payload_uuid,
                 error = %e,
                 "Failed to mark payload uploaded",
             );
-            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-        })?;
+            // The file is already renamed into place, but the row still says
+            // `uploading`; without a reset every retry is refused as in
+            // progress while nothing can finish it.
+            reset_payload_status(
+                &state,
+                object_uuid,
+                object.revision,
+                payload_uuid,
+                "uploading",
+                "pending",
+            )
+            .await;
+            return Err(ApiError::from_code_with_message(
+                ApiErrorCode::Database,
+                "Database error",
+            ));
+        }
+    };
 
     if uploaded.rows_affected != 1 {
         _ = tokio::fs::remove_file(&final_path).await;
@@ -590,6 +608,15 @@ pub async fn upload_payload(
             payload_id = %payload_uuid,
             "Payload upload finalization failed because status was no longer uploading",
         );
+        reset_payload_status(
+            &state,
+            object_uuid,
+            object.revision,
+            payload_uuid,
+            "uploading",
+            "pending",
+        )
+        .await;
         return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectPayloadUploadInProgress,
             "Object payload upload no longer in progress",
@@ -989,7 +1016,7 @@ pub async fn revise_object(
     .await?;
 
     let tombstone = req.envelope.body.operation == ObjectEnvelopeOperation::Delete;
-    if tombstone && !kind_is_deletable(kind) {
+    if tombstone && !kind_supports_revisions(kind) {
         debug!(
             object_id = %object_uuid,
             kind = kind.as_ref(),
@@ -998,6 +1025,21 @@ pub async fn revise_object(
         return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectDeleteUnsupported,
             "Only file and schedule objects can be deleted",
+        ));
+    }
+    // A revise on any other kind would insert the revision row and then fail
+    // the event_log CHECK (only file/schedule/collab may emit `updated`, and
+    // collab never reaches here), leaving a pending row that blocks later
+    // writes. Reject before any write.
+    if !tombstone && !kind_supports_revisions(kind) {
+        debug!(
+            object_id = %object_uuid,
+            kind = kind.as_ref(),
+            "Rejected revision for a kind that does not support revisions",
+        );
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::ObjectReviseUnsupported,
+            "Only file and schedule objects can be revised",
         ));
     }
 
@@ -1238,12 +1280,13 @@ pub async fn revise_object(
     Ok(Postcard(response))
 }
 
-/// Which kinds `delete_object` and tombstone revisions may act on.
+/// Which kinds revisions may be written for.
 ///
 /// Clipboard is excluded because it expires passively on a TTL and never emits
-/// a `deleted` event; collab is excluded because it is deleted through its own
-/// route, which has a plaintext row and a Y-sync session to tear down as well.
-fn kind_is_deletable(kind: ObjectKind) -> bool {
+/// an `updated` event; collab is excluded because it is versioned through its
+/// own Y-sync route, which has a plaintext row and a session to tear down as
+/// well. The same set gates deletes: only these kinds tombstone and purge.
+fn kind_supports_revisions(kind: ObjectKind) -> bool {
     match kind {
         ObjectKind::File | ObjectKind::Schedule => true,
         ObjectKind::Clipboard | ObjectKind::Collab => false,
@@ -2160,7 +2203,7 @@ pub async fn purge_object(
         ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
-    if !kind_is_deletable(kind) {
+    if !kind_supports_revisions(kind) {
         debug!(
             object_id = %object_uuid,
             kind = kind.as_ref(),
@@ -4209,6 +4252,58 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn revising_a_clipboard_object_is_rejected_before_any_write() {
+            let (state, _dir) = test_state().await;
+            let user_id = insert_user(&state).await;
+            let device_id = Uuid::now_v7();
+            let key = insert_device(&state, user_id, device_id).await;
+            let object_id = Uuid::now_v7().to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request(
+                    object_id.clone(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Clipboard,
+                    b"clip",
+                    true,
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("init");
+
+            // An `updated` event for clipboard violates the event_log CHECK, so
+            // accepting this would fail the commit with a 500 (or strand a
+            // pending row on the streamed path that blocks later writes).
+            let error = revise_with(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Clipboard,
+                b"edited",
+                &key,
+            )
+            .await
+            .expect_err("clipboard objects cannot be revised");
+            assert_eq!(error.body().code, ApiErrorCode::ObjectReviseUnsupported);
+
+            let object_uuid: Uuid = object_id.parse().expect("uuid");
+            assert_eq!(
+                object_revisions::Entity::find()
+                    .filter(object_revisions::Column::ObjectId.eq(object_uuid))
+                    .all(state.db())
+                    .await
+                    .expect("query revisions")
+                    .len(),
+                1,
+                "the rejected revise must leave no revision row behind",
+            );
+        }
+
+        #[tokio::test]
         async fn a_revision_charges_bytes_but_not_an_object() {
             let (state, _dir) = test_state().await;
             let (user_id, device_id, object_id, key) = seeded(&state).await;
@@ -4524,6 +4619,73 @@ mod tests {
                 "usage {bytes} must stay within the 600-byte quota",
             );
         }
+
+        #[tokio::test]
+        async fn a_zero_byte_tombstone_succeeds_above_the_quota_and_purge_releases() {
+            let (state, _dir) = test_state_with_user_quotas(50, 100).await;
+            let user_id = insert_user(&state).await;
+            let device_id = Uuid::now_v7();
+            let key = insert_device(&state, user_id, device_id).await;
+            let object_id = Uuid::now_v7().to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request(
+                    object_id.clone(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    b"first",
+                    true,
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("init");
+            // Genesis "first" (5) plus the 18 metadata bytes.
+            assert_eq!(user_storage_usage(&state, user_id).await, (23, 1));
+
+            // Push accounted usage over the limit the way lowering
+            // max_user_storage_bytes under existing data would.
+            users::Entity::update_many()
+                .col_expr(
+                    users::Column::StorageBytes,
+                    sea_orm::sea_query::Expr::value(1000),
+                )
+                .filter(users::Column::Id.eq(user_id))
+                .exec(state.db())
+                .await
+                .expect("inflate usage");
+
+            // Empty metadata reserves nothing, so this must succeed despite the
+            // over-quota counters; otherwise the object could never be purged
+            // back under the limit.
+            revise_meta_only(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                ObjectEnvelopeOperation::Delete,
+                Vec::new(),
+                &key,
+            )
+            .await
+            .expect("zero-byte tombstone above the quota");
+
+            purge_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path(object_id),
+            )
+            .await
+            .expect("purge");
+            assert_eq!(
+                user_storage_usage(&state, user_id).await,
+                (977, 0),
+                "purge releases the whole chain",
+            );
+        }
     }
 
     #[tokio::test]
@@ -4736,28 +4898,32 @@ mod tests {
             )
             .await
             .expect("init");
-            let (pending, _) = begin_streamed_revision(
-                &state, user_id, device_id, &object_id, kind, b"pending", &key,
-            )
-            .await;
-            assert!(
-                get_object_revision(
-                    State(state.clone()),
-                    Extension(auth(user_id, device_id)),
-                    Path((object_id.clone(), 2))
+            // Only schedule objects support revisions; the clipboard case below
+            // covers expiry instead (a clipboard revise is rejected outright).
+            if kind == ObjectKind::Schedule {
+                let (pending, _) = begin_streamed_revision(
+                    &state, user_id, device_id, &object_id, kind, b"pending", &key,
                 )
-                .await
-                .is_err()
-            );
-            assert!(
-                download_revision_payload(
-                    State(state.clone()),
-                    Extension(auth(user_id, device_id)),
-                    Path((object_id.clone(), 2, pending.id.to_string()))
-                )
-                .await
-                .is_err()
-            );
+                .await;
+                assert!(
+                    get_object_revision(
+                        State(state.clone()),
+                        Extension(auth(user_id, device_id)),
+                        Path((object_id.clone(), 2))
+                    )
+                    .await
+                    .is_err()
+                );
+                assert!(
+                    download_revision_payload(
+                        State(state.clone()),
+                        Extension(auth(user_id, device_id)),
+                        Path((object_id.clone(), 2, pending.id.to_string()))
+                    )
+                    .await
+                    .is_err()
+                );
+            }
             if kind == ObjectKind::Clipboard {
                 objects::Entity::update_many()
                     .col_expr(
@@ -5642,6 +5808,91 @@ mod tests {
                 ))
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn failed_mark_uploaded_resets_payload_to_pending_for_retry() {
+        let (state, _data_dir) = test_state().await;
+        let user_id = insert_user(&state).await;
+        let device_id = Uuid::now_v7();
+        let signing_secret_key = insert_device(&state, user_id, device_id).await;
+        let object_id = Uuid::now_v7().to_string();
+        let payload_id = Uuid::now_v7().to_string();
+        let ciphertext = b"encrypted file payload";
+
+        init_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            postcard(init_request(
+                object_id.clone(),
+                payload_id.clone(),
+                ObjectKind::File,
+                ciphertext,
+                false,
+                device_id,
+                &signing_secret_key,
+            )),
+        )
+        .await
+        .expect("init");
+
+        // Fail the "mark uploaded" update the way a transient database error
+        // would, after the file was already renamed into place.
+        state
+            .db()
+            .execute_unprepared(
+                r#"
+                CREATE TRIGGER fail_mark_uploaded
+                BEFORE UPDATE OF status ON object_payloads
+                WHEN NEW.status = 'uploaded'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced mark-uploaded failure');
+                END;
+                "#,
+            )
+            .await
+            .expect("create trigger");
+
+        let err = upload_payload(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path((object_id.clone(), payload_id.clone())),
+            Body::from(ciphertext.to_vec()),
+        )
+        .await
+        .expect_err("forced mark-uploaded failure should fail the upload");
+        assert_eq!(err.body().code, ApiErrorCode::Database);
+
+        state
+            .db()
+            .execute_unprepared("DROP TRIGGER fail_mark_uploaded")
+            .await
+            .expect("drop trigger");
+
+        // Without the reset the row would stay `uploading` and the retry below
+        // would be refused as in progress while nothing can finish it.
+        let status: String = object_payloads::Entity::find_by_id((
+            object_id.parse::<Uuid>().expect("object id"),
+            GENESIS_REVISION,
+            payload_id.parse::<Uuid>().expect("payload id"),
+        ))
+        .select_only()
+        .column(object_payloads::Column::Status)
+        .into_tuple()
+        .one(state.db())
+        .await
+        .expect("query status")
+        .expect("payload row");
+        assert_eq!(status, "pending");
+
+        upload_payload(
+            State(state),
+            Extension(auth(user_id, device_id)),
+            Path((object_id, payload_id)),
+            Body::from(ciphertext.to_vec()),
+        )
+        .await
+        .expect("retry after reset");
     }
 
     #[tokio::test]
