@@ -365,8 +365,16 @@ pub async fn init_object(
         // write lock, so seq order matches commit order.
         if all_inline {
             let seq = state_ref.next_event_seq();
-            let inserted =
-                insert_created_event(txn, user_id, kind, object_id, created_at_str, seq).await?;
+            let inserted = insert_object_event(
+                txn,
+                user_id,
+                kind,
+                object_id,
+                created_at_str,
+                seq,
+                ObjectEventType::Created,
+            )
+            .await?;
             advance_object_head(txn, user_id, object_id, GENESIS_REVISION, seq, false).await?;
             Ok(Some(inserted))
         } else {
@@ -465,12 +473,6 @@ pub async fn upload_payload(
         ));
     }
 
-    if payload.ciphertext_size < 0 {
-        return Err(ApiError::from_code_with_message(
-            ApiErrorCode::InvalidPayloadSize,
-            "Invalid payload size",
-        ));
-    }
     let expected_size = payload.ciphertext_size as u64;
     let now = Utc::now().to_rfc3339();
     let claimed = object_payloads::Entity::update_many()
@@ -623,13 +625,11 @@ pub async fn upload_payload(
         ));
     }
 
-    // Bump the parent object's server-assigned updated_at so the orphan sweep
-    // (which keys on updated_at) treats an actively-progressing multi-payload
-    // upload as live rather than reaping it mid-flight. A failure here only risks
-    // an early reap on a later sweep — the payload is already durably stored — so
-    // log and continue.
-    // `stored_at` is what the orphan sweep measures, so it has to move on every
-    // upload or a slow multi-payload write would be reaped mid-flight.
+    // Bump the revision's server-assigned stored_at (and the object's
+    // updated_at) so the orphan sweep treats an actively-progressing
+    // multi-payload upload as live rather than reaping it mid-flight. A
+    // failure here only risks an early reap on a later sweep — the payload is
+    // already durably stored — so log and continue.
     let object_now = Utc::now().to_rfc3339();
     if let Err(e) = object_revisions::Entity::update_many()
         .col_expr(
@@ -863,12 +863,13 @@ pub async fn complete_object(
     // connection.
     let created_seq = state.next_event_seq();
 
-    let tombstone = object.operation == ObjectEnvelopeOperation::Delete;
-    let event_type = match object.operation {
-        ObjectEnvelopeOperation::Create => ObjectEventType::Created,
-        ObjectEnvelopeOperation::Delete => ObjectEventType::Deleted,
-        ObjectEnvelopeOperation::Revise if object.was_tombstoned => ObjectEventType::Created,
-        ObjectEnvelopeOperation::Revise => ObjectEventType::Updated,
+    // A delete envelope carries no payloads, so it always completes inside
+    // revise_object and never reaches this streamed completion path.
+    let event_type = if object.operation == ObjectEnvelopeOperation::Create || object.was_tombstoned
+    {
+        ObjectEventType::Created
+    } else {
+        ObjectEventType::Updated
     };
 
     // The source-device check already happened in `object_for_upload`, which
@@ -880,7 +881,7 @@ pub async fn complete_object(
         object_uuid,
         object.revision,
         created_seq,
-        tombstone,
+        false,
     )
     .await
     {
@@ -2683,12 +2684,6 @@ async fn object_for_upload(
 
 fn init_request_storage_bytes(req: &ObjectInitRequest) -> Result<i64, ApiError> {
     let payload_bytes = req.payloads.iter().try_fold(0_i64, |total, payload| {
-        if payload.ciphertext_size < 0 {
-            return Err(ApiError::from_code_with_message(
-                ApiErrorCode::InvalidPayloadSize,
-                "Invalid payload size",
-            ));
-        }
         total.checked_add(payload.ciphertext_size).ok_or_else(|| {
             ApiError::from_code_with_message(
                 ApiErrorCode::PayloadTooLarge,
@@ -2785,8 +2780,7 @@ async fn idempotent_init_response(
     genesis: object_revisions::Model,
 ) -> Result<ObjectInitResponse, ApiError> {
     let object_id = req.id.into_uuid();
-    if existing.user_id != user_id
-        || existing.kind != req.kind.to_string()
+    if existing.kind != req.kind.to_string()
         || genesis.source_device_id != Some(device_id)
         || genesis.meta_nonce != req.meta_nonce
         || genesis.meta_ciphertext != req.meta_ciphertext
@@ -3019,29 +3013,6 @@ where
     Ok(())
 }
 
-async fn insert_created_event<C>(
-    db: &C,
-    user_id: Uuid,
-    kind: ObjectKind,
-    object_id: Uuid,
-    now: &str,
-    seq: i64,
-) -> Result<event_log::Model, ApiError>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    insert_object_event(
-        db,
-        user_id,
-        kind,
-        object_id,
-        now,
-        seq,
-        ObjectEventType::Created,
-    )
-    .await
-}
-
 async fn insert_object_event<C>(
     db: &C,
     user_id: Uuid,
@@ -3129,57 +3100,12 @@ async fn object_event_seq(
 }
 
 fn map_payload_batch_insert_error(error: DbErr, object_id: Uuid) -> ApiError {
-    match error.sql_err() {
-        Some(SqlErr::UniqueConstraintViolation(constraint)) => {
-            if is_duplicate_payload_id_violation(&constraint) {
-                warn!(
-                    object_id = %object_id,
-                    constraint = %constraint,
-                    "Duplicate payload id in init_object request",
-                );
-                ApiError::from_code_with_message(
-                    ApiErrorCode::DuplicateObjectPayloadId,
-                    "Duplicate object payload id",
-                )
-            } else if is_payload_path_conflict(&constraint) {
-                warn!(
-                    object_id = %object_id,
-                    constraint = %constraint,
-                    "Object payload ids resolve to conflicting storage paths",
-                );
-                ApiError::from_code_with_message(
-                    ApiErrorCode::BadRequest,
-                    "Object payload ids conflict",
-                )
-            } else {
-                error!(
-                    object_id = %object_id,
-                    constraint = %constraint,
-                    error = %error,
-                    "Failed to batch insert object payload rows due to a uniqueness violation",
-                );
-                ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-            }
-        }
-        _ => {
-            error!(
-                object_id = %object_id,
-                error = %error,
-                "Failed to batch insert object payload rows",
-            );
-            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-        }
-    }
-}
-
-fn is_duplicate_payload_id_violation(constraint: &str) -> bool {
-    (constraint.contains("object_payloads.object_id")
-        && constraint.contains("object_payloads.payload_id"))
-        || constraint.contains("pk_object_payloads")
-}
-
-fn is_payload_path_conflict(constraint: &str) -> bool {
-    constraint.contains("object_payloads.ciphertext_path")
+    error!(
+        object_id = %object_id,
+        error = %error,
+        "Failed to batch insert object payload rows",
+    );
+    ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
 }
 
 fn broadcast_created(
@@ -5266,26 +5192,6 @@ mod tests {
             .await
             .expect("object lookup");
         assert!(object.is_none(), "failed init transaction rolls back");
-    }
-
-    #[test]
-    fn payload_uniqueness_helpers_separate_payload_id_from_path_conflict() {
-        let duplicate_payload_id =
-            "UNIQUE constraint failed: object_payloads.object_id, object_payloads.payload_id";
-        let path_conflict = "UNIQUE constraint failed: object_payloads.ciphertext_path";
-        let unknown = "UNIQUE constraint failed: other.column";
-
-        assert!(is_duplicate_payload_id_violation(duplicate_payload_id));
-        assert!(!is_payload_path_conflict(duplicate_payload_id));
-
-        assert!(
-            !is_duplicate_payload_id_violation(path_conflict),
-            "ciphertext_path is not the payload-id primary key"
-        );
-        assert!(is_payload_path_conflict(path_conflict));
-
-        assert!(!is_duplicate_payload_id_violation(unknown));
-        assert!(!is_payload_path_conflict(unknown));
     }
 
     #[tokio::test]
