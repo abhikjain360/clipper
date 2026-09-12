@@ -838,6 +838,49 @@ END:VEVENT\r\nEND:VCALENDAR\r\n";
 }
 
 #[test]
+fn quoted_parameter_colon_does_not_hide_an_overflowing_interval() {
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:probe\r\nDTSTART:20260912T090000Z\r\nDTEND:20260912T100000Z\r\nRRULE;X-PROBE=\"a:b\":INTERVAL=65536;FREQ=DAILY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    match parse_ics(feed, SourceId(uuid_fixture()), import_fixture()) {
+        Err(clipper_schedule::IngestError::Malformed(message)) => {
+            assert!(
+                message.contains("INTERVAL"),
+                "must name INTERVAL: {message:?}"
+            );
+        }
+        other => panic!("quoted overflowing INTERVAL must be Malformed, got {other:?}"),
+    }
+}
+
+#[test]
+fn quoted_parameter_without_colon_still_validates() {
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:probe\r\nDTSTART:20260912T090000Z\r\nDTEND:20260912T100000Z\r\nRRULE;X-PROBE=\"abc\":FREQ=DAILY;INTERVAL=2\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let outcome =
+        parse_ics(feed, SourceId(uuid_fixture()), import_fixture()).expect("valid rule parses");
+    assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+    assert_eq!(outcome.events.len(), 1);
+}
+
+#[test]
+fn quoted_colon_in_non_rrule_property_does_not_hide_the_next_rrule() {
+    let valid = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:probe\r\nDTSTART:20260912T090000Z\r\nDTEND:20260912T100000Z\r\nDESCRIPTION;X-QUOTED=\"a:b\":hello\r\nRRULE:FREQ=DAILY;INTERVAL=2\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let outcome = parse_ics(valid, SourceId(uuid_fixture()), import_fixture())
+        .expect("valid rule after a quoted colon parses");
+    assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+    assert_eq!(outcome.events.len(), 1);
+
+    let overflowing = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:probe\r\nDTSTART:20260912T090000Z\r\nDTEND:20260912T100000Z\r\nDESCRIPTION;X-QUOTED=\"a:b\":hello\r\nRRULE:FREQ=DAILY;INTERVAL=65536\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    match parse_ics(overflowing, SourceId(uuid_fixture()), import_fixture()) {
+        Err(clipper_schedule::IngestError::Malformed(message)) => {
+            assert!(
+                message.contains("INTERVAL"),
+                "must still name INTERVAL: {message:?}"
+            );
+        }
+        other => panic!("overflowing INTERVAL after a quoted colon must be Malformed, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_valid_interval_and_count_still_becomes_a_cadence() {
     let feed = feed_with_rrule("FREQ=DAILY;INTERVAL=2;COUNT=5");
     let outcome =

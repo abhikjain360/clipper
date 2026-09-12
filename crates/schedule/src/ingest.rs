@@ -343,6 +343,20 @@ fn validate_calendar_envelope(text: &str) -> Result<(), IngestError> {
     Ok(())
 }
 
+/// Finds the property value separator: the first `:` outside a double-quoted
+/// parameter value. A line with an unterminated quote has no value.
+fn value_separator(line: &str) -> Option<usize> {
+    let mut in_quotes = false;
+    for (index, byte) in line.bytes().enumerate() {
+        if byte == b'"' {
+            in_quotes = !in_quotes;
+        } else if byte == b':' && !in_quotes {
+            return Some(index);
+        }
+    }
+    None
+}
+
 /// Rejects RRULE values calcard would silently narrow.
 /// calcard reads every numeric clause through a wider integer and casts it
 /// down: INTERVAL to u16 and COUNT to u32 (dropping zero, stripping the sign),
@@ -355,7 +369,7 @@ fn validate_calendar_envelope(text: &str) -> Result<(), IngestError> {
 /// exactly is rejected rather than rewritten.
 fn validate_rrule_numbers(text: &str) -> Result<(), IngestError> {
     for line in unfold_content_lines(text) {
-        let Some(colon) = line.find(':') else {
+        let Some(colon) = value_separator(&line) else {
             continue;
         };
         let (before, after) = line.split_at(colon);
