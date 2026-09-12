@@ -1122,17 +1122,20 @@ impl LocalStore {
                     .await?;
                 Ok(false)
             }
-            // A fetch is already outstanding for this object. Starting a second
-            // one for a duplicate event just races the first.
+            // A fetch is already outstanding for this object. A duplicate
+            // event (same sequence) does not need a second fetch. A newer
+            // event does: the outstanding fetch may have read an older head,
+            // and the revision check on persist keeps the two ordered.
             Some(StoredObjectRecord::PendingCreate(mut record)) => {
-                if created_seq >= record.event_seq {
+                let newer = created_seq > record.event_seq;
+                if newer {
                     record.event_seq = created_seq;
                     record.created_seq = created_seq;
-                    record.seen_generation = Some(generation);
-                    self.write_stored_object_record(&StoredObjectRecord::PendingCreate(record))
-                        .await?;
                 }
-                Ok(false)
+                record.seen_generation = Some(generation);
+                self.write_stored_object_record(&StoredObjectRecord::PendingCreate(record))
+                    .await?;
+                Ok(newer)
             }
             Some(StoredObjectRecord::Deleted(record)) => {
                 let pending = StoredObjectRecord::PendingCreate(StoredSyncMarkerRecord {
@@ -3684,6 +3687,45 @@ mod tests {
                 )
                 .await
                 .is_err()
+        );
+    }
+
+    /// A second event for an object whose first fetch is still outstanding
+    /// needs a new fetch only when it is newer: the outstanding fetch may have
+    /// read the head before that revision was published.
+    #[tokio::test]
+    async fn a_newer_event_for_a_pending_object_asks_for_another_fetch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let generation = store.start_generation().await;
+        let id = "66666666-6666-4666-8666-666666666666";
+
+        assert!(
+            store
+                .mark_pending_create(ObjectKind::Schedule, id, 10, generation)
+                .await
+                .expect("first create")
+        );
+        assert!(
+            !store
+                .mark_pending_create(ObjectKind::Schedule, id, 10, generation)
+                .await
+                .expect("duplicate create"),
+            "a duplicate event must not start a second fetch"
+        );
+        assert!(
+            store
+                .mark_pending_update(ObjectKind::Schedule, id, 11, generation)
+                .await
+                .expect("newer update"),
+            "a newer event must fetch again"
+        );
+        assert!(
+            !store
+                .mark_pending_update(ObjectKind::Schedule, id, 11, generation)
+                .await
+                .expect("repeated update")
         );
     }
 
