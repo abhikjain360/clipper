@@ -458,6 +458,43 @@ fn pre_filter_keeps_a_day_before_candidate_resolving_into_the_window() {
     assert_eq!(out[0].span.start(), utc(2026, 6, 11, 9, 30));
 }
 
+/// Candidates on or past a day after the window end never resolve into it, so
+/// they are skipped before resolving. An all-day series over Samoa's skipped
+/// December 30 with a window ending December 29 keeps the earlier days instead
+/// of failing on the skipped one.
+#[test]
+fn pre_filter_skips_a_day_after_candidates_without_resolving_them() {
+    let item = ScheduleItem {
+        id: ScheduleItemId::new(),
+        title: "apia".to_string(),
+        span: ScheduleSpan::AllDay {
+            start: NaiveDate::from_ymd_opt(2011, 12, 27).expect("valid date"),
+            days: NonZeroU32::new(1).expect("non-zero"),
+        },
+        recurrence: daily(),
+        reference: None,
+        alarm: None,
+    };
+    let out = expand(
+        &item,
+        &[],
+        &Expansion {
+            window: local_midnight_window(Tz::Pacific__Apia, (2011, 12, 27), (2011, 12, 29)),
+            observer: Tz::Pacific__Apia,
+        },
+    )
+    .expect("candidates after the window must not fail the expansion");
+    let ids: Vec<_> = out.iter().map(|o| o.recurrence_id).collect();
+    assert_eq!(
+        ids,
+        vec![
+            RecurrenceId::Date(NaiveDate::from_ymd_opt(2011, 12, 27).expect("valid date")),
+            RecurrenceId::Date(NaiveDate::from_ymd_opt(2011, 12, 28).expect("valid date")),
+        ],
+        "December 27 and 28 resolve before the skip; December 30 is never resolved"
+    );
+}
+
 /// Santiago and Havana spring forward at 00:00, so local midnight itself is the
 /// missing hour on the transition day. An all-day series must still produce
 /// every date: the midnight shifts forward and the day is 23 hours long.
