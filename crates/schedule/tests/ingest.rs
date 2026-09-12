@@ -608,3 +608,105 @@ END:VEVENT\r\nEND:VCALENDAR\r\n";
         "multiple RRULE properties cannot be resolved by UID alone"
     );
 }
+
+fn feed_with_rrule(rule: &str) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:rule-check@example.com\r\nDTSTART:20260901T090000Z\r\n\
+DTEND:20260901T100000Z\r\nRRULE:{rule}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+}
+
+fn assert_malformed_rrule(rule: &str, part: &str) {
+    let feed = feed_with_rrule(rule);
+    match parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()) {
+        Err(clipper_schedule::IngestError::Malformed(message)) => {
+            assert!(
+                message.contains(part),
+                "error {message:?} must name {part:?} for rule {rule:?}"
+            );
+        }
+        other => panic!("rule {rule:?} must be Malformed, got {other:?}"),
+    }
+}
+
+#[test]
+fn rewritten_interval_and_count_rules_are_rejected() {
+    assert_malformed_rrule("FREQ=DAILY;INTERVAL=0", "INTERVAL");
+    assert_malformed_rrule("FREQ=DAILY;COUNT=0", "COUNT");
+    assert_malformed_rrule("FREQ=DAILY;INTERVAL=-1", "INTERVAL");
+    assert_malformed_rrule("FREQ=DAILY;COUNT=-5", "COUNT");
+    assert_malformed_rrule("FREQ=DAILY;INTERVAL=+2", "INTERVAL");
+}
+
+#[test]
+fn a_folded_rrule_with_zero_interval_is_rejected() {
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:folded@example.com\r\nDTSTART:20260901T090000Z\r\n\
+DTEND:20260901T100000Z\r\nRRULE:FREQ=DAILY;INTERVAL=\r\n 0\r\n\
+END:VEVENT\r\nEND:VCALENDAR\r\n";
+    match parse_ics(feed, SourceId(uuid_fixture()), import_fixture()) {
+        Err(clipper_schedule::IngestError::Malformed(message)) => {
+            assert!(message.contains("INTERVAL"), "must name INTERVAL: {message:?}");
+        }
+        other => panic!("folded INTERVAL=0 must be Malformed, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_valid_interval_and_count_still_becomes_a_cadence() {
+    let feed = feed_with_rrule("FREQ=DAILY;INTERVAL=2;COUNT=5");
+    let outcome = parse_ics(&feed, SourceId(uuid_fixture()), import_fixture())
+        .expect("valid rule parses");
+    assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+    let event = outcome.events.into_iter().next().expect("one event");
+    let Recurrence::Every(cadence) = event.recurrence else {
+        panic!("expected a cadence, got {:?}", event.recurrence);
+    };
+    assert_eq!(cadence.interval.get(), 2);
+    assert_eq!(
+        cadence.end,
+        RecurrenceEnd::After(std::num::NonZeroU32::new(5).expect("non-zero"))
+    );
+}
+
+fn feed_with_exdates(count: usize) -> String {
+    let values = vec!["20260902T090000Z"; count].join(",");
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:many-overrides@example.com\r\nDTSTART:20260901T090000Z\r\n\
+DTEND:20260901T100000Z\r\nRRULE:FREQ=DAILY;COUNT=5\r\n\
+EXDATE:{values}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+}
+
+#[test]
+fn too_many_exdate_values_are_rejected() {
+    let feed = feed_with_exdates(10_001);
+    match parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()) {
+        Err(clipper_schedule::IngestError::LimitExceeded(message)) => {
+            assert!(message.contains("too many recurrence overrides"));
+        }
+        Ok(outcome) => {
+            assert!(outcome.events.is_empty(), "oversized event must not parse");
+            assert_eq!(outcome.skipped.len(), 1);
+            assert!(
+                outcome.skipped[0]
+                    .reason
+                    .contains("too many recurrence overrides"),
+                "must report the limit: {:?}",
+                outcome.skipped[0].reason
+            );
+        }
+        Err(other) => panic!("expected the override cap, got {other:?}"),
+    }
+}
+
+#[test]
+fn ten_thousand_exdate_values_parse() {
+    let feed = feed_with_exdates(10_000);
+    let outcome = parse_ics(&feed, SourceId(uuid_fixture()), import_fixture())
+        .expect("10,000 overrides fit the cap");
+    assert_eq!(outcome.events.len(), 1);
+    assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+}
