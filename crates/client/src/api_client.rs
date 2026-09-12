@@ -13,6 +13,11 @@ use zeroize::Zeroizing;
 const POSTCARD_ERROR_PREVIEW_BYTES: usize = 64;
 const MAX_POSTCARD_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 256 * 1024;
+/// How much server-supplied error text is kept once it has been cleaned.
+const MAX_SERVER_MESSAGE_BYTES: usize = 512;
+/// A challenge id is an opaque handle the client echoes back; a long one is a
+/// server sending something other than a handle.
+const MAX_CHALLENGE_ID_BYTES: usize = 64;
 
 /// Clipper API client.
 pub struct ApiClient {
@@ -61,6 +66,18 @@ impl ApiClient {
             base_url: parse_server_url(base_url)?,
             token: RwLock::new(None),
         })
+    }
+
+    fn deadline_get(&self, url: Url) -> reqwest::RequestBuilder {
+        with_deadline(self.http.get(url))
+    }
+
+    fn deadline_post(&self, url: Url) -> reqwest::RequestBuilder {
+        with_deadline(self.http.post(url))
+    }
+
+    fn deadline_delete(&self, url: Url) -> reqwest::RequestBuilder {
+        with_deadline(self.http.delete(url))
     }
 
     pub fn token(&self) -> Option<String> {
@@ -256,8 +273,7 @@ impl ApiClient {
             credential_request,
         };
         let challenge_resp = self
-            .http
-            .post(self.api_url(&["auth", "challenge"])?)
+            .deadline_post(self.api_url(&["auth", "challenge"])?)
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(&challenge_req)?)
             .send()
@@ -265,6 +281,15 @@ impl ApiClient {
 
         let challenge_resp: LoginChallengeResponse =
             Self::postcard_response(challenge_resp).await?;
+        // This device signs what the server puts in front of it, so refuse a
+        // challenge that is not the shape the protocol defines.
+        if challenge_resp.device_proof_challenge.len() != DEVICE_LOGIN_PROOF_CHALLENGE_BYTES
+            || challenge_resp.challenge_id.len() > MAX_CHALLENGE_ID_BYTES
+        {
+            return Err(ClientError::UnexpectedResponse(
+                "login challenge is not the expected shape".into(),
+            ));
+        }
         let finish = crypto::opaque_client_login_finish(
             &client_login_state,
             passphrase.as_bytes(),
@@ -318,8 +343,7 @@ impl ApiClient {
             platform: Some(device.platform.to_string()),
         };
         let resp = self
-            .http
-            .post(self.api_url(&["auth", "login"])?)
+            .deadline_post(self.api_url(&["auth", "login"])?)
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(&req)?)
             .send()
@@ -337,8 +361,7 @@ impl ApiClient {
 
     pub async fn websocket_ticket(&self) -> Result<WsTicketResponse, ClientError> {
         let resp = self
-            .http
-            .post(self.api_url(&["ws-ticket"])?)
+            .deadline_post(self.api_url(&["ws-ticket"])?)
             .header(
                 header::AUTHORIZATION,
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -378,8 +401,7 @@ impl ApiClient {
             registration_request,
         };
         let resp = self
-            .http
-            .post(self.api_url(&["auth", "register", "start"])?)
+            .deadline_post(self.api_url(&["auth", "register", "start"])?)
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(&start_req)?)
             .send()
@@ -422,8 +444,7 @@ impl ApiClient {
             platform: Some(device.platform.to_string()),
         };
         let resp = self
-            .http
-            .post(self.api_url(&["auth", "register", "finish"])?)
+            .deadline_post(self.api_url(&["auth", "register", "finish"])?)
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(&finish_req)?)
             .send()
@@ -445,8 +466,7 @@ impl ApiClient {
 
     pub async fn logout(&self) -> Result<(), ClientError> {
         let resp = self
-            .http
-            .post(self.api_url(&["auth", "logout"])?)
+            .deadline_post(self.api_url(&["auth", "logout"])?)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -467,8 +487,7 @@ impl ApiClient {
     /// attempt can fall back to the login screen.
     pub async fn validate_session(&self) -> Result<(), ClientError> {
         let resp = self
-            .http
-            .get(self.api_url(&["auth", "validate"])?)
+            .deadline_get(self.api_url(&["auth", "validate"])?)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -483,8 +502,7 @@ impl ApiClient {
 
     pub async fn list_devices(&self) -> Result<DeviceListResponse, ClientError> {
         let resp = self
-            .http
-            .get(self.api_url(&["auth", "devices"])?)
+            .deadline_get(self.api_url(&["auth", "devices"])?)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -498,8 +516,7 @@ impl ApiClient {
     pub async fn remove_device(&self, device_id: &str) -> Result<OkResponse, ClientError> {
         let url = self.api_url(&["auth", "devices", device_id])?;
         let resp = self
-            .http
-            .delete(url)
+            .deadline_delete(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -517,8 +534,7 @@ impl ApiClient {
         req: &ObjectInitRequest,
     ) -> Result<ObjectInitResponse, ClientError> {
         let resp = self
-            .http
-            .post(self.api_url(&["objects", "init"])?)
+            .deadline_post(self.api_url(&["objects", "init"])?)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -542,8 +558,7 @@ impl ApiClient {
         req: &ObjectReviseRequest,
     ) -> Result<ObjectInitResponse, ClientError> {
         let resp = self
-            .http
-            .post(self.api_url(&["objects", object_id, "revisions"])?)
+            .deadline_post(self.api_url(&["objects", object_id, "revisions"])?)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -563,9 +578,7 @@ impl ApiClient {
         data: Vec<u8>,
     ) -> Result<OkResponse, ClientError> {
         let url = self.api_url(&["objects", object_id, "payloads", payload_id])?;
-        let resp = self
-            .http
-            .put(url)
+        let resp = with_transfer_deadline(self.http.put(url))
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -585,8 +598,7 @@ impl ApiClient {
     ) -> Result<ObjectCompleteResponse, ClientError> {
         let url = self.api_url(&["objects", object_id, "complete"])?;
         let resp = self
-            .http
-            .post(url)
+            .deadline_post(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -623,8 +635,7 @@ impl ApiClient {
         }
 
         let resp = self
-            .http
-            .get(url)
+            .deadline_get(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -638,8 +649,7 @@ impl ApiClient {
     pub async fn get_object(&self, object_id: &str) -> Result<ObjectListItem, ClientError> {
         let url = self.api_url(&["objects", object_id])?;
         let resp = self
-            .http
-            .get(url)
+            .deadline_get(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -659,8 +669,7 @@ impl ApiClient {
     ) -> Result<ObjectListItem, ClientError> {
         let url = self.api_url(&["objects", object_id, "revisions", &revision.to_string()])?;
         let resp = self
-            .http
-            .get(url)
+            .deadline_get(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -686,9 +695,7 @@ impl ApiClient {
             "payloads",
             payload_id,
         ])?;
-        let resp = self
-            .http
-            .get(url)
+        let resp = with_transfer_deadline(self.http.get(url))
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -713,9 +720,7 @@ impl ApiClient {
     ) -> Result<Vec<u8>, ClientError> {
         let expected_ciphertext_size = expected_body_size(expected_ciphertext_size)?;
         let url = self.api_url(&["objects", object_id, "payloads", payload_id])?;
-        let resp = self
-            .http
-            .get(url)
+        let resp = with_transfer_deadline(self.http.get(url))
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -743,8 +748,7 @@ impl ApiClient {
     ) -> Result<ObjectDeleteResponse, ClientError> {
         let url = self.api_url(&["objects", object_id])?;
         let resp = self
-            .http
-            .delete(url)
+            .deadline_delete(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -765,8 +769,7 @@ impl ApiClient {
     /// A new doc starts untitled and empty, so no request body is sent.
     pub async fn create_collab_doc(&self) -> Result<CreateCollabDocResponse, ClientError> {
         let resp = self
-            .http
-            .post(self.api_url(&["collab-docs"])?)
+            .deadline_post(self.api_url(&["collab-docs"])?)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -782,8 +785,7 @@ impl ApiClient {
     pub async fn get_collab_doc_meta(&self, object_id: &str) -> Result<CollabDocMeta, ClientError> {
         let url = self.api_url(&["collab-docs", object_id, "meta"])?;
         let resp = self
-            .http
-            .get(url)
+            .deadline_get(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -799,8 +801,7 @@ impl ApiClient {
     /// is the reconciliation source for them.
     pub async fn list_collab_docs(&self) -> Result<CollabDocListResponse, ClientError> {
         let resp = self
-            .http
-            .get(self.api_url(&["collab-docs"])?)
+            .deadline_get(self.api_url(&["collab-docs"])?)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -819,9 +820,7 @@ impl ApiClient {
         title: &str,
     ) -> Result<CollabDocMeta, ClientError> {
         let url = self.api_url(&["collab-docs", object_id])?;
-        let resp = self
-            .http
-            .patch(url)
+        let resp = with_deadline(self.http.patch(url))
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -840,8 +839,7 @@ impl ApiClient {
     pub async fn delete_collab_doc(&self, object_id: &str) -> Result<(), ClientError> {
         let url = self.api_url(&["collab-docs", object_id])?;
         let resp = self
-            .http
-            .delete(url)
+            .deadline_delete(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -876,6 +874,43 @@ pub(crate) fn default_tls_config() -> rustls::ClientConfig {
 /// disabled so API requests only ever go to the configured host. The wasm
 /// builder does not expose these knobs; the browser enforces its own
 /// fetch/redirect policy there.
+#[cfg(not(target_family = "wasm"))]
+/// Deadline for the small calls: auth, metadata, listings. Payload transfers
+/// are left out — they are large by nature and keep the per-chunk read timeout
+/// instead, so a slow link does not cancel a download that is making progress.
+const METADATA_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The browser client cannot be given connect or read timeouts, so every
+/// request carries this deadline instead; without one a hung request never
+/// completes and the caller waits forever.
+#[cfg(target_family = "wasm")]
+const BROWSER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn with_deadline(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        request.timeout(METADATA_REQUEST_TIMEOUT)
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        request.timeout(BROWSER_REQUEST_TIMEOUT)
+    }
+}
+
+/// Payload transfers are large by nature. Native bounds them with the
+/// per-chunk read timeout, which does not cancel a download that is still
+/// making progress; the browser has no such option and takes the deadline.
+fn with_transfer_deadline(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        request
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        request.timeout(BROWSER_REQUEST_TIMEOUT)
+    }
+}
+
 #[cfg(not(target_family = "wasm"))]
 fn build_http_client() -> Result<Client, ClientError> {
     crate::ensure_crypto_provider();
@@ -963,6 +998,21 @@ fn body_preview(bytes: &[u8]) -> String {
         .join(" ")
 }
 
+/// Server text ends up in UI banners and in the log, so it is bounded and
+/// stripped of control characters first: the server is not trusted to send
+/// something a terminal or a text layout can be steered by.
+fn sanitized_server_message(message: &str) -> String {
+    let mut clean = String::with_capacity(message.len().min(MAX_SERVER_MESSAGE_BYTES));
+    for character in message.chars() {
+        let character = if character.is_control() { ' ' } else { character };
+        if clean.len() + character.len_utf8() > MAX_SERVER_MESSAGE_BYTES {
+            break;
+        }
+        clean.push(character);
+    }
+    clean
+}
+
 async fn api_error_from_response(resp: reqwest::Response) -> ClientError {
     let status = resp.status().as_u16();
     let content_type = resp
@@ -973,7 +1023,7 @@ async fn api_error_from_response(resp: reqwest::Response) -> ClientError {
     let bytes = read_response_body_limited(resp, MAX_ERROR_RESPONSE_BYTES)
         .await
         .unwrap_or_default();
-    let error = if is_json_content_type(content_type.as_deref()) {
+    let mut error = if is_json_content_type(content_type.as_deref()) {
         serde_json::from_slice::<ErrorResponse>(&bytes).unwrap_or_else(|_| {
             ErrorResponse::new(
                 ApiErrorCode::from_http_status(status),
@@ -986,6 +1036,7 @@ async fn api_error_from_response(resp: reqwest::Response) -> ClientError {
     } else {
         ErrorResponse::new(ApiErrorCode::from_http_status(status), body_preview(&bytes))
     };
+    error.message = sanitized_server_message(&error.message);
 
     ClientError::Api { status, error }
 }
@@ -1436,6 +1487,22 @@ mod tests {
         )));
         assert!(!is_postcard_content_type(Some("application/json")));
         assert!(!is_postcard_content_type(None));
+    }
+
+    #[test]
+    fn server_messages_are_stripped_and_clamped() {
+        // Control characters would otherwise reach a terminal log and a UI
+        // banner verbatim.
+        assert_eq!(
+            sanitized_server_message("bad\u{1b}[2Jrequest\n"),
+            "bad [2Jrequest ",
+        );
+        let long = sanitized_server_message(&"x".repeat(MAX_SERVER_MESSAGE_BYTES * 2));
+        assert_eq!(long.len(), MAX_SERVER_MESSAGE_BYTES);
+        // A clamp must not split a character in half.
+        let wide = sanitized_server_message(&"\u{00e9}".repeat(MAX_SERVER_MESSAGE_BYTES));
+        assert!(wide.len() <= MAX_SERVER_MESSAGE_BYTES);
+        assert!(wide.chars().all(|character| character == '\u{00e9}'));
     }
 
     #[test]

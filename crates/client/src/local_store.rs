@@ -1122,6 +1122,8 @@ impl LocalStore {
                     .await?;
                 Ok(false)
             }
+            // A fetch is already outstanding for this object. Starting a second
+            // one for a duplicate event just races the first.
             Some(StoredObjectRecord::PendingCreate(mut record)) => {
                 if created_seq >= record.event_seq {
                     record.event_seq = created_seq;
@@ -1130,7 +1132,7 @@ impl LocalStore {
                     self.write_stored_object_record(&StoredObjectRecord::PendingCreate(record))
                         .await?;
                 }
-                Ok(true)
+                Ok(false)
             }
             Some(StoredObjectRecord::Deleted(record)) => {
                 let pending = StoredObjectRecord::PendingCreate(StoredSyncMarkerRecord {
@@ -1231,7 +1233,7 @@ impl LocalStore {
                 anchor
             }),
         };
-        self.remove_payloads_for_object(object_id).await?;
+        self.discard_cached_payload(object_id).await?;
         self.remove_memory_record(object_id).await;
         let record = StoredObjectRecord::Deleted(StoredSyncMarkerRecord {
             id: object_id.to_string(),
@@ -1288,7 +1290,7 @@ impl LocalStore {
             head: local_head_from_present(present)?,
             kind: StoredRevisionAnchorKind::Absent,
         };
-        self.remove_payloads_for_object(&present.id).await?;
+        self.discard_cached_payload(&present.id).await?;
         self.remove_memory_record(&present.id).await;
         self.write_stored_object_record(&StoredObjectRecord::Deleted(StoredSyncMarkerRecord {
             id: present.id.clone(),
@@ -1336,7 +1338,7 @@ impl LocalStore {
         match &record {
             StoredObjectRecord::Present(_) => self.mark_record_absent(&record).await,
             StoredObjectRecord::PendingCreate(marker) if marker.revision_anchor.is_some() => {
-                self.remove_payloads_for_object(object_id).await?;
+                self.discard_cached_payload(object_id).await?;
                 self.remove_memory_record(object_id).await;
                 self.write_stored_object_record(&StoredObjectRecord::Deleted(marker.clone()))
                     .await
@@ -1961,6 +1963,16 @@ impl LocalStore {
         .await
     }
 
+    /// Drop the cached payload of an object that is becoming a marker.
+    ///
+    /// Nothing to do here: the marker write deletes the object row in one
+    /// transaction and the payload row cascades with it. A separate delete
+    /// would be a second transaction for work already done.
+    async fn discard_cached_payload(&self, _object_id: &str) -> Result<(), LocalStoreError> {
+        Ok(())
+    }
+
+    #[cfg(test)]
     async fn remove_payloads_for_object(&self, object_id: &str) -> Result<(), LocalStoreError> {
         self.with_database(|connection| sqlite::delete_payload(connection, object_id))
             .await
@@ -2205,6 +2217,12 @@ impl LocalStore {
                 .then(|| id.clone())
             })
             .collect())
+    }
+
+    /// The browser store has no cascade, so a marker write leaves the payload
+    /// behind unless it is removed here.
+    async fn discard_cached_payload(&self, object_id: &str) -> Result<(), LocalStoreError> {
+        self.remove_payloads_for_object(object_id).await
     }
 
     /// Removal is by id, never by kind. A schedule object caches a payload
@@ -2452,8 +2470,9 @@ fn decrypt_file_record(
         encrypted
             .payloads
             .iter()
-            .map(|payload| payload.ciphertext_size.max(0))
-            .sum()
+            .fold(0_i64, |total, payload| {
+                total.saturating_add(payload.ciphertext_size.max(0))
+            })
     });
     let local_record = LocalObjectRecord {
         id: record.id.clone(),
@@ -2605,10 +2624,7 @@ fn is_text_mime_type(mime_type: &str) -> bool {
     mime_type
         .split(';')
         .next()
-        .map(|base| {
-            base.trim().eq_ignore_ascii_case("text/plain") || base.trim().starts_with("text/")
-        })
-        .unwrap_or(false)
+        .is_some_and(|base| base.trim().starts_with("text/"))
 }
 
 fn validate_item_id(id: &str) -> Result<String, LocalStoreError> {
