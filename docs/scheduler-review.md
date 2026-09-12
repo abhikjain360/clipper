@@ -176,6 +176,85 @@ check reference-only serialization, missing resolution and ambiguous input.
 Browser wasm build/check, web checks and 13 tests, and mobile checks pass.
 Manual browser reload/redownload and installed Android QA remain outstanding.
 
+## Pre-review polish (2026-09-12)
+
+Before the owner's Rust review, an AI pre-review pass ran over the branch: five
+reviewers over different model families (envelope and anchors, schedule
+domain, server routes, client sync, calendar ingest), two adversarial test
+suites (schedule crate, client store), a parser fuzzer over the ICS ingest, a
+boundary check across the IPC, wasm and UniFFI contracts, and an inventory of
+every open item in the security documents. Everything that needed no product
+decision was fixed on the branch in sixteen commits after `830cd60`; the
+findings and their status are in
+[scheduler-rust-review-guide.md](scheduler-rust-review-guide.md#appendix-a-pre-review-findings-and-status),
+the security items in
+[security-inventory-2026-09-12.md](security-inventory-2026-09-12.md), and the
+decisions that remain in the guide's Appendix B and in
+[scheduler-backlog.md](scheduler-backlog.md).
+
+The most consequential fixes: the expansion engine now hands the recurrence
+library wall-clock times and resolves every candidate through this crate's DST
+policy (a series starting inside a gap expands, midnight gaps no longer drop a
+day, floating identities are observer independent, and imported all-day rules
+with a DATE `UNTIL` expand); three client anchor gaps are closed (a collab
+listing, a delayed tombstone response, or a direct file download could lower or
+erase an accepted revision); a stale snapshot page no longer aborts
+reconciliation; metadata ciphertext counts toward the storage quota; a
+clipboard revise can no longer strand a pending revision; signatures are domain
+separated and the device identity record is authenticated.
+
+Two consequences for existing development data: objects signed before the
+domain-separation commit no longer verify, and device identity records at
+version 2 are rejected. Restart the development server on the new build and
+log in again; recreate any test objects.
+
+Validation on the polished branch: workspace Clippy with warnings denied; 420
+workspace tests (140 in the schedule crate, 84 in the client, 104 in the
+server) plus the live two-device integration test; wasm, web and mobile checks;
+entity regeneration as a no-op; unused-dependency and dependency-audit checks
+with the same 13 filtered advisories; formatting with the pinned toolchains.
+Interactive QA on the polished build is recorded in the next section.
+
+## QA of the polished build (2026-09-12)
+
+A fresh sandbox was used because objects and device records from the earlier
+sandbox no longer verify: server data in `data/scheduler-qa-2`, API on
+`127.0.0.1:18790`, wasm web client on `127.0.0.1:53890`, account `polish-qa`
+(passphrase and consumed access key beside the data directory). Everything
+below ran against the branch head after the formatting commit.
+
+Web, Chrome driven by Playwright with the browser zone set to Europe/Berlin:
+registration with the access key; login; the Schedule tab; a daily floating
+07:00 block created through the composer and shown on the grid for the two
+remaining days of the week and in the event list as "Every day · 07:00 for 30
+min (Europe/Berlin)"; clicking the block started its timer, the running timer
+survived a reload and a new login, Stop closed it, and the grid then carried a
+"QA gym, actual" record with the pinned plan title; an untracked session added
+an "Unplanned, actual" record; logout returned to the login screen. Zero
+console errors or warnings across every run.
+
+Android, release APK on the API 36 emulator (Pixel_10): the previous session
+was rejected as expected and the login screen appeared; login against the
+sandbox through `adb reverse`; the Alarms tab reported exact scheduling,
+notifications and full-screen display permitted and "1 upcoming alarm in the
+mirrored plan" for an alarm-enabled block created from the web client three
+minutes earlier; at 16:17 local the native ring screen was the resumed
+activity, the ringing foreground service held its notification, the label read
+"QA alarm", and Dismiss stopped the service and closed the screen.
+
+Not exercised on this build: the desktop Tauri bundle. It was built and
+started its bundled daemon, but a freshly signed bundle raises a macOS keychain
+prompt for the IPC secret that only the owner can answer, so the logged-in
+desktop flows, calendar feed import and refresh (native only) and the
+two-client live edit checks remain owner QA. The engine changes are covered by
+the schedule crate's adversarial and behaviour suites and the live integration
+test rather than by a browser flow, since the composer's date picker was not
+driven for a March 2026 DST date.
+
+To stop the sandbox afterwards: kill the `clipper-server` process whose data
+directory is `data/scheduler-qa-2`, the vite process on port 53890 and the
+Python file server on port 8089.
+
 ## Validation
 
 The revision-aware change passes the Rust workspace tests (including 73 domain
