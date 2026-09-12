@@ -142,6 +142,9 @@ pub struct SyncEngine {
     import_rules: Mutex<std::collections::VecDeque<calendar_import::CachedImportRules>>,
     schedule_history: Mutex<HashMap<(u64, clipper_schedule::ObjectRevisionRef), ScheduleRecord>>,
     history_epoch: std::sync::atomic::AtomicU64,
+    /// The stamp of the newest view published to `state`, so an older view
+    /// arriving late is dropped rather than shown.
+    published_stamp: std::sync::atomic::AtomicU64,
 }
 
 /// Secrets a browser client needs to resume a session after a page reload
@@ -186,6 +189,7 @@ impl SyncEngine {
             calendar_write: Mutex::new(()),
             schedule_history: Mutex::new(HashMap::new()),
             history_epoch: std::sync::atomic::AtomicU64::new(0),
+            published_stamp: std::sync::atomic::AtomicU64::new(0),
             import_rules: Mutex::new(std::collections::VecDeque::new()),
         }))
     }
@@ -455,6 +459,10 @@ impl SyncEngine {
             self.schedule_history.lock().await.clear();
             self.import_rules.lock().await.clear();
             self.local_store.clear_memory().await;
+            // Fence anything still in flight from the previous session: the
+            // database below is a different profile's, and a straggling write
+            // that still passed the old generation would land in it.
+            self.local_store.start_generation().await;
             self.local_store
                 .set_profile(profile_id_from_encryption_key(&encryption_key));
             *active_key = Some(encryption_key);
@@ -553,6 +561,10 @@ impl SyncEngine {
         *self.device_identity_wrapping_key.write().await = None;
         self.local_store.clear_memory().await;
         self.schedule_history.lock().await.clear();
+        // Fence in-flight sync writes. Without this a straggling snapshot or
+        // live event still passes the generation check and writes into
+        // whichever profile database the next login opens.
+        self.local_store.start_generation().await;
         {
             let mut state = self.state.write().await;
             *state = AppState::default();
@@ -613,6 +625,7 @@ impl SyncEngine {
             *self.device_identity_wrapping_key.write().await = None;
             self.local_store.clear_memory().await;
             self.schedule_history.lock().await.clear();
+            self.local_store.start_generation().await;
             *self.state.write().await = AppState::default();
             self.bump_version();
             info!("Removed the current device; local session cleared");
@@ -1569,10 +1582,8 @@ impl SyncEngine {
         };
 
         let mut stopped = *actual;
-        stopped.span = clipper_schedule::ActualSpan::Complete(
-            clipper_schedule::TimeRange::new(started, chrono::Utc::now())
-                .map_err(|error| ClientError::InvalidArgument(error.to_string()))?,
-        );
+        stopped.span =
+            clipper_schedule::ActualSpan::Complete(stopped_span(started, chrono::Utc::now())?);
         self.write_schedule_record(
             object_id,
             ScheduleRecord::Actual(Box::new(stopped)),
@@ -2079,7 +2090,10 @@ impl SyncEngine {
                         }
                     }
                     Err(error) => {
-                        warn!(id = %item.id, "Failed to decrypt schedule object: {}", error)
+                        if let Err(error) = self.keep_held_revision(&item, generation, error).await
+                        {
+                            warn!(id = %item.id, "Failed to decrypt schedule object: {}", error);
+                        }
                     }
                 }
             }
@@ -2266,6 +2280,17 @@ impl SyncEngine {
         }
         {
             let mut state = self.state.write().await;
+            // Nothing to show without a session, and a straggling snapshot from
+            // the previous one must not repopulate the screen after logout.
+            if state.session.is_none() {
+                return;
+            }
+            // Views are built under the store lock but published without one,
+            // so an older view can arrive after a newer one. Drop it.
+            if visible.stamp <= self.published_stamp.load(Ordering::SeqCst) {
+                return;
+            }
+            self.published_stamp.store(visible.stamp, Ordering::SeqCst);
             state.clipboard_items = visible.clipboard_items;
             state.files = visible.files;
             state.collab_docs = visible.collab_docs;
@@ -2422,7 +2447,14 @@ impl SyncEngine {
                 .await?;
             validate_snapshot_page(&page, after, stream_start_seq)?;
             for item in page.items {
-                self.check_revision_advance(&item).await?;
+                if let Err(error) = verify_object_list_item_envelope(&item) {
+                    warn!(id = %item.id, "Rejected file object envelope: {}", error);
+                    continue;
+                }
+                if let Err(error) = self.check_revision_advance(&item).await {
+                    self.keep_held_revision(&item, generation, error).await?;
+                    continue;
+                }
                 match decrypt_file_object_item(&item, &encryption_key) {
                     Ok(file) => {
                         self.persist_file_snapshot_item(
@@ -2523,19 +2555,25 @@ impl SyncEngine {
                         .decrypt_clipboard_object_item_with_api(api, &item, encryption_key)
                         .await
                     {
-                        Ok(object) => Some((object, created_seq)),
-                        Err(e) => {
-                            warn!(id = %item.id, "Failed to load clipboard object: {}", e);
-                            None
-                        }
+                        Ok(object) => Ok((object, created_seq)),
+                        Err(error) => Err((item, error)),
                     }
                 })
-                .buffer_unordered(CLIPBOARD_HYDRATION_CONCURRENCY)
-                .filter_map(std::future::ready);
+                .buffer_unordered(CLIPBOARD_HYDRATION_CONCURRENCY);
 
-            while let Some((object, created_seq)) = objects.next().await {
-                self.persist_clipboard_snapshot_item(&object, created_seq, generation)
-                    .await?;
+            while let Some(loaded) = objects.next().await {
+                match loaded {
+                    Ok((object, created_seq)) => {
+                        self.persist_clipboard_snapshot_item(&object, created_seq, generation)
+                            .await?;
+                    }
+                    Err((item, error)) => {
+                        if let Err(error) = self.keep_held_revision(&item, generation, error).await
+                        {
+                            warn!(id = %item.id, "Failed to load clipboard object: {}", error);
+                        }
+                    }
+                }
             }
 
             match page.next_after {
@@ -2556,6 +2594,32 @@ impl SyncEngine {
         {
             self.publish_visible_state(visible).await;
         }
+        Ok(())
+    }
+
+    /// Account for a snapshot item this pass will not install.
+    ///
+    /// A refused revision is an ordinary interleave: the page was built before
+    /// a live event or this device's own write advanced the head. The object is
+    /// still on the server, so it is marked as seen and the sweep leaves it
+    /// alone, and the pass carries on. Any other error comes back unchanged.
+    async fn keep_held_revision(
+        &self,
+        item: &ObjectListItem,
+        generation: u64,
+        error: ClientError,
+    ) -> Result<(), ClientError> {
+        let ClientError::RevisionRejected(reason) = &error else {
+            return Err(error);
+        };
+        warn!(
+            id = %item.id,
+            served_revision = item.revision,
+            "Kept the revision this device holds: {reason}",
+        );
+        self.local_store
+            .mark_snapshot_seen(&item.id.to_string(), generation)
+            .await?;
         Ok(())
     }
 
@@ -2860,14 +2924,20 @@ impl SyncEngine {
         let encryption_key = self.current_encryption_key().await?;
         match kind {
             ObjectKind::Clipboard => {
-                let object = self
+                let object = match self
                     .decrypt_clipboard_object_item_with_api(api, &item, &encryption_key)
-                    .await?;
+                    .await
+                {
+                    Ok(object) => object,
+                    Err(error) => return self.keep_held_revision(&item, generation, error).await,
+                };
                 self.persist_clipboard_snapshot_item(&object, item.created_seq, generation)
                     .await?;
             }
             ObjectKind::File => {
-                self.check_revision_advance(&item).await?;
+                if let Err(error) = self.check_revision_advance(&item).await {
+                    return self.keep_held_revision(&item, generation, error).await;
+                }
                 let file = decrypt_file_object_item(&item, &encryption_key)?;
                 self.persist_file_snapshot_item(
                     &file,
@@ -2878,9 +2948,13 @@ impl SyncEngine {
                 .await?;
             }
             ObjectKind::Schedule => {
-                let (record, encrypted) = self
+                let (record, encrypted) = match self
                     .decrypt_schedule_object_item(api, &item, &encryption_key)
-                    .await?;
+                    .await
+                {
+                    Ok(decrypted) => decrypted,
+                    Err(error) => return self.keep_held_revision(&item, generation, error).await,
+                };
                 if let Some(visible) = self
                     .local_store
                     .persist_snapshot_schedule_present_encrypted(
@@ -3850,6 +3924,21 @@ fn verify_payload_hash(
     Ok(())
 }
 
+/// The span a stopped timer records.
+///
+/// Clamped to at least one second, because a `TimeRange` must be non-empty and
+/// the clock can be behind the start: a device whose time moved backwards, or a
+/// timer started on a device running ahead, would otherwise be impossible to
+/// stop until wall-clock time caught up. Stopping clamps
+/// (`docs/schedule-model-review.md`).
+fn stopped_span(
+    started: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<TimeRange, ClientError> {
+    let end = now.max(started + chrono::Duration::seconds(1));
+    TimeRange::new(started, end).map_err(|error| ClientError::InvalidArgument(error.to_string()))
+}
+
 fn object_envelope_error(message: impl Into<String>) -> ClientError {
     ClientError::Crypto(crypto::CryptoError::Signature(message.into()))
 }
@@ -4248,6 +4337,93 @@ mod tests {
         }
         verify_object_list_item_envelope(&item)
             .expect_err("a tampered signature with a key present must be rejected");
+    }
+
+    fn visible_state(stamp: u64, text: &str) -> LocalVisibleState {
+        LocalVisibleState {
+            stamp,
+            clipboard_items: vec![DecryptedClipboardItem {
+                id: "11111111-1111-4111-8111-111111111111".into(),
+                text: text.into(),
+                mime_type: "text/plain".into(),
+                payload_size: text.len() as i64,
+                created_at: "2026-01-22T00:00:00+00:00".into(),
+                source_device_id: "22222222-2222-4222-8222-222222222222".into(),
+            }],
+            files: Vec::new(),
+            collab_docs: Vec::new(),
+            schedule_items: Vec::new(),
+            calendar_sources: Vec::new(),
+            running_actual: None,
+            running_plan: None,
+        }
+    }
+
+    async fn open_session(engine: &Arc<SyncEngine>) {
+        engine.state.write().await.session = Some(AuthenticatedSession {
+            username: "tester".into(),
+            device_id: "22222222-2222-4222-8222-222222222222".into(),
+            device_name: "test".into(),
+            server_url: "http://127.0.0.1:8787".into(),
+        });
+    }
+
+    #[test]
+    fn stopping_a_timer_clamps_a_clock_that_runs_behind() {
+        let now = chrono::Utc::now();
+        // A timer started five minutes in the future by a device running ahead.
+        let span = stopped_span(now + chrono::Duration::minutes(5), now).expect("clamped span");
+        assert_eq!(span.start(), now + chrono::Duration::minutes(5));
+        assert_eq!(span.end() - span.start(), chrono::Duration::seconds(1));
+        // An ordinary stop still ends now.
+        let span = stopped_span(now - chrono::Duration::minutes(5), now).expect("span");
+        assert_eq!(span.end(), now);
+    }
+
+    #[tokio::test]
+    async fn logout_fences_sync_writes_that_are_still_in_flight() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", temp.path());
+        engine.local_store.set_profile("profile-a".into());
+        open_session(&engine).await;
+        let generation = engine.local_store.start_generation().await;
+
+        engine.logout().await.expect("logout clears local state");
+
+        assert!(
+            !engine
+                .local_store
+                .mark_pending_create(
+                    ObjectKind::Clipboard,
+                    "33333333-3333-4333-8333-333333333333",
+                    1,
+                    generation,
+                )
+                .await
+                .expect("marker"),
+            "a write from the logged-out session must not land",
+        );
+        engine.publish_visible_state(visible_state(1, "stale")).await;
+        assert!(
+            engine.get_state().await.clipboard_items.is_empty(),
+            "a straggling snapshot must not repopulate the screen",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_view_does_not_replace_a_newer_one() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", temp.path());
+        open_session(&engine).await;
+
+        engine.publish_visible_state(visible_state(2, "newer")).await;
+        engine.publish_visible_state(visible_state(1, "older")).await;
+
+        let state = engine.get_state().await;
+        assert_eq!(
+            state.clipboard_items.first().map(|item| item.text.clone()),
+            Some("newer".to_string()),
+        );
     }
 
     #[tokio::test]
