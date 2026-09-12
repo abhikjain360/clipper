@@ -31,6 +31,9 @@ use crate::{
 const MAX_ICS_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COMPONENTS: usize = 50_000;
 const MAX_PROPERTIES: usize = 500_000;
+/// Every component costs a BEGIN and an END line on top of its properties, so
+/// a feed within both caps holds at most this many lines.
+const MAX_CONTENT_LINES: usize = MAX_PROPERTIES + 2 * MAX_COMPONENTS;
 const MAX_OVERRIDES_PER_EVENT: usize = 10_000;
 
 /// Identifies a calendar source.
@@ -293,6 +296,12 @@ fn parse_calendar(text: &str) -> Result<calcard::icalendar::ICalendar, IngestErr
     use calcard::icalendar::ICalendar;
 
     validate_calendar_envelope(text)?;
+    // Counted before parsing. The component and property caps below only apply
+    // once the parser has allocated the whole tree, which for 8 MiB of
+    // two-byte properties is hundreds of megabytes.
+    if text.lines().count() > MAX_CONTENT_LINES {
+        return Err(IngestError::LimitExceeded("too many calendar lines"));
+    }
     validate_rrule_counts(text)?;
     let calendar =
         ICalendar::parse(text).map_err(|error| IngestError::Malformed(format!("{error:?}")))?;
@@ -617,29 +626,13 @@ fn recurrence_overrides(
 ) -> Result<Vec<OccurrenceOverrideData>, IngestError> {
     use std::collections::BTreeMap;
 
-    // Count values before building FeedTimes, so one huge EXDATE line
-    // cannot allocate hundreds of thousands of overrides first.
-    let rdate_count = recurrence_values_count(master, "RDATE");
-    if rdate_count > MAX_OVERRIDES_PER_EVENT {
-        return Err(IngestError::LimitExceeded(
-            "too many recurrence overrides for one event",
-        ));
-    }
-    let mut total = rdate_count;
-    total = total
-        .checked_add(overrides.len())
-        .filter(|total| *total <= MAX_OVERRIDES_PER_EVENT)
-        .ok_or(IngestError::LimitExceeded(
-            "too many recurrence overrides for one event",
-        ))?;
-    let exdate_count = recurrence_values_count(master, "EXDATE");
-    total = total
-        .checked_add(exdate_count)
-        .filter(|total| *total <= MAX_OVERRIDES_PER_EVENT)
-        .ok_or(IngestError::LimitExceeded(
-            "too many recurrence overrides for one event",
-        ))?;
-    let _ = total;
+    // Counted before building FeedTimes, so one huge EXDATE line cannot
+    // allocate hundreds of thousands of overrides first.
+    override_count_within_limit(
+        recurrence_values_count(master, "RDATE"),
+        overrides.len(),
+        recurrence_values_count(master, "EXDATE"),
+    )?;
 
     let item = ScheduleItemId(event_id);
     let mut by_recurrence_id = BTreeMap::new();
@@ -753,6 +746,27 @@ fn span_at(master_span: &ScheduleSpan, time: &FeedTime) -> Result<ScheduleSpan, 
             days: *days,
         }),
         _ => Err(IngestError::MismatchedDateType),
+    }
+}
+
+/// Accepts an event whose RDATE values, detached instances and EXDATE values
+/// together stay within [`MAX_OVERRIDES_PER_EVENT`]. A sum that overflows is
+/// over the cap.
+fn override_count_within_limit(
+    rdate: usize,
+    detached: usize,
+    exdate: usize,
+) -> Result<(), IngestError> {
+    let within = rdate
+        .checked_add(detached)
+        .and_then(|total| total.checked_add(exdate))
+        .is_some_and(|total| total <= MAX_OVERRIDES_PER_EVENT);
+    if within {
+        Ok(())
+    } else {
+        Err(IngestError::LimitExceeded(
+            "too many recurrence overrides for one event",
+        ))
     }
 }
 

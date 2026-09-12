@@ -286,9 +286,8 @@ where
 
 /// Combine per-user payload and metadata sums into revision costs.
 ///
-/// Every user appears in at most one of the two inputs: a revision without
-/// payloads has no payload row, and a user with no revisions is absent from
-/// both. Either side alone still costs what it holds.
+/// Adds the two totals per user. A user missing from one side counts zero
+/// there, so a user in only one input still costs what that side holds.
 fn merge_usage(
     payload_bytes_by_user: Vec<(Uuid, Option<i64>)>,
     meta_bytes_by_user: Vec<(Uuid, Option<i64>)>,
