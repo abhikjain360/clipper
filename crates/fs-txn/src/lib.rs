@@ -53,19 +53,15 @@ impl FsTransaction {
     /// and the pre-existing file is left untouched and untracked.
     pub async fn write_new(&mut self, path: impl Into<PathBuf>, data: &[u8]) -> io::Result<()> {
         let path = path.into();
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .await?;
-        // Own it from here: record before chmod/write so any partial setup rolls back.
-        self.paths.push(path);
+        // Set the private mode at open time so the file is never briefly
+        // world-readable in a create-then-chmod gap.
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))
-                .await?;
-        }
+        options.mode(PRIVATE_FILE_MODE);
+        let mut file = options.open(&path).await?;
+        // Own it from here: record before write so any partial setup rolls back.
+        self.paths.push(path);
         file.write_all(data).await?;
         file.flush().await
     }
