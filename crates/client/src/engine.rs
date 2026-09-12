@@ -31,7 +31,8 @@ use crate::{
     },
     local_store::{
         DeviceSigningIdentity, EncryptedInlineObject, EncryptedObject, LocalHead, LocalStore,
-        LocalVisibleState, StoredObjectIdentity,
+        LocalVisibleState, StoredObjectIdentity, clipboard_display_text, is_text_mime_type,
+        normalized_clipboard_mime_type, top_level_mime_type, verify_payload_ciphertext,
     },
     schedule::{
         OccurrenceLabel, ScheduleRecord, actual_view, decrypt_schedule_meta,
@@ -3904,17 +3905,14 @@ fn verify_object_list_item_envelope(item: &ObjectListItem) -> Result<(), ClientE
     }
 }
 
+/// The store owns the check; this keeps the envelope error type callers here
+/// already handle.
 fn verify_payload_hash(
     payload: &ObjectPayloadDescriptor,
     ciphertext: &[u8],
 ) -> Result<(), ClientError> {
-    let payload_hash = crypto::sha256(ciphertext);
-    if payload.sha256_ciphertext.as_slice() != payload_hash.as_slice() {
-        return Err(object_envelope_error(
-            "downloaded payload hash does not match object envelope",
-        ));
-    }
-    Ok(())
+    verify_payload_ciphertext(payload, ciphertext)
+        .map_err(|error| object_envelope_error(error.to_string()))
 }
 
 /// The span a stopped timer records.
@@ -4001,18 +3999,6 @@ fn collab_created_seq(created_at: &str) -> i64 {
         })
 }
 
-fn clipboard_display_text(mime_type: &str, data: &[u8]) -> String {
-    if is_text_mime_type(mime_type) {
-        String::from_utf8_lossy(data).into_owned()
-    } else {
-        clipboard_display_label(mime_type, data.len() as i64)
-    }
-}
-
-fn clipboard_display_label(mime_type: &str, size: i64) -> String {
-    format!("{mime_type} clipboard payload ({size} bytes)")
-}
-
 fn clipboard_payload_digest(mime_type: &str, data: &[u8]) -> [u8; 32] {
     let mut bytes = Vec::with_capacity(mime_type.len() + 1 + data.len());
     bytes.extend_from_slice(normalized_clipboard_mime_type(mime_type).as_bytes());
@@ -4027,27 +4013,6 @@ fn is_supported_clipboard_mime_type(mime_type: &str) -> bool {
 
 fn same_mime_type(a: &str, b: &str) -> bool {
     normalized_clipboard_mime_type(a) == normalized_clipboard_mime_type(b)
-}
-
-fn is_text_mime_type(mime_type: &str) -> bool {
-    top_level_mime_type(mime_type) == "text"
-}
-
-fn normalized_clipboard_mime_type(mime_type: &str) -> String {
-    mime_type
-        .split(';')
-        .next()
-        .unwrap_or(mime_type)
-        .trim()
-        .to_ascii_lowercase()
-}
-
-fn top_level_mime_type(mime_type: &str) -> String {
-    normalized_clipboard_mime_type(mime_type)
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .to_string()
 }
 
 fn is_not_found_error(error: &ClientError) -> bool {
@@ -4501,5 +4466,205 @@ mod tests {
                 .await,
             Err(ClientError::NotAuthenticated),
         ));
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod adversarial_history_tests {
+    use super::*;
+
+    const HISTORY_TEST_KEY: [u8; 32] = [1; 32];
+    const HISTORY_TEST_DEVICE_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+    fn source_record(name: &str) -> ScheduleRecord {
+        ScheduleRecord::Source(Box::new(CalendarSource {
+            id: SourceId::new(),
+            name: name.into(),
+            kind: SourceKind::Ics {
+                url: "https://example.invalid/calendar".into(),
+            },
+            enabled: true,
+            active_import: None,
+            pending_import: None,
+            retired_imports: Vec::new(),
+        }))
+    }
+
+    fn encrypted_schedule_object(
+        record: &ScheduleRecord,
+        object_id: &str,
+        revision: u64,
+        parent_hash: Option<[u8; crypto::SHA256_BYTES]>,
+    ) -> EncryptedInlineObject {
+        let object_id_typed: ObjectId = object_id.parse().expect("object id");
+        let device_id: DeviceId = HISTORY_TEST_DEVICE_ID.parse().expect("device id");
+        let payload_id: ObjectPayloadId = uuid::Uuid::now_v7().into();
+        let aad_body = ObjectEnvelopeBody {
+            object_id: object_id_typed,
+            object_type: ObjectKind::Schedule,
+            envelope_version: crypto::OBJECT_ENVELOPE_VERSION,
+            revision,
+            parent_hash,
+            source_device_id: device_id,
+            created_at: "2026-09-12T00:00:00Z".into(),
+            operation: if revision == 1 {
+                ObjectEnvelopeOperation::Create
+            } else {
+                ObjectEnvelopeOperation::Revise
+            },
+            meta_nonce: Vec::new(),
+            sha256_meta_ciphertext: Vec::new(),
+            payloads: vec![ObjectEnvelopePayload {
+                id: payload_id,
+                nonce: Vec::new(),
+                ciphertext_size: 0,
+                sha256_ciphertext: Vec::new(),
+            }],
+        };
+        let (meta_nonce, meta_ciphertext) =
+            encrypt_schedule_meta(&record.meta(), &HISTORY_TEST_KEY, &aad_body)
+                .expect("meta encrypt");
+        let (payload_nonce, payload_ciphertext) =
+            encrypt_schedule_payload(record, &HISTORY_TEST_KEY, &aad_body, payload_id)
+                .expect("payload encrypt");
+        let envelope_payload = ObjectEnvelopePayload {
+            id: payload_id,
+            nonce: payload_nonce.clone(),
+            ciphertext_size: payload_ciphertext.len() as i64,
+            sha256_ciphertext: crypto::sha256(&payload_ciphertext).to_vec(),
+        };
+        let body = ObjectEnvelopeBody {
+            meta_nonce: meta_nonce.clone(),
+            sha256_meta_ciphertext: crypto::sha256(&meta_ciphertext).to_vec(),
+            payloads: vec![envelope_payload],
+            ..aad_body
+        };
+        EncryptedInlineObject {
+            object: EncryptedObject {
+                meta_nonce,
+                meta_ciphertext,
+                payloads: vec![ObjectPayloadDescriptor {
+                    id: payload_id,
+                    nonce: payload_nonce,
+                    ciphertext_size: payload_ciphertext.len() as i64,
+                    sha256_ciphertext: crypto::sha256(&payload_ciphertext).to_vec(),
+                }],
+                created_at: "2026-09-12T00:00:00Z".into(),
+                source_device_id: HISTORY_TEST_DEVICE_ID.into(),
+                envelope: ObjectEnvelope {
+                    body,
+                    signature: vec![0; crypto::OBJECT_ENVELOPE_SIGNATURE_BYTES],
+                },
+            },
+            payload_ciphertext,
+        }
+    }
+
+    /// The 64-entry cap drops everything already cached when a new read lands.
+    /// Stale-era entries must not survive that eviction, and the new read must
+    /// still be served.
+    #[tokio::test]
+    async fn history_cache_eviction_clears_stale_entries_without_losing_the_new_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", dir.path());
+        *engine.encryption_key.write().await = Some(Zeroizing::new(HISTORY_TEST_KEY));
+        let epoch = engine.history_epoch.load(Ordering::SeqCst);
+
+        // Fill the cache to its documented bound with entries of this session.
+        for i in 0..64u8 {
+            let pin = clipper_schedule::ObjectRevisionRef {
+                object_id: uuid::Uuid::new_v4().into(),
+                revision: 1,
+                body_hash: [i; 32],
+            };
+            engine
+                .schedule_history
+                .lock()
+                .await
+                .insert((epoch, pin), source_record("cached"));
+        }
+
+        // One real object whose local head matches the pin, so the read is
+        // served locally and repopulates the cache (no network on 127.0.0.1:1).
+        let record = source_record("current");
+        let object_id = uuid::Uuid::new_v4().to_string();
+        let encrypted = encrypted_schedule_object(&record, &object_id, 1, None);
+        engine.local_store.set_profile("profile-a".into());
+        engine
+            .local_store
+            .persist_local_schedule_present_encrypted(
+                StoredObjectIdentity {
+                    object_id: &object_id,
+                    created_at: "2026-09-12T00:00:00Z",
+                    source_device_id: HISTORY_TEST_DEVICE_ID,
+                },
+                record,
+                &encrypted,
+                1,
+                1,
+                10,
+            )
+            .await
+            .expect("persist schedule object");
+        let head = engine
+            .local_store
+            .local_head(&object_id)
+            .await
+            .expect("local head")
+            .expect("a head for the persisted object");
+        let pin = clipper_schedule::ObjectRevisionRef {
+            object_id: object_id.parse().expect("object id"),
+            revision: head.revision,
+            body_hash: head.parent_hash,
+        };
+
+        let loaded = engine.schedule_revision(pin).await.expect("cached read");
+        assert_eq!(loaded.as_source().expect("a source").name, "current");
+
+        let cache = engine.schedule_history.lock().await;
+        assert_eq!(
+            cache.len(),
+            1,
+            "eviction at the cap must drop the stale entries, not keep 64"
+        );
+        assert!(
+            cache.contains_key(&(epoch, pin)),
+            "the freshly read entry must be the one that survived"
+        );
+    }
+
+    /// Logout must clear the historical read cache and advance the session
+    /// epoch, even when the server cannot be reached.
+    #[tokio::test]
+    async fn logout_clears_history_cache_and_advances_the_epoch_offline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", dir.path());
+        *engine.encryption_key.write().await = Some(Zeroizing::new(HISTORY_TEST_KEY));
+        let epoch_before = engine.history_epoch.load(Ordering::SeqCst);
+        let pin = clipper_schedule::ObjectRevisionRef {
+            object_id: uuid::Uuid::new_v4().into(),
+            revision: 1,
+            body_hash: [2; 32],
+        };
+        engine
+            .schedule_history
+            .lock()
+            .await
+            .insert((epoch_before, pin), source_record("leftover"));
+
+        engine.logout().await.expect("logout clears local state");
+
+        assert!(
+            engine.schedule_history.lock().await.is_empty(),
+            "logout must empty the historical read cache"
+        );
+        assert!(
+            engine.history_epoch.load(Ordering::SeqCst) > epoch_before,
+            "logout must advance the session epoch"
+        );
+        assert!(
+            engine.encryption_key.read().await.is_none(),
+            "logout must drop the data key"
+        );
     }
 }

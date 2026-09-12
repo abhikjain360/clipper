@@ -2578,24 +2578,30 @@ fn single_payload(
     }
 }
 
-fn verify_payload_ciphertext(
+/// Check payload bytes against the descriptor that names them.
+///
+/// One copy for both sides: cached bytes read back and bytes just downloaded
+/// are the same question, and the engine wraps this for its own error type.
+pub(crate) fn verify_payload_ciphertext(
     payload: &ObjectPayloadDescriptor,
     ciphertext: &[u8],
 ) -> Result<(), LocalStoreError> {
     if payload.ciphertext_size >= 0 && ciphertext.len() as i64 != payload.ciphertext_size {
         return Err(LocalStoreError::EncryptedCache(
-            "cached payload size mismatch".into(),
+            "payload size does not match the object envelope".into(),
         ));
     }
     if crypto::sha256(ciphertext).as_slice() != payload.sha256_ciphertext.as_slice() {
         return Err(LocalStoreError::EncryptedCache(
-            "cached payload hash mismatch".into(),
+            "payload hash does not match the object envelope".into(),
         ));
     }
     Ok(())
 }
 
-fn clipboard_display_text(mime_type: &str, data: &[u8]) -> String {
+/// The display text for a clipboard payload, bounded so a huge or hostile
+/// payload cannot become the preview itself.
+pub(crate) fn clipboard_display_text(mime_type: &str, data: &[u8]) -> String {
     if is_text_mime_type(mime_type) {
         bounded_text_preview(&String::from_utf8_lossy(data))
     } else {
@@ -2620,11 +2626,27 @@ fn bounded_text_preview(text: &str) -> String {
     preview
 }
 
-fn is_text_mime_type(mime_type: &str) -> bool {
+pub(crate) fn is_text_mime_type(mime_type: &str) -> bool {
+    top_level_mime_type(mime_type) == "text"
+}
+
+pub(crate) fn top_level_mime_type(mime_type: &str) -> String {
+    normalized_clipboard_mime_type(mime_type)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The bare type, without parameters or case, which is what every comparison
+/// here means by "the same MIME type".
+pub(crate) fn normalized_clipboard_mime_type(mime_type: &str) -> String {
     mime_type
         .split(';')
         .next()
-        .is_some_and(|base| base.trim().starts_with("text/"))
+        .unwrap_or(mime_type)
+        .trim()
+        .to_ascii_lowercase()
 }
 
 fn validate_item_id(id: &str) -> Result<String, LocalStoreError> {
@@ -4668,3 +4690,6 @@ mod tests {
             .expect("a restore past the tombstone is accepted");
     }
 }
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod adversarial_tests;

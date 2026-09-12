@@ -186,19 +186,48 @@ pub(super) fn read_record(
         )));
     }
 
-    let content = content.ok_or_else(|| {
-        LocalStoreError::EncryptedCache(format!("object {object_id} is held with no content"))
-    })?;
-    Ok(Some(StoredObjectRecord::Present(Box::new(
-        StoredPresentObjectRecord {
-            id: object_id.to_string(),
-            kind,
-            seen_generation,
-            event_seq,
-            created_seq,
-            content: serde_json::from_slice::<StoredPresentContent>(&content)?,
-        },
-    ))))
+    let Some(content) = content else {
+        return unreadable_cache_row(connection, object_id, "the row holds no content");
+    };
+    match serde_json::from_slice::<StoredPresentContent>(&content) {
+        Ok(content) => Ok(Some(StoredObjectRecord::Present(Box::new(
+            StoredPresentObjectRecord {
+                id: object_id.to_string(),
+                kind,
+                seen_generation,
+                event_seq,
+                created_seq,
+                content,
+            },
+        )))),
+        Err(error) => unreadable_cache_row(
+            connection,
+            object_id,
+            &format!("the row's content will not parse: {error}"),
+        ),
+    }
+}
+
+/// A held row this device can no longer read.
+///
+/// The content is a cache and goes; the anchor is not and stays, so the object
+/// reads back as an absent one: the same head may reappear, the sweep carries
+/// on, and the next fetch replaces the row. Failing here instead would make
+/// every path that touches the id — persist, sweep, head read, revision check —
+/// fail for good.
+fn unreadable_cache_row(
+    connection: &Connection,
+    object_id: &str,
+    reason: &str,
+) -> Result<Option<StoredObjectRecord>, LocalStoreError> {
+    tracing::warn!(object_id = %object_id, "Discarding an unreadable local cache row: {reason}");
+    match read_anchor_row(connection, object_id)? {
+        Some(marker) => Ok(Some(StoredObjectRecord::Deleted(marker))),
+        None => {
+            connection.execute("DELETE FROM objects WHERE id = ?1", params![object_id])?;
+            Ok(None)
+        }
+    }
 }
 
 /// Every object this device currently holds or is still fetching.
@@ -245,34 +274,57 @@ pub(super) fn live_records(
             parent_hash,
         ) = row?;
         let seen_generation = seen_generation.map(|generation| generation as u64);
+        // One damaged row must cost that object, not the hydration: a hard
+        // error here leaves the client showing nothing at all.
+        let kind = match object_kind(&kind) {
+            Ok(kind) => kind,
+            Err(error) => {
+                tracing::warn!(object_id = %id, "Skipping a local cache row: {error}");
+                continue;
+            }
+        };
+        let anchor = damaged_anchor_dropped(
+            &id,
+            revision_anchor(anchor_kind.as_deref(), revision, parent_hash.as_deref()),
+        );
+        let marker = |id| StoredSyncMarkerRecord {
+            id,
+            kind,
+            seen_generation,
+            event_seq,
+            created_seq,
+            revision_anchor: anchor,
+        };
         let record = match (pending, content) {
-            (true, _) => StoredObjectRecord::PendingCreate(StoredSyncMarkerRecord {
-                id,
-                kind: object_kind(&kind)?,
-                seen_generation,
-                event_seq,
-                created_seq,
-                revision_anchor: revision_anchor(
-                    anchor_kind.as_deref(),
-                    revision,
-                    parent_hash.as_deref(),
-                )?,
-            }),
-            (false, Some(content)) => {
-                StoredObjectRecord::Present(Box::new(StoredPresentObjectRecord {
+            (true, _) => StoredObjectRecord::PendingCreate(marker(id)),
+            (false, Some(content)) => match serde_json::from_slice::<StoredPresentContent>(&content)
+            {
+                Ok(content) => StoredObjectRecord::Present(Box::new(StoredPresentObjectRecord {
                     id,
-                    kind: object_kind(&kind)?,
+                    kind,
                     seen_generation,
                     event_seq,
                     created_seq,
-                    content: serde_json::from_slice::<StoredPresentContent>(&content)?,
-                }))
-            }
+                    content,
+                })),
+                // Unreadable content is a broken cache entry, and the answer to
+                // one is to fetch it again. Keep the chain position it proved
+                // while it was readable, the way an absent object does.
+                Err(error) => {
+                    tracing::warn!(object_id = %id, "Local cache row will not parse: {error}");
+                    if anchor.is_none() {
+                        continue;
+                    }
+                    StoredObjectRecord::Deleted(marker(id))
+                }
+            },
             // A held object with no content is a row this code never writes.
-            // Warn and skip rather than fail the whole hydration for it.
             (false, None) => {
                 tracing::warn!(object_id = %id, "Skipping a held object with no content");
-                continue;
+                if anchor.is_none() {
+                    continue;
+                }
+                StoredObjectRecord::Deleted(marker(id))
             }
         };
         records.push(record);
@@ -618,8 +670,33 @@ fn read_anchor_row(
         seen_generation: seen_generation.map(|generation| generation as u64),
         event_seq,
         created_seq,
-        revision_anchor: revision_anchor(ak.as_deref(), revision, hash.as_deref())?,
+        revision_anchor: damaged_anchor_dropped(
+            object_id,
+            revision_anchor(ak.as_deref(), revision, hash.as_deref()),
+        ),
     }))
+}
+
+/// Keep the ordering guard when the chain position cannot be read.
+///
+/// A damaged anchor row would otherwise fail every later read of that object —
+/// including the marker write behind a live create event, which would tear the
+/// WebSocket down and reconnect into the same failure. Dropping the chain
+/// position costs rollback protection for one object and says so.
+fn damaged_anchor_dropped(
+    object_id: &str,
+    anchor: Result<Option<StoredRevisionAnchor>, LocalStoreError>,
+) -> Option<StoredRevisionAnchor> {
+    match anchor {
+        Ok(anchor) => anchor,
+        Err(error) => {
+            tracing::warn!(
+                object_id = %object_id,
+                "Ignoring a damaged revision anchor; this object loses rollback protection: {error}",
+            );
+            None
+        }
+    }
 }
 
 fn revision_anchor(
