@@ -4,8 +4,6 @@ mod ipc_secret;
 
 use std::{path::PathBuf, sync::OnceLock};
 
-use rand::RngExt;
-
 use clipper_app_types::{
     ActualView, AppState, CollabItem, DeviceInfo, IngestReport, OccurrenceView,
 };
@@ -19,6 +17,7 @@ use clipper_daemon_types::{
 };
 use clipper_schedule::ScheduleItem;
 use daemon_client::{DaemonClient, DaemonClientError};
+use rand::RngExt;
 use serde::{Deserialize, Serialize, Serializer};
 use tauri::{Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -734,7 +733,9 @@ fn ensure_private_staging_dir() -> Result<PathBuf, CommandError> {
         let meta = std::fs::symlink_metadata(&dir)
             .map_err(|e| CommandError::Client(format!("staging dir: {e}")))?;
         if !meta.is_dir() {
-            return Err(CommandError::Client("staging path is not a directory".into()));
+            return Err(CommandError::Client(
+                "staging path is not a directory".into(),
+            ));
         }
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))
             .map_err(|e| CommandError::Client(format!("staging dir: {e}")))?;
@@ -749,7 +750,9 @@ fn ensure_private_staging_dir() -> Result<PathBuf, CommandError> {
         let meta = std::fs::metadata(&dir)
             .map_err(|e| CommandError::Client(format!("staging dir: {e}")))?;
         if !meta.is_dir() {
-            return Err(CommandError::Client("staging path is not a directory".into()));
+            return Err(CommandError::Client(
+                "staging path is not a directory".into(),
+            ));
         }
     }
     Ok(dir)
@@ -802,7 +805,9 @@ async fn create_private_temp_file(kind: &str, hint: &str) -> Result<PathBuf, Com
             Err(e) => return Err(CommandError::Client(format!("temp create: {e}"))),
         }
     }
-    Err(CommandError::Client("temp create: too many collisions".into()))
+    Err(CommandError::Client(
+        "temp create: too many collisions".into(),
+    ))
 }
 
 fn non_empty_string(s: String) -> Option<String> {

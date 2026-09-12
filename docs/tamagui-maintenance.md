@@ -18,11 +18,11 @@ browser bundle.
 
 Checked upstream npm distribution tags and the published extractor code:
 
-| Channel | Version | Extractor still uses legacy TypeScript API |
-| --- | --- | --- |
-| latest | 2.7.7 | Yes |
-| canary | 2.7.7-1788328229285 | Yes |
-| beta | 3.0.0-beta.1123.1 | Yes |
+| Channel | Version             | Extractor still uses legacy TypeScript API |
+| ------- | ------------------- | ------------------------------------------ |
+| latest  | 2.7.7               | Yes                                        |
+| canary  | 2.7.7-1788328229285 | Yes                                        |
+| beta    | 3.0.0-beta.1123.1   | Yes                                        |
 
 The default branch's
 [esbuildTsconfigPaths.ts](https://github.com/tamagui/tamagui/blob/64a9282e/code/compiler/static/src/extractor/esbuildTsconfigPaths.ts)

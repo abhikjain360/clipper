@@ -19,10 +19,7 @@ pub(crate) struct UserStorageUsage {
 /// write paths call `revision_cost_bytes` with the request's sizes before
 /// reserving. The release aggregations below add the payload sum to the
 /// metadata sum with the same function, so the two cannot drift apart.
-pub(crate) fn revision_cost_bytes(
-    meta_ciphertext_len: i64,
-    payload_bytes: i64,
-) -> Option<i64> {
+pub(crate) fn revision_cost_bytes(meta_ciphertext_len: i64, payload_bytes: i64) -> Option<i64> {
     if meta_ciphertext_len < 0 || payload_bytes < 0 {
         return None;
     }
@@ -36,8 +33,7 @@ pub(crate) fn revision_cost_bytes(
 /// revisions to payloads. Summing metadata over the joined rows would count
 /// one revision's metadata once per payload instead of once.
 pub(crate) fn meta_bytes_sum_expr() -> SimpleExpr {
-    Func::sum(Func::cust("LENGTH").arg(Expr::col(object_revisions::Column::MetaCiphertext)))
-        .into()
+    Func::sum(Func::cust("LENGTH").arg(Expr::col(object_revisions::Column::MetaCiphertext))).into()
 }
 
 /// Reserve room for one write.
@@ -265,9 +261,7 @@ where
             let meta_bytes = meta_by_user.remove(&user_id).unwrap_or(0);
             let storage_bytes =
                 revision_cost_bytes(meta_bytes, payload_bytes).ok_or_else(|| {
-                    DbErr::Custom(format!(
-                        "invalid storage quota aggregate for {user_id}",
-                    ))
+                    DbErr::Custom(format!("invalid storage quota aggregate for {user_id}",))
                 })?;
             if object_count < 0 {
                 Err(DbErr::Custom(format!(
@@ -319,9 +313,7 @@ fn merge_usage(
         .map(|(user_id, (payload_bytes, meta_bytes))| {
             let storage_bytes =
                 revision_cost_bytes(meta_bytes, payload_bytes).ok_or_else(|| {
-                    DbErr::Custom(format!(
-                        "invalid storage quota aggregate for {user_id}",
-                    ))
+                    DbErr::Custom(format!("invalid storage quota aggregate for {user_id}",))
                 })?;
             Ok(UserStorageUsage {
                 user_id,

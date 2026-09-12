@@ -374,16 +374,12 @@ fn validate_rrule_counts(text: &str) -> Result<(), IngestError> {
                 &mut count_seen
             };
             if *seen {
-                return Err(IngestError::Malformed(format!(
-                    "RRULE has duplicate {key}"
-                )));
+                return Err(IngestError::Malformed(format!("RRULE has duplicate {key}")));
             }
             *seen = true;
             let number = raw_value.trim();
-            let all_zero = !number.is_empty()
-                && number.bytes().all(|byte| byte == b'0');
-            let all_digits =
-                !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit());
+            let all_zero = !number.is_empty() && number.bytes().all(|byte| byte == b'0');
+            let all_digits = !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit());
             if !all_digits || all_zero {
                 return Err(IngestError::Malformed(format!(
                     "RRULE has invalid {key}={raw_value}"

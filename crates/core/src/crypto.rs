@@ -1460,7 +1460,10 @@ mod signature_domains {
 
     /// Sign arbitrary bytes with the test device key, bypassing the helpers.
     fn sign_raw(message: &[u8]) -> Vec<u8> {
-        SigningKey::from_bytes(&SECRET).sign(message).to_bytes().to_vec()
+        SigningKey::from_bytes(&SECRET)
+            .sign(message)
+            .to_bytes()
+            .to_vec()
     }
 
     #[test]

@@ -38,8 +38,7 @@ const MAX_IPC_REQUEST_LINE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Bound on the HMAC handshake. Mirrors WS_HELLO_TIMEOUT in
 /// crates/server/src/ws.rs. A peer that never answers must not hold a slot.
-pub(crate) const IPC_HANDSHAKE_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(10);
+pub(crate) const IPC_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 type HmacSha256 = Hmac<Sha256>;
 
