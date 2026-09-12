@@ -876,7 +876,9 @@ fn quoted_colon_in_non_rrule_property_does_not_hide_the_next_rrule() {
                 "must still name INTERVAL: {message:?}"
             );
         }
-        other => panic!("overflowing INTERVAL after a quoted colon must be Malformed, got {other:?}"),
+        other => {
+            panic!("overflowing INTERVAL after a quoted colon must be Malformed, got {other:?}")
+        }
     }
 }
 
