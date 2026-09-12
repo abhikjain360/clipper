@@ -253,10 +253,27 @@ impl RruleEngine {
             });
         }
 
+        // Candidates far before the window cannot resolve into it, so skip
+        // resolving them. Resolving every candidate from DTSTART would fail
+        // the whole expansion on an unresolvable date long before the window,
+        // such as an all-day span on a civil date the zone skipped. The bound
+        // is a wall clock like `before_local`, with the same day of slack;
+        // the window check below is on the instant and decides the real edge.
+        let after_local = expansion
+            .window
+            .start()
+            .with_timezone(&zone)
+            .naive_local()
+            .checked_sub_days(Days::new(1))
+            .ok_or(TimeError::DateOverflow)?;
+
         let mut spans = Vec::new();
         for occurrence in result.dates {
             // DTSTART was UTC, so this carries a wall clock, not an instant.
             let local = occurrence.naive_utc();
+            if local < after_local {
+                continue;
+            }
             let resolved = span_at(item, local, zone).resolve(expansion.observer)?;
             if !expansion.window.contains(resolved.start()) {
                 continue;
