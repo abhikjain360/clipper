@@ -759,7 +759,7 @@ async fn concurrent_writers_to_one_object_never_leave_torn_state() {
     assert!(!succeeded.is_empty(), "at least the genesis write must land");
 
     // Whatever revision won, the record, its payload, and the memory copy must
-    // all describe the same revision — never a torn mix.
+    // all describe that same revision, never a torn mix.
     let head = store.local_head(&entry.id).await.expect("head").expect("a head");
     let record = store
         .stored_object_record(&entry.id)
@@ -964,8 +964,8 @@ async fn one_malformed_content_row_must_not_drop_the_other_objects() {
             .expect("persist");
     }
 
-    // One row's content stops being parseable — a stray write, a truncated
-    // restore, a future bug. Hydration must keep serving everything else.
+    // One row's content stops being parseable, from a stray write or a
+    // truncated restore. Hydration must keep serving everything else.
     store
         .with_database(|connection| {
             connection.execute(

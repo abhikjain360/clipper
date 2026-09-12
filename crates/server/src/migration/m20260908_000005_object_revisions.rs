@@ -117,9 +117,9 @@ impl MigrationTrait for Migration {
         )
         .await?;
 
-        // Collab documents are the one kind the envelope break does not touch —
-        // their content is a server-visible Y-doc, not ciphertext — so throwing
-        // them away with everything else would be gratuitous. They keep their
+        // Collab documents are the one kind the envelope break does not touch.
+        // Their content is a server-visible Y-doc, not ciphertext, so there is
+        // no reason to throw them away with everything else. They keep their
         // rows and get fresh identity rows here.
         //
         // Fresh, because the original object ids only ever existed in the table
@@ -262,10 +262,10 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, _: &SchemaManager) -> Result<(), DbErr> {
-        // Deliberately not implemented. Reversing this would mean folding a
-        // chain of revisions back into a single row and re-signing every
-        // envelope as v1, which no server can do — signing needs a key only the
-        // client holds. Recreating the database is the supported path back.
+        // Not implemented. Reversing this would mean folding a chain of
+        // revisions back into a single row and re-signing every envelope as
+        // v1. No server can do that: signing needs a key only the client
+        // holds. Recreating the database is the supported path back.
         Err(DbErr::Migration(
             "m20260908_000005_object_revisions is irreversible: recreate the database instead"
                 .to_string(),

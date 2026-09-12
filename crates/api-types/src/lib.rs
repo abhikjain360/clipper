@@ -30,11 +30,10 @@ pub const OBJECT_ENVELOPE_VERSION: u64 = 1;
 
 /// The plaintext sealed as the meta of a tombstone revision.
 ///
-/// A tombstone has no content — that is what it means — but the meta column is
-/// not nullable and every ciphertext has to be bound to its envelope, so
-/// something must be sealed. It is deliberately the same for every object kind:
-/// nothing reads it, because a tombstoned object is never listed, and a
-/// per-kind version would only be a shape each kind's decoder had to learn.
+/// A tombstone has no content, but the meta column is not nullable and every
+/// ciphertext has to be bound to its envelope, so something must be sealed.
+/// It is the same for every object kind. Nothing reads it, because a
+/// tombstoned object is never listed.
 pub const TOMBSTONE_META_PLAINTEXT: &[u8] = br#"{"tombstone":true}"#;
 /// Maximum payload entries one object may declare. Clients currently send
 /// exactly one; the cap bounds the batched insert a single init request can
@@ -321,7 +320,7 @@ pub struct ClipboardMeta {
 
 /// Which schedule record an object holds.
 ///
-/// Lives in the object's *encrypted* meta, not in `object_kind`, so the server
+/// Lives in the object's encrypted meta, not in `object_kind`, so the server
 /// cannot tell a plan from a record of what actually happened.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, Display, EnumString,
@@ -329,14 +328,14 @@ pub struct ClipboardMeta {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ScheduleRecordKind {
-    /// A series definition — stored once however often it repeats.
+    /// A series definition, stored once however often it repeats.
     Item,
     /// One occurrence that deviates from its series.
     Override,
     /// Time actually spent, as opposed to time planned.
     Actual,
     /// A calendar Clipper pulls events from. Holds the feed URL, which for an
-    /// iCalendar source *is* the credential — hence encrypted like everything
+    /// iCalendar source is the credential, so it is encrypted like everything
     /// else.
     Source,
     /// An event as a provider describes it: the upstream-owned record,
@@ -346,8 +345,8 @@ pub enum ScheduleRecordKind {
 
 /// Encrypted metadata for a schedule object.
 ///
-/// Deliberately tiny: it says only what the payload is and how to read it, so
-/// a client can route the payload to the right deserializer without guessing.
+/// It says only what the payload is and how to read it, so a client can route
+/// the payload to the right deserializer without guessing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleMeta {
     pub record: ScheduleRecordKind,
@@ -437,17 +436,17 @@ pub struct ObjectEnvelopeBody {
     pub envelope_version: u64,
     /// 1 for the first revision of an object, one greater than its parent's
     /// thereafter. Redundant with `parent_hash`, which already pins the chain
-    /// position — but it lets a single envelope be checked without walking the
-    /// chain, and it is what the server's `current + 1` rule compares against.
+    /// position. It lets a single envelope be checked without walking the
+    /// chain, and the server's `current + 1` rule compares against it.
     #[garde(range(min = 1))]
     pub revision: u64,
     /// SHA-256 of the parent revision's canonical body bytes
     /// (`object_envelope_body_bytes`), present exactly when `revision > 1`.
     ///
-    /// This is what makes a retained history verifiable rather than merely
-    /// stored: a server that drops a revision from the middle of a chain leaves
-    /// a hash that no longer matches. It does not detect truncation of the
-    /// head — only a client-remembered high-water mark does that.
+    /// It makes a retained history verifiable: a server that drops a revision
+    /// from the middle of a chain leaves a hash that no longer matches. It
+    /// does not detect truncation of the head. Only a client-remembered
+    /// high-water mark does that.
     #[garde(custom(validate_revision_link(self.revision, self.operation)))]
     pub parent_hash: Option<[u8; SHA256_BYTES]>,
     #[garde(skip)]
@@ -481,10 +480,10 @@ pub struct ObjectEnvelope {
 ///
 /// The same shape as `ObjectInitRequest` minus `id` and `kind`, both of which
 /// are already settled: the id is in the path, and an object's kind never
-/// changes. Everything about *where* this lands in the chain — the revision
-/// number, the parent hash, whether it is a tombstone — is inside the signed
-/// envelope rather than repeated here, so the server checks one authority
-/// rather than reconciling two.
+/// changes. Where this lands in the chain (the revision number, the parent
+/// hash, whether it is a tombstone) is inside the signed envelope rather than
+/// repeated here, so the server checks one authority rather than reconciling
+/// two.
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct ObjectReviseRequest {
     #[garde(length(equal = XCHACHA20_NONCE_BYTES))]

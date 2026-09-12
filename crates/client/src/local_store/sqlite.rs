@@ -1,24 +1,20 @@
 //! SQLite backing for the native local store.
 //!
-//! Two tables with different lifetimes, which is the point of the whole thing
-//! (`docs/local-store-plan.md`, S2):
+//! Two tables with different lifetimes (`docs/local-store-plan.md`, S2):
 //!
 //! - `objects`, with `object_payloads` hanging off it, is a cache. Every row
-//!   can be dropped and downloaded again; none of it is worth more than the
-//!   time it saves.
+//!   can be dropped and downloaded again.
 //! - `object_anchors` is the ledger of what this device has already accepted.
-//!   Nothing the server holds can reconstruct it, so a lost row there is a
-//!   silent reduction in rollback protection rather than a slow start.
+//!   Nothing the server holds can reconstruct it, so a lost row there reduces
+//!   rollback protection.
 //!
-//! Keeping them apart makes the safe operation structurally unable to perform
-//! the unsafe one: `DELETE FROM objects` is a complete cache wipe and cannot
-//! reach an anchor. The old store had the anchor living inside the record it
-//! outlived, so any cleanup that touched the record risked the anchor too.
+//! They are separate tables so that a cache wipe cannot reach an anchor:
+//! `DELETE FROM objects` drops the whole cache and leaves every anchor.
 //!
 //! Calls here block. They are single-file, single-connection statements over
 //! indexed rows, so the work is microseconds and a `spawn_blocking` hop per
-//! call would cost more than it saves; the enclosing methods stay `async` only
-//! because the browser implementation of the same boundary genuinely is.
+//! call would cost more than it saves. The enclosing methods stay `async`
+//! because the browser implementation of the same boundary is.
 
 use std::{path::Path, str::FromStr};
 
@@ -35,9 +31,9 @@ use super::{
 ///
 /// A mismatch recreates the database rather than migrating it, because the
 /// cache is worth nothing and the project keeps no local compatibility. The
-/// anchors go with it, which is the one part that is a real (if small) loss:
-/// a schema change that expects to keep them has to carry the
-/// `object_anchors` rows across instead of taking this path.
+/// anchors go with it, and that is the real loss: a schema change that expects
+/// to keep them has to carry the `object_anchors` rows across instead of
+/// taking this path.
 const SCHEMA_VERSION: i32 = 1;
 
 const SCHEMA: &str = "
@@ -213,8 +209,8 @@ pub(super) fn read_record(
 /// The content is a cache and goes; the anchor is not and stays, so the object
 /// reads back as an absent one: the same head may reappear, the sweep carries
 /// on, and the next fetch replaces the row. Failing here instead would make
-/// every path that touches the id — persist, sweep, head read, revision check —
-/// fail for good.
+/// every path that touches the id fail for good: persist, sweep, head read and
+/// revision check.
 fn unreadable_cache_row(
     connection: &Connection,
     object_id: &str,
@@ -232,10 +228,8 @@ fn unreadable_cache_row(
 
 /// Every object this device currently holds or is still fetching.
 ///
-/// Deliberately not "every row": an object that is gone leaves an anchor and
-/// nothing else, and neither hydration nor reconciliation has any use for one.
-/// Under the old store they were indistinguishable from live records until
-/// opened and parsed, so both paid for every object ever deleted.
+/// Not every row. An object that is gone leaves an anchor and nothing else,
+/// and neither hydration nor reconciliation has any use for one.
 pub(super) fn live_records(
     connection: &Connection,
 ) -> Result<Vec<StoredObjectRecord>, LocalStoreError> {
@@ -334,9 +328,9 @@ pub(super) fn live_records(
 
 /// The objects of one kind that a reconciliation pass did not account for.
 ///
-/// Just the ids: the sweep decides what to do from the row it fetches next,
-/// and most passes account for everything, so reading and parsing every
-/// object's content to answer "which ones are missing" was the wrong shape.
+/// Just the ids. The sweep decides what to do from the row it fetches next,
+/// and most passes account for everything, so this never reads or parses an
+/// object's content.
 pub(super) fn stale_object_ids(
     connection: &Connection,
     kind: ObjectKind,
@@ -359,10 +353,9 @@ pub(super) fn stale_object_ids(
 /// Persist a record, and the payload ciphertext that belongs with it, as one
 /// transaction.
 ///
-/// The two used to be separate writes in a fixed order, which left a window
-/// where a crash produced a record whose payload was missing — unreadable
-/// content that the next hydration would try to clean up. Committing them
-/// together removes the window rather than recovering from it.
+/// One transaction, so a crash cannot leave a record whose payload is
+/// missing. Such a record is unreadable content the next hydration has to
+/// clean up.
 pub(super) fn write_record(
     connection: &mut Connection,
     record: &StoredObjectRecord,
@@ -392,9 +385,8 @@ pub(super) fn write_record(
             )?;
             // Mirror the chain position out of the cache entry as it lands.
             // The envelope inside the content proves the same thing, but only
-            // for as long as the content is readable — and the whole reason
-            // this table exists is that the content is the disposable half.
-            // Collab docs have no chain and so get no row.
+            // while the content is readable, and the content is the disposable
+            // half. Collab docs have no chain and so get no row.
             match present_revision_anchor(present)? {
                 Some(anchor) => upsert_anchor(
                     &transaction,
@@ -678,7 +670,7 @@ fn read_anchor_row(
 
 /// Keep the ordering guard when the chain position cannot be read.
 ///
-/// A damaged anchor row would otherwise fail every later read of that object —
+/// A damaged anchor row would otherwise fail every later read of that object,
 /// including the marker write behind a live create event, which would tear the
 /// WebSocket down and reconnect into the same failure. Dropping the chain
 /// position costs rollback protection for one object and says so.

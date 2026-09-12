@@ -1306,18 +1306,17 @@ impl LocalStore {
     /// Throw away content this device can no longer read, without throwing
     /// away what it already accepted.
     ///
-    /// A record that fails to decrypt is a broken *cache* entry, and the answer
+    /// A record that fails to decrypt is a broken cache entry, and the answer
     /// to a broken cache entry is to fetch it again. It says nothing about the
     /// chain: the envelope sitting beside the unreadable content is still
     /// signed and still names the revision this device accepted. Deleting the
-    /// record would take that anchor with it, so a payload file that goes
-    /// missing for any reason — a crash between the two writes of a delete, a
-    /// partially restored backup, a stray cleaner — would quietly undo
-    /// rollback protection for that object, and a server that noticed could
-    /// then replay an older revision unchallenged.
+    /// record would take that anchor with it. A payload file can go missing
+    /// for reasons that have nothing to do with the chain, such as a partially
+    /// restored backup or a stray cleaner, and losing the anchor there would
+    /// let a server replay an older revision unchallenged.
     ///
     /// Downgrading to an `Absent` marker keeps the anchor and still allows the
-    /// same head back, which is exactly what the refetch will bring.
+    /// same head back, which is what the refetch will bring.
     async fn discard_unreadable_cache_entry(
         &self,
         record: &StoredObjectRecord,
@@ -1535,11 +1534,10 @@ impl LocalStore {
 
     /// Where the local copy of an object sits in its chain.
     ///
-    /// A new revision has to name the head it follows, and it has to be *this*
-    /// head — the one this client actually saw — not whatever the server
-    /// currently holds. Rebasing onto the server's head would silently absorb
-    /// another device's edit instead of colliding with it, which is the exact
-    /// thing the parent hash exists to prevent.
+    /// A new revision has to name the head it follows, and that is the head
+    /// this client saw, not whatever the server currently holds. Rebasing onto
+    /// the server's head would silently absorb another device's edit instead
+    /// of colliding with it, which is what the parent hash exists to prevent.
     ///
     /// `None` means there is no local copy to follow, which is a caller error
     /// rather than a reason to fall back to asking the server.
@@ -1889,8 +1887,8 @@ impl LocalStore {
     /// A cutover, not a migration: the project keeps no local compatibility,
     /// and everything those files held is either a cache the server can serve
     /// again or an anchor whose loss costs one round of rollback protection on
-    /// objects that predate the change. Leaving them would be worse — the
-    /// ciphertext would sit there unreferenced and unswept forever.
+    /// objects that predate the change. Left in place, the ciphertext would sit
+    /// there unreferenced and unswept forever.
     async fn discard_legacy_file_store(&self) {
         for directory in [self.legacy_object_dir(), self.legacy_clipboard_dir()] {
             match tokio::fs::remove_dir_all(&directory).await {
@@ -3249,8 +3247,8 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn rejects_device_identity_record_with_a_malformed_device_id() {
-        // A malformed id used to be treated as a corrupt record and replaced.
-        // Re-minting loses the registered device, so it is an error instead.
+        // A malformed id is an error, not a corrupt record to replace.
+        // Re-minting one would lose the registered device.
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = LocalStore::new(tmp.path());
         let profile = "profile-a";
@@ -3933,8 +3931,7 @@ mod tests {
             .await
             .expect("persist revision two");
 
-        // Whatever the cause — a half-applied delete under the old store, a
-        // restored backup, a cleaner — this is the shape it leaves: the record
+        // A restored backup or a stray cleaner leaves this shape: the record
         // and its envelope intact, the cached payload gone.
         store
             .remove_payloads_for_object(&item.id)
@@ -3977,9 +3974,8 @@ mod tests {
             .expect("the refetched head is the one the anchor already accepted");
     }
 
-    /// S2's whole claim, as a test: the anchors are not in the cache, so the
-    /// one operation that is always safe — throw the cache away — cannot
-    /// perform the one that never is.
+    /// S2's claim, as a test: the anchors are not in the cache, so throwing
+    /// the cache away cannot drop an anchor.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn wiping_the_cache_leaves_every_anchor_standing() {
@@ -4161,8 +4157,8 @@ mod tests {
     }
 
     /// A page built before the head advanced lists an older revision. That is
-    /// an ordinary interleave, so the item is skipped and the pass carries on —
-    /// and the object stays accounted for, or the sweep that follows would drop
+    /// an ordinary interleave, so the item is skipped and the pass carries on.
+    /// The object stays accounted for, or the sweep that follows would drop
     /// something the server still holds.
     #[tokio::test]
     async fn a_stale_snapshot_page_skips_one_item_and_keeps_going() {
@@ -4346,9 +4342,9 @@ mod tests {
     }
 
     /// A collab listing is plaintext server metadata with no signed chain.
-    /// Writing one under the id of an encrypted object replaced that object's
-    /// record, and the next collab sweep then dropped the record and its
-    /// anchor — after which revision 1 could be replayed unchallenged.
+    /// Writing one under the id of an encrypted object must not replace that
+    /// object's record: the next collab sweep would drop the record and its
+    /// anchor, and revision 1 could then be replayed unchallenged.
     #[tokio::test]
     async fn a_collab_listing_cannot_erase_an_encrypted_objects_anchor() {
         let tmp = tempfile::tempdir().expect("tempdir");

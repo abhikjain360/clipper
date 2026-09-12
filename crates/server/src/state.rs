@@ -183,10 +183,8 @@ impl AppState {
             .one(self.db())
             .await?;
         // Every revision holds a seq, not only the head, and a superseded one
-        // is retained. Seeding from `objects.published_seq` alone would
-        // still be correct today — a chain's head always carries its largest
-        // seq — but it would quietly stop being correct the moment retention
-        // starts pruning heads, so read the revisions themselves.
+        // is retained. Read the revisions themselves rather than
+        // `objects.published_seq`, which only covers heads.
         let max_revision_seq: Option<i64> = object_revisions::Entity::find()
             .filter(object_revisions::Column::CreatedSeq.is_not_null())
             .select_only()

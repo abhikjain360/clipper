@@ -414,9 +414,9 @@ pub fn delete_file(file_id: String) -> Promise {
 
 /// Create a schedule series from its JSON form.
 ///
-/// The item crosses as JSON rather than as flattened arguments because a
-/// recurrence rule does not reduce to a handful of strings without losing
-/// something. `packages/shared` owns the matching TypeScript shape.
+/// The item crosses as JSON, not as flattened arguments: a recurrence rule
+/// does not reduce to a handful of strings. `packages/shared` owns the
+/// matching TypeScript shape.
 #[wasm_bindgen(js_name = createScheduleItem)]
 pub fn create_schedule_item(item: JsValue) -> Promise {
     ok_promise(async move {

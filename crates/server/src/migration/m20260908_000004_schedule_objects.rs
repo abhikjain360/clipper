@@ -15,8 +15,8 @@
 //! SQLite cannot widen a CHECK constraint in place, so both tables go through
 //! the same rename/recreate/copy/drop dance the previous two migrations used.
 //! Renaming `objects` repoints `object_payloads`' foreign key at the renamed
-//! table, so that one is rebuilt afterwards to re-emit its FK — exactly as
-//! `m20260615_000002_collab_docs` had to.
+//! table, so that one is rebuilt afterwards to re-emit its FK, the same way
+//! `m20260615_000002_collab_docs` does.
 
 use sea_orm_migration::prelude::*;
 

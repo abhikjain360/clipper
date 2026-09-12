@@ -565,10 +565,10 @@ impl SyncEngine {
     ///
     /// Shared by logout, removing this device, and a session the server has
     /// definitively refused: all three must leave no key material resident and
-    /// no in-flight sync write able to land. Bumping the store generation is
-    /// what fences those writes — without it a straggling snapshot or live
-    /// event still passes the generation check and writes into whichever
-    /// profile database the next login opens.
+    /// no in-flight sync write able to land. Bumping the store generation
+    /// fences those writes. Without it a straggling snapshot or live event
+    /// still passes the generation check and writes into whichever profile
+    /// database the next login opens.
     async fn clear_local_session(&self) {
         self.api.clear_token();
         {
@@ -1254,10 +1254,9 @@ impl SyncEngine {
 
     /// Delete a file by appending a tombstone revision.
     ///
-    /// `DELETE /api/objects/{id}` is now purge and refuses an object that has
-    /// not been tombstoned, so this is not another route to the same thing — it
-    /// is the delete. Reclaiming the blob is a separate purge, which nothing
-    /// calls yet.
+    /// This is the delete. `DELETE /api/objects/{id}` is purge, and it refuses
+    /// an object that has not been tombstoned. Reclaiming the blob is that
+    /// separate purge, which nothing calls yet.
     pub async fn delete_file(&self, file_id: &str) -> Result<(), ClientError> {
         let _write = self.calendar_write.lock().await;
         if self
@@ -1325,10 +1324,10 @@ impl SyncEngine {
     /// Seal a schedule record and write it as one revision of an object.
     ///
     /// Genesis and revise differ only in the placement they are given and the
-    /// route that starts the write — everything about sealing, and the fact
-    /// that a small record rides inline and so completes without a second
-    /// round-trip, is the same. Deleting is not routed through here: a tombstone
-    /// carries no payload, so it shares nothing with this beyond the envelope.
+    /// route that starts the write. Sealing is the same for both, and so is
+    /// riding a small record inline, which completes without a second
+    /// round-trip. Deleting is not routed through here: a tombstone carries no
+    /// payload, so it shares nothing with this beyond the envelope.
     async fn write_schedule_record(
         &self,
         object_id: &str,
@@ -1465,7 +1464,7 @@ impl SyncEngine {
     ///
     /// Shared by every deletable kind, because a tombstone is the same object
     /// in all of them. Its meta is still encrypted and still bound to the
-    /// envelope even though it says nothing — the column is not nullable, and
+    /// envelope even though it says nothing: the column is not nullable, and
     /// an empty ciphertext would be a second shape the server's checks would
     /// have to know about.
     async fn write_tombstone(
@@ -1737,15 +1736,14 @@ impl SyncEngine {
     /// Two distinct checks, and both need local state, which is why they cannot
     /// live in the stateless envelope verification:
     ///
-    /// Rollback. A server can serve revision 3 while 7 exists — every envelope
-    /// in the chain is genuinely signed, so nothing about revision 3 looks
-    /// wrong on its own. Only a client that remembers 7 can tell. A freshly
+    /// Rollback. A server can serve revision 3 while 7 exists. Every envelope
+    /// in the chain is signed, so nothing about revision 3 looks wrong on its
+    /// own. Only a client that remembers 7 can tell. A freshly
     /// installed device has nothing to remember and must trust what it is
     /// given: signatures alone cannot establish that a head is the newest one.
     ///
     /// Continuity. When the served revision is the immediate successor of the
-    /// held one, its parent hash must be the held one's. That is what makes the
-    /// chain load-bearing instead of decorative — a server that drops or
+    /// held one, its parent hash must be the held one's. A server that drops or
     /// substitutes a revision leaves a hash that does not match. A larger jump
     /// cannot be checked locally, because the revisions in between were never
     /// seen.
@@ -2821,9 +2819,9 @@ impl SyncEngine {
 
     /// Refetch an object whose head moved to a new revision.
     ///
-    /// Same materialisation as a creation — the object is pulled and the local
-    /// copy replaced — but reached through `mark_pending_update`, because the
-    /// create path deliberately ignores an object it already holds.
+    /// Same materialisation as a creation: the object is pulled and the local
+    /// copy replaced. It goes through `mark_pending_update`, because the
+    /// create path ignores an object it already holds.
     async fn handle_updated_object_event(
         self: &Arc<Self>,
         generation: u64,
@@ -3766,9 +3764,9 @@ fn object_envelope_body_for_aad(
 
 /// Where a new envelope sits in its object's chain.
 ///
-/// The revision number, the parent hash and the operation always move together
-/// — a create has no parent, a revise and a tombstone both do — so they travel
-/// as one value rather than three arguments that could be combined into
+/// The revision number, the parent hash and the operation always move
+/// together: a create has no parent, a revise and a tombstone both do. They
+/// travel as one value rather than three arguments that could be combined into
 /// something the server would reject.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum EnvelopePlacement {
