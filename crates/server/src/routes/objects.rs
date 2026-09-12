@@ -1258,10 +1258,12 @@ pub async fn revise_object(
 
         // The chain already existed, so no object is added and only bytes
         // are charged. A tombstone is the only way to reclaim quota — purge
-        // requires one — so its bytes are charged without a limit check; the
-        // metadata cap above bounds the overage per object. Ordinary
-        // revisions keep the limited reservation: retained history is why
-        // they have to be charged at all.
+        // requires one — so its bytes are charged without a limit check.
+        // The overage stays bounded: a tombstoned object accepts no second
+        // tombstone, and an over-limit account cannot write the revise that
+        // would revive it, so at most one capped tombstone per object sits
+        // above the limit. Ordinary revisions keep the limited reservation:
+        // retained history is why they have to be charged at all.
         if tombstone {
             storage_quota::charge_user_storage(txn, user_id, revision_storage_bytes)
                 .await
@@ -4402,6 +4404,59 @@ mod tests {
             .map(|Postcard(resp)| resp)
         }
 
+        /// Revive with a zero-cost revision: empty metadata and one
+        /// zero-length inline payload whose hash is the hash of the empty
+        /// string. The request is valid and costs zero bytes.
+        async fn zero_byte_revive(
+            state: &AppState,
+            user_id: Uuid,
+            device_id: Uuid,
+            object_id: &str,
+            signing_secret_key: &[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
+        ) -> Result<ObjectInitResponse, ApiError> {
+            let object_uuid: Uuid = object_id.parse().expect("object id");
+            let (head_revision, parent_hash) = head_of(state, object_uuid).await;
+            let payload_id: clipper_core::models::ObjectPayloadId = Uuid::now_v7().into();
+            let nonce = vec![7_u8; XCHACHA20_NONCE_BYTES];
+            let payload = ObjectEnvelopePayload {
+                id: payload_id,
+                nonce: nonce.clone(),
+                ciphertext_size: 0,
+                sha256_ciphertext: sha256(&[]).to_vec(),
+            };
+            let envelope = signed_envelope_at(
+                object_uuid.into(),
+                ObjectKind::Schedule,
+                head_revision + 1,
+                Some(parent_hash),
+                ObjectEnvelopeOperation::Revise,
+                nonce.clone(),
+                &[],
+                vec![payload],
+                device_id,
+                signing_secret_key,
+            );
+            revise_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path(object_id.to_string()),
+                postcard(ObjectReviseRequest {
+                    meta_nonce: nonce,
+                    meta_ciphertext: Vec::new(),
+                    payloads: vec![ObjectPayloadInit {
+                        id: payload_id,
+                        nonce: vec![7_u8; XCHACHA20_NONCE_BYTES],
+                        ciphertext_size: 0,
+                        sha256_ciphertext: sha256(&[]).to_vec(),
+                        inline_ciphertext: Some(Vec::new()),
+                    }],
+                    envelope,
+                }),
+            )
+            .await
+            .map(|Postcard(resp)| resp)
+        }
+
         #[tokio::test]
         async fn init_charges_payload_and_metadata_bytes() {
             let (state, _dir) = test_state().await;
@@ -4870,6 +4925,183 @@ mod tests {
                 user_storage_usage(&state, user_id).await,
                 before,
                 "rejected tombstone reserves nothing",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_zero_byte_revival_is_refused_while_over_the_quota() {
+            let (state, _dir) = test_state_with_user_quotas(100, 1).await;
+            let user_id = insert_user(&state).await;
+            let device_id = Uuid::now_v7();
+            let key = insert_device(&state, user_id, device_id).await;
+            let object_id = Uuid::now_v7().to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request_with_meta(
+                    object_id.clone(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    Vec::new(),
+                    b"",
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("init");
+            assert_eq!(user_storage_usage(&state, user_id).await, (0, 1));
+
+            // A 256-byte tombstone lands the account over the 100-byte
+            // limit. It charges without a limit check so the delete can
+            // always land.
+            revise_meta_only(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                ObjectEnvelopeOperation::Delete,
+                vec![0; MAX_TOMBSTONE_META_CIPHERTEXT_BYTES],
+                &key,
+            )
+            .await
+            .expect("tombstone");
+            assert_eq!(user_storage_usage(&state, user_id).await, (256, 1));
+
+            // The revival costs zero bytes, but it is still a revise and
+            // still runs the quota predicates. Over the byte limit it is
+            // refused and charges nothing, so tombstone-and-revive cycles
+            // cannot grow usage past the limit.
+            let err = zero_byte_revive(&state, user_id, device_id, &object_id, &key)
+                .await
+                .expect_err("a zero-byte revival must not bypass the quota");
+            assert_eq!(err.body().code, ApiErrorCode::StorageQuotaExceeded);
+            assert_eq!(
+                user_storage_usage(&state, user_id).await,
+                (256, 1),
+                "the refused revival charges nothing"
+            );
+
+            purge_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path(object_id.clone()),
+            )
+            .await
+            .expect("purge");
+            assert_eq!(user_storage_usage(&state, user_id).await, (0, 0));
+
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request_with_meta(
+                    object_id,
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    Vec::new(),
+                    b"",
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("a fresh init succeeds once usage is back under the quota");
+        }
+
+        #[tokio::test]
+        async fn a_user_exactly_at_the_byte_limit_can_still_tombstone_and_purge() {
+            // Genesis "first" (5 payload bytes) plus the 18 metadata bytes in
+            // `init_request`: a 23-byte quota puts the account exactly at the
+            // byte limit after init.
+            let (state, _dir) = test_state_with_user_quotas(23, 1).await;
+            let user_id = insert_user(&state).await;
+            let device_id = Uuid::now_v7();
+            let key = insert_device(&state, user_id, device_id).await;
+            let object_id = Uuid::now_v7().to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request(
+                    object_id.clone(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    b"first",
+                    true,
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("init");
+            assert_eq!(user_storage_usage(&state, user_id).await, (23, 1));
+
+            tombstone_object(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                &key,
+            )
+            .await
+            .expect("tombstone at the limit");
+            purge_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path(object_id),
+            )
+            .await
+            .expect("purge");
+            assert_eq!(
+                user_storage_usage(&state, user_id).await,
+                (0, 0),
+                "tombstone then purge still works from exactly the byte limit"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_zero_byte_revision_still_succeeds_under_the_quota() {
+            let (state, _dir) = test_state().await;
+            let user_id = insert_user(&state).await;
+            let device_id = Uuid::now_v7();
+            let key = insert_device(&state, user_id, device_id).await;
+            let object_uuid = Uuid::now_v7();
+            let object_id = object_uuid.to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request_with_meta(
+                    object_id.clone(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    Vec::new(),
+                    b"",
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("init");
+            assert_eq!(user_storage_usage(&state, user_id).await, (0, 1));
+
+            zero_byte_revive(&state, user_id, device_id, &object_id, &key)
+                .await
+                .expect("a zero-byte revision under the quota succeeds");
+            assert_eq!(
+                user_storage_usage(&state, user_id).await,
+                (0, 1),
+                "a zero-byte revision charges nothing but still publishes"
+            );
+            let object = objects::Entity::find_by_id(object_uuid)
+                .one(state.db())
+                .await
+                .expect("query object")
+                .expect("object exists");
+            assert_eq!(
+                object.head_revision,
+                Some(2),
+                "the zero-byte revision advanced the head"
             );
         }
     }
