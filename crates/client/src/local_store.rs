@@ -10,7 +10,11 @@ mod sqlite;
 
 #[cfg(not(target_family = "wasm"))]
 use std::path::Path;
-use std::{collections::HashMap, path::PathBuf, sync::RwLock};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{RwLock, atomic},
+};
 
 use clipper_app_types::{
     ActualView, CalendarSourceView, CollabItem, DecryptedClipboardItem, DecryptedFileItem,
@@ -231,6 +235,10 @@ struct MemoryState {
 
 #[derive(Debug, Clone)]
 pub struct LocalVisibleState {
+    /// When this view was built, counted by the store. A publisher drops a view
+    /// stamped lower than one it has already published, so two concurrent
+    /// snapshots cannot leave the older one on screen.
+    pub stamp: u64,
     pub clipboard_items: Vec<DecryptedClipboardItem>,
     pub files: Vec<DecryptedFileItem>,
     pub collab_docs: Vec<CollabItem>,
@@ -269,6 +277,9 @@ pub struct LocalStore {
     profile_id: RwLock<Option<String>>,
     sync: Mutex<LocalSyncControl>,
     memory: Mutex<MemoryState>,
+    /// Counts the views built, so a publisher can tell which of two views is
+    /// the newer one. Incremented while the sync lock is held.
+    visible_stamp: atomic::AtomicU64,
     /// Opened on first use, because the database lives under the profile
     /// directory and the profile is not known when the store is constructed.
     #[cfg(not(target_family = "wasm"))]
@@ -289,6 +300,7 @@ impl LocalStore {
             profile_id: RwLock::new(None),
             sync: Mutex::new(LocalSyncControl::default()),
             memory: Mutex::new(MemoryState::default()),
+            visible_stamp: atomic::AtomicU64::new(0),
             #[cfg(not(target_family = "wasm"))]
             database: Mutex::new(None),
         }
@@ -306,6 +318,59 @@ impl LocalStore {
         let mut sync = self.sync.lock().await;
         sync.generation += 1;
         sync.generation
+    }
+
+    /// Account for an object a pass listed but did not write.
+    ///
+    /// A refused revision still proves the object is on the server, so the
+    /// sweep at the end of the pass must not treat it as gone.
+    pub async fn mark_snapshot_seen(
+        &self,
+        object_id: &str,
+        generation: u64,
+    ) -> Result<(), LocalStoreError> {
+        let object_id = validate_item_id(object_id)?;
+        let sync = self.sync.lock().await;
+        if sync.generation != generation {
+            return Ok(());
+        }
+        self.refresh_seen_generation(&object_id, generation).await
+    }
+
+    /// Keep the revision this device already accepted.
+    ///
+    /// A snapshot page can list a revision older than the local head whenever a
+    /// live event or this device's own write lands while the page is in flight,
+    /// so a refusal is an ordinary interleave and must not abort the pass. Any
+    /// other error is the caller's.
+    async fn keep_retained_revision(
+        &self,
+        object_id: &str,
+        generation: u64,
+        error: LocalStoreError,
+    ) -> Result<(), LocalStoreError> {
+        let LocalStoreError::RevisionRejected(reason) = error else {
+            return Err(error);
+        };
+        tracing::warn!(object_id = %object_id, "Kept the revision this device holds: {reason}");
+        self.refresh_seen_generation(object_id, generation).await
+    }
+
+    /// Mark a held record as accounted for by this pass without changing it.
+    /// The caller holds the sync lock.
+    async fn refresh_seen_generation(
+        &self,
+        object_id: &str,
+        generation: u64,
+    ) -> Result<(), LocalStoreError> {
+        let Some(StoredObjectRecord::Present(mut record)) =
+            self.stored_object_record(object_id).await?
+        else {
+            return Ok(());
+        };
+        record.seen_generation = Some(generation);
+        self.write_stored_object_record(&StoredObjectRecord::Present(record))
+            .await
     }
 
     pub async fn clear_memory(&self) {
@@ -352,18 +417,24 @@ impl LocalStore {
         if sync.generation != generation {
             return Ok(None);
         }
-        self.persist_clipboard_present_encrypted_inner(
-            &item_id,
-            item,
-            payload,
-            encrypted,
-            StoredObjectSyncMeta {
-                created_seq,
-                event_seq: created_seq,
-                seen_generation: Some(generation),
-            },
-        )
-        .await?;
+        if let Err(error) = self
+            .persist_clipboard_present_encrypted_inner(
+                &item_id,
+                item,
+                payload,
+                encrypted,
+                StoredObjectSyncMeta {
+                    created_seq,
+                    event_seq: created_seq,
+                    seen_generation: Some(generation),
+                },
+            )
+            .await
+        {
+            self.keep_retained_revision(&item_id, generation, error)
+                .await?;
+            return Ok(None);
+        }
         self.visible_state_inner(visible_clipboard_limit)
             .await
             .map(Some)
@@ -408,17 +479,23 @@ impl LocalStore {
         if sync.generation != generation {
             return Ok(None);
         }
-        self.persist_schedule_present_encrypted_inner(
-            identity,
-            record,
-            encrypted,
-            StoredObjectSyncMeta {
-                created_seq,
-                event_seq: created_seq,
-                seen_generation: Some(generation),
-            },
-        )
-        .await?;
+        if let Err(error) = self
+            .persist_schedule_present_encrypted_inner(
+                identity,
+                record,
+                encrypted,
+                StoredObjectSyncMeta {
+                    created_seq,
+                    event_seq: created_seq,
+                    seen_generation: Some(generation),
+                },
+            )
+            .await
+        {
+            self.keep_retained_revision(identity.object_id, generation, error)
+                .await?;
+            return Ok(None);
+        }
         self.visible_state_inner(visible_clipboard_limit)
             .await
             .map(Some)
@@ -569,15 +646,21 @@ impl LocalStore {
         if sync.generation != generation {
             return Ok(None);
         }
-        self.persist_file_present_encrypted_inner(
-            &item_id,
-            item,
-            encrypted,
-            created_seq,
-            created_seq,
-            Some(generation),
-        )
-        .await?;
+        if let Err(error) = self
+            .persist_file_present_encrypted_inner(
+                &item_id,
+                item,
+                encrypted,
+                created_seq,
+                created_seq,
+                Some(generation),
+            )
+            .await
+        {
+            self.keep_retained_revision(&item_id, generation, error)
+                .await?;
+            return Ok(None);
+        }
         self.visible_state_inner(visible_clipboard_limit)
             .await
             .map(Some)
@@ -1265,30 +1348,24 @@ impl LocalStore {
         }
     }
 
-    async fn recent_clipboard_items_inner(
-        &self,
+    fn recent_clipboard_items_inner(
+        records: &[LocalObjectRecord],
         limit: usize,
-    ) -> Result<Vec<DecryptedClipboardItem>, LocalStoreError> {
-        let mut records = self.all_memory_records().await;
-        sort_records_desc(&mut records);
+    ) -> Vec<DecryptedClipboardItem> {
         let mut items = records
             .iter()
             .filter_map(clipboard_item_from_record)
             .collect::<Vec<_>>();
         items.truncate(limit);
-        Ok(items)
+        items
     }
 
-    async fn file_items_inner(&self) -> Result<Vec<DecryptedFileItem>, LocalStoreError> {
-        let mut records = self.all_memory_records().await;
-        sort_records_desc(&mut records);
-        Ok(records.iter().filter_map(file_item_from_record).collect())
+    fn file_items_inner(records: &[LocalObjectRecord]) -> Vec<DecryptedFileItem> {
+        records.iter().filter_map(file_item_from_record).collect()
     }
 
-    async fn collab_items_inner(&self) -> Result<Vec<CollabItem>, LocalStoreError> {
-        let mut records = self.all_memory_records().await;
-        sort_records_desc(&mut records);
-        Ok(records.iter().filter_map(collab_item_from_record).collect())
+    fn collab_items_inner(records: &[LocalObjectRecord]) -> Vec<CollabItem> {
+        records.iter().filter_map(collab_item_from_record).collect()
     }
 
     async fn clipboard_payload_inner(
@@ -1365,11 +1442,21 @@ impl LocalStore {
         })
     }
 
-    async fn schedule_items_inner(&self) -> Result<Vec<ScheduleItemView>, LocalStoreError> {
-        let mut records = self.all_memory_records().await;
-        sort_records_desc(&mut records);
+    /// The schedule rows, each stamped with the revision it was read at.
+    ///
+    /// The kind is matched first because reading a head is a database read and
+    /// a JSON parse. Asking for one per held object of any kind made every
+    /// publish cost a read per object, and `local_head` fails outright on a
+    /// collab record, which has no chain.
+    async fn schedule_items_inner(
+        &self,
+        records: &[LocalObjectRecord],
+    ) -> Result<Vec<ScheduleItemView>, LocalStoreError> {
         let mut views = Vec::new();
-        for record in &records {
+        for record in records {
+            if !matches!(record.data, LocalObjectData::Schedule(_)) {
+                continue;
+            }
             if let Some(head) = self.local_head(&record.id).await?
                 && let Some(view) = schedule_item_view_from_record(record, head.revision)
             {
@@ -1379,11 +1466,8 @@ impl LocalStore {
         Ok(views)
     }
 
-    async fn calendar_sources_inner(&self) -> Result<Vec<CalendarSourceView>, LocalStoreError> {
-        let mut records = self.all_memory_records().await;
-        sort_records_desc(&mut records);
-
-        Ok(records
+    fn calendar_sources_inner(records: &[LocalObjectRecord]) -> Vec<CalendarSourceView> {
+        records
             .iter()
             .filter_map(|record| {
                 let LocalObjectData::Schedule(schedule) = &record.data else {
@@ -1401,7 +1485,7 @@ impl LocalStore {
                         record.id == batch.object_id.to_string() && matches!(&record.data, LocalObjectData::File(_)))),
                 ))
             })
-            .collect())
+            .collect()
     }
 
     /// The timer currently running, if any.
@@ -1410,9 +1494,9 @@ impl LocalStore {
     /// timer is relevant on every screen, and there is at most one.
     async fn running_actual_inner(
         &self,
+        records: &[LocalObjectRecord],
     ) -> Option<(ActualView, Option<clipper_schedule::PlannedRef>)> {
-        let records = self.all_memory_records().await;
-        for record in &records {
+        for record in records {
             let LocalObjectData::Schedule(schedule) = &record.data else {
                 continue;
             };
@@ -1654,21 +1738,26 @@ impl LocalStore {
         self.memory.lock().await.records.values().cloned().collect()
     }
 
+    /// Build every view from one read of the held records.
+    ///
+    /// The records are cloned out of memory and sorted once: each view used to
+    /// take its own deep copy, so a publish copied the working set six times.
     async fn visible_state_inner(
         &self,
         visible_clipboard_limit: usize,
     ) -> Result<LocalVisibleState, LocalStoreError> {
-        let running = self.running_actual_inner().await;
+        let mut records = self.all_memory_records().await;
+        sort_records_desc(&mut records);
+        let running = self.running_actual_inner(&records).await;
         Ok(LocalVisibleState {
-            clipboard_items: self
-                .recent_clipboard_items_inner(visible_clipboard_limit)
-                .await?,
-            files: self.file_items_inner().await?,
-            collab_docs: self.collab_items_inner().await?,
-            schedule_items: self.schedule_items_inner().await?,
-            calendar_sources: self.calendar_sources_inner().await?,
+            clipboard_items: Self::recent_clipboard_items_inner(&records, visible_clipboard_limit),
+            files: Self::file_items_inner(&records),
+            collab_docs: Self::collab_items_inner(&records),
+            schedule_items: self.schedule_items_inner(&records).await?,
+            calendar_sources: Self::calendar_sources_inner(&records),
             running_plan: running.as_ref().and_then(|(_, planned)| *planned),
             running_actual: running.map(|(view, _)| view),
+            stamp: self.visible_stamp.fetch_add(1, atomic::Ordering::SeqCst) + 1,
         })
     }
 
@@ -2319,7 +2408,7 @@ fn validate_revision_against_head(
 }
 
 fn revision_anchor_error(object_id: &str, revision: u64, reason: &str) -> LocalStoreError {
-    LocalStoreError::EncryptedCache(format!(
+    LocalStoreError::RevisionRejected(format!(
         "revision {revision} of object {object_id} {reason}",
     ))
 }
@@ -2787,6 +2876,10 @@ pub enum LocalStoreError {
     DeviceIdentityDecrypt(String),
     #[error("encrypted local cache error: {0}")]
     EncryptedCache(String),
+    /// A served revision contradicts the retained anchor. The device keeps what
+    /// it holds; a reconciliation pass skips the object rather than failing.
+    #[error("{0}")]
+    RevisionRejected(String),
     #[error("browser local storage error: {0}")]
     BrowserStorage(String),
 }
@@ -4027,6 +4120,191 @@ mod tests {
                 .is_none(),
             "the cached ciphertext should go with the object row",
         );
+    }
+
+    /// A page built before the head advanced lists an older revision. That is
+    /// an ordinary interleave, so the item is skipped and the pass carries on —
+    /// and the object stays accounted for, or the sweep that follows would drop
+    /// something the server still holds.
+    #[tokio::test]
+    async fn a_stale_snapshot_page_skips_one_item_and_keeps_going() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let held = item(
+            "ffffffff-1111-4111-8111-111111111111",
+            "revision three",
+            "2026-01-19T00:00:00+00:00",
+        );
+        let revision_two = encrypted_clipboard_at(
+            &held,
+            b"revision two",
+            2,
+            Some([2; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        let revision_three = encrypted_clipboard_at(
+            &held,
+            held.text.as_bytes(),
+            3,
+            Some([3; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &held,
+                held.text.as_bytes(),
+                &revision_three,
+                3,
+                3,
+                10,
+            )
+            .await
+            .expect("persist revision three");
+        let head = store.local_head(&held.id).await.expect("head");
+
+        let generation = store.start_generation().await;
+        assert!(
+            store
+                .persist_snapshot_clipboard_present_encrypted(
+                    &held,
+                    b"revision two",
+                    &revision_two,
+                    2,
+                    generation,
+                    10,
+                )
+                .await
+                .expect("a stale page item must not fail the pass")
+                .is_none()
+        );
+        assert_eq!(store.local_head(&held.id).await.expect("head"), head);
+
+        // The rest of the page still lands.
+        let other = item(
+            "ffffffff-2222-4222-8222-222222222222",
+            "other",
+            "2026-01-19T00:00:01+00:00",
+        );
+        store
+            .persist_snapshot_clipboard_present_encrypted(
+                &other,
+                other.text.as_bytes(),
+                &encrypted_clipboard(&other, other.text.as_bytes()),
+                4,
+                generation,
+                10,
+            )
+            .await
+            .expect("persist the next item")
+            .expect("current generation");
+
+        // And the sweep at the end of the pass keeps the skipped object.
+        let visible = store
+            .sweep_kind(ObjectKind::Clipboard, generation, 10, 10)
+            .await
+            .expect("sweep")
+            .expect("current generation");
+        assert_eq!(visible.clipboard_items.len(), 2);
+        assert_eq!(store.local_head(&held.id).await.expect("head"), head);
+    }
+
+    /// The same revision with a different body is the server contradicting
+    /// itself. The device keeps what it accepted.
+    #[tokio::test]
+    async fn an_equivocating_snapshot_body_is_skipped() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let held = item(
+            "ffffffff-3333-4333-8333-333333333333",
+            "revision three",
+            "2026-01-20T00:00:00+00:00",
+        );
+        let revision_three = encrypted_clipboard_at(
+            &held,
+            held.text.as_bytes(),
+            3,
+            Some([3; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        let other_three = encrypted_clipboard_at(
+            &held,
+            b"another three",
+            3,
+            Some([9; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &held,
+                held.text.as_bytes(),
+                &revision_three,
+                3,
+                3,
+                10,
+            )
+            .await
+            .expect("persist revision three");
+        let head = store.local_head(&held.id).await.expect("head");
+
+        let generation = store.start_generation().await;
+        assert!(
+            store
+                .persist_snapshot_clipboard_present_encrypted(
+                    &held,
+                    b"another three",
+                    &other_three,
+                    3,
+                    generation,
+                    10,
+                )
+                .await
+                .expect("an equivocating body must not fail the pass")
+                .is_none()
+        );
+        assert_eq!(store.local_head(&held.id).await.expect("head"), head);
+        let hydrated = store
+            .hydrate_ciphertext_cache(&TEST_KEY, 10)
+            .await
+            .expect("hydrate");
+        assert_eq!(
+            hydrated.clipboard_items.first().map(|item| item.text.clone()),
+            Some("revision three".to_string()),
+        );
+    }
+
+    /// A collab doc has no revision chain, so building the views must not ask
+    /// for its head. Asking failed the whole view build, which meant one collab
+    /// doc broke hydration and every later write.
+    #[tokio::test]
+    async fn a_held_collab_doc_does_not_break_the_view() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let visible = store
+            .persist_local_collab_present(
+                &collab_item(
+                    "ffffffff-4444-4444-8444-444444444444",
+                    "2026-01-21T00:00:00+00:00",
+                ),
+                TEST_DEVICE_ID,
+                1,
+                1,
+                10,
+            )
+            .await
+            .expect("persist a collab doc");
+        assert_eq!(visible.collab_docs.len(), 1);
+        assert!(visible.schedule_items.is_empty());
+
+        let restarted = LocalStore::new(tmp.path());
+        restarted.set_profile("profile-a".into());
+        let hydrated = restarted
+            .hydrate_ciphertext_cache(&TEST_KEY, 10)
+            .await
+            .expect("hydration must survive a collab record");
+        assert_eq!(hydrated.collab_docs.len(), 1);
     }
 
     /// A collab listing is plaintext server metadata with no signed chain.
