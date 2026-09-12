@@ -2429,6 +2429,19 @@ impl SyncEngine {
         Ok(())
     }
 
+    /// A restart receiver that only reports refreshes requested from now on.
+    ///
+    /// Cloning a `watch::Receiver` copies the seen version of the receiver it
+    /// was cloned from, and nothing marks the engine's own `ws_restart_rx` as
+    /// seen. Without `mark_unchanged` every clone taken after the first
+    /// refresh reports a change immediately, so each new WebSocket would tear
+    /// itself down as soon as it connected.
+    fn restart_signal(&self) -> watch::Receiver<u64> {
+        let mut receiver = self.ws_restart_rx.clone();
+        receiver.mark_unchanged();
+        receiver
+    }
+
     async fn publish_visible_state(&self, mut visible: LocalVisibleState) {
         // No network work here: publication must not wait for historical reads
         // while newer sync snapshots are ready to publish.
@@ -3382,7 +3395,7 @@ impl SyncEngine {
             generation, "WebSocket connected and reconciliation started"
         );
 
-        let mut restart_rx = self.ws_restart_rx.clone();
+        let mut restart_rx = self.restart_signal();
         loop {
             tokio::select! {
                 changed = restart_rx.changed() => {
@@ -3546,7 +3559,7 @@ impl SyncEngine {
             generation, "WebSocket connected and reconciliation started"
         );
 
-        let mut restart_rx = self.ws_restart_rx.clone();
+        let mut restart_rx = self.restart_signal();
         loop {
             tokio::select! {
                 changed = restart_rx.changed() => {
@@ -4745,6 +4758,29 @@ mod tests {
         refreshing
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("refresh must return rather than block on its own borrow");
+    }
+
+    /// A socket that connects after some refreshes must stay up until the next
+    /// one, so a reconnect loop cannot restart it on every pass.
+    #[tokio::test]
+    async fn a_restart_signal_reports_only_refreshes_asked_for_after_it_was_taken() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", temp.path());
+
+        engine.refresh().await.expect("first refresh");
+        engine.refresh().await.expect("second refresh");
+
+        let signal = engine.restart_signal();
+        assert!(
+            !signal.has_changed().expect("signal open"),
+            "earlier refreshes must not restart a connection that started after them",
+        );
+
+        engine.refresh().await.expect("third refresh");
+        assert!(
+            signal.has_changed().expect("signal open"),
+            "a refresh asked for during the connection must restart it",
+        );
     }
 
     const RETAIN_TEST_KEY: [u8; 32] = [7; 32];
