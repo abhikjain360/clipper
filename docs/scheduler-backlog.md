@@ -1,9 +1,14 @@
 # Scheduler outstanding work and decisions
 
 Maintained entry point for “what is still left to do on the scheduler?” Last
-updated 2026-09-10. This is a durable project backlog, not a temporary review
+updated 2026-09-12. This is a durable project backlog, not a temporary review
 walkthrough. An unchecked item is outstanding, not authorization to implement
 it or a requirement to finish it before merging this PR.
+
+The owner's Rust review starts from
+[scheduler-rust-review-guide.md](scheduler-rust-review-guide.md). Its Appendix B
+lists the product decisions the 2026-09-12 pre-review surfaced; the ones that
+touch scheduler behavior are repeated in the last section below.
 
 Update this file when a decision is settled or work lands. Keep detailed design
 in the linked documents and test evidence in [scheduler-review.md](scheduler-review.md).
@@ -92,6 +97,32 @@ If code and these notes disagree, verify the code and correct the notes.
       the saved ICS snapshot, while upstream iteration limits can produce incomplete
       results. Existing generated history/window bounds also intentionally reject
       overly dense expansion.
+
+## Decisions surfaced by the pre-review (2026-09-12)
+
+Each is described with its alternatives and a recommendation in
+[scheduler-rust-review-guide.md](scheduler-rust-review-guide.md#appendix-b-decisions-for-the-owner).
+The code does one defensible thing today; none of these blocks the review.
+
+- [ ] A rescheduled override for a position the rule never generates adds an
+      occurrence (the provider `RDATE` path). Keep, and validate identities in the
+      future override-authoring UI, or restrict to imported events.
+- [ ] A cancelled occurrence consumes a `COUNT` slot (RFC 5545). Keep or
+      change; either way say so in the composer.
+- [ ] An imported `DTSTART` that is not on `BYDAY` is not an occurrence, while
+      Google Calendar includes it. Include it for imported events or keep the rule.
+- [ ] `COUNT` together with `UNTIL` in an imported rule stays `Imported` instead
+      of being rejected.
+- [ ] The one-hour `created_at` window now applies to revisions; a device clock
+      more than an hour behind cannot edit and gets no distinct error code.
+- [ ] A 404 during live materialization drops the local copy of a held object
+      until the next reconnect.
+- [ ] Logout waits on an in-flight calendar sync (up to the 60 s fetch timeout).
+- [ ] Collab writes carry no server ordering key, so a rename can revert locally
+      until the next snapshot. Needs the server to return the committed `seq`.
+- [ ] Any skipped event still rejects the whole import replacement.
+- [ ] Security items of class C in
+      [security-inventory-2026-09-12.md](security-inventory-2026-09-12.md).
 
 ## Existing boundaries, not promises of future fixes
 
