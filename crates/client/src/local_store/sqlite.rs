@@ -564,7 +564,6 @@ fn upsert_object(
 /// The row exists even when there is no chain position to retain: for a
 /// deleted object its `event_seq` is what stops a late create event bringing
 /// the object back.
-#[allow(clippy::too_many_arguments)]
 fn upsert_anchor(
     connection: &Connection,
     object_id: &str,

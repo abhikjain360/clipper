@@ -5,6 +5,7 @@ use clipper_client::engine::{
     AppState, ClipboardPayload, ScheduleItem, SyncEngine, TEXT_CLIPBOARD_MIME_TYPE,
 };
 use js_sys::{Object, Promise, Reflect, Uint8Array};
+use serde::Serialize;
 use tokio::sync::{Mutex, watch};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
@@ -319,8 +320,7 @@ pub fn logout() -> Promise {
 pub fn get_state() -> Promise {
     ok_promise(async {
         let state = HOLDER.current_state().await;
-        let value = serde_wasm_bindgen::to_value(&state).map_err(js_error)?;
-        Ok(value)
+        to_js(&state)
     })
 }
 
@@ -471,8 +471,7 @@ pub fn expand_schedule(from: String, to: String, observer_zone: String) -> Promi
             .expand_schedule(&from, &to, &observer_zone)
             .await
             .map_err(js_error)?;
-        let value = serde_wasm_bindgen::to_value(&occurrences).map_err(js_error)?;
-        Ok(value)
+        to_js(&occurrences)
     })
 }
 
@@ -507,8 +506,7 @@ pub fn actuals_between(from: String, to: String) -> Promise {
             .actuals_between(&from, &to)
             .await
             .map_err(js_error)?;
-        let value = serde_wasm_bindgen::to_value(&actuals).map_err(js_error)?;
-        Ok(value)
+        to_js(&actuals)
     })
 }
 
@@ -535,8 +533,7 @@ pub fn sync_calendar_source(object_id: String) -> Promise {
             .sync_calendar_source(&object_id)
             .await
             .map_err(js_error)?;
-        let value = serde_wasm_bindgen::to_value(&report).map_err(js_error)?;
-        Ok(value)
+        to_js(&report)
     })
 }
 
@@ -547,8 +544,7 @@ pub fn create_collab_doc() -> Promise {
             .create_collab_doc()
             .await
             .map_err(js_error)?;
-        let value = serde_wasm_bindgen::to_value(&item).map_err(js_error)?;
-        Ok(value)
+        to_js(&item)
     })
 }
 
@@ -570,8 +566,7 @@ pub fn rename_collab_doc(object_id: String, title: String) -> Promise {
             .rename_collab_doc(&object_id, &title)
             .await
             .map_err(js_error)?;
-        let value = serde_wasm_bindgen::to_value(&item).map_err(js_error)?;
-        Ok(value)
+        to_js(&item)
     })
 }
 
@@ -582,8 +577,7 @@ pub fn get_collab_doc_meta(object_id: String) -> Promise {
             .get_collab_doc_meta(&object_id)
             .await
             .map_err(js_error)?;
-        let value = serde_wasm_bindgen::to_value(&item).map_err(js_error)?;
-        Ok(value)
+        to_js(&item)
     })
 }
 
@@ -591,8 +585,7 @@ pub fn get_collab_doc_meta(object_id: String) -> Promise {
 pub fn list_devices() -> Promise {
     ok_promise(async {
         let devices = engine_or_error()?.list_devices().await.map_err(js_error)?;
-        let value = serde_wasm_bindgen::to_value(&devices).map_err(js_error)?;
-        Ok(value)
+        to_js(&devices)
     })
 }
 
@@ -658,6 +651,15 @@ where
 
 fn js_error(error: impl ToString) -> JsValue {
     js_sys::Error::new(&error.to_string()).into()
+}
+
+/// Converts a value to JavaScript, writing an absent `Option` as `null`.
+///
+/// `serde_wasm_bindgen::to_value` writes `undefined` instead, which does not
+/// match the `null` the Tauri commands return for the same fields.
+fn to_js<T: Serialize + ?Sized>(value: &T) -> Result<JsValue, JsValue> {
+    let serializer = serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true);
+    value.serialize(&serializer).map_err(js_error)
 }
 
 fn clipboard_payload_value(payload: ClipboardPayload) -> Result<JsValue, JsValue> {
