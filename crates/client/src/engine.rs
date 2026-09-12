@@ -2401,7 +2401,9 @@ impl SyncEngine {
                 .await
             {
                 warn!("File snapshot failed: {}", error);
-                file_engine.end_refused_session_for(generation, &error).await;
+                file_engine
+                    .end_refused_session_for(generation, &error)
+                    .await;
             }
         });
 
@@ -2412,7 +2414,9 @@ impl SyncEngine {
                 .await
             {
                 warn!("Clipboard snapshot failed: {}", error);
-                clipboard_engine.end_refused_session_for(generation, &error).await;
+                clipboard_engine
+                    .end_refused_session_for(generation, &error)
+                    .await;
             }
         });
 
@@ -2423,7 +2427,9 @@ impl SyncEngine {
                 .await
             {
                 warn!("Collab doc snapshot failed: {}", error);
-                collab_engine.end_refused_session_for(generation, &error).await;
+                collab_engine
+                    .end_refused_session_for(generation, &error)
+                    .await;
             }
         });
 
@@ -2434,7 +2440,9 @@ impl SyncEngine {
                 .await
             {
                 warn!("Schedule snapshot failed: {}", error);
-                schedule_engine.end_refused_session_for(generation, &error).await;
+                schedule_engine
+                    .end_refused_session_for(generation, &error)
+                    .await;
             }
         });
     }

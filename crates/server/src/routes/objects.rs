@@ -1275,8 +1275,7 @@ pub async fn revise_object(
                     ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
                 })?;
         } else {
-            reserve_user_storage_quota(txn, state_ref, user_id, revision_storage_bytes, 0)
-                .await?;
+            reserve_user_storage_quota(txn, state_ref, user_id, revision_storage_bytes, 0).await?;
         }
 
         if all_inline {
@@ -4828,8 +4827,7 @@ mod tests {
             // the operation before any route runs, so the request is
             // refused at the extractor and nothing is written.
             let (head_revision, parent_hash) = head_of(&state, object_uuid).await;
-            let tombstone_payload_id: clipper_core::models::ObjectPayloadId =
-                Uuid::now_v7().into();
+            let tombstone_payload_id: clipper_core::models::ObjectPayloadId = Uuid::now_v7().into();
             let meta_nonce = vec![13_u8; XCHACHA20_NONCE_BYTES];
             let meta_ciphertext = b"tombstone metadata".to_vec();
             let payload_nonce = vec![14_u8; XCHACHA20_NONCE_BYTES];
