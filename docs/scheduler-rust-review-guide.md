@@ -73,14 +73,19 @@ Order and what to check:
     provider rule text is validated. Read it slowly.
   - `imported_rule::convert`: the allow-list of clauses that become a
     `Cadence`. Ask: can a rule convert and change meaning? (Every clause the
-    converter does not understand must keep the rule `Imported`.)
+    converter does not understand must keep the rule `Imported`.) Check each
+    `FREQ` arm against RFC 5545's expand/limit table: a yearly rule with
+    `BYMONTHDAY` but no `BYMONTH` expands to every month and stays imported.
   - `MonthDay`, `NthWeekday`, `WeekdaySet`: validated on deserialize.
 - [ ] `src/engine.rs` (550 lines). The expansion.
   - `rule_spans`: builds the DTSTART/RRULE text for the `rrule` crate on
-    wall-clock time, skips candidates more than a day before the window
-    without resolving them, then resolves the rest through `time.rs`. An
-    `UNTIL` given as an instant is applied to the resolved instant; `rrule`
-    only sees a loose wall-clock bound (`until_wall_clock`, `rrule_line`).
+    wall-clock time, skips candidates more than a day before the window or
+    a day past its end without resolving them, then resolves the rest
+    through `time.rs`. An `UNTIL` given as an instant is applied to the
+    resolved instant; `rrule` only sees a loose wall-clock bound
+    (`until_wall_clock`, `until_scan_bound`, `rrule_line`). A candidate that
+    cannot resolve (an all-day span on a skipped date) is dropped when its
+    wall clock is past the cutoff's wall clock, and is an error otherwise.
     Ask: where does each of the two limits (65,535 scanned, 10,000 in
     window) bite, and does exceeding either error rather than truncate?
   - `occurrences`: first loop applies cancellations and reschedules to rule
@@ -165,7 +170,10 @@ then the client acceptance in stage 3.
       `release_user_storage` are the only counter writers. `charge_user_storage`
       is for tombstones only: their metadata is capped and charged without a
       limit check, because a tombstone is the only way to purge back under
-      the limit. `revision_usage_by_user` gives bytes; `object_usage_by_user` gives
+      the limit. Every other revision, including one that costs zero bytes,
+      goes through the limit predicate, so an account over its limit can only
+      tombstone and purge; the overage is at most one capped tombstone per
+      object. `revision_usage_by_user` gives bytes; `object_usage_by_user` gives
       bytes and count; the orphan sweep must take bytes from the first and the
       count from the second.
 - [ ] `crates/server/src/cleanup.rs`. `cleanup_orphan_object_uploads` keys on
@@ -222,11 +230,22 @@ Questions to hold through stage 2:
     retained. Retention is fenced on the session epoch under the key read
     lock, so a download that finishes after a logout and login is dropped
     rather than written into the next profile.
-  - `end_refused_session_for`, `start_generation_for_session`, `ws_loop`,
-    `ws_connect`: a 401, a `hello_ack` and the reconnect loop each name the
-    generation or session epoch they belong to. A straggler from a replaced
-    session is ignored; it never clears the new session or claims a
-    generation in its profile.
+  - `hold_session_for_write`: the same fence for every user-initiated write
+    that persists after a server round trip (uploads, clipboard pushes,
+    schedule and timer writes, collab create, rename and delete). The epoch
+    is read before the network work; the guard is taken after it, so logout
+    never waits on an in-flight request.
+  - `end_refused_session_for`, `end_refused_session_for_epoch`,
+    `start_generation_for_session`, `ws_loop`, `ws_connect`,
+    `websocket_handshake_error`: a 401, a `hello_ack` and the reconnect loop
+    each name the generation or session epoch they belong to. A straggler
+    from a replaced session is ignored; it never clears the new session or
+    claims a generation in its profile. A 401 on the WebSocket handshake or
+    ticket ends the session it belongs to instead of retrying forever.
+  - `clear_local_session`, `finish_auth` and `LocalStore::fence_and_clear_memory`:
+    the store generation advances and memory is cleared under one hold of the
+    store's `sync` lock, so a writer that already passed its generation check
+    finishes before the clear and cannot put the old account's records back.
   - `validate_snapshot_page`, `snapshot_files`, `snapshot_clipboard`,
     `snapshot_schedule`: pages must advance inside a fixed watermark; a
     stale page item is skipped, not fatal, and the sweep at the end still runs.
@@ -299,7 +318,9 @@ Questions for stage 4:
       `partition_masters_and_overrides`, `event_from_component`, `span_from`,
       `recurrence_overrides`, `feed_time_from_partial`, `rrule_text`,
       `validate_rrule_numbers` (rejects any numeric clause calcard would
-      narrow or rewrite). Limits: 8 MiB feed, 50,000 components, 500,000
+      narrow or rewrite; `value_separator` finds the property value at the
+      first `:` outside a quoted parameter, as RFC 5545 section 3.1 requires).
+      Limits: 8 MiB feed, 50,000 components, 500,000
       properties, 10,000 overrides per event. Any skipped event rejects the whole
       replacement; the previous calendar stays active.
 - [ ] `crates/client/src/calendar_import.rs` (640 lines, new):
@@ -449,20 +470,60 @@ against the code, and reported seven defects plus one partial fix. All are
 fixed on the branch in the eight commits named below. It found no regression
 in signature domains, AAD binding, server user scoping or the OPAQUE pinning.
 
-| #   | Finding                                                                                                                                                                                                                                                                 | Where                                                                      | Status                                                                                |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| R1  | A download that finished after a logout and login wrote the previous account's file record and anchor into the new profile and published its filename into the new session's state.                                                                                     | `engine.rs` `download_file_bytes`, `retain_downloaded_file`                | Fixed in "Drop a file download that finished after its session was replaced"          |
-| R2  | A tombstone reserves its 34 bytes of metadata ciphertext, so a user at or above the byte or object limit could not delete and so could not purge. The S2 test passed only because it sent empty metadata.                                                               | `objects.rs` `revise_object`, `storage_quota.rs`                           | Fixed in "Charge tombstones without a quota check so a full account can still delete" |
-| R3  | A UTC `UNTIL` was compared on wall clock. Within an hour of a DST change an occurrence was wrongly dropped (fall-back) or kept (spring-forward).                                                                                                                        | `engine.rs` `rrule_line`, `rule_spans`; `recurrence.rs` `until_wall_clock` | Fixed in "Cut instant UNTIL rules on the resolved instant, not the wall clock"        |
-| R4  | A delayed 401 from a replaced session's snapshot request signed the new session out, and did so outside the lock every other session change holds.                                                                                                                      | `engine.rs` `start_reconciliation`, `end_refused_session_for`              | Fixed in "Keep a newer session signed in when a refusal for a replaced one arrives"   |
-| R5  | Every candidate from DTSTART was resolved before the window filter, so a series that started before a date the zone skipped failed on every later window.                                                                                                               | `engine.rs` `rule_spans`                                                   | Fixed in "Skip candidates before the window before resolving them"                    |
-| R6  | The import pre-check missed values wider than calcard's integers (`INTERVAL=65536` became 1, `COUNT=4294967296` became endless) and did not cover the other numeric clauses.                                                                                            | `ingest.rs` `validate_rrule_numbers`                                       | Fixed in "Reject import rules with counts the parser would narrow"                    |
-| R7  | The Tauri byte-upload command staged bytes under a name without the extension, so drag-and-drop uploads on desktop lost their filename and MIME type.                                                                                                                   | `web/src-tauri/src/lib.rs` `upload_file_bytes`                             | Fixed in "Stage desktop byte uploads under the user's filename"                       |
-| R8  | A WebSocket authenticated as the previous account could claim a fresh generation after `hello_ack` and stream its events into the new profile; the previous login's reconnect loop also kept running and reconnected as the new user, so every event was handled twice. | `engine.rs` `ws_connect`, `ws_loop`, `start_generation_for_session`        | Fixed in "Stop a WebSocket and its reconnect loop when their session ends"            |
+| #   | Finding                                                                                                                                                                                                                                                                 | Where                                                                      | Status                                                                                                             |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| R1  | A download that finished after a logout and login wrote the previous account's file record and anchor into the new profile and published its filename into the new session's state.                                                                                     | `engine.rs` `download_file_bytes`, `retain_downloaded_file`                | Fixed in "Drop a file download that finished after its session was replaced"                                       |
+| R2  | A tombstone reserves its 34 bytes of metadata ciphertext, so a user at or above the byte or object limit could not delete and so could not purge. The S2 test passed only because it sent empty metadata.                                                               | `objects.rs` `revise_object`, `storage_quota.rs`                           | Fixed in "Charge tombstones without a quota check so a full account can still delete"                              |
+| R3  | A UTC `UNTIL` was compared on wall clock. Within an hour of a DST change an occurrence was wrongly dropped (fall-back) or kept (spring-forward).                                                                                                                        | `engine.rs` `rrule_line`, `rule_spans`; `recurrence.rs` `until_wall_clock` | Fixed in "Cut instant UNTIL rules on the resolved instant, not the wall clock"                                     |
+| R4  | A delayed 401 from a replaced session's snapshot request signed the new session out, and did so outside the lock every other session change holds.                                                                                                                      | `engine.rs` `start_reconciliation`, `end_refused_session_for`              | Fixed in "Keep a newer session signed in when a refusal for a replaced one arrives"                                |
+| R5  | Every candidate from DTSTART was resolved before the window filter, so a series that started before a date the zone skipped failed on every later window.                                                                                                               | `engine.rs` `rule_spans`                                                   | Fixed in "Skip candidates before the window before resolving them"                                                 |
+| R6  | The import pre-check missed values wider than calcard's integers (`INTERVAL=65536` became 1, `COUNT=4294967296` became endless) and did not cover the other numeric clauses.                                                                                            | `ingest.rs` `validate_rrule_numbers`                                       | Fixed in "Reject import rules with counts the parser would narrow"; a quoted parameter colon bypassed it, T8 below |
+| R7  | The Tauri byte-upload command staged bytes under a name without the extension, so drag-and-drop uploads on desktop lost their filename and MIME type.                                                                                                                   | `web/src-tauri/src/lib.rs` `upload_file_bytes`                             | Fixed in "Stage desktop byte uploads under the user's filename"                                                    |
+| R8  | A WebSocket authenticated as the previous account could claim a fresh generation after `hello_ack` and stream its events into the new profile; the previous login's reconnect loop also kept running and reconnected as the new user, so every event was handled twice. | `engine.rs` `ws_connect`, `ws_loop`, `start_generation_for_session`        | Fixed in "Stop a WebSocket and its reconnect loop when their session ends"                                         |
 
 The reviewer also noted that the native `discard_cached_payload` is a no-op
 that the shared delete paths still call. Left as is; it is listed in the
 backlog as a simplification.
+
+### Third pass: whole-codebase review
+
+A third pass the same day widened the scope to the whole codebase, not only
+the polish commits: GPT-6 Astra at its highest effort, a Claude Fable
+reviewer reading the security surfaces first, and an Opus agent driving the
+web and Android UI in a sandbox. The two code reviewers reported ten distinct
+defects (one found by both), four of which were on `main` before this branch;
+the Opus fixer found an eleventh while writing a test. All eleven are fixed
+in the commits named below. Both reviewers verified R1 to R8; Astra marked R6
+partial because of T8. Neither found a private server handler that reads or
+writes outside the authenticated `user_id`, a `seq` allocated before the
+transaction's first write, a plaintext write into an AEAD-wrapped auth
+column, or a body field the server could substitute that is in neither the
+AAD nor the signature. The UI QA passed session replacement on web and
+Android, deletion at a full quota, the DST `UNTIL` cases and a regression
+sweep; it surfaced decision B17.
+
+| #   | Finding                                                                                                                                                                                                                                                                                                                                           | Where                                                                                                                          | Status                                                                                            |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| T1  | Every user-initiated write that persists after a server round trip (upload, clipboard push, schedule and timer writes, collab create, rename and delete) stamped whatever session was current when the response arrived, so a logout and login in between wrote the previous account's record into the new profile. On `main` before this branch. | `engine.rs` `hold_session_for_write`, `upload_file_bytes`, `send_clipboard_payload`, `write_schedule_record`, the collab paths | Fixed in "Drop a local write whose session ended while the server call was in flight"             |
+| T2  | Logout cleared memory before advancing the store generation, so a snapshot writer that had passed its generation check and was waiting on the database put the signed-out account's decrypted records back; `next_alarms` returned them with no session.                                                                                          | `engine.rs` `clear_local_session`, `finish_auth`; `local_store.rs` `fence_and_clear_memory`                                    | Fixed in "Fence the store before clearing memory so logout leaves no records behind"              |
+| T3  | A 401 on the WebSocket ticket or handshake was retried forever, so a device removed from another device kept its keys and decrypted state resident until the process restarted.                                                                                                                                                                   | `engine.rs` `ws_loop`, `websocket_handshake_error`, `end_refused_session_for_epoch`; `api_client.rs` `api_error_from_parts`    | Fixed in "Sign out when the server refuses the WebSocket handshake"                               |
+| T4  | `refresh` read the restart counter through `borrow()` inside the `send` call, holding the channel's read lock while `send` took its write lock. The Refresh action hung its caller on every shell. On `main` before this branch; found by the fixer while writing the test for T5.                                                                | `engine.rs` `refresh`                                                                                                          | Fixed in "Bump the refresh counter in place instead of blocking on the channel's own read borrow" |
+| T5  | A cloned restart receiver inherited the engine receiver's never-updated version, so after the first refresh every new WebSocket saw a restart at once, dropped itself and reconnected every second, restarting reconciliation each time. On `main` before this branch.                                                                            | `engine.rs` `restart_signal`, `ws_connect`                                                                                     | Fixed in "Restart a WebSocket only for a refresh asked for after it connected"                    |
+| T6  | A revival's `Created` event arriving before its tombstone's `Deleted` advanced the cached sequence without a fetch, so the old revision stayed visible until the next reconciliation.                                                                                                                                                             | `local_store.rs` `mark_pending_fetch`; `engine.rs` `handle_created_event`                                                      | Fixed in "Fetch the head when a create event is newer than the revision already held"             |
+| T7  | A candidate the `UNTIL` scan slack admitted that could not resolve (an all-day span on the date Samoa skipped, past the cutoff) failed the whole window instead of being dropped.                                                                                                                                                                 | `engine.rs` `rule_spans`; `recurrence.rs` `until_scan_bound`                                                                   | Fixed in "Skip unresolvable candidates past the instant cutoff and the window end"                |
+| T8  | The RRULE numeric pre-check split the content line at the first `:`, including one inside a quoted parameter, so `RRULE;X="a:b":INTERVAL=65536;FREQ=DAILY` bypassed it and calcard narrowed the interval.                                                                                                                                         | `ingest.rs` `value_separator`, `validate_rrule_numbers`                                                                        | Fixed in "Reject numeric RRULE clauses hidden behind a quoted parameter colon"                    |
+| T9  | `FREQ=YEARLY;BYMONTHDAY=n` without `BYMONTH` converted to once a year on the start month; RFC 5545 expands it to every month, so eleven of twelve occurrences vanished from the calendar and from alarms. On `main` before this branch.                                                                                                           | `imported_rule.rs` `cadence`                                                                                                   | Fixed in "Keep yearly rules with a month day but no month as imported"                            |
+| T10 | A revision that cost zero bytes skipped the quota predicate, so an account over its limit could alternate a charged tombstone and a free zero-byte revival forever and grow its usage without bound. Found by both reviewers.                                                                                                                     | `storage_quota.rs` `try_reserve_user_storage`; `objects.rs` `revise_object`                                                    | Fixed in "Refuse no-cost revisions while an account is over its storage quota"                    |
+| T11 | The desktop staging write returned as soon as its bytes were queued on tokio's blocking pool, so the daemon could read an empty or truncated file.                                                                                                                                                                                                | `web/src-tauri/src/lib.rs` `write_private_upload_file`                                                                         | Fixed in "Wait for the staged upload bytes before handing the path to the daemon"                 |
+
+Noted and left alone: a user action that itself gets a 401 (an upload, a
+delete) reports the error but does not end the session; only the snapshot
+and WebSocket paths do. `hydrate_ciphertext_cache` replaces the memory map
+without holding the store's `sync` lock; it runs inside `finish_auth` before
+the new session's WebSocket starts, so no writer can race it today. The
+browser logs `net::ERR_ABORTED` for logout and validate because the client
+drops the response body unread; the server processes both. All three are in
+the backlog.
 
 ## Appendix B: decisions for the owner
 
@@ -523,3 +584,10 @@ alternative, and a recommendation.
   watcher re-checks, the Linux one does not.
 - **B16. Tauri capability allowlist.** Still `core:default`. Needs a run of
   the desktop app to confirm the minimal set.
+- **B17. Deleting a file frees no quota.** The UI delete appends a tombstone,
+  which is charged, and nothing purges ordinary files afterwards; only
+  calendar import files are purged. An account at its limit cannot recover
+  space from the UI (UI QA, 2026-09-12). Options: purge as soon as the server
+  acknowledges the tombstone, which makes delete irreversible at once; purge
+  once every device has observed the tombstone, which needs a signal the
+  server does not have; or an explicit "empty trash" action.

@@ -226,6 +226,32 @@ or streams into it; a full account can delete again; desktop drag-and-drop
 uploads keep their filename. Validation after the second pass:
 445 workspace tests (164 in the schedule crate: 13 unit, 57 adversarial, 37 behaviour, 15 corpus, 2 imported-rule, 35 ingest, 5 `UNTIL`; 94 in the client plus the ignored live test; 107 in the server; 2 in the desktop shell), workspace Clippy with warnings denied, the wasm and web checks, and formatting with the pinned toolchains.
 
+A third pass the same day widened the scope to the whole codebase: GPT-6
+Astra at its highest effort, a Claude Fable reviewer reading the security
+surfaces first, and an Opus agent driving the web and Android UI in the
+sandbox. The two code reviewers reported ten distinct defects, four of them
+on `main` before this branch, and the fixer found an eleventh; all are fixed
+and listed as T1 to T11 in the guide's Appendix A. The ones that matter for
+day-to-day use: the Refresh action no longer hangs its caller, and no longer
+makes every later WebSocket reconnect once a second; an upload, clipboard
+push, schedule write or collab change that finishes after a logout and login
+is dropped instead of landing in the next account's profile; logout leaves
+no decrypted record of the old account in memory; a device removed from
+another device signs itself out instead of retrying its WebSocket forever; a
+revival event that overtakes its tombstone fetches the new revision; a
+yearly imported rule with `BYMONTHDAY` and no `BYMONTH` keeps all twelve
+occurrences; an account over its quota can no longer grow its usage with
+tombstone and zero-byte revival cycles; desktop byte uploads are complete on
+disk before the daemon reads them. The UI QA passed session replacement on
+web and Android, deletion at a full quota, the DST `UNTIL` cases and a
+regression sweep of blocks, timers, files, clipboard and collab docs; it
+found that a deleted file never frees quota (decision B17). Validation after
+the third pass: 464 workspace tests (170 in the schedule crate: 13 unit, 58
+adversarial, 37 behaviour, 15 corpus, 2 imported-rule, 38 ingest, 7 `UNTIL`;
+103 in the client plus the ignored live test; 110 in the server; 3 in the
+desktop shell), workspace Clippy with warnings denied, the wasm and web
+checks, and formatting with the pinned toolchains.
+
 ## QA of the polished build (2026-09-12)
 
 A fresh sandbox was used because objects and device records from the earlier

@@ -22,9 +22,9 @@ Generated from `git diff main...HEAD` on 2026-09-12. For each changed Rust file:
 
 ## crates/client/src/api_client.rs
 
-+242 −69 lines; 43 non-test functions touched, 2 test functions touched.
++270 −82 lines; 44 non-test functions touched, 2 test functions touched.
 
-- (top level) (51 changed lines)
+- (top level) (71 changed lines)
 - `deadline_get` (line 71, 3 changed lines)
 - `deadline_post` (line 75, 3 changed lines)
 - `deadline_delete` (line 79, 3 changed lines)
@@ -56,17 +56,18 @@ Generated from `git diff main...HEAD` on 2026-09-12. For each changed Rust file:
 - `with_deadline` (line 889, 10 changed lines)
 - `with_transfer_deadline` (line 903, 10 changed lines)
 - `sanitized_server_message` (line 1004, 15 changed lines)
-- `api_error_from_response` (line 1020, 3 changed lines)
-- `encrypt_clipboard_meta` (line 1092, 4 changed lines)
-- `decrypt_clipboard_meta` (line 1105, 4 changed lines)
-- `encrypt_clipboard_payload` (line 1118, 4 changed lines)
-- `decrypt_clipboard_payload` (line 1130, 4 changed lines)
-- `encrypt_file_meta_bytes` (line 1142, 4 changed lines)
-- `decrypt_file_meta_bytes` (line 1155, 4 changed lines)
-- `encrypt_file_blob_bytes` (line 1172, 4 changed lines)
-- `decrypt_file_blob_bytes` (line 1184, 4 changed lines)
-- `error_response` (line 1343, 5 changed lines)
-- `from` (line 1383, 9 changed lines)
+- `api_error_from_parts` (line 1027, 12 changed lines)
+- `api_error_from_response` (line 1050, 12 changed lines)
+- `encrypt_clipboard_meta` (line 1107, 4 changed lines)
+- `decrypt_clipboard_meta` (line 1120, 4 changed lines)
+- `encrypt_clipboard_payload` (line 1133, 4 changed lines)
+- `decrypt_clipboard_payload` (line 1145, 4 changed lines)
+- `encrypt_file_meta_bytes` (line 1157, 4 changed lines)
+- `decrypt_file_meta_bytes` (line 1170, 4 changed lines)
+- `encrypt_file_blob_bytes` (line 1187, 4 changed lines)
+- `decrypt_file_blob_bytes` (line 1199, 4 changed lines)
+- `error_response` (line 1358, 5 changed lines)
+- `from` (line 1398, 9 changed lines)
 - tests touched: `envelope_body`, `server_messages_are_stripped_and_clamped`
 
 ## crates/client/src/calendar_import.rs
@@ -77,87 +78,124 @@ New file, 641 lines, 11 functions, 0 test functions.
 
 ## crates/client/src/engine.rs
 
-+2536 −215 lines; 78 non-test functions touched, 23 test functions touched.
++4339 −1419 lines; 115 non-test functions touched, 36 test functions touched.
 
-- (top level) (479 changed lines)
+- (top level) (1084 changed lines)
 - `validate_snapshot_page` (line 65, 30 changed lines)
 - `try_new_with_data_dir` (line 175, 6 changed lines)
 - `login_with_platform` (line 248, 1 changed lines)
 - `register_with_platform` (line 310, 1 changed lines)
 - `resume_with_platform` (line 387, 5 changed lines)
-- `finish_auth` (line 453, 23 changed lines)
-- `logout` (line 553, 5 changed lines)
-- `clear_local_session` (line 573, 18 changed lines)
-- `end_refused_session` (line 595, 8 changed lines)
-- `end_refused_session_for` (line 613, 13 changed lines)
-- `session_is_current` (line 633, 3 changed lines)
-- `start_generation_for_session` (line 645, 6 changed lines)
-- `remove_device` (line 680, 9 changed lines)
-- `send_clipboard_payload` (line 711, 10 changed lines)
-- `clipboard_payload` (line 907, 2 changed lines)
-- `copy_to_local` (line 941, 2 changed lines)
-- `submit_single_payload_object` (line 970, 12 changed lines)
-- `finish_single_payload_object` (line 996, 9 changed lines)
-- `upload_file_bytes` (line 1075, 11 changed lines)
-- `download_file_bytes` (line 1194, 33 changed lines)
-- `retain_downloaded_file` (line 1253, 38 changed lines)
-- `delete_file` (line 1332, 35 changed lines)
-- `create_schedule_item` (line 1377, 4 changed lines)
-- `create_schedule_record` (line 1388, 8 changed lines)
-- `write_schedule_record` (line 1403, 160 changed lines)
-- `write_tombstone` (line 1542, 57 changed lines)
-- `start_actual` (line 1604, 36 changed lines)
-- `stop_actual` (line 1646, 4 changed lines)
-- `stop_actual_inner` (line 1651, 32 changed lines)
-- `actuals_between` (line 1685, 46 changed lines)
-- `running_actual_id` (line 1733, 11 changed lines)
-- `update_schedule_item` (line 1749, 55 changed lines)
-- `check_revision_advance` (line 1826, 6 changed lines)
-- `local_head` (line 1834, 8 changed lines)
-- `delete_schedule_object` (line 1849, 5 changed lines)
-- `tombstone_schedule_object` (line 1855, 18 changed lines)
-- `expand_schedule` (line 1880, 137 changed lines)
-- `next_alarms` (line 2025, 70 changed lines)
-- `add_calendar_source` (line 2097, 37 changed lines)
-- `snapshot_schedule` (line 2136, 71 changed lines)
-- `decrypt_schedule_object_item` (line 2208, 49 changed lines)
-- `create_collab_doc` (line 2268, 19 changed lines)
-- `rename_collab_doc` (line 2292, 29 changed lines)
-- `delete_collab_doc` (line 2326, 16 changed lines)
-- `get_collab_doc_meta` (line 2345, 4 changed lines)
-- `refresh` (line 2352, 1 changed lines)
-- `publish_visible_state` (line 2357, 31 changed lines)
-- `start_reconciliation` (line 2396, 22 changed lines)
-- `handle_ws_text` (line 2450, 24 changed lines)
-- `snapshot_files` (line 2535, 9 changed lines)
-- `snapshot_clipboard` (line 2634, 27 changed lines)
-- `keep_held_revision` (line 2710, 19 changed lines)
-- `decrypt_clipboard_object_item_with_api` (line 2811, 3 changed lines)
-- `handle_updated_object_event` (line 2905, 32 changed lines)
-- `materialize_object` (line 2987, 38 changed lines)
-- `materialize_collab` (line 3092, 5 changed lines)
-- `ws_loop` (line 3143, 38 changed lines)
-- `ws_connect` (line 3204, 14 changed lines)
-- `encrypted_clipboard_from_init` (line 3685, 4 changed lines)
-- `parse_calendar_feed` (line 3697, 8 changed lines)
-- `fetch_calendar_feed` (line 3723, 57 changed lines)
-- `parse_instant` (line 3787, 8 changed lines)
-- `encrypted_object_from_revise` (line 3816, 19 changed lines)
-- `object_envelope_body_for_aad` (line 3864, 9 changed lines)
-- `revision` (line 3906, 6 changed lines)
-- `parent_hash` (line 3913, 6 changed lines)
-- `operation` (line 3920, 7 changed lines)
-- `object_envelope_body` (line 3930, 14 changed lines)
-- `verify_object_list_item_envelope` (line 3955, 15 changed lines)
-- `verify_payload_hash` (line 4035, 8 changed lines)
-- `stopped_span` (line 4050, 7 changed lines)
-- `check_upload_plaintext_size` (line 4062, 5 changed lines)
-- `session_refused` (line 4150, 3 changed lines)
-- `source_record` (line 4854, 13 changed lines)
-- `encrypted_schedule_object` (line 4868, 69 changed lines)
-- `history_cache_eviction_clears_stale_entries_without_losing_the_new_read` (line 4942, 68 changed lines)
-- `logout_clears_history_cache_and_advances_the_epoch_offline` (line 5014, 31 changed lines)
-- tests touched: `snapshot_pages_must_advance_inside_the_watermark`, `calendar_fetch_errors_do_not_expose_the_private_url`, `calendar_fetch_bounds_chunked_bodies_before_reading_to_end`, `envelope_payload`, `signed_item_with_payload_count`, `signed_item_with_version`, `historical_reads_require_the_exact_pinned_signed_body`, `envelope_verification_accepts_initial_format_and_rejects_unknown_versions`, `visible_state`, `open_session`, `stopping_a_timer_clamps_a_clock_that_runs_behind`, `logout_fences_sync_writes_that_are_still_in_flight`, `signed_file_item`, `a_download_that_outlives_its_session_is_not_retained`, `a_download_that_finishes_inside_its_session_is_retained`, `a_refusal_from_a_replaced_session_does_not_sign_out_the_new_one`, `a_refusal_waits_for_a_session_change_already_running`, `a_socket_from_a_replaced_session_does_not_claim_the_store`, `the_websocket_loop_of_an_ended_session_stops_instead_of_reconnecting`, `a_late_view_does_not_replace_a_newer_one`, `only_a_refused_token_ends_the_session`, `a_refused_session_is_torn_down_once`, `an_oversized_upload_is_refused_before_encryption`
+- `finish_auth` (line 453, 22 changed lines)
+- `logout` (line 552, 5 changed lines)
+- `clear_local_session` (line 572, 19 changed lines)
+- `end_refused_session` (line 593, 8 changed lines)
+- `end_refused_session_for` (line 611, 13 changed lines)
+- `end_refused_session_for_epoch` (line 633, 13 changed lines)
+- `session_is_current` (line 653, 3 changed lines)
+- `start_generation_for_session` (line 665, 7 changed lines)
+- `hold_session_for_write` (line 685, 10 changed lines)
+- `remove_device` (line 724, 9 changed lines)
+- `send_clipboard_payload` (line 755, 14 changed lines)
+- `clipboard_payload` (line 955, 2 changed lines)
+- `copy_to_local` (line 989, 2 changed lines)
+- `submit_single_payload_object` (line 1018, 12 changed lines)
+- `finish_single_payload_object` (line 1044, 9 changed lines)
+- `upload_file_bytes` (line 1123, 15 changed lines)
+- `download_file_bytes` (line 1246, 33 changed lines)
+- `retain_downloaded_file` (line 1305, 38 changed lines)
+- `delete_file` (line 1384, 35 changed lines)
+- `create_schedule_item` (line 1429, 4 changed lines)
+- `create_schedule_record` (line 1440, 8 changed lines)
+- `write_schedule_record` (line 1455, 166 changed lines)
+- `write_tombstone` (line 1600, 56 changed lines)
+- `start_actual` (line 1662, 35 changed lines)
+- `stop_actual` (line 1704, 4 changed lines)
+- `stop_actual_inner` (line 1709, 48 changed lines)
+- `actuals_between` (line 1743, 144 changed lines)
+- `running_actual_id` (line 1791, 11 changed lines)
+- `update_schedule_item` (line 1807, 63 changed lines)
+- `check_revision_advance` (line 1884, 6 changed lines)
+- `local_head` (line 1892, 8 changed lines)
+- `delete_schedule_object` (line 1907, 5 changed lines)
+- `tombstone_schedule_object` (line 1913, 18 changed lines)
+- `expand_schedule` (line 1938, 137 changed lines)
+- `next_alarms` (line 2083, 70 changed lines)
+- `add_calendar_source` (line 2155, 37 changed lines)
+- `snapshot_schedule` (line 2194, 62 changed lines)
+- `decrypt_schedule_object_item` (line 2266, 126 changed lines)
+- `create_collab_doc` (line 2326, 55 changed lines)
+- `rename_collab_doc` (line 2354, 83 changed lines)
+- `delete_collab_doc` (line 2392, 22 changed lines)
+- `get_collab_doc_meta` (line 2415, 4 changed lines)
+- `refresh` (line 2427, 4 changed lines)
+- `restart_signal` (line 2439, 5 changed lines)
+- `publish_visible_state` (line 2445, 40 changed lines)
+- `start_reconciliation` (line 2484, 67 changed lines)
+- `handle_ws_text` (line 2538, 172 changed lines)
+- `snapshot_files` (line 2623, 79 changed lines)
+- `snapshot_collab_docs` (line 2694, 31 changed lines)
+- `snapshot_clipboard` (line 2722, 76 changed lines)
+- `keep_held_revision` (line 2798, 18 changed lines)
+- `persist_file_snapshot_item` (line 2818, 31 changed lines)
+- `persist_collab_snapshot_item` (line 2841, 42 changed lines)
+- `persist_clipboard_snapshot_item` (line 2866, 21 changed lines)
+- `current_encryption_key` (line 2891, 7 changed lines)
+- `decrypt_clipboard_object_item_with_api` (line 2899, 55 changed lines)
+- `handle_created_event` (line 2955, 32 changed lines)
+- `handle_updated_object_event` (line 2992, 32 changed lines)
+- `handle_deleted_event` (line 3025, 22 changed lines)
+- `handle_updated_collab_event` (line 3055, 18 changed lines)
+- `materialize_object` (line 3074, 100 changed lines)
+- `materialize_collab` (line 3179, 26 changed lines)
+- `remove_absent_object` (line 3206, 14 changed lines)
+- `ws_loop` (line 3230, 131 changed lines)
+- `ws_connect` (line 3298, 211 changed lines)
+- `connect` (line 3606, 74 changed lines)
+- `send_text` (line 3681, 5 changed lines)
+- `next_text` (line 3687, 13 changed lines)
+- `js_error_message` (line 3703, 5 changed lines)
+- `mime_guess_from_filename` (line 3709, 21 changed lines)
+- `normalized_mime_type` (line 3731, 6 changed lines)
+- `safe_object_filename` (line 3738, 12 changed lines)
+- `inline_ciphertext` (line 3751, 3 changed lines)
+- `check_payload_ciphertext_size` (line 3761, 12 changed lines)
+- `single_payload` (line 3774, 11 changed lines)
+- `encrypted_clipboard_from_init` (line 3786, 9 changed lines)
+- `parse_calendar_feed` (line 3798, 8 changed lines)
+- `fetch_calendar_feed` (line 3824, 57 changed lines)
+- `parse_instant` (line 3888, 8 changed lines)
+- `encrypted_object_from_init` (line 3897, 19 changed lines)
+- `encrypted_object_from_revise` (line 3917, 19 changed lines)
+- `encrypted_object_from_list_item` (line 3937, 10 changed lines)
+- `optional_device_id` (line 3948, 10 changed lines)
+- `object_envelope_body_for_aad` (line 3965, 27 changed lines)
+- `revision` (line 4007, 6 changed lines)
+- `parent_hash` (line 4014, 6 changed lines)
+- `operation` (line 4021, 7 changed lines)
+- `object_envelope_body` (line 4031, 24 changed lines)
+- `verify_object_list_item_envelope` (line 4056, 77 changed lines)
+- `verify_payload_hash` (line 4136, 7 changed lines)
+- `stopped_span` (line 4151, 7 changed lines)
+- `check_upload_plaintext_size` (line 4163, 8 changed lines)
+- `object_envelope_error` (line 4172, 3 changed lines)
+- `decrypt_file_object_item` (line 4176, 21 changed lines)
+- `collab_item_from_meta` (line 4199, 10 changed lines)
+- `collab_created_seq` (line 4219, 8 changed lines)
+- `clipboard_payload_digest` (line 4228, 7 changed lines)
+- `is_supported_clipboard_mime_type` (line 4236, 3 changed lines)
+- `same_mime_type` (line 4240, 3 changed lines)
+- `is_not_found_error` (line 4244, 3 changed lines)
+- `session_refused` (line 4251, 3 changed lines)
+- `websocket_handshake_error` (line 4264, 17 changed lines)
+- `spawn_background` (line 4283, 14 changed lines)
+- `profile_id_from_encryption_key` (line 4298, 9 changed lines)
+- `hex_string` (line 4302, 16 changed lines)
+- `source_record` (line 5453, 13 changed lines)
+- `encrypted_schedule_object` (line 5467, 69 changed lines)
+- `history_cache_eviction_clears_stale_entries_without_losing_the_new_read` (line 5541, 68 changed lines)
+- `logout_clears_history_cache_and_advances_the_epoch_offline` (line 5613, 31 changed lines)
+- tests touched: `snapshot_pages_must_advance_inside_the_watermark`, `calendar_fetch_errors_do_not_expose_the_private_url`, `calendar_fetch_bounds_chunked_bodies_before_reading_to_end`, `descriptor`, `envelope_payload`, `signed_item_with_payload_count`, `signed_item_with_version`, `historical_reads_require_the_exact_pinned_signed_body`, `envelope_verification_accepts_initial_format_and_rejects_unknown_versions`, `envelope_verification_rejects_over_count_payload_list_before_quadratic_work`, `envelope_verification_allows_max_payload_count_past_the_cap`, `envelope_verification_accepts_reclaimed_source_device_without_key`, `envelope_verification_rejects_bad_signature_when_key_present`, `visible_state`, `open_session`, `stopping_a_timer_clamps_a_clock_that_runs_behind`, `logout_fences_sync_writes_that_are_still_in_flight`, `logout_clears_memory_after_a_writer_already_past_its_generation_check`, `refresh_does_not_block_on_the_restart_channel`, `a_restart_signal_reports_only_refreshes_asked_for_after_it_was_taken`, `a_revival_that_overtakes_its_tombstone_still_fetches_the_new_head`, `signed_file_item`, `a_download_that_outlives_its_session_is_not_retained`, `a_download_that_finishes_inside_its_session_is_retained`, `an_upload_that_outlives_its_session_is_not_persisted`, `a_refusal_from_a_replaced_session_does_not_sign_out_the_new_one`, `a_refusal_waits_for_a_session_change_already_running`, `a_socket_from_a_replaced_session_does_not_claim_the_store`, `the_websocket_loop_of_an_ended_session_stops_instead_of_reconnecting`, `a_late_view_does_not_replace_a_newer_one`, `only_a_refused_token_ends_the_session`, `a_refused_websocket_handshake_is_a_refused_session`, `a_websocket_refusal_from_a_replaced_session_does_not_sign_out_the_new_one`, `a_websocket_the_server_refuses_ends_the_session`, `a_refused_session_is_torn_down_once`, `an_oversized_upload_is_refused_before_encryption`
 
 ## crates/client/src/lib.rs
 
@@ -167,91 +205,92 @@ New file, 641 lines, 11 functions, 0 test functions.
 
 ## crates/client/src/local_store.rs
 
-+2587 −369 lines; 82 non-test functions touched, 29 test functions touched.
++2635 −382 lines; 83 non-test functions touched, 30 test functions touched.
 
-- (top level) (438 changed lines)
+- (top level) (456 changed lines)
 - `new` (line 297, 3 changed lines)
-- `current_generation` (line 327, 3 changed lines)
-- `mark_snapshot_seen` (line 335, 12 changed lines)
-- `keep_retained_revision` (line 354, 12 changed lines)
-- `refresh_seen_generation` (line 369, 14 changed lines)
-- `persist_local_clipboard_present_encrypted` (line 388, 2 changed lines)
-- `persist_snapshot_clipboard_present_encrypted` (line 414, 28 changed lines)
-- `persist_local_schedule_present_encrypted` (line 451, 20 changed lines)
-- `persist_snapshot_schedule_present_encrypted` (line 476, 31 changed lines)
-- `persist_schedule_present_encrypted_inner` (line 512, 40 changed lines)
-- `import_file_object` (line 555, 18 changed lines)
-- `import_file_ciphertext` (line 578, 16 changed lines)
-- `cache_import_file_ciphertext` (line 596, 25 changed lines)
-- `persist_snapshot_file_present_encrypted` (line 644, 24 changed lines)
-- `hydrate_ciphertext_cache` (line 732, 10 changed lines)
-- `mark_pending_update` (line 787, 34 changed lines)
-- `apply_local_delete` (line 822, 2 changed lines)
-- `apply_local_tombstone` (line 838, 20 changed lines)
-- `apply_live_delete` (line 859, 2 changed lines)
-- `remove_absent_object` (line 897, 2 changed lines)
-- `persist_clipboard_present_encrypted_inner` (line 960, 7 changed lines)
-- `persist_file_present_encrypted_inner` (line 1004, 2 changed lines)
-- `persist_collab_present_inner` (line 1048, 17 changed lines)
-- `mark_pending_create_inner` (line 1111, 26 changed lines)
-- `apply_delete_inner` (line 1175, 73 changed lines)
-- `sweep_kind_inner` (line 1260, 40 changed lines)
-- `mark_record_absent` (line 1293, 28 changed lines)
-- `discard_unreadable_cache_entry` (line 1331, 10 changed lines)
-- `mark_object_absent_inner` (line 1343, 19 changed lines)
-- `recent_clipboard_items_inner` (line 1363, 8 changed lines)
-- `file_items_inner` (line 1375, 6 changed lines)
-- `collab_items_inner` (line 1379, 6 changed lines)
-- `decrypt_stored_object_record_preview` (line 1395, 6 changed lines)
-- `decrypt_schedule_record` (line 1425, 31 changed lines)
-- `schedule_items_inner` (line 1463, 17 changed lines)
-- `calendar_sources_inner` (line 1481, 21 changed lines)
-- `running_actual_inner` (line 1507, 38 changed lines)
-- `local_head` (line 1555, 10 changed lines)
-- `validate_incoming_revision` (line 1572, 9 changed lines)
-- `validate_encrypted_revision_advance` (line 1588, 44 changed lines)
-- `schedule_records_with_ids` (line 1633, 14 changed lines)
-- `schedule_records_with_heads` (line 1651, 10 changed lines)
-- `decrypt_present_clipboard_payload` (line 1713, 2 changed lines)
-- `visible_state_inner` (line 1756, 16 changed lines)
-- `load_or_create_device_signing_identity_inner` (line 1786, 10 changed lines)
-- `load_device_signing_identity_inner` (line 1821, 4 changed lines)
-- `write_device_identity` (line 1844, 2 changed lines)
-- `sweep_orphaned_temp_files` (line 1860, 23 changed lines)
-- `with_database` (line 1869, 30 changed lines)
-- `open_database` (line 1889, 6 changed lines)
-- `discard_legacy_file_store` (line 1903, 13 changed lines)
-- `stored_object_record` (line 1920, 8 changed lines)
-- `write_stored_object_record` (line 1928, 7 changed lines)
-- `write_stored_object_record_with_payload` (line 1941, 18 changed lines)
-- `stored_object_payload_ciphertext` (line 1950, 13 changed lines)
-- `live_stored_object_records` (line 1958, 33 changed lines)
-- `stale_stored_object_ids` (line 1963, 61 changed lines)
-- `discard_cached_payload` (line 1980, 4 changed lines)
-- `remove_payloads_for_object` (line 1985, 12 changed lines)
-- `remove_stored_object_record_and_payloads` (line 1990, 13 changed lines)
-- `database_path` (line 2005, 4 changed lines)
-- `legacy_object_dir` (line 2011, 1 changed lines)
-- `legacy_clipboard_dir` (line 2015, 9 changed lines)
-- `write_browser_device_identity` (line 2088, 2 changed lines)
-- `object_payload_ciphertext_key` (line 2308, 4 changed lines)
-- `local_head_from_present` (line 2362, 10 changed lines)
-- `revision_anchor_for_record` (line 2373, 10 changed lines)
-- `present_revision_anchor` (line 2389, 11 changed lines)
-- `validate_revision_against_head` (line 2401, 35 changed lines)
-- `revision_anchor_error` (line 2437, 5 changed lines)
-- `decrypt_file_record` (line 2466, 8 changed lines)
-- `schedule_item_view_from_record` (line 2501, 12 changed lines)
-- `sort_records_desc` (line 2514, 3 changed lines)
-- `verify_payload_ciphertext` (line 2591, 5 changed lines)
-- `clipboard_display_text` (line 2610, 1 changed lines)
-- `is_text_mime_type` (line 2635, 4 changed lines)
-- `top_level_mime_type` (line 2639, 7 changed lines)
-- `normalized_clipboard_mime_type` (line 2649, 8 changed lines)
-- `device_identity_record_aad` (line 2681, 21 changed lines)
-- `encrypted_device_identity_record` (line 2703, 10 changed lines)
-- `device_identity_from_record` (line 2725, 19 changed lines)
-- tests touched: `encrypted_clipboard`, `encrypted_clipboard_at`, `file_item`, `encrypted_file_at`, `collab_item`, `encrypts_device_identity_at_rest`, `tampered_device_identity_record`, `rejects_device_identity_record_with_a_substituted_device_id`, `rejects_device_identity_record_with_a_malformed_device_id`, `rejects_device_identity_record_copied_from_another_profile`, `hydrate_sweeps_orphaned_temp_files`, `opening_the_store_discards_the_file_based_one_it_replaces`, `restricts_cache_permissions_and_does_not_store_plaintext`, `a_newer_event_for_a_pending_object_asks_for_another_fetch`, `delete_marker_keeps_revision_anchor_across_sweeps_and_restart`, `snapshot_absence_retains_head_without_forcing_a_new_revision`, `locally_signed_tombstone_is_a_durable_exact_head`, `hydration_keeps_the_anchor_when_cached_content_cannot_be_read`, `wiping_the_cache_leaves_every_anchor_standing`, `a_deleted_object_leaves_nothing_for_hydration_to_read`, `dropping_an_object_reclaims_its_cached_payload`, `a_stale_snapshot_page_skips_one_item_and_keeps_going`, `an_equivocating_snapshot_body_is_skipped`, `a_held_collab_doc_does_not_break_the_view`, `a_collab_listing_cannot_erase_an_encrypted_objects_anchor`, `a_chainless_record_cannot_take_an_anchor_away`, `a_late_local_tombstone_cannot_lower_the_anchor`, `validating_an_incoming_revision_honours_an_absent_anchor`, `validating_an_incoming_revision_honours_an_observed_delete_anchor`
+- `hold_database_for_test` (line 312, 9 changed lines)
+- `current_generation` (line 340, 3 changed lines)
+- `mark_snapshot_seen` (line 348, 12 changed lines)
+- `keep_retained_revision` (line 367, 12 changed lines)
+- `refresh_seen_generation` (line 382, 14 changed lines)
+- `fence_and_clear_memory` (line 407, 3 changed lines)
+- `persist_local_clipboard_present_encrypted` (line 413, 2 changed lines)
+- `persist_snapshot_clipboard_present_encrypted` (line 439, 28 changed lines)
+- `persist_local_schedule_present_encrypted` (line 476, 20 changed lines)
+- `persist_snapshot_schedule_present_encrypted` (line 501, 31 changed lines)
+- `persist_schedule_present_encrypted_inner` (line 537, 40 changed lines)
+- `import_file_object` (line 580, 18 changed lines)
+- `import_file_ciphertext` (line 603, 16 changed lines)
+- `cache_import_file_ciphertext` (line 621, 25 changed lines)
+- `persist_snapshot_file_present_encrypted` (line 669, 24 changed lines)
+- `hydrate_ciphertext_cache` (line 757, 10 changed lines)
+- `mark_pending_fetch` (line 797, 5 changed lines)
+- `apply_local_delete` (line 813, 2 changed lines)
+- `apply_local_tombstone` (line 829, 20 changed lines)
+- `apply_live_delete` (line 850, 2 changed lines)
+- `remove_absent_object` (line 888, 2 changed lines)
+- `persist_clipboard_present_encrypted_inner` (line 951, 7 changed lines)
+- `persist_file_present_encrypted_inner` (line 995, 2 changed lines)
+- `persist_collab_present_inner` (line 1039, 17 changed lines)
+- `mark_pending_fetch_inner` (line 1102, 58 changed lines)
+- `apply_delete_inner` (line 1168, 65 changed lines)
+- `sweep_kind_inner` (line 1253, 40 changed lines)
+- `mark_record_absent` (line 1286, 28 changed lines)
+- `discard_unreadable_cache_entry` (line 1324, 10 changed lines)
+- `mark_object_absent_inner` (line 1336, 19 changed lines)
+- `recent_clipboard_items_inner` (line 1356, 8 changed lines)
+- `file_items_inner` (line 1368, 6 changed lines)
+- `collab_items_inner` (line 1372, 6 changed lines)
+- `decrypt_stored_object_record_preview` (line 1388, 6 changed lines)
+- `decrypt_schedule_record` (line 1418, 31 changed lines)
+- `schedule_items_inner` (line 1456, 17 changed lines)
+- `calendar_sources_inner` (line 1474, 21 changed lines)
+- `running_actual_inner` (line 1500, 38 changed lines)
+- `local_head` (line 1548, 10 changed lines)
+- `validate_incoming_revision` (line 1565, 9 changed lines)
+- `validate_encrypted_revision_advance` (line 1581, 44 changed lines)
+- `schedule_records_with_ids` (line 1626, 14 changed lines)
+- `schedule_records_with_heads` (line 1644, 10 changed lines)
+- `decrypt_present_clipboard_payload` (line 1706, 2 changed lines)
+- `visible_state_inner` (line 1749, 16 changed lines)
+- `load_or_create_device_signing_identity_inner` (line 1779, 10 changed lines)
+- `load_device_signing_identity_inner` (line 1814, 4 changed lines)
+- `write_device_identity` (line 1837, 2 changed lines)
+- `sweep_orphaned_temp_files` (line 1853, 23 changed lines)
+- `with_database` (line 1862, 30 changed lines)
+- `open_database` (line 1882, 6 changed lines)
+- `discard_legacy_file_store` (line 1896, 13 changed lines)
+- `stored_object_record` (line 1913, 8 changed lines)
+- `write_stored_object_record` (line 1921, 7 changed lines)
+- `write_stored_object_record_with_payload` (line 1934, 18 changed lines)
+- `stored_object_payload_ciphertext` (line 1943, 13 changed lines)
+- `live_stored_object_records` (line 1951, 33 changed lines)
+- `stale_stored_object_ids` (line 1956, 61 changed lines)
+- `discard_cached_payload` (line 1973, 4 changed lines)
+- `remove_payloads_for_object` (line 1978, 12 changed lines)
+- `remove_stored_object_record_and_payloads` (line 1983, 13 changed lines)
+- `database_path` (line 1998, 4 changed lines)
+- `legacy_object_dir` (line 2004, 1 changed lines)
+- `legacy_clipboard_dir` (line 2008, 9 changed lines)
+- `write_browser_device_identity` (line 2081, 2 changed lines)
+- `object_payload_ciphertext_key` (line 2301, 4 changed lines)
+- `local_head_from_present` (line 2355, 10 changed lines)
+- `revision_anchor_for_record` (line 2366, 10 changed lines)
+- `present_revision_anchor` (line 2382, 11 changed lines)
+- `validate_revision_against_head` (line 2394, 35 changed lines)
+- `revision_anchor_error` (line 2430, 5 changed lines)
+- `decrypt_file_record` (line 2459, 8 changed lines)
+- `schedule_item_view_from_record` (line 2494, 12 changed lines)
+- `verify_payload_ciphertext` (line 2584, 5 changed lines)
+- `clipboard_display_text` (line 2603, 1 changed lines)
+- `is_text_mime_type` (line 2628, 4 changed lines)
+- `top_level_mime_type` (line 2632, 7 changed lines)
+- `normalized_clipboard_mime_type` (line 2642, 8 changed lines)
+- `device_identity_record_aad` (line 2674, 21 changed lines)
+- `encrypted_device_identity_record` (line 2696, 10 changed lines)
+- `device_identity_from_record` (line 2718, 19 changed lines)
+- tests touched: `encrypted_clipboard`, `encrypted_clipboard_at`, `file_item`, `encrypted_file_at`, `collab_item`, `encrypts_device_identity_at_rest`, `tampered_device_identity_record`, `rejects_device_identity_record_with_a_substituted_device_id`, `rejects_device_identity_record_with_a_malformed_device_id`, `rejects_device_identity_record_copied_from_another_profile`, `hydrate_sweeps_orphaned_temp_files`, `opening_the_store_discards_the_file_based_one_it_replaces`, `restricts_cache_permissions_and_does_not_store_plaintext`, `a_newer_event_for_a_pending_object_asks_for_another_fetch`, `a_create_for_a_held_object_fetches_only_when_it_is_newer`, `delete_marker_keeps_revision_anchor_across_sweeps_and_restart`, `snapshot_absence_retains_head_without_forcing_a_new_revision`, `locally_signed_tombstone_is_a_durable_exact_head`, `hydration_keeps_the_anchor_when_cached_content_cannot_be_read`, `wiping_the_cache_leaves_every_anchor_standing`, `a_deleted_object_leaves_nothing_for_hydration_to_read`, `dropping_an_object_reclaims_its_cached_payload`, `a_stale_snapshot_page_skips_one_item_and_keeps_going`, `an_equivocating_snapshot_body_is_skipped`, `a_held_collab_doc_does_not_break_the_view`, `a_collab_listing_cannot_erase_an_encrypted_objects_anchor`, `a_chainless_record_cannot_take_an_anchor_away`, `a_late_local_tombstone_cannot_lower_the_anchor`, `validating_an_incoming_revision_honours_an_absent_anchor`, `validating_an_incoming_revision_honours_an_observed_delete_anchor`
 
 ## crates/client/src/local_store/adversarial_tests.rs
 
@@ -310,14 +349,14 @@ New file, 1345 lines, 6 functions, 0 test functions.
 
 ## crates/daemon-types/src/ipc_path.rs
 
-+95 −8 lines; 6 non-test functions touched, 0 test functions touched.
++100 −8 lines; 6 non-test functions touched, 0 test functions touched.
 
-- (top level) (16 changed lines)
+- (top level) (19 changed lines)
 - `ensure_private_socket_dir` (line 40, 44 changed lines)
-- `unique_base` (line 260, 10 changed lines)
-- `existing_0755_directory_is_rejected` (line 272, 14 changed lines)
-- `freshly_created_directory_is_0700` (line 288, 10 changed lines)
-- `existing_0700_directory_is_accepted` (line 300, 9 changed lines)
+- `unique_base` (line 263, 12 changed lines)
+- `existing_0755_directory_is_rejected` (line 277, 14 changed lines)
+- `freshly_created_directory_is_0700` (line 293, 10 changed lines)
+- `existing_0700_directory_is_accepted` (line 305, 9 changed lines)
 
 ## crates/daemon-types/src/protocol.rs
 
@@ -392,15 +431,15 @@ New file, 200 lines, 4 functions, 9 test functions.
 
 ## crates/schedule/src/engine.rs
 
-New file, 554 lines, 19 functions, 0 test functions.
+New file, 578 lines, 19 functions, 0 test functions.
 
-- `occurrences` (46), `overlapping_occurrences` (59), `next_after` (85), `maximum_lookback` (106), `span_lookback` (120), `default` (150), `new` (159), `with_max_candidates` (163), `with_imported_rules` (172), `rule_spans` (181), `insert` (314), `merge` (326), `lookup` (330), `is_empty` (334), `effective_zone` (416), `recurrence_id` (434), `span_at` (456), `rrule_line` (487), `ical_weekday` (529)
+- `occurrences` (46), `overlapping_occurrences` (59), `next_after` (85), `maximum_lookback` (106), `span_lookback` (120), `default` (150), `new` (159), `with_max_candidates` (163), `with_imported_rules` (172), `rule_spans` (181), `insert` (338), `merge` (350), `lookup` (354), `is_empty` (358), `effective_zone` (440), `recurrence_id` (458), `span_at` (480), `rrule_line` (511), `ical_weekday` (553)
 
 ## crates/schedule/src/ingest.rs
 
-New file, 1042 lines, 40 functions, 0 test functions.
+New file, 1056 lines, 41 functions, 0 test functions.
 
-- `new` (44), `default` (50), `fmt` (56), `contains_event` (91), `belongs_to_import` (139), `derive_id` (151), `parse_ics` (192), `parse_imported_recurrence_rules` (238), `partition_masters_and_overrides` (265), `parse_calendar` (295), `validate_calendar_envelope` (324), `validate_rrule_numbers` (356), `is_digits` (429), `is_signed_digits` (435), `byday_ordinal_fits` (443), `unfold_content_lines` (461), `event_from_component` (478), `local` (532), `is_floating` (536), `timed_start` (540), `instant` (552), `span_from` (560), `positive_days` (620), `duration_minutes` (627), `all_day_duration` (634), `ical_duration_minutes` (648), `duration_property` (665), `recurrence_overrides` (683), `make_override` (763), `recurrence_id_for` (778), `span_at` (800), `override_count_within_limit` (817), `recurrence_values_count` (836), `recurrence_times` (849), `text_property` (873), `rrule_text` (887), `date_time_property` (911), `property` (921), `feed_time_from_entry` (931), `feed_time_from_partial` (942)
+- `new` (44), `default` (50), `fmt` (56), `contains_event` (91), `belongs_to_import` (139), `derive_id` (151), `parse_ics` (192), `parse_imported_recurrence_rules` (238), `partition_masters_and_overrides` (265), `parse_calendar` (295), `validate_calendar_envelope` (324), `value_separator` (348), `validate_rrule_numbers` (370), `is_digits` (443), `is_signed_digits` (449), `byday_ordinal_fits` (457), `unfold_content_lines` (475), `event_from_component` (492), `local` (546), `is_floating` (550), `timed_start` (554), `instant` (566), `span_from` (574), `positive_days` (634), `duration_minutes` (641), `all_day_duration` (648), `ical_duration_minutes` (662), `duration_property` (679), `recurrence_overrides` (697), `make_override` (777), `recurrence_id_for` (792), `span_at` (814), `override_count_within_limit` (831), `recurrence_values_count` (850), `recurrence_times` (863), `text_property` (887), `rrule_text` (901), `date_time_property` (925), `property` (935), `feed_time_from_entry` (945), `feed_time_from_partial` (956)
 
 ## crates/schedule/src/item.rs
 
@@ -412,19 +451,19 @@ New file, 210 lines, 4 functions, 0 test functions.
 
 New file, 41 lines, 0 functions, 0 test functions.
 
--
+- 
 
 ## crates/schedule/src/recurrence.rs
 
-New file, 551 lines, 24 functions, 0 test functions.
+New file, 555 lines, 24 functions, 0 test functions.
 
-- `from_imported_rule` (40), `new` (59), `as_str` (98), `until_wall_clock` (120), `until_value_wall_clock` (139), `until_scan_bound` (162), `every` (177), `each` (186), `ending` (194), `try_from` (261), `from_start` (270), `from_end` (274), `check` (278), `as_ical` (287), `last` (340), `serialize` (369), `deserialize` (380), `serde_weekday_name` (446), `serde_weekday_from_name` (458), `just` (483), `weekdays` (488), `contains` (499), `iter` (503), `after` (529)
+- `from_imported_rule` (40), `new` (59), `as_str` (98), `until_wall_clock` (120), `until_value_wall_clock` (139), `until_scan_bound` (166), `every` (181), `each` (190), `ending` (198), `try_from` (265), `from_start` (274), `from_end` (278), `check` (282), `as_ical` (291), `last` (344), `serialize` (373), `deserialize` (384), `serde_weekday_name` (450), `serde_weekday_from_name` (462), `just` (487), `weekdays` (492), `contains` (503), `iter` (507), `after` (533)
 
 ## crates/schedule/src/recurrence/imported_rule.rs
 
-New file, 301 lines, 7 functions, 6 test functions.
+New file, 305 lines, 7 functions, 6 test functions.
 
-- `convert` (17), `cadence` (30), `has_any` (146), `parse_positive` (150), `parse_plain_weekday` (154), `parse_month_day` (167), `parse_monthly_weekday` (176)
+- `convert` (17), `cadence` (30), `has_any` (150), `parse_positive` (154), `parse_plain_weekday` (158), `parse_month_day` (171), `parse_monthly_weekday` (180)
 
 ## crates/schedule/src/summary.rs
 
@@ -440,9 +479,9 @@ New file, 250 lines, 14 functions, 0 test functions.
 
 ## crates/schedule/tests/adversarial.rs
 
-New file, 1770 lines, 74 functions, 0 test functions.
+New file, 1807 lines, 75 functions, 0 test functions.
 
-- `local` (21), `utc` (25), `window` (31), `expansion` (35), `local_midnight_window` (43), `timed_item` (53), `daily` (67), `expand` (71), `in_zone` (79), `floating_0230_spring_forward_berlin` (93), `floating_0230_spring_forward_new_york` (107), `zoned_0230_fall_back_berlin_takes_earlier_instant` (122), `zoned_0130_fall_back_new_york_takes_earlier_instant` (138), `all_day_on_fall_back_day_is_25_hours` (153), `two_all_day_blocks_over_fall_back_are_49_hours` (168), `weekly_zoned_series_keeps_wall_clock_across_spring_forward` (184), `weekly_zoned_series_keeps_wall_clock_across_fall_back` (219), `series_starting_inside_the_gap_still_emits_the_gap_day` (256), `floating_series_starting_in_gap_expands_in_every_zone` (289), `floating_series_on_a_skipped_date_shifts_to_the_next_valid_instant` (328), `all_day_series_on_a_skipped_date_reports_a_zero_length_day` (370), `series_starting_before_a_skipped_date_expands_a_later_window` (405), `pre_filter_keeps_a_day_before_candidate_resolving_into_the_window` (440), `all_day_series_keeps_every_date_across_a_midnight_gap` (465), `a_floating_gap_identity_is_the_same_for_every_observer` (506), `monthly_30th_skips_february` (548), `monthly_29th_skips_non_leap_february` (570), `monthly_31st_every_two_months` (608), `yearly_feb29_every_two_years` (644), `count_includes_the_first_occurrence` (673), `until_is_inclusive_of_the_boundary_instant` (702), `until_compares_instants_not_wall_clock` (741), `fortnightly_weeks_start_on_monday_across_year_boundary` (772), `cancelled` (809), `rescheduled` (818), `utc_span` (831), `floating_cancellation_in_dst_gap_matches_in_any_zone` (848), `override_moving_an_occurrence_out_of_the_window` (879), `override_moving_an_occurrence_within_the_window` (909), `duplicate_overrides_for_one_identity_yield_at_most_one_occurrence` (943), `a_rescheduled_override_for_an_ungenerated_identity_adds_an_occurrence` (972), `a_rescheduled_override_adds_an_occurrence_to_a_one_off` (1009), `cancellation_for_an_unknown_identity_changes_nothing` (1038), `occurrence_starting_exactly_at_window_end_is_excluded` (1062), `occurrence_starting_exactly_at_window_start_is_included` (1081), `occurrence_ending_exactly_at_window_start_is_excluded_everywhere` (1100), `overnight_event_needs_overlap_expansion` (1131), `multi_day_all_day_overlaps_each_covered_window` (1157), `window_before_series_start_is_empty` (1185), `zero_length_windows_are_rejected` (1205), `import_id` (1231), `an_imported_all_day_rule_with_a_date_until_includes_the_last_day` (1238), `an_imported_rule_with_a_utc_until_keeps_the_matching_day` (1292), `single_candidate_with_limit_one_is_complete` (1340), `two_candidates_with_limit_one_errors` (1360), `very_old_daily_series_hits_the_historical_scan_limit` (1382), `alarmed_daily_utc` (1404), `alarm_lead_before_the_window_still_rings` (1424), `alarm_with_passed_lead_is_dropped` (1443), `cancelled_occurrence_raises_no_alarm` (1461), `rescheduled_occurrence_raises_one_ordered_alarm` (1477), `json_round_trip` (1513), `postcard_round_trip` (1523), `sample_item` (1533), `every_public_time_shape_round_trips` (1560), `every_public_recurrence_shape_round_trips` (1586), `every_public_item_and_alarm_shape_round_trips` (1640), `postcard_supported_shapes_round_trip` (1681), `internally_tagged_enums_are_json_only` (1695), `zero_duration_is_rejected_on_deserialize` (1709), `zero_interval_is_rejected_on_deserialize` (1721), `zero_count_is_rejected_on_deserialize` (1739), `zero_day_all_day_is_rejected_on_deserialize` (1747), `bad_zone_is_rejected_on_deserialize` (1758)
+- `local` (21), `utc` (25), `window` (31), `expansion` (35), `local_midnight_window` (43), `timed_item` (53), `daily` (67), `expand` (71), `in_zone` (79), `floating_0230_spring_forward_berlin` (93), `floating_0230_spring_forward_new_york` (107), `zoned_0230_fall_back_berlin_takes_earlier_instant` (122), `zoned_0130_fall_back_new_york_takes_earlier_instant` (138), `all_day_on_fall_back_day_is_25_hours` (153), `two_all_day_blocks_over_fall_back_are_49_hours` (168), `weekly_zoned_series_keeps_wall_clock_across_spring_forward` (184), `weekly_zoned_series_keeps_wall_clock_across_fall_back` (219), `series_starting_inside_the_gap_still_emits_the_gap_day` (256), `floating_series_starting_in_gap_expands_in_every_zone` (289), `floating_series_on_a_skipped_date_shifts_to_the_next_valid_instant` (328), `all_day_series_on_a_skipped_date_reports_a_zero_length_day` (370), `series_starting_before_a_skipped_date_expands_a_later_window` (405), `pre_filter_keeps_a_day_before_candidate_resolving_into_the_window` (440), `pre_filter_skips_a_day_after_candidates_without_resolving_them` (466), `all_day_series_keeps_every_date_across_a_midnight_gap` (502), `a_floating_gap_identity_is_the_same_for_every_observer` (543), `monthly_30th_skips_february` (585), `monthly_29th_skips_non_leap_february` (607), `monthly_31st_every_two_months` (645), `yearly_feb29_every_two_years` (681), `count_includes_the_first_occurrence` (710), `until_is_inclusive_of_the_boundary_instant` (739), `until_compares_instants_not_wall_clock` (778), `fortnightly_weeks_start_on_monday_across_year_boundary` (809), `cancelled` (846), `rescheduled` (855), `utc_span` (868), `floating_cancellation_in_dst_gap_matches_in_any_zone` (885), `override_moving_an_occurrence_out_of_the_window` (916), `override_moving_an_occurrence_within_the_window` (946), `duplicate_overrides_for_one_identity_yield_at_most_one_occurrence` (980), `a_rescheduled_override_for_an_ungenerated_identity_adds_an_occurrence` (1009), `a_rescheduled_override_adds_an_occurrence_to_a_one_off` (1046), `cancellation_for_an_unknown_identity_changes_nothing` (1075), `occurrence_starting_exactly_at_window_end_is_excluded` (1099), `occurrence_starting_exactly_at_window_start_is_included` (1118), `occurrence_ending_exactly_at_window_start_is_excluded_everywhere` (1137), `overnight_event_needs_overlap_expansion` (1168), `multi_day_all_day_overlaps_each_covered_window` (1194), `window_before_series_start_is_empty` (1222), `zero_length_windows_are_rejected` (1242), `import_id` (1268), `an_imported_all_day_rule_with_a_date_until_includes_the_last_day` (1275), `an_imported_rule_with_a_utc_until_keeps_the_matching_day` (1329), `single_candidate_with_limit_one_is_complete` (1377), `two_candidates_with_limit_one_errors` (1397), `very_old_daily_series_hits_the_historical_scan_limit` (1419), `alarmed_daily_utc` (1441), `alarm_lead_before_the_window_still_rings` (1461), `alarm_with_passed_lead_is_dropped` (1480), `cancelled_occurrence_raises_no_alarm` (1498), `rescheduled_occurrence_raises_one_ordered_alarm` (1514), `json_round_trip` (1550), `postcard_round_trip` (1560), `sample_item` (1570), `every_public_time_shape_round_trips` (1597), `every_public_recurrence_shape_round_trips` (1623), `every_public_item_and_alarm_shape_round_trips` (1677), `postcard_supported_shapes_round_trip` (1718), `internally_tagged_enums_are_json_only` (1732), `zero_duration_is_rejected_on_deserialize` (1746), `zero_interval_is_rejected_on_deserialize` (1758), `zero_count_is_rejected_on_deserialize` (1776), `zero_day_all_day_is_rejected_on_deserialize` (1784), `bad_zone_is_rejected_on_deserialize` (1795)
 
 ## crates/schedule/tests/behaviour.rs
 
@@ -458,21 +497,21 @@ New file, 328 lines, 19 functions, 0 test functions.
 
 ## crates/schedule/tests/imported_rule.rs
 
-New file, 92 lines, 4 functions, 0 test functions.
+New file, 102 lines, 4 functions, 0 test functions.
 
-- `import_id` (8), `starts` (12), `converted_cadences_have_the_same_occurrences_as_the_imported_rule` (51), `unsupported_rules_retain_only_the_import_reference` (81)
+- `import_id` (8), `starts` (12), `converted_cadences_have_the_same_occurrences_as_the_imported_rule` (51), `unsupported_rules_retain_only_the_import_reference` (91)
 
 ## crates/schedule/tests/ingest.rs
 
-New file, 897 lines, 42 functions, 0 test functions.
+New file, 942 lines, 45 functions, 0 test functions.
 
-- `parse` (68), `uuid_fixture` (73), `import_fixture` (77), `event` (81), `readable_events_are_kept_and_unreadable_ones_are_reported` (90), `a_tzid_start_stays_pinned_to_its_zone` (106), `a_z_suffix_is_utc_rather_than_floating` (128), `a_bare_local_start_stays_floating` (143), `all_day_events_are_dates_and_dtend_is_exclusive` (152), `all_day_events_are_not_filtered_out` (175), `a_cancelled_event_is_tombstoned_not_dropped` (187), `a_representable_ingested_rule_becomes_an_editable_cadence` (198), `events_without_a_rule_happen_once` (221), `ids_are_stable_across_passes_and_distinct_per_source` (228), `an_ingested_series_expands` (259), `garbage_and_incomplete_calendars_are_rejected_but_an_empty_snapshot_is_valid` (303), `parser_has_an_input_size_ceiling` (324), `a_feed_with_too_many_lines_is_rejected_before_parsing` (331), `an_unknown_tzid_skips_the_event_instead_of_becoming_floating` (353), `durations_use_instants_across_zones_and_dst` (367), `duration_properties_are_honoured_for_timed_and_all_day_events` (385), `exdate_rdate_and_recurrence_id_components_become_overrides` (416), `an_unsupported_range_override_skips_its_whole_series` (478), `exdate_takes_precedence_over_the_same_rdate` (494), `a_detached_instance_moved_across_the_window_boundary_still_overlaps` (511), `an_unsupported_rule_is_resolved_from_the_referenced_snapshot` (555), `runtime_rule_extraction_rejects_ambiguous_master_uids_and_rrules` (614), `feed_with_rrule` (634), `assert_malformed_rrule` (642), `rewritten_interval_and_count_rules_are_rejected` (656), `overflowing_interval_and_count_rules_are_rejected` (665), `narrowed_by_clauses_are_rejected` (671), `a_numeric_wkst_is_rejected` (692), `boundary_interval_and_count_are_kept` (709), `boundary_interval_expands_with_that_interval` (735), `extreme_but_exact_values_still_import` (781), `plus_signed_ordinals_are_valid_and_import_unchanged` (799), `a_folded_rrule_with_zero_interval_is_rejected` (824), `a_valid_interval_and_count_still_becomes_a_cadence` (841), `feed_with_exdates` (857), `too_many_exdate_values_are_rejected` (868), `ten_thousand_exdate_values_parse` (890)
+- `parse` (68), `uuid_fixture` (73), `import_fixture` (77), `event` (81), `readable_events_are_kept_and_unreadable_ones_are_reported` (90), `a_tzid_start_stays_pinned_to_its_zone` (106), `a_z_suffix_is_utc_rather_than_floating` (128), `a_bare_local_start_stays_floating` (143), `all_day_events_are_dates_and_dtend_is_exclusive` (152), `all_day_events_are_not_filtered_out` (175), `a_cancelled_event_is_tombstoned_not_dropped` (187), `a_representable_ingested_rule_becomes_an_editable_cadence` (198), `events_without_a_rule_happen_once` (221), `ids_are_stable_across_passes_and_distinct_per_source` (228), `an_ingested_series_expands` (259), `garbage_and_incomplete_calendars_are_rejected_but_an_empty_snapshot_is_valid` (303), `parser_has_an_input_size_ceiling` (324), `a_feed_with_too_many_lines_is_rejected_before_parsing` (331), `an_unknown_tzid_skips_the_event_instead_of_becoming_floating` (353), `durations_use_instants_across_zones_and_dst` (367), `duration_properties_are_honoured_for_timed_and_all_day_events` (385), `exdate_rdate_and_recurrence_id_components_become_overrides` (416), `an_unsupported_range_override_skips_its_whole_series` (478), `exdate_takes_precedence_over_the_same_rdate` (494), `a_detached_instance_moved_across_the_window_boundary_still_overlaps` (511), `an_unsupported_rule_is_resolved_from_the_referenced_snapshot` (555), `runtime_rule_extraction_rejects_ambiguous_master_uids_and_rrules` (614), `feed_with_rrule` (634), `assert_malformed_rrule` (642), `rewritten_interval_and_count_rules_are_rejected` (656), `overflowing_interval_and_count_rules_are_rejected` (665), `narrowed_by_clauses_are_rejected` (671), `a_numeric_wkst_is_rejected` (692), `boundary_interval_and_count_are_kept` (709), `boundary_interval_expands_with_that_interval` (735), `extreme_but_exact_values_still_import` (781), `plus_signed_ordinals_are_valid_and_import_unchanged` (799), `a_folded_rrule_with_zero_interval_is_rejected` (824), `quoted_parameter_colon_does_not_hide_an_overflowing_interval` (841), `quoted_parameter_without_colon_still_validates` (855), `quoted_colon_in_non_rrule_property_does_not_hide_the_next_rrule` (864), `a_valid_interval_and_count_still_becomes_a_cadence` (886), `feed_with_exdates` (902), `too_many_exdate_values_are_rejected` (913), `ten_thousand_exdate_values_parse` (935)
 
 ## crates/schedule/tests/until.rs
 
-New file, 161 lines, 14 functions, 0 test functions.
+New file, 227 lines, 17 functions, 0 test functions.
 
-- `local` (15), `utc` (19), `berlin_span` (25), `cadence_item` (35), `imported_item` (46), `expand` (65), `expand_imported` (76), `fall_back_expansion` (88), `spring_forward_expansion` (96), `instant_until_includes_fold_day_before_the_cutoff` (107), `imported_instant_until_includes_fold_day_before_the_cutoff` (121), `instant_until_excludes_gap_day_after_the_cutoff` (133), `imported_instant_until_excludes_gap_day_after_the_cutoff` (144), `date_until_includes_the_whole_last_day` (153)
+- `local` (15), `utc` (19), `berlin_span` (25), `cadence_item` (35), `imported_item` (46), `expand` (65), `expand_imported` (76), `fall_back_expansion` (88), `spring_forward_expansion` (96), `instant_until_includes_fold_day_before_the_cutoff` (107), `imported_instant_until_includes_fold_day_before_the_cutoff` (121), `instant_until_excludes_gap_day_after_the_cutoff` (133), `imported_instant_until_excludes_gap_day_after_the_cutoff` (144), `date_until_includes_the_whole_last_day` (153), `local_midnight_window` (162), `until_slack_skips_an_unresolvable_day_past_the_cutoff` (178), `resolved_fold_candidate_keeps_instant_cutoff_despite_later_wall_clock` (215)
 
 ## crates/server/src/cleanup.rs
 
@@ -568,45 +607,47 @@ New file, 275 lines, 2 functions, 0 test functions.
 
 ## crates/server/src/routes/objects.rs
 
-+3686 −969 lines; 36 non-test functions touched, 56 test functions touched.
++4124 −1175 lines; 38 non-test functions touched, 60 test functions touched.
 
-- (top level) (526 changed lines)
+- (top level) (674 changed lines)
 - `init_object` (line 90, 104 changed lines)
 - `upload_payload` (line 424, 96 changed lines)
 - `complete_object` (line 680, 131 changed lines)
-- `revise_object` (line 954, 519 changed lines)
-- `kind_supports_revisions` (line 1345, 6 changed lines)
-- `head_revision_for_write` (line 1357, 71 changed lines)
-- `deserialize` (line 1447, 21 changed lines)
-- `head_revision_join` (line 1476, 11 changed lines)
-- `select_revision_columns` (line 1489, 13 changed lines)
-- `list_objects` (line 1579, 99 changed lines)
-- `get_object` (line 1725, 56 changed lines)
-- `get_object_revision` (line 1777, 13 changed lines)
-- `load_readable_revision` (line 1791, 32 changed lines)
-- `download_revision_payload` (line 1824, 12 changed lines)
-- `retained_clipboard_object_ids_raw` (line 1843, 6 changed lines)
-- `object_list_items` (line 1917, 30 changed lines)
-- `download_payload` (line 2075, 17 changed lines)
-- `read_revision_payload` (line 2125, 7 changed lines)
-- `purge_object` (line 2191, 156 changed lines)
-- `validate_object_envelope` (line 2453, 78 changed lines)
-- `validate_envelope_payload` (line 2614, 2 changed lines)
-- `object_for_upload` (line 2648, 50 changed lines)
-- `init_request_storage_bytes` (line 2736, 22 changed lines)
-- `reserve_user_storage_quota` (line 2761, 2 changed lines)
-- `idempotent_init_response` (line 2824, 24 changed lines)
-- `advance_object_head` (line 2974, 66 changed lines)
-- `insert_object_event` (line 3067, 8 changed lines)
-- `map_payload_batch_insert_error` (line 3153, 38 changed lines)
-- `broadcast_created` (line 3162, 21 changed lines)
-- `spawn_clipboard_trim` (line 3184, 7 changed lines)
-- `object_payload_filename` (line 3199, 3 changed lines)
-- `stream_body_to_payload_file` (line 3203, 78 changed lines)
-- `reset_payload_status` (line 3282, 36 changed lines)
-- `sha256_file` (line 3319, 17 changed lines)
-- `remove_paths` (line 3337, 13 changed lines)
-- tests touched: `validate_object_created_at_bounds_the_window`, `test_state`, `test_state_with_max_items`, `test_state_with_user_quotas`, `auth`, `user_storage_usage`, `postcard`, `init_created_seq`, `init_upload_urls`, `insert_user`, `insert_device`, `init_request`, `signed_envelope`, `signed_envelope_at`, `head_of`, `tombstone_object`, `revise_with`, `begin_streamed_revision`, `seeded`, `listed`, `a_revision_becomes_the_head_and_advances_the_sync_cursor`, `a_streamed_revision_completes_only_its_payloads_and_emits_updated`, `a_revision_signed_against_a_stale_head_is_refused`, `a_correct_revision_number_with_a_wrong_parent_hash_is_refused`, `a_tombstone_hides_the_object_but_keeps_its_history`, `a_revision_after_a_tombstone_brings_the_object_back`, `purge_refuses_an_object_that_is_still_live`, `revising_a_clipboard_object_is_rejected_before_any_write`, `a_revision_charges_bytes_but_not_an_object`, `init_request_with_meta`, `revise_meta_only`, `init_charges_payload_and_metadata_bytes`, `a_payload_free_revision_charges_its_metadata_bytes`, `purge_releases_payload_and_metadata_for_the_whole_chain`, `ordinary_revisions_eventually_exceed_the_byte_quota`, `a_full_account_can_still_tombstone_and_purge_back_under_the_quota`, `a_tombstone_with_oversized_metadata_is_rejected_without_a_write`, `a_second_tombstone_is_rejected_without_a_write`, `a_tombstone_with_a_payload_is_rejected_without_a_write`, `init_rejects_wrong_payload_nonce_length_before_writing`, `init_rejects_wrong_payload_sha256_length_before_writing`, `historical_revisions_survive_edits_and_tombstones_but_not_purge`, `historical_reads_exclude_pending_revisions_and_expired_clipboard`, `reclaiming_source_device_detaches_objects_instead_of_blocking`, `inline_init_accepts_multiple_payloads_in_one_batch`, `init_rejects_duplicate_payload_id_before_insert`, `complete_object_rechecks_payload_metadata_and_uploaded_file`, `delete_file_returns_deleted_seq_and_broadcast_actor`, `streaming_upload_rejects_size_mismatch_without_final_file`, `failed_mark_uploaded_resets_payload_to_pending_for_retry`, `init_rejects_payload_exceeding_max_blob_bytes`, `init_rejects_user_storage_quota_and_rolls_back_inline_file`, `init_rejects_user_object_count_quota`, `trim_user_clipboard_keeps_newest_and_drops_files`, `deleting_a_schedule_object_logs_its_own_kind`, `clipboard_objects_are_still_not_deletable_here`
+- `revise_object` (line 954, 521 changed lines)
+- `kind_supports_revisions` (line 1347, 6 changed lines)
+- `head_revision_for_write` (line 1359, 71 changed lines)
+- `deserialize` (line 1449, 21 changed lines)
+- `head_revision_join` (line 1478, 11 changed lines)
+- `select_revision_columns` (line 1491, 13 changed lines)
+- `list_objects` (line 1581, 99 changed lines)
+- `get_object` (line 1727, 56 changed lines)
+- `get_object_revision` (line 1779, 13 changed lines)
+- `load_readable_revision` (line 1793, 32 changed lines)
+- `download_revision_payload` (line 1826, 12 changed lines)
+- `retained_clipboard_object_ids_raw` (line 1845, 6 changed lines)
+- `object_list_items` (line 1919, 30 changed lines)
+- `download_payload` (line 2077, 17 changed lines)
+- `read_revision_payload` (line 2127, 7 changed lines)
+- `purge_object` (line 2193, 156 changed lines)
+- `validate_object_envelope` (line 2455, 78 changed lines)
+- `validate_envelope_payload` (line 2616, 2 changed lines)
+- `object_for_upload` (line 2650, 50 changed lines)
+- `init_request_storage_bytes` (line 2738, 22 changed lines)
+- `reserve_user_storage_quota` (line 2763, 2 changed lines)
+- `idempotent_init_response` (line 2826, 138 changed lines)
+- `advance_object_head` (line 2976, 92 changed lines)
+- `insert_object_event` (line 3069, 34 changed lines)
+- `parse_object_kind` (line 3104, 10 changed lines)
+- `object_event_seq` (line 3116, 38 changed lines)
+- `map_payload_batch_insert_error` (line 3155, 8 changed lines)
+- `broadcast_created` (line 3164, 21 changed lines)
+- `spawn_clipboard_trim` (line 3186, 7 changed lines)
+- `object_payload_filename` (line 3201, 3 changed lines)
+- `stream_body_to_payload_file` (line 3205, 78 changed lines)
+- `reset_payload_status` (line 3284, 36 changed lines)
+- `sha256_file` (line 3321, 17 changed lines)
+- `remove_paths` (line 3339, 13 changed lines)
+- tests touched: `validate_object_created_at_bounds_the_window`, `test_state`, `test_state_with_max_items`, `test_state_with_user_quotas`, `auth`, `user_storage_usage`, `postcard`, `init_created_seq`, `init_upload_urls`, `insert_user`, `insert_device`, `init_request`, `signed_envelope`, `signed_envelope_at`, `head_of`, `tombstone_object`, `revise_with`, `begin_streamed_revision`, `seeded`, `listed`, `a_revision_becomes_the_head_and_advances_the_sync_cursor`, `a_streamed_revision_completes_only_its_payloads_and_emits_updated`, `a_revision_signed_against_a_stale_head_is_refused`, `a_correct_revision_number_with_a_wrong_parent_hash_is_refused`, `a_tombstone_hides_the_object_but_keeps_its_history`, `a_revision_after_a_tombstone_brings_the_object_back`, `purge_refuses_an_object_that_is_still_live`, `revising_a_clipboard_object_is_rejected_before_any_write`, `a_revision_charges_bytes_but_not_an_object`, `init_request_with_meta`, `revise_meta_only`, `zero_byte_revive`, `init_charges_payload_and_metadata_bytes`, `a_payload_free_revision_charges_its_metadata_bytes`, `purge_releases_payload_and_metadata_for_the_whole_chain`, `ordinary_revisions_eventually_exceed_the_byte_quota`, `a_full_account_can_still_tombstone_and_purge_back_under_the_quota`, `a_tombstone_with_oversized_metadata_is_rejected_without_a_write`, `a_second_tombstone_is_rejected_without_a_write`, `a_tombstone_with_a_payload_is_rejected_without_a_write`, `a_zero_byte_revival_is_refused_while_over_the_quota`, `a_user_exactly_at_the_byte_limit_can_still_tombstone_and_purge`, `a_zero_byte_revision_still_succeeds_under_the_quota`, `init_rejects_wrong_payload_nonce_length_before_writing`, `init_rejects_wrong_payload_sha256_length_before_writing`, `historical_revisions_survive_edits_and_tombstones_but_not_purge`, `historical_reads_exclude_pending_revisions_and_expired_clipboard`, `reclaiming_source_device_detaches_objects_instead_of_blocking`, `inline_init_accepts_multiple_payloads_in_one_batch`, `init_rejects_duplicate_payload_id_before_insert`, `complete_object_rechecks_payload_metadata_and_uploaded_file`, `delete_file_returns_deleted_seq_and_broadcast_actor`, `streaming_upload_rejects_size_mismatch_without_final_file`, `failed_mark_uploaded_resets_payload_to_pending_for_retry`, `init_rejects_payload_exceeding_max_blob_bytes`, `init_rejects_user_storage_quota_and_rolls_back_inline_file`, `init_rejects_user_object_count_quota`, `trim_user_clipboard_keeps_newest_and_drops_files`, `deleting_a_schedule_object_logs_its_own_kind`, `clipboard_objects_are_still_not_deletable_here`
 
 ## crates/server/src/secret.rs
 
@@ -629,16 +670,16 @@ New file, 275 lines, 2 functions, 0 test functions.
 
 ## crates/server/src/storage_quota.rs
 
-+246 −12 lines; 8 non-test functions touched, 0 test functions touched.
++243 −12 lines; 8 non-test functions touched, 0 test functions touched.
 
-- (top level) (42 changed lines)
+- (top level) (47 changed lines)
 - `revision_cost_bytes` (line 22, 6 changed lines)
 - `meta_bytes_sum_expr` (line 35, 3 changed lines)
-- `try_reserve_user_storage` (line 45, 19 changed lines)
-- `charge_user_storage` (line 99, 30 changed lines)
-- `revision_usage_by_user` (line 170, 62 changed lines)
-- `object_usage_by_user` (line 233, 55 changed lines)
-- `merge_usage` (line 324, 41 changed lines)
+- `try_reserve_user_storage` (line 48, 11 changed lines)
+- `charge_user_storage` (line 96, 30 changed lines)
+- `revision_usage_by_user` (line 167, 62 changed lines)
+- `object_usage_by_user` (line 230, 55 changed lines)
+- `merge_usage` (line 321, 41 changed lines)
 
 ## crates/server/src/ws.rs
 
@@ -688,9 +729,9 @@ New file, 275 lines, 2 functions, 0 test functions.
 
 ## web/src-tauri/src/lib.rs
 
-+364 −25 lines; 22 non-test functions touched, 2 test functions touched.
++418 −25 lines; 22 non-test functions touched, 3 test functions touched.
 
-- (top level) (67 changed lines)
+- (top level) (75 changed lines)
 - `run` (line 107, 9 changed lines)
 - `upload_file_bytes` (line 376, 24 changed lines)
 - `download_file_bytes` (line 427, 13 changed lines)
@@ -708,8 +749,9 @@ New file, 275 lines, 2 functions, 0 test functions.
 - `ensure_private_staging_dir` (line 730, 45 changed lines)
 - `create_private_upload_dir` (line 776, 22 changed lines)
 - `upload_staging_path` (line 799, 3 changed lines)
-- `write_private_upload_file` (line 803, 19 changed lines)
-- `sanitize_temp_prefix` (line 823, 12 changed lines)
-- `random_hex_suffix` (line 842, 5 changed lines)
-- `create_private_temp_file` (line 848, 25 changed lines)
-- tests touched: `upload_staging_path_keeps_the_user_filename`, `upload_staging_path_sanitizes_traversal_filename`
+- `write_private_upload_file` (line 803, 25 changed lines)
+- `sanitize_temp_prefix` (line 829, 12 changed lines)
+- `random_hex_suffix` (line 848, 5 changed lines)
+- `create_private_temp_file` (line 854, 25 changed lines)
+- tests touched: `upload_staging_path_keeps_the_user_filename`, `upload_staging_path_sanitizes_traversal_filename`, `staging_write_returns_only_after_its_bytes_are_on_disk`
+
