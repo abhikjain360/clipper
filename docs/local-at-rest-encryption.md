@@ -131,14 +131,24 @@ directory (native) or under a profile-scoped `localStorage` key (web).
 
 The current on-disk record is `DeviceIdentityEncryptedRecord`:
 
-- `version` — `DEVICE_IDENTITY_RECORD_VERSION_V2` (2); other versions are
+- `version` — `DEVICE_IDENTITY_RECORD_VERSION_V3` (3); other versions are
   rejected with `UnsupportedDeviceIdentityVersion`.
-- `device_id` — the server-assigned device UUID, **stored in cleartext**
-  (see "Flagged gaps" below).
+- `device_id` — the server-assigned device UUID, stored in cleartext but
+  authenticated (see the AAD below).
 - `wrapped_signing_secret_key` — the signing secret sealed with
-  `crypto::wrap_with_key(wrapping_key, secret, AAD_WRAP_DEVICE_SIGNING_SECRET_V1)`,
-  i.e. `nonce_24 ‖ XChaCha20-Poly1305(secret)` with AAD
-  `clipper:wrap:device-signing-secret:v1`.
+  `crypto::wrap_with_key(wrapping_key, secret, aad)`, i.e.
+  `nonce_24 ‖ XChaCha20-Poly1305(secret)`.
+
+The AAD is `device_identity_record_aad`: the postcard encoding of
+`(clipper:wrap:device-signing-secret:v1, version, device_id, profile_id)`. It
+binds the record's whole cleartext header to the secret, so a substituted
+`device_id`, a changed version, or a record copied into another profile's slot
+fails the tag instead of being accepted
+(`rejects_device_identity_record_with_a_substituted_device_id`,
+`rejects_device_identity_record_copied_from_another_profile`). A `device_id`
+that is not a UUID is an error too, not a reason to mint a fresh identity
+(`rejects_device_identity_record_with_a_malformed_device_id`), because
+re-minting would abandon the registered device.
 
 Unwrapping requires the device-identity wrapping key; a wrong key fails with
 `DeviceIdentityDecrypt` (asserted by `encrypts_device_identity_at_rest`). The
@@ -147,7 +157,7 @@ in-memory `signing_secret_key` is held in `Zeroizing`.
 #### Plaintext records
 
 Legacy or forged plaintext identity records are not accepted. A record without
-`version = 2` and `wrapped_signing_secret_key` fails closed and is not silently
+`version = 3` and `wrapped_signing_secret_key` fails closed and is not silently
 promoted into a wrapped identity (`rejects_plaintext_device_identity_record`).
 
 ## Filesystem safeguards (native, Unix)
@@ -298,13 +308,11 @@ document.
 - **`device_id` is stored in cleartext** in the device-identity record (both the
   wrapped native record and the `localStorage` record). Only the signing secret
   is wrapped. This is a low-sensitivity identifier, but it is metadata that is
-  not protected at rest. It is also **unauthenticated** (the wrap AAD is a
-  constant, not bound to the record header): a same-uid process or same-origin
-  script can substitute another UUID undetected, causing silent device-identity
-  migration on the next login (the server mints a new device row for the fresh
-  id) or, via the re-mint path for malformed ids, loss of the registered
-  identity (2026-07-19 audit R25). The fix is to bind `device_id ‖ profile_id`
-  into the wrap AAD.
+  not protected at rest. It is no longer unauthenticated: the wrap AAD binds
+  `label ‖ version ‖ device_id ‖ profile_id`, so substituting another UUID
+  fails the tag rather than silently migrating the device identity, and a
+  malformed id is an error rather than a re-mint (2026-07-19 audit R25, crypto
+  review CR4 — closed).
 - **`FsTransaction` sets `0600` after creating files**, not via the open mode.
   There is a brief window in which a staged server payload file exists with
   default-umask permissions before the `chmod`. The client local store no longer

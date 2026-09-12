@@ -20,6 +20,21 @@ verbatim in code comments in both files.
 Cipher suite: `Ristretto255 + TripleDH + SHA-512 + Argon2id`
 (`ClipperOpaqueCipherSuite` in `crates/core/src/crypto.rs`).
 
+## Key stretching
+
+`KSF` is Argon2id with memory 19456 KiB (19 MiB), 2 iterations, and parallelism
+1. The parameters are written out in `crates/core/src/crypto.rs`
+(`OPAQUE_KSF_M_COST_KIB`, `OPAQUE_KSF_T_COST`, `OPAQUE_KSF_P_COST`) and passed
+to both `opaque_client_register_finish` and `opaque_client_login_finish`, so
+registration and login provably stretch the same way. They match the `argon2`
+crate's current defaults, but they are stated rather than inherited: a
+dependency bump that moved the default would otherwise change `rwd` silently.
+
+The parameters are not stored in the password file, so they are not negotiated
+per user. Changing any of the three changes `rwd`, and therefore the export key
+and every key derived from it. Existing accounts would no longer log in;
+changing these values requires re-registration.
+
 ## State kept on the server
 
 The `server_config` row carries one server-wide OPAQUE setup blob. After
@@ -102,6 +117,10 @@ M       = r · H(pw)
 state_C = (r, pw, ...)               (kept in memory until finish)
 send M                                ⟶ RegistrationRequest
 ```
+
+`state_C` is secret in both flows. It holds `r` and `M`, so a reader recovers
+`H(pw) = r⁻¹ · M` and gets an offline dictionary oracle with no KSF cost per
+guess. The wrappers return the serialized state in `Zeroizing`.
 
 ### Round 1 — server (`opaque_server_register_start(opaque_server_setup, M, id_U)`)
 
@@ -305,7 +324,11 @@ pk_D = Public(sk_D)
   device_id,
   device_signing_public_key = pk_D
 }
-σ_D = Sign(sk_D, Canon(π_D))         (Canon = postcard encoding of the body)
+σ_D = Sign(sk_D, "clipper:device-login-proof:v1" ‖ Canon(π_D))
+                                     (Canon = postcard encoding of the body;
+                                      the prefix is the signing domain, so a
+                                      device signature over an object envelope
+                                      is not a login proof)
 ```
 
 and sends `(device_id, pk_D, σ_D)` in `LoginRequest`. New devices omit `σ_D`
@@ -321,7 +344,7 @@ check user_id == authenticated user_id                          else 409
 check pk_D == pk_D_stored                                        else 409
 require this is a Login (not a Registration) session            else 401
 require σ_D present and η_D length == 32                         else 401
-check Verify(pk_D_stored, Canon(π_D), σ_D)                       else 401
+check Verify(pk_D_stored, domain ‖ Canon(π_D), σ_D)              else 401
 ```
 
 Only then does the server update `devices.last_seen_at` and create a session.

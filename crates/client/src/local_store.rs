@@ -35,7 +35,7 @@ const DEFAULT_PROFILE: &str = "default";
 const CLIPBOARD_TEXT_PREVIEW_MAX_CHARS: usize = 512;
 #[cfg(not(target_family = "wasm"))]
 const DEVICE_IDENTITY_FILE_PREFIX: &str = "device-identity-v1";
-const DEVICE_IDENTITY_RECORD_VERSION_V2: u64 = 2;
+const DEVICE_IDENTITY_RECORD_VERSION_V3: u64 = 3;
 #[cfg(target_family = "wasm")]
 const OBJECT_INDEX_LIMIT: usize = 1_000;
 
@@ -1689,11 +1689,12 @@ impl LocalStore {
         wrapping_key: &[u8; 32],
     ) -> Result<DeviceSigningIdentity, LocalStoreError> {
         if let Some(record) = self.read_device_identity_record(profile_id).await? {
-            match device_identity_from_record(record, wrapping_key) {
+            match device_identity_from_record(record, profile_id, wrapping_key) {
                 Ok(identity) => return Ok(identity),
                 Err(
                     error @ (LocalStoreError::DeviceIdentityDecrypt(_)
-                    | LocalStoreError::UnsupportedDeviceIdentityVersion(_)),
+                    | LocalStoreError::UnsupportedDeviceIdentityVersion(_)
+                    | LocalStoreError::InvalidDeviceId(_)),
                 ) => return Err(error),
                 Err(error) => {
                     tracing::warn!("Replacing invalid local device identity: {}", error);
@@ -1725,7 +1726,7 @@ impl LocalStore {
         let Some(record) = self.read_device_identity_record(profile_id).await? else {
             return Ok(None);
         };
-        device_identity_from_record(record, wrapping_key).map(Some)
+        device_identity_from_record(record, profile_id, wrapping_key).map(Some)
     }
 
     async fn read_device_identity_record(
@@ -1747,7 +1748,7 @@ impl LocalStore {
         wrapping_key: &[u8; 32],
     ) -> Result<(), LocalStoreError> {
         ensure_private_dir(&self.base_dir).await?;
-        let record = encrypted_device_identity_record(identity, wrapping_key)?;
+        let record = encrypted_device_identity_record(identity, profile_id, wrapping_key)?;
         let bytes = serde_json::to_vec_pretty(&record)?;
         write_private_file_atomic(&self.device_identity_path(profile_id), &bytes).await
     }
@@ -1929,11 +1930,12 @@ impl LocalStore {
         {
             let record = serde_json::from_str::<DeviceIdentityEncryptedRecord>(&json)
                 .map_err(LocalStoreError::from)?;
-            match device_identity_from_record(record, wrapping_key) {
+            match device_identity_from_record(record, profile_id, wrapping_key) {
                 Ok(identity) => return Ok(identity),
                 Err(
                     error @ (LocalStoreError::DeviceIdentityDecrypt(_)
-                    | LocalStoreError::UnsupportedDeviceIdentityVersion(_)),
+                    | LocalStoreError::UnsupportedDeviceIdentityVersion(_)
+                    | LocalStoreError::InvalidDeviceId(_)),
                 ) => return Err(error),
                 Err(error) => {
                     tracing::warn!("Replacing invalid local device identity: {}", error);
@@ -1970,7 +1972,7 @@ impl LocalStore {
         };
         let record = serde_json::from_str::<DeviceIdentityEncryptedRecord>(&json)
             .map_err(LocalStoreError::from)?;
-        device_identity_from_record(record, wrapping_key).map(Some)
+        device_identity_from_record(record, profile_id, wrapping_key).map(Some)
     }
 
     fn write_browser_device_identity(
@@ -1980,7 +1982,7 @@ impl LocalStore {
         identity: &DeviceSigningIdentity,
         wrapping_key: &[u8; 32],
     ) -> Result<(), LocalStoreError> {
-        let record = encrypted_device_identity_record(identity, wrapping_key)?;
+        let record = encrypted_device_identity_record(identity, profile_id, wrapping_key)?;
         let json = serde_json::to_string(&record)?;
         storage
             .set_item(&self.device_identity_key(profile_id), &json)
@@ -2538,17 +2540,50 @@ fn new_device_signing_identity(device_id: Option<String>) -> DeviceSigningIdenti
     }
 }
 
+/// AAD for the wrapped device signing secret.
+///
+/// The record's cleartext header is authenticated alongside the secret. A
+/// rewritten `device_id`, a changed version, or a record copied from another
+/// profile therefore fails to unwrap instead of being accepted.
+fn device_identity_record_aad(
+    version: u64,
+    device_id: Option<&str>,
+    profile_id: &str,
+) -> Result<Vec<u8>, LocalStoreError> {
+    #[derive(Serialize)]
+    struct DeviceIdentityRecordAad<'a> {
+        label: &'a [u8],
+        version: u64,
+        device_id: Option<&'a str>,
+        profile_id: &'a str,
+    }
+
+    postcard::to_allocvec(&DeviceIdentityRecordAad {
+        label: crypto::AAD_WRAP_DEVICE_SIGNING_SECRET_V1,
+        version,
+        device_id,
+        profile_id,
+    })
+    .map_err(|error| LocalStoreError::DeviceIdentityEncrypt(format!("aad: {error}")))
+}
+
 fn encrypted_device_identity_record(
     identity: &DeviceSigningIdentity,
+    profile_id: &str,
     wrapping_key: &[u8; 32],
 ) -> Result<DeviceIdentityEncryptedRecord, LocalStoreError> {
+    let aad = device_identity_record_aad(
+        DEVICE_IDENTITY_RECORD_VERSION_V3,
+        identity.device_id.as_deref(),
+        profile_id,
+    )?;
     Ok(DeviceIdentityEncryptedRecord {
-        version: DEVICE_IDENTITY_RECORD_VERSION_V2,
+        version: DEVICE_IDENTITY_RECORD_VERSION_V3,
         device_id: identity.device_id.clone(),
         wrapped_signing_secret_key: crypto::wrap_with_key(
             wrapping_key,
             identity.signing_secret_key.as_ref(),
-            crypto::AAD_WRAP_DEVICE_SIGNING_SECRET_V1,
+            &aad,
         )
         .map_err(|error| LocalStoreError::DeviceIdentityEncrypt(error.to_string()))?,
     })
@@ -2556,23 +2591,26 @@ fn encrypted_device_identity_record(
 
 fn device_identity_from_record(
     record: DeviceIdentityEncryptedRecord,
+    profile_id: &str,
     wrapping_key: &[u8; 32],
 ) -> Result<DeviceSigningIdentity, LocalStoreError> {
-    if record.version != DEVICE_IDENTITY_RECORD_VERSION_V2 {
+    if record.version != DEVICE_IDENTITY_RECORD_VERSION_V3 {
         return Err(LocalStoreError::UnsupportedDeviceIdentityVersion(
             record.version,
         ));
     }
+    // A malformed id is a tampered or corrupt record, not a reason to mint a
+    // new identity: re-minting would lose the registered device.
     let device_id = record
         .device_id
-        .map(|id| validate_device_id(&id))
+        .as_deref()
+        .map(validate_device_id)
         .transpose()?;
-    let plaintext = crypto::unwrap_with_key(
-        wrapping_key,
-        &record.wrapped_signing_secret_key,
-        crypto::AAD_WRAP_DEVICE_SIGNING_SECRET_V1,
-    )
-    .map_err(|error| LocalStoreError::DeviceIdentityDecrypt(error.to_string()))?;
+    // Bind the id exactly as the record stores it, which is what the write
+    // path bound.
+    let aad = device_identity_record_aad(record.version, record.device_id.as_deref(), profile_id)?;
+    let plaintext = crypto::unwrap_with_key(wrapping_key, &record.wrapped_signing_secret_key, &aad)
+        .map_err(|error| LocalStoreError::DeviceIdentityDecrypt(error.to_string()))?;
     let signing_secret_key = device_signing_secret_key_from_vec(plaintext)?;
     Ok(DeviceSigningIdentity {
         device_id,
@@ -2957,7 +2995,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("identity json");
         assert_eq!(
             json.get("version").and_then(serde_json::Value::as_u64),
-            Some(DEVICE_IDENTITY_RECORD_VERSION_V2)
+            Some(DEVICE_IDENTITY_RECORD_VERSION_V3)
         );
         assert!(json.get("wrapped_signing_secret_key").is_some());
         assert!(json.get("signing_secret_key").is_none());
@@ -3021,6 +3059,125 @@ mod tests {
             json.get("wrapped_signing_secret_key").is_none(),
             "forged plaintext record must not be promoted to a wrapped record"
         );
+    }
+
+    /// Persist an identity, then rewrite one field of the stored JSON record.
+    #[cfg(not(target_family = "wasm"))]
+    async fn tampered_device_identity_record(
+        store: &LocalStore,
+        profile: &str,
+        wrapping_key: &[u8; 32],
+        device_id: serde_json::Value,
+    ) {
+        let identity = DeviceSigningIdentity {
+            device_id: Some(TEST_DEVICE_ID.into()),
+            signing_secret_key: Zeroizing::new([9_u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]),
+        };
+        store
+            .persist_device_signing_identity(profile, &identity, wrapping_key)
+            .await
+            .expect("persist identity");
+
+        let path = store.device_identity_path(profile);
+        let bytes = tokio::fs::read(&path).await.expect("identity bytes");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("identity json");
+        json["device_id"] = device_id;
+        let bytes = serde_json::to_vec_pretty(&json).expect("tampered json");
+        write_private_file_atomic(&path, &bytes)
+            .await
+            .expect("write tampered identity");
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn rejects_device_identity_record_with_a_substituted_device_id() {
+        // `device_id` is cleartext beside the wrapped secret, and it is bound
+        // into the wrap AAD. Swapping it for another valid UUID must fail the
+        // tag rather than silently migrate the device.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        let profile = "profile-a";
+        let wrapping_key = [3_u8; 32];
+        let other_device_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        tampered_device_identity_record(
+            &store,
+            profile,
+            &wrapping_key,
+            serde_json::json!(other_device_id),
+        )
+        .await;
+
+        let err = store
+            .load_or_create_device_signing_identity(profile, &wrapping_key)
+            .await
+            .expect_err("a substituted device id must not unwrap");
+        assert!(matches!(err, LocalStoreError::DeviceIdentityDecrypt(_)));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn rejects_device_identity_record_with_a_malformed_device_id() {
+        // A malformed id used to be treated as a corrupt record and replaced.
+        // Re-minting loses the registered device, so it is an error instead.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        let profile = "profile-a";
+        let wrapping_key = [3_u8; 32];
+        tampered_device_identity_record(
+            &store,
+            profile,
+            &wrapping_key,
+            serde_json::json!("not-a-uuid"),
+        )
+        .await;
+
+        let err = store
+            .load_or_create_device_signing_identity(profile, &wrapping_key)
+            .await
+            .expect_err("a malformed device id must not mint a new identity");
+        assert!(matches!(err, LocalStoreError::InvalidDeviceId(_)));
+
+        let bytes = tokio::fs::read(store.device_identity_path(profile))
+            .await
+            .expect("identity bytes");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("identity json");
+        assert_eq!(
+            json.get("device_id").and_then(serde_json::Value::as_str),
+            Some("not-a-uuid"),
+            "the rejected record must not be replaced by a fresh identity",
+        );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn rejects_device_identity_record_copied_from_another_profile() {
+        // The AAD binds the profile, so a record moved between profile slots
+        // fails to unwrap even when both profiles share a wrapping key.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        let wrapping_key = [3_u8; 32];
+        let identity = DeviceSigningIdentity {
+            device_id: Some(TEST_DEVICE_ID.into()),
+            signing_secret_key: Zeroizing::new([9_u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]),
+        };
+        store
+            .persist_device_signing_identity("profile-a", &identity, &wrapping_key)
+            .await
+            .expect("persist identity");
+
+        let bytes = tokio::fs::read(store.device_identity_path("profile-a"))
+            .await
+            .expect("identity bytes");
+        write_private_file_atomic(&store.device_identity_path("profile-b"), &bytes)
+            .await
+            .expect("copy identity");
+
+        let err = store
+            .load_or_create_device_signing_identity("profile-b", &wrapping_key)
+            .await
+            .expect_err("a record from another profile must not unwrap");
+        assert!(matches!(err, LocalStoreError::DeviceIdentityDecrypt(_)));
     }
 
     #[cfg(not(target_family = "wasm"))]
