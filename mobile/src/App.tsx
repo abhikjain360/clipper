@@ -344,6 +344,10 @@ function LoginScreen({
                 value={accessKey}
                 autoCapitalize="none"
                 autoCorrect={false}
+                autoComplete="off"
+                textContentType="none"
+                importantForAutofill="no"
+                secureTextEntry
                 onChangeText={setAccessKey}
               />
             </Field>

@@ -303,6 +303,10 @@ function LoginScreen({
                                     value={accessKey}
                                     autoCapitalize="none"
                                     autoCorrect="off"
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                    secureTextEntry
+                                    type="password"
                                     onChangeText={setAccessKey}
                                 />
                             </Field>
@@ -312,6 +316,8 @@ function LoginScreen({
                                 value={passphrase}
                                 secureTextEntry
                                 type="password"
+                                autoComplete="new-password"
+                                spellCheck={false}
                                 onChangeText={setPassphrase}
                             />
                         </Field>
@@ -653,6 +659,9 @@ function FilesPanel({
         setBusy(true);
         onError(null);
         try {
+            if (file.size > 512 * 1024 * 1024) {
+                throw new Error("Files larger than 512 MiB cannot be uploaded.");
+            }
             const bytes = new Uint8Array(await file.arrayBuffer());
             const backend = await clipperBackend();
             await backend.uploadFileBytes(file.name, file.type, bytes);
@@ -1265,7 +1274,10 @@ function SharePage({ token }: { token: string }) {
                             : `Could not open the document (HTTP ${response.status}).`,
                     );
                 }
-                const meta = (await response.json()) as { object_id: string };
+                const meta = (await response.json()) as { object_id?: unknown } | null;
+                if (typeof meta?.object_id !== "string" || meta.object_id.length === 0) {
+                    throw new Error("This share link is invalid or no longer exists.");
+                }
                 if (!cancelled) setInfo({ objectId: meta.object_id, serverUrl });
             } catch (caught) {
                 if (!cancelled) setError(caught instanceof Error ? caught.message : String(caught));
