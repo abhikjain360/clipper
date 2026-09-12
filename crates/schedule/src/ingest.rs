@@ -302,7 +302,7 @@ fn parse_calendar(text: &str) -> Result<calcard::icalendar::ICalendar, IngestErr
     if text.lines().count() > MAX_CONTENT_LINES {
         return Err(IngestError::LimitExceeded("too many calendar lines"));
     }
-    validate_rrule_counts(text)?;
+    validate_rrule_numbers(text)?;
     let calendar =
         ICalendar::parse(text).map_err(|error| IngestError::Malformed(format!("{error:?}")))?;
     if calendar.components.len() > MAX_COMPONENTS {
@@ -343,11 +343,17 @@ fn validate_calendar_envelope(text: &str) -> Result<(), IngestError> {
     Ok(())
 }
 
-/// Rejects RRULE values calcard would silently normalize.
-/// calcard drops INTERVAL=0 and COUNT=0 and strips the sign from
-/// negative values, which would turn an invalid rule into a different
-/// valid one. Check the raw text before parsing.
-fn validate_rrule_counts(text: &str) -> Result<(), IngestError> {
+/// Rejects RRULE values calcard would silently narrow.
+/// calcard reads every numeric clause through a wider integer and casts it
+/// down: INTERVAL to u16 and COUNT to u32 (dropping zero, stripping the sign),
+/// BYSECOND, BYMINUTE and BYHOUR to u8, BYMONTHDAY and BYWEEKNO to i8,
+/// BYYEARDAY and the BYDAY ordinal to i16, BYSETPOS to i32, and BYMONTH to a
+/// saturating i8 with an optional leap suffix. An overflowing value wraps or
+/// saturates into a different valid rule instead of failing. A numeric WKST
+/// needs no check: the parser only reads weekday names, so one already fails.
+/// Check the raw text before parsing, so a value the parser would not preserve
+/// exactly is rejected rather than rewritten.
+fn validate_rrule_numbers(text: &str) -> Result<(), IngestError> {
     for line in unfold_content_lines(text) {
         let Some(colon) = line.find(':') else {
             continue;
@@ -365,22 +371,53 @@ fn validate_rrule_counts(text: &str) -> Result<(), IngestError> {
                 continue;
             };
             let key = raw_key.trim().to_ascii_uppercase();
-            if key != "INTERVAL" && key != "COUNT" {
-                continue;
-            }
-            let seen = if key == "INTERVAL" {
-                &mut interval_seen
-            } else {
-                &mut count_seen
-            };
-            if *seen {
-                return Err(IngestError::Malformed(format!("RRULE has duplicate {key}")));
-            }
-            *seen = true;
             let number = raw_value.trim();
-            let all_zero = !number.is_empty() && number.bytes().all(|byte| byte == b'0');
-            let all_digits = !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit());
-            if !all_digits || all_zero {
+            let valid = match key.as_str() {
+                "INTERVAL" | "COUNT" => {
+                    let seen = if key == "INTERVAL" {
+                        &mut interval_seen
+                    } else {
+                        &mut count_seen
+                    };
+                    if *seen {
+                        return Err(IngestError::Malformed(format!(
+                            "RRULE has duplicate {key}"
+                        )));
+                    }
+                    *seen = true;
+                    let all_zero =
+                        !number.is_empty() && number.bytes().all(|byte| byte == b'0');
+                    let all_digits =
+                        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit());
+                    let fits = if key == "INTERVAL" {
+                        number.parse::<u16>().is_ok()
+                    } else {
+                        number.parse::<u32>().is_ok()
+                    };
+                    all_digits && !all_zero && fits
+                }
+                "BYSECOND" | "BYMINUTE" | "BYHOUR" => number
+                    .split(',')
+                    .all(|item| !item.is_empty() && item.parse::<u8>().is_ok() && is_digits(item)),
+                "BYMONTHDAY" | "BYWEEKNO" => number
+                    .split(',')
+                    .all(|item| item.parse::<i8>().is_ok() && is_signed_digits(item)),
+                "BYYEARDAY" => number
+                    .split(',')
+                    .all(|item| item.parse::<i16>().is_ok() && is_signed_digits(item)),
+                "BYSETPOS" => number
+                    .split(',')
+                    .all(|item| item.parse::<i32>().is_ok() && is_signed_digits(item)),
+                "BYMONTH" => number.split(',').all(|item| {
+                    let digits = item.strip_suffix(['L', 'l']).unwrap_or(item);
+                    !digits.is_empty() && is_digits(digits) && digits.parse::<i8>().is_ok()
+                }),
+                "BYDAY" => number
+                    .split(',')
+                    .all(|item| !item.is_empty() && byday_ordinal_fits(item)),
+                _ => true,
+            };
+            if !valid {
                 return Err(IngestError::Malformed(format!(
                     "RRULE has invalid {key}={raw_value}"
                 )));
@@ -388,6 +425,38 @@ fn validate_rrule_counts(text: &str) -> Result<(), IngestError> {
         }
     }
     Ok(())
+}
+
+/// Plain digits, the shape the parser preserves unchanged for an unsigned
+/// value. A sign would be stripped or normalized away.
+fn is_digits(text: &str) -> bool {
+    text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// An optional sign followed by digits. The parser reads a leading `+` or `-`
+/// and keeps the value, so both are part of the shape.
+fn is_signed_digits(text: &str) -> bool {
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    !digits.is_empty() && is_digits(digits)
+}
+
+/// Whether the ordinal prefix of a BYDAY token survives the parser's i16.
+/// A bare weekday has no ordinal and is left for the parser to accept or
+/// reject on the weekday itself.
+fn byday_ordinal_fits(token: &str) -> bool {
+    let (signed, unsigned) = match token.strip_prefix(['+', '-']) {
+        Some(rest) => (true, rest),
+        None => (false, token),
+    };
+    let digits = unsigned
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        // A sign with no digits would be dropped by the parser.
+        return !signed;
+    }
+    unsigned[..digits].parse::<i16>().is_ok()
 }
 
 /// Joins folded content lines. A line starting with a space or tab

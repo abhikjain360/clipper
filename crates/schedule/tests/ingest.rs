@@ -662,6 +662,161 @@ fn rewritten_interval_and_count_rules_are_rejected() {
 }
 
 #[test]
+fn overflowing_interval_and_count_rules_are_rejected() {
+    assert_malformed_rrule("FREQ=DAILY;INTERVAL=65536", "INTERVAL");
+    assert_malformed_rrule("FREQ=DAILY;COUNT=4294967296", "COUNT");
+}
+
+#[test]
+fn narrowed_by_clauses_are_rejected() {
+    // calcard narrows each list to a fixed width, wrapping or saturating on
+    // overflow and stripping the sign, so any value outside that width would
+    // import as a different rule.
+    assert_malformed_rrule("FREQ=DAILY;BYSECOND=256", "BYSECOND");
+    assert_malformed_rrule("FREQ=DAILY;BYMINUTE=256", "BYMINUTE");
+    assert_malformed_rrule("FREQ=DAILY;BYHOUR=256", "BYHOUR");
+    assert_malformed_rrule("FREQ=DAILY;BYHOUR=-1", "BYHOUR");
+    assert_malformed_rrule("FREQ=MONTHLY;BYMONTHDAY=128", "BYMONTHDAY");
+    assert_malformed_rrule("FREQ=MONTHLY;BYMONTHDAY=-129", "BYMONTHDAY");
+    assert_malformed_rrule("FREQ=YEARLY;BYYEARDAY=32768", "BYYEARDAY");
+    assert_malformed_rrule("FREQ=YEARLY;BYWEEKNO=128", "BYWEEKNO");
+    assert_malformed_rrule("FREQ=YEARLY;BYMONTH=128", "BYMONTH");
+    assert_malformed_rrule(
+        "FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=2147483648",
+        "BYSETPOS",
+    );
+    assert_malformed_rrule("FREQ=MONTHLY;BYDAY=40000MO", "BYDAY");
+}
+
+#[test]
+fn a_numeric_wkst_is_rejected() {
+    // The parser only reads weekday names for WKST. A numeric one falls
+    // through to the expansion library's probe, which refuses it, so the
+    // event is skipped instead of importing with a rewritten week start.
+    let feed = feed_with_rrule("FREQ=WEEKLY;BYDAY=MO;WKST=1");
+    let outcome =
+        parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()).expect("the feed parses");
+    assert!(outcome.events.is_empty());
+    assert_eq!(outcome.skipped.len(), 1);
+    assert!(outcome.skipped[0].reason.contains("weekday"), "{:?}", outcome.skipped[0].reason);
+}
+
+#[test]
+fn boundary_interval_and_count_are_kept() {
+    let feed = feed_with_rrule("FREQ=DAILY;INTERVAL=65535");
+    let outcome =
+        parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()).expect("valid rule parses");
+    assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+    let event = outcome.events.into_iter().next().expect("one event");
+    let Recurrence::Every(cadence) = event.recurrence else {
+        panic!("expected a cadence, got {:?}", event.recurrence);
+    };
+    assert_eq!(cadence.interval.get(), 65535);
+
+    let feed = feed_with_rrule("FREQ=DAILY;COUNT=4294967295");
+    let outcome =
+        parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()).expect("valid rule parses");
+    assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+    let event = outcome.events.into_iter().next().expect("one event");
+    let Recurrence::Every(cadence) = event.recurrence else {
+        panic!("expected a cadence, got {:?}", event.recurrence);
+    };
+    assert_eq!(
+        cadence.end,
+        RecurrenceEnd::After(std::num::NonZeroU32::new(4294967295).expect("non-zero"))
+    );
+}
+
+#[test]
+fn boundary_interval_expands_with_that_interval() {
+    use chrono::{TimeDelta, TimeZone, Utc};
+    use clipper_schedule::{
+        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, TimeRange,
+    };
+
+    let event = parse_ics(
+        &feed_with_rrule("FREQ=DAILY;INTERVAL=65535"),
+        SourceId(uuid_fixture()),
+        import_fixture(),
+    )
+    .expect("valid rule parses")
+    .events
+    .pop()
+    .expect("one event");
+    let item = ScheduleItem {
+        id: ScheduleItemId(event.id),
+        title: event.title.clone(),
+        span: event.span.clone(),
+        recurrence: event.recurrence.clone(),
+        reference: None,
+        alarm: None,
+    };
+    let from = Utc.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).single().unwrap();
+    let occurrences = RruleEngine::new()
+        .occurrences(
+            &item,
+            &[],
+            &Expansion {
+                window: TimeRange::new(from, from + TimeDelta::days(2 * 65535)).unwrap(),
+                observer: Tz::UTC,
+            },
+        )
+        .expect("expands");
+    let starts: Vec<_> = occurrences
+        .iter()
+        .map(|occurrence| occurrence.span.start())
+        .collect();
+    assert_eq!(
+        starts,
+        vec![from, from + TimeDelta::days(65535)],
+        "a wrapped interval would show far more than two occurrences"
+    );
+}
+
+#[test]
+fn extreme_but_exact_values_still_import() {
+    for rule in [
+        "FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1",
+        "FREQ=MONTHLY;BYMONTHDAY=-1",
+        "FREQ=YEARLY;BYYEARDAY=-1",
+        "FREQ=YEARLY;BYWEEKNO=-1",
+        "FREQ=DAILY;BYHOUR=0",
+    ] {
+        parse_ics(
+            &feed_with_rrule(rule),
+            SourceId(uuid_fixture()),
+            import_fixture(),
+        )
+        .expect("an exactly representable rule imports: {rule}");
+    }
+}
+
+#[test]
+fn plus_signed_ordinals_are_valid_and_import_unchanged() {
+    // RFC 5545 allows a leading plus on ordinals. The parser reads it and
+    // keeps the value, so the pre-check must let it through.
+    for rule in [
+        "FREQ=MONTHLY;BYDAY=+1MO",
+        "FREQ=MONTHLY;BYMONTHDAY=+15",
+        "FREQ=MONTHLY;BYDAY=MO;BYSETPOS=+1",
+        "FREQ=YEARLY;BYYEARDAY=+100",
+        "FREQ=YEARLY;BYWEEKNO=+1",
+    ] {
+        let outcome = parse_ics(
+            &feed_with_rrule(rule),
+            SourceId(uuid_fixture()),
+            import_fixture(),
+        )
+        .expect("a plus-signed ordinal imports: {rule}");
+        assert!(
+            outcome.skipped.is_empty(),
+            "{rule} must not be skipped: {:?}",
+            outcome.skipped
+        );
+    }
+}
+
+#[test]
 fn a_folded_rrule_with_zero_interval_is_rejected() {
     let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
 UID:folded@example.com\r\nDTSTART:20260901T090000Z\r\n\
