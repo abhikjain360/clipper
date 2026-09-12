@@ -24,7 +24,7 @@ use crate::{
     },
     recurrence::{
         Cadence, Frequency, MonthlyRule, Recurrence, RecurrenceEnd, ValidatedRrule,
-        until_wall_clock,
+        until_scan_bound, until_wall_clock,
     },
     time::{ScheduleSpan, TimeError, TimeRange, TimedStart},
 };
@@ -184,7 +184,7 @@ impl RruleEngine {
         expansion: &Expansion,
     ) -> Result<Vec<(RecurrenceId, TimeRange)>, EngineError> {
         let zone = effective_zone(item, expansion.observer);
-        let rule_line = match &item.recurrence {
+        let (rule_line, until_cutoff) = match &item.recurrence {
             // A one-off has no rule to expand.
             Recurrence::Once => {
                 let resolved = item.span.resolve(expansion.observer)?;
@@ -259,6 +259,12 @@ impl RruleEngine {
             let local = occurrence.naive_utc();
             let resolved = span_at(item, local, zone).resolve(expansion.observer)?;
             if !expansion.window.contains(resolved.start()) {
+                continue;
+            }
+            // An instant UNTIL cuts on the resolved instant. UNTIL is
+            // inclusive. DATE and floating values already carry wall-clock
+            // meaning in the rule text and need no post-filter.
+            if until_cutoff.is_some_and(|cutoff| resolved.start() > cutoff) {
                 continue;
             }
             if spans.len() >= self.max_candidates {
@@ -453,9 +459,15 @@ fn span_at(item: &ScheduleItem, local: chrono::NaiveDateTime, zone: Tz) -> Sched
     }
 }
 
-/// Builds the `RRULE` value for a cadence. `zone` is the zone the rule expands
-/// in; it only affects `UNTIL`.
-fn rrule_line(cadence: &Cadence, zone: Tz) -> String {
+/// Builds the `RRULE` value for a cadence, and reports the instant cutoff when
+/// the cadence ends on one. `zone` is the zone the rule expands in; it only
+/// affects `UNTIL`.
+///
+/// An instant end becomes a loose wall-clock bound for `rrule`: the wall clock
+/// the instant shows in the expansion zone, plus one day. That bound only
+/// stops `rrule` from scanning forever; the caller applies the returned
+/// instant as the true inclusive cutoff on each resolved occurrence.
+fn rrule_line(cadence: &Cadence, zone: Tz) -> (String, Option<DateTime<Utc>>) {
     // RFC 5545 requires FREQ first.
     let mut parts = Vec::new();
     match &cadence.frequency {
@@ -482,24 +494,19 @@ fn rrule_line(cadence: &Cadence, zone: Tz) -> String {
         }
     }
     parts.push(format!("INTERVAL={}", cadence.interval));
+    let mut cutoff = None;
     match cadence.end {
         RecurrenceEnd::Never => {}
         RecurrenceEnd::After(count) => parts.push(format!("COUNT={count}")),
         RecurrenceEnd::On(instant) => {
-            // DTSTART is a UTC wall clock, so UNTIL must be one too: write the
-            // wall clock this instant shows in the expansion zone. Inside a
-            // fall-back hour that comparison can differ from the instant
-            // comparison by at most that hour.
             parts.push(format!(
                 "UNTIL={}",
-                instant
-                    .with_timezone(&zone)
-                    .naive_local()
-                    .format("%Y%m%dT%H%M%SZ")
+                until_scan_bound(instant, zone).format("%Y%m%dT%H%M%SZ")
             ));
+            cutoff = Some(instant);
         }
     }
-    parts.join(";")
+    (parts.join(";"), cutoff)
 }
 
 fn ical_weekday(day: Weekday) -> &'static str {
