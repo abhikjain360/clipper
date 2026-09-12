@@ -460,9 +460,9 @@ impl SyncEngine {
         signing_identity: DeviceSigningIdentity,
     ) -> Result<(), ClientError> {
         let cache_key = *encryption_key;
-        {
+        let epoch = {
             let mut active_key = self.encryption_key.write().await;
-            self.history_epoch.fetch_add(1, Ordering::SeqCst);
+            let epoch = self.history_epoch.fetch_add(1, Ordering::SeqCst) + 1;
             self.schedule_history.lock().await.clear();
             self.import_rules.lock().await.clear();
             self.local_store.clear_memory().await;
@@ -473,7 +473,8 @@ impl SyncEngine {
             self.local_store
                 .set_profile(profile_id_from_encryption_key(&encryption_key));
             *active_key = Some(encryption_key);
-        }
+            epoch
+        };
         *self.device_signing_key.write().await = Some(signing_identity.signing_secret_key);
         *self.device_identity_wrapping_key.write().await = Some(device_identity_wrapping_key);
 
@@ -506,7 +507,7 @@ impl SyncEngine {
         {
             let engine = Arc::clone(self);
             spawn_background(async move {
-                engine.ws_loop().await;
+                engine.ws_loop(epoch).await;
             });
         }
 
@@ -631,6 +632,22 @@ impl SyncEngine {
     /// ones its session opened.
     fn session_is_current(&self, epoch: u64) -> bool {
         self.history_epoch.load(Ordering::SeqCst) == epoch
+    }
+
+    /// Claim a store generation for the session `epoch` names.
+    ///
+    /// The read guard is what makes the check and the claim one step: a login
+    /// or logout has to take the write lock to bump the epoch, so it either
+    /// happens entirely before this or entirely after it. Without that, a
+    /// socket authenticated as the previous account can make itself the
+    /// current generation and stream its events into the next account's
+    /// profile.
+    async fn start_generation_for_session(&self, epoch: u64) -> Result<u64, ClientError> {
+        let _active_key = self.encryption_key.read().await;
+        if !self.session_is_current(epoch) {
+            return Err(ClientError::NotAuthenticated);
+        }
+        Ok(self.local_store.start_generation().await)
     }
 
     // ── Devices ──
@@ -3108,12 +3125,22 @@ impl SyncEngine {
 
     // ── WebSocket ──
 
+    /// Keep a WebSocket up for the session `epoch` names.
+    ///
+    /// Every login spawns one of these, so a logout followed by a new login
+    /// leaves two running. The epoch check is how the older one stops: without
+    /// it, it sees the new session's state and token and reconnects as the new
+    /// user, and every event is then handled twice.
     #[cfg(not(target_family = "wasm"))]
-    async fn ws_loop(self: &Arc<Self>) {
+    async fn ws_loop(self: &Arc<Self>, epoch: u64) {
         let mut backoff = Duration::from_secs(1);
         let max_backoff = Duration::from_secs(60);
 
         loop {
+            if !self.session_is_current(epoch) {
+                debug!("Stopping the WebSocket loop of a session that has ended");
+                return;
+            }
             {
                 let state = self.state.read().await;
                 if !state.is_logged_in() {
@@ -3127,12 +3154,19 @@ impl SyncEngine {
             }
             self.bump_version();
 
-            match self.ws_connect().await {
+            match self.ws_connect(epoch).await {
                 Ok(()) => {
                     backoff = Duration::from_secs(1);
                 }
                 Err(e) => {
                     warn!("WebSocket error: {}", e);
+                    // The state belongs to whichever session is installed now.
+                    // A socket whose session has ended must not mark the next
+                    // session disconnected.
+                    if !self.session_is_current(epoch) {
+                        debug!("Stopping the WebSocket loop of a session that has ended");
+                        return;
+                    }
                     {
                         let mut state = self.state.write().await;
                         state.connection_status = ConnectionStatus::Disconnected;
@@ -3141,6 +3175,10 @@ impl SyncEngine {
                 }
             }
 
+            if !self.session_is_current(epoch) {
+                debug!("Stopping the WebSocket loop of a session that has ended");
+                return;
+            }
             {
                 let state = self.state.read().await;
                 if !state.is_logged_in() {
@@ -3155,7 +3193,7 @@ impl SyncEngine {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    async fn ws_connect(self: &Arc<Self>) -> Result<(), ClientError> {
+    async fn ws_connect(self: &Arc<Self>, epoch: u64) -> Result<(), ClientError> {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite;
 
@@ -3237,7 +3275,10 @@ impl SyncEngine {
             }
         };
 
-        let generation = self.local_store.start_generation().await;
+        // The session may have changed while the handshake was in flight.
+        // Claiming the generation only for the session this socket
+        // authenticated as keeps its events out of the next account.
+        let generation = self.start_generation_for_session(epoch).await?;
         self.start_reconciliation(generation, stream_start_seq)
             .await;
 
@@ -3289,12 +3330,22 @@ impl SyncEngine {
         Ok(())
     }
 
+    /// Keep a WebSocket up for the session `epoch` names.
+    ///
+    /// Every login spawns one of these, so a logout followed by a new login
+    /// leaves two running. The epoch check is how the older one stops: without
+    /// it, it sees the new session's state and token and reconnects as the new
+    /// user, and every event is then handled twice.
     #[cfg(target_family = "wasm")]
-    async fn ws_loop(self: &Arc<Self>) {
+    async fn ws_loop(self: &Arc<Self>, epoch: u64) {
         let mut backoff = Duration::from_secs(1);
         let max_backoff = Duration::from_secs(60);
 
         loop {
+            if !self.session_is_current(epoch) {
+                debug!("Stopping the WebSocket loop of a session that has ended");
+                return;
+            }
             {
                 let state = self.state.read().await;
                 if !state.is_logged_in() {
@@ -3308,12 +3359,19 @@ impl SyncEngine {
             }
             self.bump_version();
 
-            match self.ws_connect().await {
+            match self.ws_connect(epoch).await {
                 Ok(()) => {
                     backoff = Duration::from_secs(1);
                 }
                 Err(e) => {
                     warn!("WebSocket error: {}", e);
+                    // The state belongs to whichever session is installed now.
+                    // A socket whose session has ended must not mark the next
+                    // session disconnected.
+                    if !self.session_is_current(epoch) {
+                        debug!("Stopping the WebSocket loop of a session that has ended");
+                        return;
+                    }
                     {
                         let mut state = self.state.write().await;
                         state.connection_status = ConnectionStatus::Disconnected;
@@ -3322,6 +3380,10 @@ impl SyncEngine {
                 }
             }
 
+            if !self.session_is_current(epoch) {
+                debug!("Stopping the WebSocket loop of a session that has ended");
+                return;
+            }
             {
                 let state = self.state.read().await;
                 if !state.is_logged_in() {
@@ -3335,7 +3397,7 @@ impl SyncEngine {
     }
 
     #[cfg(target_family = "wasm")]
-    async fn ws_connect(self: &Arc<Self>) -> Result<(), ClientError> {
+    async fn ws_connect(self: &Arc<Self>, epoch: u64) -> Result<(), ClientError> {
         let api = &self.api;
         let ticket = api.websocket_ticket().await?;
         let ws_url = api.websocket_ticket_url()?;
@@ -3370,7 +3432,10 @@ impl SyncEngine {
             }
         };
 
-        let generation = self.local_store.start_generation().await;
+        // The session may have changed while the handshake was in flight.
+        // Claiming the generation only for the session this socket
+        // authenticated as keeps its events out of the next account.
+        let generation = self.start_generation_for_session(epoch).await?;
         self.start_reconciliation(generation, stream_start_seq)
             .await;
 
@@ -4630,6 +4695,60 @@ mod tests {
         );
         drop(held);
         assert!(engine.get_state().await.session.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_socket_from_a_replaced_session_does_not_claim_the_store() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", temp.path());
+        let epoch = engine.history_epoch.load(Ordering::SeqCst);
+        let generation = engine.local_store.start_generation().await;
+
+        // The handshake finished after a logout and a new login.
+        engine.history_epoch.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            matches!(
+                engine.start_generation_for_session(epoch).await,
+                Err(ClientError::NotAuthenticated),
+            ),
+            "a socket of an ended session must not be given a generation",
+        );
+        assert_eq!(
+            engine.local_store.current_generation().await,
+            generation,
+            "and the store must still be fenced on the current session's generation",
+        );
+
+        let current = engine.history_epoch.load(Ordering::SeqCst);
+        assert_eq!(
+            engine
+                .start_generation_for_session(current)
+                .await
+                .expect("the current session gets a generation"),
+            generation + 1,
+        );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn the_websocket_loop_of_an_ended_session_stops_instead_of_reconnecting() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", temp.path());
+        let epoch = engine.history_epoch.load(Ordering::SeqCst);
+        open_session(&engine).await;
+        // A logout and a new login happened after this loop was spawned, so
+        // the session it is still holding state for belongs to someone else.
+        engine.history_epoch.fetch_add(1, Ordering::SeqCst);
+        let version_before = engine.state_version();
+
+        tokio::time::timeout(Duration::from_millis(500), engine.ws_loop(epoch))
+            .await
+            .expect("the loop of an ended session must return, not reconnect");
+        assert_eq!(
+            engine.state_version(),
+            version_before,
+            "and it must not report a connection attempt on the new session's behalf",
+        );
     }
 
     #[tokio::test]
