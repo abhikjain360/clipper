@@ -451,8 +451,6 @@ New file, 210 lines, 4 functions, 0 test functions.
 
 New file, 41 lines, 0 functions, 0 test functions.
 
-- 
-
 ## crates/schedule/src/recurrence.rs
 
 New file, 555 lines, 24 functions, 0 test functions.
@@ -754,4 +752,3 @@ New file, 275 lines, 2 functions, 0 test functions.
 - `random_hex_suffix` (line 848, 5 changed lines)
 - `create_private_temp_file` (line 854, 25 changed lines)
 - tests touched: `upload_staging_path_keeps_the_user_filename`, `upload_staging_path_sanitizes_traversal_filename`, `staging_write_returns_only_after_its_bytes_are_on_disk`
-
