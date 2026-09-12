@@ -669,7 +669,10 @@ DTEND:20260901T100000Z\r\nRRULE:FREQ=DAILY;INTERVAL=\r\n 0\r\n\
 END:VEVENT\r\nEND:VCALENDAR\r\n";
     match parse_ics(feed, SourceId(uuid_fixture()), import_fixture()) {
         Err(clipper_schedule::IngestError::Malformed(message)) => {
-            assert!(message.contains("INTERVAL"), "must name INTERVAL: {message:?}");
+            assert!(
+                message.contains("INTERVAL"),
+                "must name INTERVAL: {message:?}"
+            );
         }
         other => panic!("folded INTERVAL=0 must be Malformed, got {other:?}"),
     }
@@ -678,8 +681,8 @@ END:VEVENT\r\nEND:VCALENDAR\r\n";
 #[test]
 fn a_valid_interval_and_count_still_becomes_a_cadence() {
     let feed = feed_with_rrule("FREQ=DAILY;INTERVAL=2;COUNT=5");
-    let outcome = parse_ics(&feed, SourceId(uuid_fixture()), import_fixture())
-        .expect("valid rule parses");
+    let outcome =
+        parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()).expect("valid rule parses");
     assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
     let event = outcome.events.into_iter().next().expect("one event");
     let Recurrence::Every(cadence) = event.recurrence else {

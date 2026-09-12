@@ -23,12 +23,13 @@ Cipher suite: `Ristretto255 + TripleDH + SHA-512 + Argon2id`
 ## Key stretching
 
 `KSF` is Argon2id with memory 19456 KiB (19 MiB), 2 iterations, and parallelism
+
 1. The parameters are written out in `crates/core/src/crypto.rs`
-(`OPAQUE_KSF_M_COST_KIB`, `OPAQUE_KSF_T_COST`, `OPAQUE_KSF_P_COST`) and passed
-to both `opaque_client_register_finish` and `opaque_client_login_finish`, so
-registration and login provably stretch the same way. They match the `argon2`
-crate's current defaults, but they are stated rather than inherited: a
-dependency bump that moved the default would otherwise change `rwd` silently.
+   (`OPAQUE_KSF_M_COST_KIB`, `OPAQUE_KSF_T_COST`, `OPAQUE_KSF_P_COST`) and passed
+   to both `opaque_client_register_finish` and `opaque_client_login_finish`, so
+   registration and login provably stretch the same way. They match the `argon2`
+   crate's current defaults, but they are stated rather than inherited: a
+   dependency bump that moved the default would otherwise change `rwd` silently.
 
 The parameters are not stored in the password file, so they are not negotiated
 per user. Changing any of the three changes `rwd`, and therefore the export key

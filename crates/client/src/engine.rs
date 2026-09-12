@@ -3727,7 +3727,6 @@ fn optional_device_id(device_id: Option<&str>) -> Result<Option<DeviceId>, Clien
         .transpose()
 }
 
-
 /// The projection the AAD is computed from, before the ciphertexts exist.
 ///
 /// It has to agree with the final envelope on every bound field — `revision`
@@ -3798,7 +3797,6 @@ impl EnvelopePlacement {
         }
     }
 }
-
 
 #[allow(clippy::too_many_arguments)]
 fn object_envelope_body(
@@ -4380,7 +4378,9 @@ mod tests {
                 .expect("marker"),
             "a write from the logged-out session must not land",
         );
-        engine.publish_visible_state(visible_state(1, "stale")).await;
+        engine
+            .publish_visible_state(visible_state(1, "stale"))
+            .await;
         assert!(
             engine.get_state().await.clipboard_items.is_empty(),
             "a straggling snapshot must not repopulate the screen",
@@ -4393,8 +4393,12 @@ mod tests {
         let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", temp.path());
         open_session(&engine).await;
 
-        engine.publish_visible_state(visible_state(2, "newer")).await;
-        engine.publish_visible_state(visible_state(1, "older")).await;
+        engine
+            .publish_visible_state(visible_state(2, "newer"))
+            .await;
+        engine
+            .publish_visible_state(visible_state(1, "older"))
+            .await;
 
         let state = engine.get_state().await;
         assert_eq!(

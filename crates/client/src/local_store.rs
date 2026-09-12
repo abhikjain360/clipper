@@ -2465,12 +2465,9 @@ fn decrypt_file_record(
     )
     .map_err(|error| LocalStoreError::EncryptedCache(error.to_string()))?;
     let blob_size = meta.size.unwrap_or_else(|| {
-        encrypted
-            .payloads
-            .iter()
-            .fold(0_i64, |total, payload| {
-                total.saturating_add(payload.ciphertext_size.max(0))
-            })
+        encrypted.payloads.iter().fold(0_i64, |total, payload| {
+            total.saturating_add(payload.ciphertext_size.max(0))
+        })
     });
     let local_record = LocalObjectRecord {
         id: record.id.clone(),
@@ -3209,8 +3206,7 @@ mod tests {
 
         let path = store.device_identity_path(profile);
         let bytes = tokio::fs::read(&path).await.expect("identity bytes");
-        let mut json: serde_json::Value =
-            serde_json::from_slice(&bytes).expect("identity json");
+        let mut json: serde_json::Value = serde_json::from_slice(&bytes).expect("identity json");
         json["device_id"] = device_id;
         let bytes = serde_json::to_vec_pretty(&json).expect("tampered json");
         write_private_file_atomic(&path, &bytes)
@@ -4303,7 +4299,10 @@ mod tests {
             .await
             .expect("hydrate");
         assert_eq!(
-            hydrated.clipboard_items.first().map(|item| item.text.clone()),
+            hydrated
+                .clipboard_items
+                .first()
+                .map(|item| item.text.clone()),
             Some("revision three".to_string()),
         );
     }

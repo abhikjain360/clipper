@@ -253,8 +253,9 @@ mod tests {
 
 #[cfg(all(test, unix))]
 mod permission_tests {
-    use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
 
     fn unique_base() -> PathBuf {
         std::env::temp_dir().join(format!(

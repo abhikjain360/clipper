@@ -1004,7 +1004,11 @@ fn body_preview(bytes: &[u8]) -> String {
 fn sanitized_server_message(message: &str) -> String {
     let mut clean = String::with_capacity(message.len().min(MAX_SERVER_MESSAGE_BYTES));
     for character in message.chars() {
-        let character = if character.is_control() { ' ' } else { character };
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
         if clean.len() + character.len_utf8() > MAX_SERVER_MESSAGE_BYTES {
             break;
         }

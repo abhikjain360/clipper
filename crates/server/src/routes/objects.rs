@@ -255,7 +255,8 @@ pub async fn init_object(
         })
         .collect();
     let payload_count = req.payloads.len();
-    let object_storage_bytes = init_request_storage_bytes(&req)?;    let payload_models: Vec<_> = req
+    let object_storage_bytes = init_request_storage_bytes(&req)?;
+    let payload_models: Vec<_> = req
         .payloads
         .iter()
         .map(|payload| {
@@ -1120,8 +1121,8 @@ pub async fn revise_object(
             "Object metadata ciphertext exceeds maximum size",
         )
     })?;
-    let revision_storage_bytes =
-        storage_quota::revision_cost_bytes(meta_len, payload_bytes).ok_or_else(|| {
+    let revision_storage_bytes = storage_quota::revision_cost_bytes(meta_len, payload_bytes)
+        .ok_or_else(|| {
             ApiError::from_code_with_message(
                 ApiErrorCode::PayloadTooLarge,
                 "Object sizes exceed maximum size",
@@ -2264,10 +2265,7 @@ pub async fn purge_object(
     let meta_bytes: i64 = object_revisions::Entity::find()
         .filter(object_revisions::Column::ObjectId.eq(object_uuid))
         .select_only()
-        .column_as(
-            storage_quota::meta_bytes_sum_expr(),
-            "meta_bytes",
-        )
+        .column_as(storage_quota::meta_bytes_sum_expr(), "meta_bytes")
         .into_tuple::<Option<i64>>()
         .one(&txn)
         .await
@@ -4527,9 +4525,7 @@ mod tests {
                 .await
                 {
                     Ok(_) => {}
-                    Err(error)
-                        if error.body().code == ApiErrorCode::StorageQuotaExceeded =>
-                    {
+                    Err(error) if error.body().code == ApiErrorCode::StorageQuotaExceeded => {
                         assert_eq!(error.status(), StatusCode::INSUFFICIENT_STORAGE);
                         refused = true;
                         break;
@@ -4537,7 +4533,10 @@ mod tests {
                     Err(error) => panic!("unexpected revision error: {error:?}"),
                 }
             }
-            assert!(refused, "512-byte metadata revisions must hit a 600-byte quota");
+            assert!(
+                refused,
+                "512-byte metadata revisions must hit a 600-byte quota"
+            );
             let (bytes, _) = user_storage_usage(&state, user_id).await;
             assert!(
                 bytes <= 600,
@@ -5399,7 +5398,10 @@ mod tests {
         );
         assert_eq!(
             user_storage_usage(&state, user_id).await,
-            (ciphertext.len() as i64 + b"encrypted metadata".len() as i64, 1),
+            (
+                ciphertext.len() as i64 + b"encrypted metadata".len() as i64,
+                1
+            ),
             "failed completion leaves reserved quota unchanged",
         );
     }

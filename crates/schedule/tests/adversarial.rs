@@ -96,7 +96,10 @@ fn floating_0230_spring_forward_berlin() {
         duration: BlockDuration::from_minutes(30).expect("non-zero"),
     };
     let resolved = span.resolve(Tz::Europe__Berlin).expect("resolves");
-    assert_eq!(in_zone(resolved.start(), Tz::Europe__Berlin), "2026-03-29 03:30 CEST");
+    assert_eq!(
+        in_zone(resolved.start(), Tz::Europe__Berlin),
+        "2026-03-29 03:30 CEST"
+    );
 }
 
 /// Floating 02:30 on New York's spring-forward day (2026-03-08, 02:00 -> 03:00).
@@ -191,12 +194,22 @@ fn weekly_zoned_series_keeps_wall_clock_across_spring_forward() {
     let out = expand(
         &item,
         &[],
-        &expansion(utc(2026, 3, 22, 0, 0), utc(2026, 4, 1, 0, 0), Tz::Europe__Berlin),
+        &expansion(
+            utc(2026, 3, 22, 0, 0),
+            utc(2026, 4, 1, 0, 0),
+            Tz::Europe__Berlin,
+        ),
     )
     .expect("expands");
     assert_eq!(out.len(), 2);
-    assert_eq!(in_zone(out[0].span.start(), Tz::Europe__Berlin), "2026-03-23 09:00 CET");
-    assert_eq!(in_zone(out[1].span.start(), Tz::Europe__Berlin), "2026-03-30 09:00 CEST");
+    assert_eq!(
+        in_zone(out[0].span.start(), Tz::Europe__Berlin),
+        "2026-03-23 09:00 CET"
+    );
+    assert_eq!(
+        in_zone(out[1].span.start(), Tz::Europe__Berlin),
+        "2026-03-30 09:00 CEST"
+    );
     assert_eq!(out[0].span.start(), utc(2026, 3, 23, 8, 0));
     assert_eq!(out[1].span.start(), utc(2026, 3, 30, 7, 0));
 }
@@ -216,12 +229,22 @@ fn weekly_zoned_series_keeps_wall_clock_across_fall_back() {
     let out = expand(
         &item,
         &[],
-        &expansion(utc(2026, 10, 18, 0, 0), utc(2026, 10, 28, 0, 0), Tz::Europe__Berlin),
+        &expansion(
+            utc(2026, 10, 18, 0, 0),
+            utc(2026, 10, 28, 0, 0),
+            Tz::Europe__Berlin,
+        ),
     )
     .expect("expands");
     assert_eq!(out.len(), 2);
-    assert_eq!(in_zone(out[0].span.start(), Tz::Europe__Berlin), "2026-10-19 09:00 CEST");
-    assert_eq!(in_zone(out[1].span.start(), Tz::Europe__Berlin), "2026-10-26 09:00 CET");
+    assert_eq!(
+        in_zone(out[0].span.start(), Tz::Europe__Berlin),
+        "2026-10-19 09:00 CEST"
+    );
+    assert_eq!(
+        in_zone(out[1].span.start(), Tz::Europe__Berlin),
+        "2026-10-26 09:00 CET"
+    );
     assert_eq!(out[0].span.start(), utc(2026, 10, 19, 7, 0));
     assert_eq!(out[1].span.start(), utc(2026, 10, 26, 8, 0));
 }
@@ -241,7 +264,11 @@ fn series_starting_inside_the_gap_still_emits_the_gap_day() {
     let out = expand(
         &item,
         &[],
-        &expansion(utc(2026, 3, 28, 0, 0), utc(2026, 3, 31, 0, 0), Tz::Europe__Berlin),
+        &expansion(
+            utc(2026, 3, 28, 0, 0),
+            utc(2026, 3, 31, 0, 0),
+            Tz::Europe__Berlin,
+        ),
     )
     .expect("expansion succeeds");
     let starts: Vec<String> = out
@@ -303,7 +330,11 @@ fn floating_series_on_a_skipped_date_shifts_to_the_next_valid_instant() {
     let out = expand(
         &item,
         &[],
-        &expansion(utc(2011, 12, 29, 0, 0), utc(2012, 1, 2, 0, 0), Tz::Pacific__Apia),
+        &expansion(
+            utc(2011, 12, 29, 0, 0),
+            utc(2012, 1, 2, 0, 0),
+            Tz::Pacific__Apia,
+        ),
     )
     .expect("the skipped date must not break the series");
     let ids: Vec<_> = out.iter().map(|o| o.recurrence_id).collect();
@@ -351,7 +382,11 @@ fn all_day_series_on_a_skipped_date_reports_a_zero_length_day() {
     let result = expand(
         &item,
         &[],
-        &expansion(utc(2011, 12, 29, 0, 0), utc(2012, 1, 2, 0, 0), Tz::Pacific__Apia),
+        &expansion(
+            utc(2011, 12, 29, 0, 0),
+            utc(2012, 1, 2, 0, 0),
+            Tz::Pacific__Apia,
+        ),
     );
     assert!(
         matches!(
@@ -1071,7 +1106,11 @@ fn multi_day_all_day_overlaps_each_covered_window() {
         alarm: None,
     };
     // Middle day, entirely inside the event.
-    let exp = expansion(utc(2026, 3, 29, 0, 0), utc(2026, 3, 29, 12, 0), Tz::Europe__Berlin);
+    let exp = expansion(
+        utc(2026, 3, 29, 0, 0),
+        utc(2026, 3, 29, 12, 0),
+        Tz::Europe__Berlin,
+    );
     let overlapping = RruleEngine::new()
         .overlapping_occurrences(&item, &[], &exp)
         .expect("expands");
@@ -1477,7 +1516,9 @@ fn every_public_time_shape_round_trips() {
     ] {
         json_round_trip(&span);
     }
-    json_round_trip(&TimeRange::new(utc(2026, 6, 10, 9, 0), utc(2026, 6, 10, 10, 0)).expect("range"));
+    json_round_trip(
+        &TimeRange::new(utc(2026, 6, 10, 9, 0), utc(2026, 6, 10, 10, 0)).expect("range"),
+    );
 }
 
 #[test]
@@ -1485,9 +1526,8 @@ fn every_public_recurrence_shape_round_trips() {
     let weekly = Frequency::Weekly {
         weekdays: WeekdaySet::weekdays(),
     };
-    let monthly_day = Frequency::Monthly(MonthlyRule::OnDay(
-        MonthDay::from_end(1).expect("in range"),
-    ));
+    let monthly_day =
+        Frequency::Monthly(MonthlyRule::OnDay(MonthDay::from_end(1).expect("in range")));
     let monthly_weekday = Frequency::Monthly(MonthlyRule::OnWeekday {
         nth: NthWeekday::from_end(2).expect("in range"),
         weekday: Weekday::Fri,
@@ -1496,7 +1536,13 @@ fn every_public_recurrence_shape_round_trips() {
         month: Month::February,
         day: MonthDay::from_start(29).expect("in range"),
     };
-    for frequency in [Frequency::Daily, weekly, monthly_day, monthly_weekday, yearly] {
+    for frequency in [
+        Frequency::Daily,
+        weekly,
+        monthly_day,
+        monthly_weekday,
+        yearly,
+    ] {
         for end in [
             RecurrenceEnd::Never,
             RecurrenceEnd::after(7).expect("non-zero"),

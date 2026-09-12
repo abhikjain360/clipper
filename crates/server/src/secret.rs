@@ -227,8 +227,7 @@ mod tests {
             let path = dir.path().join("clipper-server.secret");
             std::fs::write(&path, format!("{}\n", generate_root_base64()))
                 .expect("write secret file");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
-                .expect("chmod");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
 
             let prev_secret = std::env::var(ENV_SECRET).ok();
             let prev_file = std::env::var(ENV_SECRET_FILE).ok();
