@@ -1151,6 +1151,11 @@ pub enum ClientError {
     WebSocket(String),
     #[error("Local store error: {0}")]
     LocalStore(String),
+    /// The server served a revision that contradicts the one this device
+    /// already accepted. The device keeps what it holds; a reconciliation pass
+    /// skips the object rather than failing.
+    #[error("Refused revision: {0}")]
+    RevisionRejected(String),
     /// No active session: a token, device identity, signing key, or encryption
     /// key required for this action is missing. The client must log in first.
     #[error("Not authenticated; sign in first")]
@@ -1287,6 +1292,9 @@ impl ClientError {
             Self::Crypto(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.to_string()),
             Self::WebSocket(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.clone()),
             Self::LocalStore(error) => ErrorResponse::new(ApiErrorCode::Storage, error.clone()),
+            Self::RevisionRejected(error) => {
+                ErrorResponse::new(ApiErrorCode::Unknown, error.clone())
+            }
             Self::NotAuthenticated | Self::NoResumableDeviceIdentity => {
                 ErrorResponse::new(ApiErrorCode::Unauthorized, self.to_string())
             }
@@ -1318,7 +1326,14 @@ impl ClientError {
 
 impl From<crate::local_store::LocalStoreError> for ClientError {
     fn from(error: crate::local_store::LocalStoreError) -> Self {
-        Self::LocalStore(error.to_string())
+        // A refused revision keeps its own type: callers treat it as a skipped
+        // object rather than a failed operation.
+        match error {
+            crate::local_store::LocalStoreError::RevisionRejected(reason) => {
+                Self::RevisionRejected(reason)
+            }
+            error => Self::LocalStore(error.to_string()),
+        }
     }
 }
 
