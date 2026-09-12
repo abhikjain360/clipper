@@ -2,7 +2,7 @@ mod daemon_client;
 mod daemon_spawn;
 mod ipc_secret;
 
-use std::{path::PathBuf, sync::OnceLock};
+use std::{path::{Path, PathBuf}, sync::OnceLock};
 
 use clipper_app_types::{
     ActualView, AppState, CollabItem, DeviceInfo, IngestReport, OccurrenceView,
@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use tauri::{Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
+use tokio::io::AsyncWriteExt;
 use tracing_subscriber::EnvFilter;
 use zeroize::Zeroizing;
 
@@ -375,18 +376,19 @@ async fn upload_file_bytes(
     _mime_type: String,
     bytes: Vec<u8>,
 ) -> CommandResult<String> {
-    let tmp = create_private_temp_file("upload", &filename).await?;
-    if let Err(e) = tokio::fs::write(&tmp, &bytes).await {
-        tokio::fs::remove_file(&tmp).await.ok();
-        return Err(CommandError::Client(format!("temp write: {e}")));
+    let upload_dir = create_private_upload_dir()?;
+    let result = async {
+        let tmp = write_private_upload_file(&upload_dir, &filename, &bytes).await?;
+        backend
+            .daemon
+            .send_result::<UploadFileResult>(DaemonCommand::UploadFile(UploadFileParams {
+                file_path: tmp.to_string_lossy().into_owned(),
+            }))
+            .await
+            .map_err(CommandError::from)
     }
-    let result = backend
-        .daemon
-        .send_result::<UploadFileResult>(DaemonCommand::UploadFile(UploadFileParams {
-            file_path: tmp.to_string_lossy().into_owned(),
-        }))
-        .await;
-    tokio::fs::remove_file(&tmp).await.ok();
+    .await;
+    tokio::fs::remove_dir_all(&upload_dir).await.ok();
     Ok(result?.file_id)
 }
 
@@ -704,6 +706,16 @@ fn safe_dialog_filename(filename: &str) -> String {
     }
 }
 
+fn safe_upload_filename(filename: &str) -> String {
+    let cleaned = safe_dialog_filename(filename);
+    let cleaned = cleaned.trim_start_matches('.');
+    if cleaned.is_empty() {
+        "clipper-upload".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
 fn staging_dir() -> PathBuf {
     dirs::cache_dir()
         .or_else(dirs::data_dir)
@@ -756,6 +768,55 @@ fn ensure_private_staging_dir() -> Result<PathBuf, CommandError> {
         }
     }
     Ok(dir)
+}
+
+fn create_private_upload_dir() -> Result<PathBuf, CommandError> {
+    let dir = ensure_private_staging_dir()?;
+    for _ in 0..10 {
+        let upload_dir = dir.join(format!("clipper-upload-{}", random_hex_suffix()));
+        #[cfg(unix)]
+        let created = {
+            use std::os::unix::fs::DirBuilderExt;
+
+            std::fs::DirBuilder::new()
+                .mode(PRIVATE_DIR_MODE)
+                .create(&upload_dir)
+        };
+        #[cfg(not(unix))]
+        let created = std::fs::DirBuilder::new().create(&upload_dir);
+        match created {
+            Ok(()) => return Ok(upload_dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(CommandError::Client(format!("temp dir: {e}"))),
+        }
+    }
+    Err(CommandError::Client(
+        "temp dir: too many collisions".into(),
+    ))
+}
+
+fn upload_staging_path(upload_dir: &Path, filename: &str) -> PathBuf {
+    upload_dir.join(safe_upload_filename(filename))
+}
+
+async fn write_private_upload_file(
+    upload_dir: &Path,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, CommandError> {
+    let path = upload_staging_path(upload_dir, filename);
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(PRIVATE_FILE_MODE);
+    let mut file = options
+        .open(&path)
+        .await
+        .map_err(|e| CommandError::Client(format!("temp create: {e}")))?;
+    file.write_all(bytes)
+        .await
+        .map_err(|e| CommandError::Client(format!("temp write: {e}")))?;
+    Ok(path)
 }
 
 fn sanitize_temp_prefix(value: &str) -> String {
@@ -812,4 +873,28 @@ async fn create_private_temp_file(kind: &str, hint: &str) -> Result<PathBuf, Com
 
 fn non_empty_string(s: String) -> Option<String> {
     if s.trim().is_empty() { None } else { Some(s) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_staging_path_keeps_the_user_filename() {
+        let upload_dir = Path::new("/private/staging/clipper-upload-random");
+
+        assert_eq!(
+            upload_staging_path(upload_dir, "report.pdf"),
+            upload_dir.join("report.pdf")
+        );
+    }
+
+    #[test]
+    fn upload_staging_path_sanitizes_traversal_filename() {
+        let upload_dir = Path::new("/private/staging/clipper-upload-random");
+        let path = upload_staging_path(upload_dir, "../../evil.pdf");
+
+        assert_eq!(path, upload_dir.join("_.._evil.pdf"));
+        assert_eq!(path.parent(), Some(upload_dir));
+    }
 }
