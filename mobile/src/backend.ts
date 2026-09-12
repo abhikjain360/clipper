@@ -68,11 +68,19 @@ export async function shareDownloadedFile(
   bytes: Uint8Array,
 ): Promise<void> {
   const file = new File(Paths.cache, safeCacheFilename(filename));
-  file.create({ intermediates: true, overwrite: true });
-  file.write(bytes);
+  try {
+    file.create({ intermediates: true, overwrite: true });
+    file.write(bytes);
 
-  if (await Sharing.isAvailableAsync()) {
-    await Sharing.shareAsync(file.uri, { mimeType });
+    if (await Sharing.isAvailableAsync()) {
+      await Sharing.shareAsync(file.uri, { mimeType });
+    }
+  } finally {
+    try {
+      file.delete();
+    } catch {
+      // The file may not exist when creation fails.
+    }
   }
 }
 
@@ -93,37 +101,54 @@ function safeCacheFilename(filename: string): string {
   return safe.replaceAll(/[^A-Za-z0-9._-]/g, "_");
 }
 
-// ── Session persistence (Android Keystore, biometric-gated) ──
-//
-// The passphrase is otherwise never written to disk (the E2E encryption keys
-// derive from it). To resume without re-typing it, the login credentials are
-// stashed in the Keystore behind device authentication (`requireAuthentication`),
-// so they can only be read after a fingerprint/PIN unlock. A separate, non-gated
-// flag lets startup detect stored creds WITHOUT triggering a biometric prompt for
-// users who have never logged in.
-
-const CREDENTIALS_KEY = "clipper.credentials.v1";
-const CREDENTIALS_FLAG_KEY = "clipper.credentials.present.v1";
-
+// Session persistence uses a revocable bearer and derived keys, never the
+// passphrase. SecureStore gates access behind device authentication. Revoking
+// the session prevents resume; data-key rotation remains a separate concern.
+const CREDENTIALS_KEY = "clipper.session.v2";
+const CREDENTIALS_FLAG_KEY = "clipper.session.present.v2";
 const SECURE_AUTH_OPTIONS: SecureStore.SecureStoreOptions = {
   requireAuthentication: true,
   authenticationPrompt: "Unlock Clipper",
   keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
 };
 
-type StoredCredentials = {
-  passphrase: string;
+type StoredSession = {
+  token: string;
+  dataKey: string;
+  wrappingKey: string;
   username: string;
   deviceName: string;
   serverUrl: string;
 };
 
-// Persist credentials behind biometric/PIN. Best-effort: a missing biometric
-// enrollment or a cancelled prompt just leaves nothing stored, so the login it
-// follows still succeeds and the user simply logs in manually next launch.
-export async function saveCredentials(creds: StoredCredentials): Promise<void> {
+async function removeLegacyCredentials(): Promise<void> {
+  // Retry on every launch, independently of the flag. Do not declare the old
+  // secret absent if deleting the protected value itself failed.
   try {
-    await SecureStore.setItemAsync(CREDENTIALS_KEY, JSON.stringify(creds), SECURE_AUTH_OPTIONS);
+    await SecureStore.deleteItemAsync("clipper.credentials.v1", SECURE_AUTH_OPTIONS);
+    await SecureStore.deleteItemAsync("clipper.credentials.present.v1");
+  } catch {
+    /* retried on the next launch */
+  }
+}
+
+// Best-effort: missing enrollment or a cancelled prompt must not fail login.
+export async function saveCredentials(): Promise<void> {
+  try {
+    await removeLegacyCredentials();
+    const material = await backend.sessionResumeMaterial();
+    const session = (await backend.getState()).session;
+    if (!material || !session) {
+      await clearCredentials();
+      return;
+    }
+    const saved: StoredSession = {
+      ...material,
+      username: session.username,
+      deviceName: session.device_name,
+      serverUrl: session.server_url,
+    };
+    await SecureStore.setItemAsync(CREDENTIALS_KEY, JSON.stringify(saved), SECURE_AUTH_OPTIONS);
     await SecureStore.setItemAsync(CREDENTIALS_FLAG_KEY, "1");
   } catch {
     await clearCredentials();
@@ -131,40 +156,63 @@ export async function saveCredentials(creds: StoredCredentials): Promise<void> {
 }
 
 export async function clearCredentials(): Promise<void> {
+  await removeLegacyCredentials();
   await SecureStore.deleteItemAsync(CREDENTIALS_KEY, SECURE_AUTH_OPTIONS).catch(() => {});
   await SecureStore.deleteItemAsync(CREDENTIALS_FLAG_KEY).catch(() => {});
 }
 
-// Reads the non-gated flag so it never triggers a biometric prompt on its own.
-async function hasStoredCredentials(): Promise<boolean> {
-  const flag = await SecureStore.getItemAsync(CREDENTIALS_FLAG_KEY).catch(() => null);
-  return flag === "1";
+function isStoredSession(value: unknown): value is StoredSession {
+  if (typeof value !== "object" || value === null || "passphrase" in value) return false;
+  return ["token", "dataKey", "wrappingKey", "username", "deviceName", "serverUrl"].every(
+    (key) =>
+      typeof (value as Record<string, unknown>)[key] === "string" &&
+      ((value as Record<string, unknown>)[key] as string).length > 0,
+  );
 }
 
-// Cold-start resume: if credentials are stored, prompt the biometric unlock and
-// replay login. Returns true on success. Never throws for the "nothing stored"
-// or "user cancelled" paths — callers fall back to the manual login screen.
+// A fresh process prompts once. Cancellation falls back to manual login; it
+// never replays OPAQUE with a stored passphrase or registers another device.
 export async function resumeSession(): Promise<boolean> {
-  if (!(await hasStoredCredentials())) return false;
-
+  await removeLegacyCredentials();
+  const flag = await SecureStore.getItemAsync(CREDENTIALS_FLAG_KEY).catch(() => null);
+  if (flag !== "1") return false;
   let raw: string | null;
   try {
     raw = await SecureStore.getItemAsync(CREDENTIALS_KEY, SECURE_AUTH_OPTIONS);
   } catch {
-    // Biometric cancelled/failed, or the Keystore key was invalidated by a
-    // biometric-enrollment change. Fall back to manual login.
     return false;
   }
   if (!raw) return false;
-
-  let creds: StoredCredentials;
+  let saved: unknown;
   try {
-    creds = JSON.parse(raw) as StoredCredentials;
+    saved = JSON.parse(raw);
   } catch {
     await clearCredentials();
     return false;
   }
-
-  await backend.login(creds.passphrase, creds.username, creds.deviceName, creds.serverUrl);
+  if (!isStoredSession(saved)) {
+    await clearCredentials();
+    return false;
+  }
+  try {
+    await backend.resume(
+      saved.token,
+      saved.dataKey,
+      saved.wrappingKey,
+      saved.username,
+      saved.deviceName,
+      saved.serverUrl,
+    );
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "SESSION_RESUME_REJECTED"
+    ) {
+      await clearCredentials();
+    }
+    throw error;
+  }
   return true;
 }

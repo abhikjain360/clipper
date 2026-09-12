@@ -39,11 +39,11 @@ pub struct DecryptedFileItem {
 /// server-visible (its Y.Doc content is not end-to-end encrypted), so its
 /// metadata arrives as plaintext with nothing to decrypt.
 ///
-/// `title` is empty for a doc that has never been renamed — clients render their
-/// own placeholder. `share_url` is the server-built public link, absent when the
-/// server has no `public_web_url` configured; clients cannot construct it
-/// themselves because the web frontend and the API are separate origins (and the
-/// desktop/mobile shells have no web origin at all).
+/// `title` is empty for a doc that has never been renamed, and clients render
+/// their own placeholder. `share_url` is the server-built public link, absent
+/// when the server has no `public_web_url` configured. No client can build it:
+/// the web frontend and the API are separate origins, and the desktop and
+/// mobile shells have no web origin at all.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct CollabItem {
@@ -84,6 +84,155 @@ pub enum ConnectionStatus {
     DaemonNotRunning,
 }
 
+/// A schedule series, rendered for a list.
+///
+/// Carries pre-formatted strings rather than structured time. That keeps this
+/// crate free of chrono and of the schedule domain crate, so its UniFFI
+/// records stay primitive, and every shell shows the same text without
+/// writing the formatting three times.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ScheduleItemView {
+    pub id: String,
+    /// Revision of the definition opened by the editor, used to reject stale saves.
+    pub revision: u64,
+    pub title: String,
+    /// Human-readable cadence, e.g. "Every weekday" or "Every 2 weeks on Tue".
+    pub recurrence: String,
+    /// Human-readable time, e.g. "07:00 (floating)" or "09:00 Europe/Berlin".
+    pub time_summary: String,
+    /// Whether this series is all-day rather than timed.
+    pub all_day: bool,
+    /// Whether this series raises an alarm, so a list can show which blocks
+    /// will actually wake someone.
+    #[serde(default)]
+    pub has_alarm: bool,
+    pub created_at: String,
+    /// The exact record, serialized.
+    ///
+    /// Every other field here is formatted for display and cannot be turned
+    /// back into a record, but editing needs the record itself. Carrying it
+    /// costs a few hundred bytes and saves a round-trip through five layers of
+    /// IPC. It is a string because this crate's types stay primitive to cross
+    /// UniFFI. Parse it with the `ScheduleItem` type in `packages/shared`,
+    /// which mirrors it exactly.
+    #[serde(default)]
+    pub definition_json: String,
+}
+
+/// One computed instance of a series, ready to place on a grid.
+///
+/// Occurrences are never stored. A client expands the window it is showing and
+/// throws the result away.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct OccurrenceView {
+    /// The series this came from.
+    pub item_id: String,
+    /// Identifies this occurrence within the series, so time can be logged
+    /// against the right one. Opaque to every layer above the engine.
+    #[serde(default)]
+    pub occurrence_key: String,
+    /// Opaque serialized plan references and resolved span used to start a timer.
+    pub plan_context: String,
+    pub title: String,
+    /// Absolute start, RFC 3339 in UTC.
+    pub start: String,
+    /// Absolute end, RFC 3339 in UTC. Half-open: an occurrence does not include
+    /// its end instant.
+    pub end: String,
+    pub all_day: bool,
+    /// True when an override moved this occurrence off its rule position, so
+    /// the UI can mark it as changed.
+    pub overridden: bool,
+    /// Name of the calendar this came from, or `None` for a block the user
+    /// authored. An ingested event's core fields are read-only, so the UI
+    /// shows its origin.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Cancelled upstream. Shown rather than hidden, because time already
+    /// logged against it survives the cancellation.
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
+/// Time actually spent, rendered for a grid.
+///
+/// Kept apart from [`OccurrenceView`] rather than folded into it, because the
+/// plan and the record of what happened can disagree.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ActualView {
+    /// The object id, which is what stopping and deleting address.
+    pub id: String,
+    /// What this was time against, if anything. Unplanned work is worth
+    /// recording too, so this can be empty.
+    pub item_id: String,
+    pub title: String,
+    /// RFC 3339 UTC.
+    pub start: String,
+    /// RFC 3339 UTC, or empty while the timer is still running.
+    pub end: String,
+    pub running: bool,
+}
+
+/// One alarm the platform should register.
+///
+/// Every field the ring screen needs is here rather than looked up. On Android
+/// this has to work before the device is unlocked, where the encrypted store
+/// cannot be read at all.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AlarmView {
+    /// The series this belongs to.
+    pub item_id: String,
+    /// Stable per occurrence, so a dismissal lands on the right one.
+    pub occurrence_key: String,
+    pub label: String,
+    /// Epoch milliseconds. The platform alarm APIs take an absolute instant, so
+    /// this crosses as a number rather than a formatted string.
+    pub fire_at_millis: i64,
+    /// When the block itself begins. Differs from `fire_at_millis` whenever the
+    /// alarm has a lead time.
+    pub occurrence_start_millis: i64,
+}
+
+/// A calendar source, rendered for a list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct CalendarSourceView {
+    /// The object id, which is what deletes and syncs address.
+    pub id: String,
+    pub name: String,
+    /// Protocol label, e.g. "ics".
+    pub protocol: String,
+    /// The feed URL with its query stripped. A private iCalendar address is a
+    /// credential, so the secret part never reaches a UI that might be
+    /// screenshotted or logged.
+    pub location: String,
+    pub enabled: bool,
+    /// Events currently held from this source.
+    pub event_count: u32,
+    /// The exact raw snapshot. The reference still names it after the file
+    /// itself is deleted.
+    pub raw_import_file_id: Option<String>,
+    pub raw_import_available: bool,
+}
+
+/// What one pass over a calendar feed did.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct IngestReport {
+    pub added: u32,
+    pub updated: u32,
+    pub unchanged: u32,
+    /// Event objects retired by replacement. Recordings are never included.
+    pub tombstoned: u32,
+    /// Entries in the feed this client could not read. Reported rather than
+    /// silently dropped.
+    pub skipped: Vec<String>,
+}
+
 /// The full UI state exposed to the app.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -96,6 +245,21 @@ pub struct AppState {
     pub clipboard_items: Vec<DecryptedClipboardItem>,
     pub files: Vec<DecryptedFileItem>,
     pub collab_docs: Vec<CollabItem>,
+    /// Series definitions. Occurrences are not here: they depend on which
+    /// window the UI is showing, so they come from a separate windowed call.
+    #[serde(default)]
+    pub schedule_items: Vec<ScheduleItemView>,
+    /// Plans left out of expansion because their definitions or exceptions
+    /// could not be resolved.
+    #[serde(default)]
+    pub schedule_warnings: Vec<String>,
+    /// Calendar feeds this account pulls from.
+    #[serde(default)]
+    pub calendar_sources: Vec<CalendarSourceView>,
+    /// The timer currently running, if any. In state rather than behind a
+    /// windowed call because a running timer is relevant on every screen.
+    #[serde(default)]
+    pub running_actual: Option<ActualView>,
     pub error: Option<String>,
 }
 
@@ -117,10 +281,10 @@ pub struct AuthenticatedSession {
     pub username: String,
     pub device_id: String,
     pub device_name: String,
-    /// The server this session is with. Every shell reaches the API through the
-    /// engine, so nothing needed this until the collab Y-sync WebSocket — which
-    /// the UI layer opens itself and therefore has to address by hand. The
-    /// compiled-in default is not a substitute: the user picks a server at login.
+    /// The server this session is with. Every shell reaches the API through
+    /// the engine, except the collab Y-sync WebSocket, which the UI layer
+    /// opens itself and so has to address by hand. The compiled-in default
+    /// will not do, because the user picks a server at login.
     pub server_url: String,
 }
 

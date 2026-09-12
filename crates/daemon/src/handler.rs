@@ -7,7 +7,7 @@ use std::{
 
 use clipper_client::{
     api_client::ClientError,
-    engine::{SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
+    engine::{ScheduleItem, SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
 };
 use hmac::{Hmac, Mac};
 use rand::RngExt;
@@ -25,14 +25,20 @@ use crate::{
     engine_manager::EngineManager,
     keychain::{self, Credentials},
     protocol::{
-        AuthChallenge, AuthenticateResult, ClipboardPayloadResult, CopyToLocalResult,
-        DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, DeviceListResult,
-        IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams, RegisterParams,
-        RegisterResult, UploadFileResult, ipc_client_auth_message, ipc_daemon_auth_message,
+        ActualsBetweenParams, AddCalendarSourceParams, AuthChallenge, AuthenticateResult,
+        ClipboardPayloadResult, CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest,
+        DaemonResponse, DeviceListResult, ExpandScheduleParams, IPC_AUTH_NONCE_BYTES,
+        IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams, RegisterParams, RegisterResult,
+        StartActualParams, UpdateScheduleItemParams, UploadFileResult, ipc_client_auth_message,
+        ipc_daemon_auth_message,
     },
 };
 
 const MAX_IPC_REQUEST_LINE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Bound on the HMAC handshake. Mirrors WS_HELLO_TIMEOUT in
+/// crates/server/src/ws.rs. A peer that never answers must not hold a slot.
+pub(crate) const IPC_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -47,7 +53,15 @@ pub async fn handle_connection(
     let writer = Arc::new(Mutex::new(write_half));
     let mut reader = BufReader::new(read_half);
 
-    if !authenticate_connection(&mut reader, &writer, &data_dir).await {
+    // Bound the handshake so a peer that connects and stays silent cannot
+    // hold a connection slot forever.
+    let authenticated = tokio::time::timeout(
+        IPC_HANDSHAKE_TIMEOUT,
+        authenticate_connection(&mut reader, &writer, &data_dir),
+    )
+    .await
+    .unwrap_or(false);
+    if !authenticated {
         return;
     }
 
@@ -426,6 +440,31 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 DaemonCommand::GetCollabDocMeta(params) => {
                     cmd_get_collab_doc_meta(id, params.object_id, &engine).await
                 }
+                DaemonCommand::CreateScheduleItem(params) => {
+                    cmd_create_schedule_item(id, params.item, &engine).await
+                }
+                DaemonCommand::UpdateScheduleItem(params) => {
+                    cmd_update_schedule_item(id, params, &engine).await
+                }
+                DaemonCommand::DeleteScheduleObject(params) => {
+                    cmd_delete_schedule_object(id, params.object_id, &engine).await
+                }
+                DaemonCommand::ExpandSchedule(params) => {
+                    cmd_expand_schedule(id, params, &engine).await
+                }
+                DaemonCommand::AddCalendarSource(params) => {
+                    cmd_add_calendar_source(id, params, &engine).await
+                }
+                DaemonCommand::StartActual(params) => cmd_start_actual(id, params, &engine).await,
+                DaemonCommand::StopActual(params) => {
+                    cmd_stop_actual(id, params.object_id, &engine).await
+                }
+                DaemonCommand::ActualsBetween(params) => {
+                    cmd_actuals_between(id, params, &engine).await
+                }
+                DaemonCommand::SyncCalendarSource(params) => {
+                    cmd_sync_calendar_source(id, params.object_id, &engine).await
+                }
                 DaemonCommand::Authenticate(_)
                 | DaemonCommand::Login(_)
                 | DaemonCommand::Register(_)
@@ -701,6 +740,111 @@ async fn cmd_delete_collab_doc(
 ) -> DaemonResponse {
     match engine.delete_collab_doc(&object_id).await {
         Ok(()) => DaemonResponse::success(id, None),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_create_schedule_item(
+    id: String,
+    item: ScheduleItem,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.create_schedule_item(item).await {
+        Ok(object_id) => json_success(id, object_id),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_update_schedule_item(
+    id: String,
+    params: UpdateScheduleItemParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine
+        .update_schedule_item(&params.object_id, params.item, params.expected_revision)
+        .await
+    {
+        Ok(object_id) => json_success(id, object_id),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_delete_schedule_object(
+    id: String,
+    object_id: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.delete_schedule_object(&object_id).await {
+        Ok(()) => DaemonResponse::success(id, None),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_expand_schedule(
+    id: String,
+    params: ExpandScheduleParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine
+        .expand_schedule(&params.from, &params.to, &params.observer_zone)
+        .await
+    {
+        Ok(occurrences) => json_success(id, occurrences),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_start_actual(
+    id: String,
+    params: StartActualParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.start_actual(params.plan_context.as_deref()).await {
+        Ok(object_id) => json_success(id, object_id),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_stop_actual(
+    id: String,
+    object_id: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.stop_actual(&object_id).await {
+        Ok(replacement) => json_success(id, replacement),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_actuals_between(
+    id: String,
+    params: ActualsBetweenParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.actuals_between(&params.from, &params.to).await {
+        Ok(actuals) => json_success(id, actuals),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_add_calendar_source(
+    id: String,
+    params: AddCalendarSourceParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.add_calendar_source(&params.name, &params.url).await {
+        Ok(object_id) => json_success(id, object_id),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_sync_calendar_source(
+    id: String,
+    object_id: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.sync_calendar_source(&object_id).await {
+        Ok(report) => json_success(id, report),
         Err(e) => client_error(id, e),
     }
 }

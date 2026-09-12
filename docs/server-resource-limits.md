@@ -178,16 +178,16 @@ single user can accumulate: `issue_session`
 (`crates/server/src/routes/auth.rs`) counts the user's existing devices before
 inserting a new one and rejects the login with `403 Device limit reached` once
 the user is at the cap. An existing device re-authenticating reuses its row and
-is never blocked. The count and insert are not one transaction, so concurrent
-new-device logins can overshoot the cap by a small margin — acceptable for a
-coarse anti-abuse bound that still prevents unbounded growth. The value is
-validated like the other quotas (non-zero, fits `i64`).
+is never blocked. The count, device insert, and session insert share one
+transaction, so concurrent new-device logins cannot race past the cap and a
+failed session insert cannot orphan a device. The value is validated like the
+other quotas (non-zero, fits `i64`).
 
 A user at the cap frees a slot by reclaiming a device. The
-`objects.source_device_id` foreign key is `ON DELETE SET NULL`, so deleting a
-device detaches the objects it created (their provenance pointer becomes NULL)
-rather than blocking the delete or cascading into the objects; the authoritative
-source device id still lives, signed, inside each object envelope. (The
+`object_revisions.source_device_id` foreign key is `ON DELETE SET NULL`, so
+deleting a device detaches the revisions it created rather than blocking the
+delete or cascading into object history; the authoritative source device id
+still lives, signed, inside each revision envelope. (The
 user-facing device-removal endpoint is shipped: `DELETE /api/auth/devices/{id}`,
 user-scoped, with the device's sessions cascade-deleted — see
 `docs/revocation.md`.)
@@ -195,28 +195,33 @@ user-scoped, with the device's sessions cascade-deleted — see
 ### What counts toward the quota
 
 The reserved byte amount for an object is computed by
-`init_request_storage_bytes`, which sums **only** the declared
-`ciphertext_size` of each payload in the init request (with a per-payload
+the init/revise handlers, which sum the declared `ciphertext_size` of
+each payload in the revision request plus the length of the revision's
+`meta_ciphertext` (with a per-payload
 `>= 0` check and a checked add that rejects overflow as `PayloadTooLarge`).
 
 This means:
 
 - **Payload ciphertext bytes count.** This is the encrypted blob/clipboard
   content, whether inline or streamed.
-- **Object metadata ciphertext (`meta_ciphertext`) and the signed envelope do
-  not count** toward `storage_bytes`. They are separately bounded only by
-  `limits.max_object_meta_ciphertext_bytes` (default 64 KiB) per object and by
-  the per-user `object_count` cap.
-- Every successfully initialized object increments `object_count` by exactly 1,
-  regardless of kind or payload count.
+- **Object metadata ciphertext (`meta_ciphertext`) bytes count.** Every stored
+  revision holds its metadata alongside its payloads, so a revision with no
+  payloads still reserves its metadata length. Metadata is separately bounded
+  by `limits.max_object_meta_ciphertext_bytes` (default 64 KiB) per revision.
+- **The signed envelope bytes do not count** toward `storage_bytes`. Only
+  payload and metadata ciphertext are charged.
+- A genesis revision increments `object_count` by exactly 1. Later revisions
+  reserve their payload bytes with `objects_added = 0`, so retained history is
+  charged without consuming another object slot.
 
-Both clipboard and file objects reserve quota at init time. (Clipboard objects
-are additionally trimmed to `clipboard.max_items`, which releases their quota;
-see below.)
+Clipboard, file, and schedule objects reserve quota at init time. File and
+schedule revisions reserve their additional bytes when written. Clipboard
+objects are additionally trimmed to `clipboard.max_items`, which releases the
+whole object's usage; see below.
 
 ### Where and how it is enforced
 
-Reservation happens inside the `init_object` transaction, via
+Reservation happens inside the `init_object` or `revise_object` transaction, via
 `reserve_user_storage_quota` → `storage_quota::try_reserve_user_storage`, after
 the object and payload rows are inserted but before the transaction commits. The
 reservation is a single conditional `UPDATE users` that both increments the
@@ -224,10 +229,10 @@ counters and asserts the post-increment values stay within bounds:
 
 ```rust
 .col_expr(StorageBytes, StorageBytes + storage_bytes)
-.col_expr(ObjectCount,  ObjectCount + 1)
+.col_expr(ObjectCount,  ObjectCount + objects_added)
 .filter(Id.eq(user_id))
 .filter(StorageBytes.lte(max_storage_bytes - storage_bytes))
-.filter(ObjectCount.lte(max_objects - 1))
+.filter(ObjectCount.lte(max_objects - objects_added))
 ```
 
 The update affects exactly one row only if both filters hold, so the check and
@@ -258,18 +263,21 @@ undone, and any staged inline payload files are removed on drop).
 `storage_quota::release_user_storage` decrements both counters (guarded so they
 never go negative) and is called whenever an object's bytes leave the system:
 
-- **File delete** (`DELETE /api/objects/{id}`): inside the delete transaction,
-  releasing `object_count: 1` and the summed payload bytes.
+- **Object purge** (`DELETE /api/objects/{id}`): after a signed tombstone has
+  made the file or schedule object non-live, the purge transaction locks the
+  object, removes its entire revision chain, and releases `object_count: 1`
+  plus every revision's payload and metadata bytes.
 - **Clipboard trim** (`cleanup::trim_user_clipboard`, spawned after each
   clipboard init/complete and also run by the periodic cleanup loop): deletes
   clipboard objects beyond `clipboard.max_items` and releases their usage.
 - **Orphan upload cleanup** (`cleanup::cleanup_orphan_object_uploads`): deletes
-  never-completed objects with no upload progress for
-  `cleanup.orphan_upload_ttl_secs` and releases their usage. Eligibility keys on
-  the server-assigned `objects.updated_at` (stamped at init and bumped on each
-  payload upload), never the client envelope's `created_at`, so a backdated or
-  future-dated `created_at` can neither force an instant reap nor escape the
-  sweep.
+  incomplete revisions with no upload progress for
+  `cleanup.orphan_upload_ttl_secs`, releases those revisions' bytes, and removes
+  the object slot only when an unpublished genesis was the whole object.
+  Eligibility keys on server-assigned `object_revisions.stored_at` (stamped at
+  init/revise and bumped on each payload upload), never the client envelope's
+  `created_at`, so a forged timestamp can neither force an instant reap nor
+  escape the sweep.
 
 `delete_objects_and_release_usage` recomputes the freed usage from the rows
 being deleted (`object_usage_by_user`) inside the transaction and asserts the
@@ -328,11 +336,22 @@ held by an RAII guard (`WsConnectionGuard`) for the connection's lifetime and
 released on any exit — clean close, idle timeout, or socket error — and the
 per-user counter entry is dropped once it returns to zero.
 
-This is **independent of `max_user_devices`**: one device (e.g. a browser
-profile) can open several connections — multiple tabs, or transient reconnect
+This is **independent of `max_user_devices`**: one device (e.g. a browser profile)
+can open several connections — multiple tabs, or transient reconnect
 overlap — so the connection ceiling is its own knob, not derived from the device
-count. There is no global aggregate cap; total live connections are bounded only
-transitively (registered users × this per-user cap).
+count.
+
+### Process-wide concurrent WebSocket connections
+
+`limits.max_ws_connections` (default 1024) caps live `/api/ws` connections
+server-wide, across all users. `handle_socket` acquires a permit from a
+process-wide semaphore immediately after the per-user slot above; a connection
+arriving at the ceiling is rejected with the same typed `connection_limit`
+WebSocket error. The permit is held for the connection's lifetime alongside the
+per-user slot guard, so it is released on any exit. The collab Y-sync sockets
+(`GET /api/collab-docs/:id/ws`) are not covered by this ceiling; they are
+bounded per document room (`MAX_CONNS_PER_ROOM = 64`, hard-coded in
+`collab_sync.rs`).
 
 ### Per-user pending WebSocket tickets
 
@@ -378,8 +397,8 @@ override flag. The relevant sections:
 
 - `[rate_limit]` — the six bucket rates plus `prune_interval_secs`.
 - `[limits]` — `max_user_storage_bytes`, `max_user_objects`,
-  `max_user_devices`, `max_user_ws_connections`, `max_file_blob_bytes`,
-  `max_file_meta_ciphertext_bytes`, `max_object_meta_ciphertext_bytes`.
+  `max_user_devices`, `max_user_ws_connections`, `max_ws_connections`,
+  `max_file_blob_bytes`, `max_object_meta_ciphertext_bytes`.
 - `[auth]` — `max_pending_challenges`, `max_pending_ws_tickets`,
   `challenge_ttl_secs`.
 - `[clipboard]` — `max_items` (per-user clipboard retention) and `ttl_days`.
@@ -427,13 +446,12 @@ mistaken for safeguards that exist:
   Partly mitigated in the documented reverse-proxy deployment (proxies usually
   apply their own header/idle timeouts); enforce in-process or require the proxy.
 
-- **Metadata and envelope bytes are not charged to the storage quota.** Only
-  payload ciphertext counts toward `storage_bytes`. The number of metadata-only
-  bytes a user can accumulate is bounded only by `object_count`
-  (`max_object_meta_ciphertext_bytes` × `max_user_objects`), not by the
-  byte quota.
+- **Signed envelope bytes are not charged to the storage quota.** Payload and
+  metadata ciphertext count toward `storage_bytes`; the stored signed envelope
+  bytes do not.
 
-- **No global aggregate cap on live WebSocket connections.** The per-user cap
-  (`max_user_ws_connections`) bounds each account, and the server ping / idle
-  close reaps dead connections, but the server-wide total is bounded only
-  transitively (registered users × the per-user cap), not by a global ceiling.
+- **No global aggregate cap on collab WebSocket connections.** The per-user cap
+  (`max_user_ws_connections`) and the process-wide ceiling
+  (`max_ws_connections`) bound the authenticated event sockets, and the server
+  ping / idle close reaps dead connections, but the unauthenticated collab
+  Y-sync sockets are bounded only per document room (`MAX_CONNS_PER_ROOM`).

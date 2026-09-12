@@ -13,6 +13,7 @@ tauri-build.workspace = true
 
 [dependencies]
 clipper-app-types.workspace = true
+clipper-schedule.workspace = true
 clipper-client.workspace = true
 clipper-daemon-types.workspace = true
 dirs.workspace = true
@@ -29,6 +30,9 @@ tokio = { workspace = true, features = ["sync", "net", "io-util", "time", "fs"] 
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 zeroize.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework.workspace = true

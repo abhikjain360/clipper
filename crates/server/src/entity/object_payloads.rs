@@ -8,6 +8,8 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub object_id: Uuid,
     #[sea_orm(primary_key, auto_increment = false)]
+    pub revision: i64,
+    #[sea_orm(primary_key, auto_increment = false)]
     pub payload_id: Uuid,
     #[sea_orm(column_type = "Text", unique)]
     pub ciphertext_path: String,
@@ -27,18 +29,18 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::objects::Entity",
-        from = "Column::ObjectId",
-        to = "super::objects::Column::Id",
+        belongs_to = "super::object_revisions::Entity",
+        from = "(Column::ObjectId, Column::Revision)",
+        to = "(super::object_revisions::Column::ObjectId, super::object_revisions::Column::Revision)",
         on_update = "Cascade",
         on_delete = "Cascade"
     )]
-    Objects,
+    ObjectRevisions,
 }
 
-impl Related<super::objects::Entity> for Entity {
+impl Related<super::object_revisions::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Objects.def()
+        Relation::ObjectRevisions.def()
     }
 }
 

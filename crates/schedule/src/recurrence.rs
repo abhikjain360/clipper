@@ -1,0 +1,554 @@
+//! How a block repeats.
+//!
+//! A rule Clipper understands becomes a typed [`Cadence`]. Every constructor
+//! below validates, so an out-of-range weekday ordinal or an empty weekday set
+//! cannot be built.
+//!
+//! A provider can send an RFC 5545 `RRULE` that [`Cadence`] cannot express.
+//! Those become [`Recurrence::Imported`], which names the original event inside
+//! its import snapshot instead of copying rule text into every persisted event.
+//! Expansion reads the rule back out of that snapshot and validates it.
+
+use std::{num::NonZeroU32, str::FromStr};
+
+use chrono::{DateTime, Days, Month, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday};
+use chrono_tz::Tz;
+use clipper_api_types::ObjectId;
+use serde::{Deserialize, Serialize};
+
+mod imported_rule;
+
+/// The complete repeat behaviour of a block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Recurrence {
+    /// Happens once. The overwhelming majority of ingested meetings.
+    Once,
+    /// Repeats on a cadence Clipper understands and can edit.
+    Every(Cadence),
+    /// An imported RFC 5545 rule that [`Cadence`] cannot express.
+    ///
+    /// The rule text stays in the import snapshot. These two fields locate the
+    /// master `VEVENT` inside it, so no persisted schedule object carries
+    /// provider syntax.
+    Imported { import: ObjectId, uid: String },
+}
+
+impl Recurrence {
+    /// Converts an imported `RRULE` to an editable cadence when that is
+    /// lossless, and keeps a reference to the import snapshot otherwise.
+    pub fn from_imported_rule(
+        rule: impl Into<String>,
+        local_start: chrono::NaiveDateTime,
+        import: ObjectId,
+        uid: impl Into<String>,
+    ) -> Result<Self, RecurrenceError> {
+        imported_rule::convert(rule.into(), local_start, import, uid.into())
+    }
+}
+
+/// A runtime-only RFC 5545 `RRULE` value, validated on the way in.
+///
+/// Not serializable. Persisted recurrence state uses [`Recurrence::Imported`],
+/// and a client rebuilds this value from the raw snapshot just before
+/// expansion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedRrule(String);
+
+impl ValidatedRrule {
+    pub fn new(rule: impl Into<String>) -> Result<Self, RecurrenceError> {
+        let rule = rule.into();
+        let trimmed = rule.trim().trim_start_matches("RRULE:").trim().to_string();
+        // An RFC 5545 rule value is ASCII. `rrule` 0.14 reads a `BYDAY` token
+        // by slicing its last two bytes without checking char boundaries, so a
+        // non-ASCII token panics inside the parser. Refuse those bytes here,
+        // before anything looks at the rule.
+        if !trimmed.is_ascii() {
+            return Err(RecurrenceError::UnparseableRule(
+                "rule contains a non-ASCII character".into(),
+            ));
+        }
+        if trimmed.is_empty() {
+            return Err(RecurrenceError::UnparseableRule("empty rule".into()));
+        }
+        // A rule is one property, not a document. Expansion splices this
+        // stored value verbatim after `RRULE:`, against the real DTSTART and
+        // zone. So a value carrying its own line break would smuggle a second
+        // property past the probe below, which validates only against its own
+        // DTSTART: a `\nEXDATE:` or a second `\nRRULE:` would go live
+        // unchecked. Reject the whole control range, so a bare CR or a NUL
+        // cannot fold lines either.
+        if trimmed.contains(|character: char| character.is_control()) {
+            return Err(RecurrenceError::UnparseableRule(
+                "rule contains a control character".into(),
+            ));
+        }
+        // One probe, in the shape expansion actually uses: a UTC wall-clock
+        // DTSTART and an UNTIL rewritten to match it. Probing another shape
+        // would accept rules that then fail on every expansion.
+        let probe = format!(
+            "DTSTART:20200101T000000Z\nRRULE:{}",
+            until_wall_clock(&trimmed, Tz::UTC).0
+        );
+        rrule::RRuleSet::from_str(&probe)
+            .map_err(|error| RecurrenceError::UnparseableRule(error.to_string()))?;
+        Ok(Self(trimmed))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Rewrites a rule's `UNTIL` into a UTC wall-clock value read in `zone`, and
+/// reports the instant cutoff when the `UNTIL` names one.
+///
+/// Expansion hands `rrule` a UTC wall-clock DTSTART, and `rrule` then demands a
+/// UTC `UNTIL`. The rewritten text is only a loose bound that stops `rrule`
+/// from scanning forever; the caller applies the returned instant as the true
+/// cutoff on each resolved occurrence:
+///
+/// - a UTC `...Z` value is an instant. It becomes the wall clock that instant
+///   shows in `zone`, plus one day, and the instant itself is the inclusive
+///   cutoff. The day of slack covers any offset change between the wall clock
+///   and the instant it resolves to.
+/// - a DATE `YYYYMMDD` covers its whole day, so it becomes `...T235959Z`;
+/// - a floating `YYYYMMDDTHHMMSS` is already wall clock, so it only gains a `Z`.
+///
+/// DATE and floating values keep wall-clock meaning and return no cutoff.
+/// Every other part is left alone.
+pub(crate) fn until_wall_clock(rule: &str, zone: Tz) -> (String, Option<DateTime<Utc>>) {
+    let mut cutoff = None;
+    let text = rule
+        .split(';')
+        .map(|part| match part.split_once('=') {
+            Some((key, value)) if key.eq_ignore_ascii_case("UNTIL") => {
+                let (wall, instant) = until_value_wall_clock(value, zone);
+                if instant.is_some() {
+                    cutoff = instant;
+                }
+                format!("{key}={wall}")
+            }
+            _ => part.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    (text, cutoff)
+}
+
+fn until_value_wall_clock(value: &str, zone: Tz) -> (String, Option<DateTime<Utc>>) {
+    if let Some(instant) = value
+        .strip_suffix(['Z', 'z'])
+        .and_then(|text| NaiveDateTime::parse_from_str(text, "%Y%m%dT%H%M%S").ok())
+    {
+        let instant = Utc.from_utc_datetime(&instant);
+        let bound = until_scan_bound(instant, zone);
+        return (bound.format("%Y%m%dT%H%M%SZ").to_string(), Some(instant));
+    }
+    if NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S").is_ok() {
+        return (format!("{value}Z"), None);
+    }
+    if NaiveDate::parse_from_str(value, "%Y%m%d").is_ok() {
+        return (format!("{value}T235959Z"), None);
+    }
+    // Not a shape this understands. Leave it for the parser to reject.
+    (value.to_string(), None)
+}
+
+/// The loose wall-clock bound `rrule` scans to for an instant `UNTIL`: the
+/// wall clock the instant shows in `zone`, plus one day. The slack keeps the
+/// bound at or past the true cutoff, even across a whole skipped date such as
+/// Samoa's 2011 move. Candidates the slack admits past the cutoff cannot
+/// resolve into the window when the window already ended, and a candidate that
+/// still fails to resolve past the cutoff's wall clock is skipped without
+/// failing the expansion. Candidates that resolve are always judged on the
+/// instant, never on the wall clock.
+pub(crate) fn until_scan_bound(instant: DateTime<Utc>, zone: Tz) -> NaiveDateTime {
+    let wall = instant.with_timezone(&zone).naive_local();
+    wall.checked_add_days(Days::new(1)).unwrap_or(wall)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cadence {
+    pub frequency: Frequency,
+    /// Every `interval` days/weeks/months/years. One means every one.
+    pub interval: NonZeroU32,
+    pub end: RecurrenceEnd,
+}
+
+impl Cadence {
+    /// A cadence repeating every `interval` periods, forever.
+    pub fn every(frequency: Frequency, interval: u32) -> Result<Self, RecurrenceError> {
+        Ok(Self {
+            frequency,
+            interval: NonZeroU32::new(interval).ok_or(RecurrenceError::ZeroInterval)?,
+            end: RecurrenceEnd::Never,
+        })
+    }
+
+    /// Every period, forever. The common case.
+    pub fn each(frequency: Frequency) -> Self {
+        Self {
+            frequency,
+            interval: NonZeroU32::new(1).expect("1 is non-zero"),
+            end: RecurrenceEnd::Never,
+        }
+    }
+
+    pub fn ending(mut self, end: RecurrenceEnd) -> Self {
+        self.end = end;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "unit", rename_all = "snake_case")]
+pub enum Frequency {
+    /// Every N days.
+    Daily,
+    /// On the given weekdays, every N weeks, with weeks starting on Monday.
+    Weekly { weekdays: WeekdaySet },
+    /// Every N months, on a day picked by ordinal or by weekday.
+    Monthly(MonthlyRule),
+    /// Every N years, in a fixed month, on a day of that month.
+    Yearly {
+        #[serde(with = "month_name")]
+        month: Month,
+        day: MonthDay,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "by", rename_all = "snake_case")]
+pub enum MonthlyRule {
+    /// The 15th; the last day; the second-to-last day.
+    OnDay(MonthDay),
+    /// The second Tuesday; the last Friday.
+    OnWeekday {
+        nth: NthWeekday,
+        #[serde(with = "weekday_name")]
+        weekday: Weekday,
+    },
+}
+
+/// A day of the month, countable from either end.
+///
+/// Counting from the end is how "the last day of the month" works without
+/// special-casing February.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "from",
+    content = "day",
+    rename_all = "snake_case",
+    try_from = "MonthDayMirror"
+)]
+pub enum MonthDay {
+    /// 1..=31, counting forwards. A month without that day is skipped:
+    /// `BYMONTHDAY=31` does not occur in April.
+    FromStart(u8),
+    /// 1..=31, counting backwards. One is the last day of the month.
+    FromEnd(u8),
+}
+
+/// Mirror for validated deserialization. Carries the same wire shape,
+/// then the constructors reject out-of-range days.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "from", content = "day", rename_all = "snake_case")]
+enum MonthDayMirror {
+    FromStart(u8),
+    FromEnd(u8),
+}
+
+impl TryFrom<MonthDayMirror> for MonthDay {
+    type Error = RecurrenceError;
+
+    fn try_from(mirror: MonthDayMirror) -> Result<Self, Self::Error> {
+        match mirror {
+            MonthDayMirror::FromStart(day) => Self::from_start(day),
+            MonthDayMirror::FromEnd(day) => Self::from_end(day),
+        }
+    }
+}
+
+impl MonthDay {
+    pub fn from_start(day: u8) -> Result<Self, RecurrenceError> {
+        Self::check(day).map(|()| Self::FromStart(day))
+    }
+
+    pub fn from_end(day: u8) -> Result<Self, RecurrenceError> {
+        Self::check(day).map(|()| Self::FromEnd(day))
+    }
+
+    fn check(day: u8) -> Result<(), RecurrenceError> {
+        if (1..=31).contains(&day) {
+            Ok(())
+        } else {
+            Err(RecurrenceError::MonthDayOutOfRange(day))
+        }
+    }
+
+    /// The signed form RFC 5545 uses in `BYMONTHDAY`.
+    pub(crate) fn as_ical(self) -> i8 {
+        match self {
+            Self::FromStart(d) => d as i8,
+            Self::FromEnd(d) => -(d as i8),
+        }
+    }
+}
+
+/// Which occurrence of a weekday within a month, countable from either end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "from",
+    content = "nth",
+    rename_all = "snake_case",
+    try_from = "NthWeekdayMirror"
+)]
+pub enum NthWeekday {
+    /// 1..=5. One is the first such weekday in the month.
+    FromStart(u8),
+    /// 1..=5. One is the last such weekday in the month.
+    FromEnd(u8),
+}
+
+/// Mirror for validated deserialization. Carries the same wire shape,
+/// then the constructors reject out-of-range ordinals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "from", content = "nth", rename_all = "snake_case")]
+enum NthWeekdayMirror {
+    FromStart(u8),
+    FromEnd(u8),
+}
+
+impl TryFrom<NthWeekdayMirror> for NthWeekday {
+    type Error = RecurrenceError;
+
+    fn try_from(mirror: NthWeekdayMirror) -> Result<Self, Self::Error> {
+        match mirror {
+            NthWeekdayMirror::FromStart(nth) => Self::from_start(nth),
+            NthWeekdayMirror::FromEnd(nth) => Self::from_end(nth),
+        }
+    }
+}
+
+impl NthWeekday {
+    pub fn from_start(nth: u8) -> Result<Self, RecurrenceError> {
+        Self::check(nth).map(|()| Self::FromStart(nth))
+    }
+
+    pub fn from_end(nth: u8) -> Result<Self, RecurrenceError> {
+        Self::check(nth).map(|()| Self::FromEnd(nth))
+    }
+
+    /// The last occurrence of a weekday in the month.
+    pub fn last() -> Self {
+        Self::FromEnd(1)
+    }
+
+    fn check(nth: u8) -> Result<(), RecurrenceError> {
+        if (1..=5).contains(&nth) {
+            Ok(())
+        } else {
+            Err(RecurrenceError::WeekdayOrdinalOutOfRange(nth))
+        }
+    }
+
+    pub(crate) fn as_ical(self) -> i8 {
+        match self {
+            Self::FromStart(n) => n as i8,
+            Self::FromEnd(n) => -(n as i8),
+        }
+    }
+}
+
+/// A non-empty set of weekdays.
+///
+/// Non-empty by construction: a weekly rule with no days would expand to
+/// nothing, silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeekdaySet(u8);
+
+/// Serialized as a list of day names. The bitmask layout stays internal.
+impl Serialize for WeekdaySet {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.iter().count()))?;
+        for day in self.iter() {
+            seq.serialize_element(serde_weekday_name(day))?;
+        }
+        seq.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for WeekdaySet {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let names = Vec::<String>::deserialize(deserializer)?;
+        let days = names
+            .iter()
+            .map(|name| serde_weekday_from_name(name))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::de::Error::custom)?;
+        Self::new(&days).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Spells a lone weekday the way [`WeekdaySet`] spells its members.
+///
+/// chrono serializes `Weekday` as `"Mon"`. Mixing that with the lowercase
+/// names in a weekday set would put two spellings in one JSON object.
+mod weekday_name {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::{Weekday, serde_weekday_from_name, serde_weekday_name};
+
+    pub fn serialize<S: Serializer>(day: &Weekday, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(serde_weekday_name(*day))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Weekday, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        serde_weekday_from_name(&name).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Spells a month in lower case, matching the weekday convention above.
+/// chrono uses `"February"`.
+mod month_name {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::Month;
+
+    const NAMES: [&str; 12] = [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+
+    pub fn serialize<S: Serializer>(month: &Month, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(NAMES[(month.number_from_month() - 1) as usize])
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Month, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        NAMES
+            .iter()
+            .position(|candidate| *candidate == name)
+            .and_then(|index| Month::try_from(index as u8 + 1).ok())
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown month {name:?}")))
+    }
+}
+
+fn serde_weekday_name(day: Weekday) -> &'static str {
+    match day {
+        Weekday::Mon => "mon",
+        Weekday::Tue => "tue",
+        Weekday::Wed => "wed",
+        Weekday::Thu => "thu",
+        Weekday::Fri => "fri",
+        Weekday::Sat => "sat",
+        Weekday::Sun => "sun",
+    }
+}
+
+fn serde_weekday_from_name(name: &str) -> Result<Weekday, String> {
+    match name {
+        "mon" => Ok(Weekday::Mon),
+        "tue" => Ok(Weekday::Tue),
+        "wed" => Ok(Weekday::Wed),
+        "thu" => Ok(Weekday::Thu),
+        "fri" => Ok(Weekday::Fri),
+        "sat" => Ok(Weekday::Sat),
+        "sun" => Ok(Weekday::Sun),
+        other => Err(format!("unknown weekday {other:?}")),
+    }
+}
+
+impl WeekdaySet {
+    pub fn new(days: &[Weekday]) -> Result<Self, RecurrenceError> {
+        let mask = days
+            .iter()
+            .fold(0u8, |acc, day| acc | (1 << day.num_days_from_monday()));
+        if mask == 0 {
+            Err(RecurrenceError::EmptyWeekdaySet)
+        } else {
+            Ok(Self(mask))
+        }
+    }
+
+    pub fn just(day: Weekday) -> Self {
+        Self(1 << day.num_days_from_monday())
+    }
+
+    /// Monday through Friday.
+    pub fn weekdays() -> Self {
+        Self::new(&[
+            Weekday::Mon,
+            Weekday::Tue,
+            Weekday::Wed,
+            Weekday::Thu,
+            Weekday::Fri,
+        ])
+        .expect("five days is non-empty")
+    }
+
+    pub fn contains(self, day: Weekday) -> bool {
+        self.0 & (1 << day.num_days_from_monday()) != 0
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = Weekday> {
+        const ORDER: [Weekday; 7] = [
+            Weekday::Mon,
+            Weekday::Tue,
+            Weekday::Wed,
+            Weekday::Thu,
+            Weekday::Fri,
+            Weekday::Sat,
+            Weekday::Sun,
+        ];
+        ORDER.into_iter().filter(move |day| self.contains(*day))
+    }
+}
+
+/// When a repeating block stops repeating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "when", content = "value", rename_all = "snake_case")]
+pub enum RecurrenceEnd {
+    Never,
+    /// After this many occurrences in total, counting the first.
+    After(NonZeroU32),
+    /// Up to and including this instant.
+    On(DateTime<Utc>),
+}
+
+impl RecurrenceEnd {
+    pub fn after(count: u32) -> Result<Self, RecurrenceError> {
+        NonZeroU32::new(count)
+            .map(Self::After)
+            .ok_or(RecurrenceError::ZeroCount)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RecurrenceError {
+    #[error("recurrence rule could not be parsed: {0}")]
+    UnparseableRule(String),
+    #[error("a repeat interval must be at least 1")]
+    ZeroInterval,
+    #[error("a repeat count must be at least 1")]
+    ZeroCount,
+    #[error("day of month {0} is out of range (expected 1..=31)")]
+    MonthDayOutOfRange(u8),
+    #[error("weekday ordinal {0} is out of range (expected 1..=5)")]
+    WeekdayOrdinalOutOfRange(u8),
+    #[error("a weekly repeat needs at least one weekday")]
+    EmptyWeekdaySet,
+}

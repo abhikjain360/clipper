@@ -39,11 +39,19 @@ impl ClientManager {
 
     /// Broadcast a JSON line to all connected clients.
     pub async fn broadcast(&self, json_line: &str) {
+        use tokio::sync::mpsc::error::TrySendError;
+
         let clients = self.clients.read().await;
         let mut dead = Vec::new();
         for (&id, tx) in clients.iter() {
-            if tx.try_send(json_line.to_string()).is_err() {
-                dead.push(id);
+            match tx.try_send(json_line.to_string()) {
+                Ok(()) => {}
+                // A slow client keeps its slot. The new event is dropped and
+                // the next broadcast carries fresher state.
+                Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Closed(_)) => {
+                    dead.push(id);
+                }
             }
         }
         drop(clients);
@@ -127,5 +135,21 @@ mod tests {
         let mgr = ClientManager::new();
         mgr.broadcast(r#"{"event":"nobody_home"}"#).await;
         // Should not panic
+    }
+
+    #[tokio::test]
+    async fn broadcast_keeps_slow_clients_on_full() {
+        let mgr = ClientManager::new();
+        // Hold the receiver without reading so the channel fills.
+        let (_id, _rx) = mgr.register().await;
+
+        for _ in 0..64 {
+            mgr.broadcast(r#"{"event":"fill"}"#).await;
+        }
+        // Channel is full. This send hits TrySendError::Full.
+        mgr.broadcast(r#"{"event":"overflow"}"#).await;
+
+        // A slow client is not evicted.
+        assert_eq!(mgr.clients.read().await.len(), 1);
     }
 }

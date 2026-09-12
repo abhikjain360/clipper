@@ -310,9 +310,24 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
             "/api/objects/{id}/complete",
             post(routes::objects::complete_object),
         )
+        // Writing the next revision. POST rather than PUT on the object,
+        // because it appends to a chain rather than replacing anything — the
+        // previous revision is still there afterwards.
+        .route(
+            "/api/objects/{id}/revisions",
+            post(routes::objects::revise_object),
+        )
+        .route(
+            "/api/objects/{id}/revisions/{revision}",
+            get(routes::objects::get_object_revision),
+        )
+        .route(
+            "/api/objects/{id}/revisions/{revision}/payloads/{payload_id}",
+            get(routes::objects::download_revision_payload),
+        )
         .route(
             "/api/objects/{id}",
-            get(routes::objects::get_object).delete(routes::objects::delete_object),
+            get(routes::objects::get_object).delete(routes::objects::purge_object),
         )
         .route("/api/objects", get(routes::objects::list_objects))
         .route(

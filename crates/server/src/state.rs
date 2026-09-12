@@ -22,7 +22,7 @@ use crate::{
     auth::AuthInfo,
     collab_sync::{CollabRoom, MAX_CONNS_PER_ROOM},
     config::ServerConfig,
-    entity::{event_log, objects},
+    entity::{event_log, object_revisions, objects},
     error::ServerResult,
     migration,
     rate_limit::RateLimiter,
@@ -51,6 +51,11 @@ pub struct AppStateInner {
     /// are reserved in `try_acquire_ws_slot` and released when the returned guard
     /// drops; an entry is removed once its count returns to zero.
     ws_connections: std::sync::Mutex<HashMap<Uuid, u64>>,
+    /// Process-wide ceiling on live WebSocket connections
+    /// (`limits.max_ws_connections`), bounding total FD/task use across all
+    /// users. Acquired alongside the per-user slot in the WebSocket accept
+    /// path; the permit is held for the connection's lifetime.
+    ws_global_cap: Arc<tokio::sync::Semaphore>,
     /// Loaded collaborative document rooms, keyed by `collab_docs.id`. A room is
     /// created on the first WebSocket connection to a document and removed when
     /// the last connection closes (see `crate::collab_sync`).
@@ -162,7 +167,8 @@ impl AppState {
     /// persisted, so a restart (or a wall clock that jumped backward) can never
     /// reissue a value at or below one a client has already observed.
     ///
-    /// Seqs are assigned both to `event_log` rows and to `objects.created_seq`,
+    /// Seqs are assigned both to `event_log` rows and to
+    /// `object_revisions.created_seq`,
     /// so seeding from `event_log` alone is unsafe: `cleanup_old_events` prunes
     /// the log after a retention window, so a surviving object's `created_seq`
     /// can outlive its log row. After such pruning a restart could otherwise
@@ -176,16 +182,34 @@ impl AppState {
             .into_tuple()
             .one(self.db())
             .await?;
-        let max_object_seq: Option<i64> = objects::Entity::find()
-            .filter(objects::Column::CreatedSeq.is_not_null())
+        // Every revision holds a seq, not only the head, and a superseded one
+        // is retained. Read the revisions themselves rather than
+        // `objects.published_seq`, which only covers heads.
+        let max_revision_seq: Option<i64> = object_revisions::Entity::find()
+            .filter(object_revisions::Column::CreatedSeq.is_not_null())
             .select_only()
-            .column(objects::Column::CreatedSeq)
-            .order_by_desc(objects::Column::CreatedSeq)
+            .column(object_revisions::Column::CreatedSeq)
+            .order_by_desc(object_revisions::Column::CreatedSeq)
             .into_tuple::<Option<i64>>()
             .one(self.db())
             .await?
             .flatten();
-        let seed = max_event_seq.unwrap_or(0).max(max_object_seq.unwrap_or(0));
+        // And collab objects have no revisions at all, so their seq exists only
+        // on the object row. Missing them would let a restart reissue a seq
+        // beneath a live collab document's.
+        let max_published_seq: Option<i64> = objects::Entity::find()
+            .filter(objects::Column::PublishedSeq.is_not_null())
+            .select_only()
+            .column(objects::Column::PublishedSeq)
+            .order_by_desc(objects::Column::PublishedSeq)
+            .into_tuple::<Option<i64>>()
+            .one(self.db())
+            .await?
+            .flatten();
+        let seed = max_event_seq
+            .unwrap_or(0)
+            .max(max_revision_seq.unwrap_or(0))
+            .max(max_published_seq.unwrap_or(0));
         self.inner.event_seq.store(seed, Ordering::SeqCst);
         Ok(())
     }
@@ -228,6 +252,12 @@ impl AppState {
         let argon2_permits = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
+        // The config value is validated `>= 1` at startup; clamp defensively
+        // for states built directly (tests) and for platforms where u64 does
+        // not fit in a usize.
+        let ws_global_permits = usize::try_from(config.limits.max_ws_connections)
+            .unwrap_or(usize::MAX)
+            .clamp(1, tokio::sync::Semaphore::MAX_PERMITS);
         Self {
             inner: Arc::new(AppStateInner {
                 db,
@@ -237,6 +267,7 @@ impl AppState {
                 rate_limiter,
                 ws_channels: std::sync::Mutex::new(HashMap::new()),
                 ws_connections: std::sync::Mutex::new(HashMap::new()),
+                ws_global_cap: Arc::new(tokio::sync::Semaphore::new(ws_global_permits)),
                 collab_rooms: std::sync::Mutex::new(HashMap::new()),
                 auth_challenges: std::sync::Mutex::new(HashMap::new()),
                 pending_registrations: std::sync::Mutex::new(HashMap::new()),
@@ -293,6 +324,12 @@ impl AppState {
     /// running the hash so a registration burst cannot exhaust memory.
     pub fn argon2_semaphore(&self) -> Arc<tokio::sync::Semaphore> {
         self.inner.argon2_semaphore.clone()
+    }
+
+    /// Process-wide live-WebSocket-connection ceiling; acquire one permit per
+    /// connection alongside the per-user slot.
+    pub fn ws_global_cap(&self) -> Arc<tokio::sync::Semaphore> {
+        self.inner.ws_global_cap.clone()
     }
 
     pub fn objects_dir(&self) -> PathBuf {
@@ -652,30 +689,46 @@ mod tests {
             .await
             .expect("disable fk");
 
-        // A surviving object whose event_log row was pruned: a created_seq far
+        // A surviving revision whose event_log row was pruned: a created_seq far
         // above the current wall clock, with no matching event_log entry.
         let future_seq = Utc::now().timestamp_micros() + 1_000_000_000_000;
         let now = Utc::now().to_rfc3339();
+        let object_id = Uuid::now_v7();
         objects::ActiveModel {
-            id: Set(Uuid::now_v7()),
+            id: Set(object_id),
             user_id: Set(Uuid::now_v7()),
             kind: Set("file".to_string()),
-            // A file object: empty-but-present ciphertext columns satisfy the
-            // objects XOR check (collab_doc_id stays null).
-            meta_ciphertext: Set(Some(Vec::new())),
-            meta_nonce: Set(Some(Vec::new())),
             created_at: Set(now.clone()),
             updated_at: Set(now.clone()),
             expires_at: Set(None),
-            source_device_id: Set(None),
-            envelope: Set(Some(Vec::new())),
-            status: Set("complete".to_string()),
-            created_seq: Set(Some(future_seq)),
+            head_revision: Set(Some(1)),
+            published_seq: Set(Some(future_seq)),
+            deleted_at: Set(None),
             collab_doc_id: Set(None),
         }
         .insert(state.db())
         .await
         .expect("insert object");
+
+        // The seq the seeder actually reads lives on the revision; the object's
+        // `published_seq` mirrors it.
+        object_revisions::ActiveModel {
+            object_id: Set(object_id),
+            revision: Set(1),
+            operation: Set("create".to_string()),
+            parent_hash: Set(None),
+            meta_ciphertext: Set(Vec::new()),
+            meta_nonce: Set(Vec::new()),
+            envelope: Set(Vec::new()),
+            source_device_id: Set(None),
+            created_at: Set(now.clone()),
+            stored_at: Set(now.clone()),
+            status: Set("complete".to_string()),
+            created_seq: Set(Some(future_seq)),
+        }
+        .insert(state.db())
+        .await
+        .expect("insert revision");
 
         // Re-seed as a fresh process would on restart.
         state.seed_event_seq().await.expect("reseed");
@@ -843,5 +896,31 @@ mod tests {
         let _other_slot = state
             .try_acquire_ws_slot(other_user_id)
             .expect("other user slot");
+    }
+
+    #[tokio::test]
+    async fn ws_global_connection_cap_follows_config() {
+        assert_eq!(
+            ServerConfig::default().limits.max_ws_connections,
+            1024,
+            "process-wide default must stay 1024",
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::connect("sqlite::memory:").await.expect("db");
+        let mut config = ServerConfig::default();
+        config.server.data_dir = dir.path().to_path_buf();
+        config.limits.max_ws_connections = 2;
+        let state = AppState::open_with_db_and_config(db, config, ServerSecrets::test_fixture())
+            .await
+            .expect("state");
+
+        let cap = state.ws_global_cap();
+        assert_eq!(cap.available_permits(), 2);
+        let _first = cap.clone().try_acquire_owned().expect("first permit");
+        let _second = cap.clone().try_acquire_owned().expect("second permit");
+        assert!(
+            cap.try_acquire_owned().is_err(),
+            "the third connection must find no permit"
+        );
     }
 }

@@ -989,6 +989,7 @@ mod tests {
     use sea_orm::{ActiveModelTrait, Database, QuerySelect, Set};
     use tempfile::TempDir;
     use tower::ServiceExt;
+    use zeroize::Zeroizing;
 
     use super::*;
     use crate::{
@@ -1190,7 +1191,10 @@ mod tests {
         Postcard::validated(value).expect("valid request")
     }
 
-    fn challenge_request(username: &str, passphrase: &[u8]) -> (LoginChallengeRequest, Vec<u8>) {
+    fn challenge_request(
+        username: &str,
+        passphrase: &[u8],
+    ) -> (LoginChallengeRequest, Zeroizing<Vec<u8>>) {
         let (credential_request, client_state) =
             crypto::opaque_client_login_start(passphrase).expect("client login start");
         (
@@ -1206,7 +1210,7 @@ mod tests {
         access_key: &str,
         username: &str,
         passphrase: &[u8],
-    ) -> (RegisterStartRequest, Vec<u8>) {
+    ) -> (RegisterStartRequest, Zeroizing<Vec<u8>>) {
         let (registration_request, client_state) =
             crypto::opaque_client_register_start(passphrase).expect("client register start");
         (
@@ -2143,11 +2147,16 @@ mod tests {
     #[tokio::test]
     async fn challenge_rate_limits_by_username_across_client_ips() {
         let passphrase = b"correct horse battery staple";
-        let (state, _data_dir) = test_state(passphrase).await;
+        // A one-request quota gives this test a 60-second refill interval
+        // instead of the default two seconds. Governor replenishes tokens
+        // continuously, so a slow host can otherwise regain a token while
+        // performing the initial burst of real OPAQUE work.
+        let (state, _data_dir) = test_state_with_config(passphrase, |config| {
+            config.rate_limit.auth_per_username_per_minute = 1;
+        })
+        .await;
+        let quota = state.config().rate_limit.auth_per_username_per_minute;
         let app = auth_route_app(state);
-        let quota = crate::config::ServerConfig::default()
-            .rate_limit
-            .auth_per_username_per_minute;
 
         for i in 0..quota {
             let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, (i + 1) as u8));

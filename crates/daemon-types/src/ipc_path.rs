@@ -38,9 +38,24 @@ pub fn socket_dir() -> PathBuf {
 }
 
 pub fn ensure_private_socket_dir(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
-    std::fs::create_dir_all(path)?;
+    // Create parents first, then the leaf alone so we know if we created it.
+    // An existing directory is never chmodded: it must already be 0700 and
+    // owned by us, otherwise fail closed.
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let created = match std::fs::DirBuilder::new()
+        .mode(PRIVATE_SOCKET_DIR_MODE)
+        .create(path)
+    {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) => return Err(error),
+    };
 
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_dir() {
@@ -63,10 +78,25 @@ pub fn ensure_private_socket_dir(path: &Path) -> std::io::Result<()> {
         ));
     }
 
-    std::fs::set_permissions(
-        path,
-        std::fs::Permissions::from_mode(PRIVATE_SOCKET_DIR_MODE),
-    )?;
+    if created {
+        std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(PRIVATE_SOCKET_DIR_MODE),
+        )?;
+    } else {
+        let mode = metadata.mode() & 0o777;
+        if mode != PRIVATE_SOCKET_DIR_MODE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} has mode {:03o}, expected {:03o}; refusing to use existing directory",
+                    path.display(),
+                    mode,
+                    PRIVATE_SOCKET_DIR_MODE
+                ),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -207,7 +237,7 @@ fn validate_socket_dir(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
@@ -218,5 +248,67 @@ mod tests {
 
         assert!(socket_path().ends_with(Path::new("tmp/Clipper/daemon.sock")));
         assert!(socket_path().as_os_str().as_bytes().len() < 104);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod permission_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    /// A scratch directory no other test in this process shares. Tests run on
+    /// parallel threads and can start inside the same clock tick, so the
+    /// clock alone is not unique; the counter is.
+    fn unique_base() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "clipper-ipc-path-test-{}-{}-{serial}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn existing_0755_directory_is_rejected() {
+        let base = unique_base();
+        let dir = base.join("sockdir");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = ensure_private_socket_dir(&dir).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+
+        // Never chmod an existing directory.
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn freshly_created_directory_is_0700() {
+        let base = unique_base();
+        let dir = base.join("new").join("sockdir");
+
+        ensure_private_socket_dir(&dir).unwrap();
+
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, PRIVATE_SOCKET_DIR_MODE);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn existing_0700_directory_is_accepted() {
+        let base = unique_base();
+        let dir = base.join("sockdir");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        ensure_private_socket_dir(&dir).unwrap();
+        std::fs::remove_dir_all(&base).ok();
     }
 }

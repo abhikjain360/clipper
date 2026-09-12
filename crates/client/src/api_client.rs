@@ -13,6 +13,11 @@ use zeroize::Zeroizing;
 const POSTCARD_ERROR_PREVIEW_BYTES: usize = 64;
 const MAX_POSTCARD_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 256 * 1024;
+/// How much server-supplied error text is kept once it has been cleaned.
+const MAX_SERVER_MESSAGE_BYTES: usize = 512;
+/// A challenge id is an opaque handle the client echoes back; a long one is a
+/// server sending something other than a handle.
+const MAX_CHALLENGE_ID_BYTES: usize = 64;
 
 /// Clipper API client.
 pub struct ApiClient {
@@ -61,6 +66,18 @@ impl ApiClient {
             base_url: parse_server_url(base_url)?,
             token: RwLock::new(None),
         })
+    }
+
+    fn deadline_get(&self, url: Url) -> reqwest::RequestBuilder {
+        with_deadline(self.http.get(url))
+    }
+
+    fn deadline_post(&self, url: Url) -> reqwest::RequestBuilder {
+        with_deadline(self.http.post(url))
+    }
+
+    fn deadline_delete(&self, url: Url) -> reqwest::RequestBuilder {
+        with_deadline(self.http.delete(url))
     }
 
     pub fn token(&self) -> Option<String> {
@@ -256,8 +273,7 @@ impl ApiClient {
             credential_request,
         };
         let challenge_resp = self
-            .http
-            .post(self.api_url(&["auth", "challenge"])?)
+            .deadline_post(self.api_url(&["auth", "challenge"])?)
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(&challenge_req)?)
             .send()
@@ -265,6 +281,15 @@ impl ApiClient {
 
         let challenge_resp: LoginChallengeResponse =
             Self::postcard_response(challenge_resp).await?;
+        // This device signs what the server puts in front of it, so refuse a
+        // challenge that is not the shape the protocol defines.
+        if challenge_resp.device_proof_challenge.len() != DEVICE_LOGIN_PROOF_CHALLENGE_BYTES
+            || challenge_resp.challenge_id.len() > MAX_CHALLENGE_ID_BYTES
+        {
+            return Err(ClientError::UnexpectedResponse(
+                "login challenge is not the expected shape".into(),
+            ));
+        }
         let finish = crypto::opaque_client_login_finish(
             &client_login_state,
             passphrase.as_bytes(),
@@ -318,8 +343,7 @@ impl ApiClient {
             platform: Some(device.platform.to_string()),
         };
         let resp = self
-            .http
-            .post(self.api_url(&["auth", "login"])?)
+            .deadline_post(self.api_url(&["auth", "login"])?)
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(&req)?)
             .send()
@@ -337,8 +361,7 @@ impl ApiClient {
 
     pub async fn websocket_ticket(&self) -> Result<WsTicketResponse, ClientError> {
         let resp = self
-            .http
-            .post(self.api_url(&["ws-ticket"])?)
+            .deadline_post(self.api_url(&["ws-ticket"])?)
             .header(
                 header::AUTHORIZATION,
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -378,8 +401,7 @@ impl ApiClient {
             registration_request,
         };
         let resp = self
-            .http
-            .post(self.api_url(&["auth", "register", "start"])?)
+            .deadline_post(self.api_url(&["auth", "register", "start"])?)
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(&start_req)?)
             .send()
@@ -422,8 +444,7 @@ impl ApiClient {
             platform: Some(device.platform.to_string()),
         };
         let resp = self
-            .http
-            .post(self.api_url(&["auth", "register", "finish"])?)
+            .deadline_post(self.api_url(&["auth", "register", "finish"])?)
             .header("Content-Type", POSTCARD_CONTENT_TYPE)
             .body(Self::postcard_body(&finish_req)?)
             .send()
@@ -445,8 +466,7 @@ impl ApiClient {
 
     pub async fn logout(&self) -> Result<(), ClientError> {
         let resp = self
-            .http
-            .post(self.api_url(&["auth", "logout"])?)
+            .deadline_post(self.api_url(&["auth", "logout"])?)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -467,8 +487,7 @@ impl ApiClient {
     /// attempt can fall back to the login screen.
     pub async fn validate_session(&self) -> Result<(), ClientError> {
         let resp = self
-            .http
-            .get(self.api_url(&["auth", "validate"])?)
+            .deadline_get(self.api_url(&["auth", "validate"])?)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -483,8 +502,7 @@ impl ApiClient {
 
     pub async fn list_devices(&self) -> Result<DeviceListResponse, ClientError> {
         let resp = self
-            .http
-            .get(self.api_url(&["auth", "devices"])?)
+            .deadline_get(self.api_url(&["auth", "devices"])?)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -498,8 +516,7 @@ impl ApiClient {
     pub async fn remove_device(&self, device_id: &str) -> Result<OkResponse, ClientError> {
         let url = self.api_url(&["auth", "devices", device_id])?;
         let resp = self
-            .http
-            .delete(url)
+            .deadline_delete(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -517,8 +534,31 @@ impl ApiClient {
         req: &ObjectInitRequest,
     ) -> Result<ObjectInitResponse, ClientError> {
         let resp = self
-            .http
-            .post(self.api_url(&["objects", "init"])?)
+            .deadline_post(self.api_url(&["objects", "init"])?)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .header("Content-Type", POSTCARD_CONTENT_TYPE)
+            .body(Self::postcard_body(req)?)
+            .send()
+            .await?;
+
+        Self::postcard_response(resp).await
+    }
+
+    /// `POST /api/objects/{id}/revisions` — append the next revision.
+    ///
+    /// Returns the same shape as init, because the rest of the write is the
+    /// same: complete straight away if every payload rode inline, otherwise
+    /// upload URLs to fill in first.
+    pub async fn object_revise(
+        &self,
+        object_id: &str,
+        req: &ObjectReviseRequest,
+    ) -> Result<ObjectInitResponse, ClientError> {
+        let resp = self
+            .deadline_post(self.api_url(&["objects", object_id, "revisions"])?)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -538,9 +578,7 @@ impl ApiClient {
         data: Vec<u8>,
     ) -> Result<OkResponse, ClientError> {
         let url = self.api_url(&["objects", object_id, "payloads", payload_id])?;
-        let resp = self
-            .http
-            .put(url)
+        let resp = with_transfer_deadline(self.http.put(url))
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -560,8 +598,7 @@ impl ApiClient {
     ) -> Result<ObjectCompleteResponse, ClientError> {
         let url = self.api_url(&["objects", object_id, "complete"])?;
         let resp = self
-            .http
-            .post(url)
+            .deadline_post(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -598,8 +635,7 @@ impl ApiClient {
         }
 
         let resp = self
-            .http
-            .get(url)
+            .deadline_get(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -613,8 +649,7 @@ impl ApiClient {
     pub async fn get_object(&self, object_id: &str) -> Result<ObjectListItem, ClientError> {
         let url = self.api_url(&["objects", object_id])?;
         let resp = self
-            .http
-            .get(url)
+            .deadline_get(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -625,6 +660,58 @@ impl ApiClient {
         Self::postcard_response(resp).await
     }
 
+    /// Fetch a pinned historical revision. Callers must verify its identity and
+    /// envelope hash and must not install it as the current object head.
+    pub async fn get_object_revision(
+        &self,
+        object_id: &str,
+        revision: u64,
+    ) -> Result<ObjectListItem, ClientError> {
+        let url = self.api_url(&["objects", object_id, "revisions", &revision.to_string()])?;
+        let resp = self
+            .deadline_get(url)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .send()
+            .await?;
+        Self::postcard_response(resp).await
+    }
+
+    pub async fn download_object_revision_payload(
+        &self,
+        object_id: &str,
+        revision: u64,
+        payload_id: &str,
+        expected_ciphertext_size: i64,
+    ) -> Result<Vec<u8>, ClientError> {
+        let expected_ciphertext_size = expected_body_size(expected_ciphertext_size)?;
+        let url = self.api_url(&[
+            "objects",
+            object_id,
+            "revisions",
+            &revision.to_string(),
+            "payloads",
+            payload_id,
+        ])?;
+        let resp = with_transfer_deadline(self.http.get(url))
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .send()
+            .await?;
+        let resp = Self::checked_response(resp).await?;
+        let bytes = read_response_body_limited(resp, expected_ciphertext_size).await?;
+        if bytes.len() != expected_ciphertext_size {
+            return Err(ClientError::UnexpectedResponse(
+                "Historical payload size differs from its descriptor".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+
     pub async fn download_object_payload(
         &self,
         object_id: &str,
@@ -633,9 +720,7 @@ impl ApiClient {
     ) -> Result<Vec<u8>, ClientError> {
         let expected_ciphertext_size = expected_body_size(expected_ciphertext_size)?;
         let url = self.api_url(&["objects", object_id, "payloads", payload_id])?;
-        let resp = self
-            .http
-            .get(url)
+        let resp = with_transfer_deadline(self.http.get(url))
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -663,8 +748,7 @@ impl ApiClient {
     ) -> Result<ObjectDeleteResponse, ClientError> {
         let url = self.api_url(&["objects", object_id])?;
         let resp = self
-            .http
-            .delete(url)
+            .deadline_delete(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -685,8 +769,7 @@ impl ApiClient {
     /// A new doc starts untitled and empty, so no request body is sent.
     pub async fn create_collab_doc(&self) -> Result<CreateCollabDocResponse, ClientError> {
         let resp = self
-            .http
-            .post(self.api_url(&["collab-docs"])?)
+            .deadline_post(self.api_url(&["collab-docs"])?)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -702,8 +785,7 @@ impl ApiClient {
     pub async fn get_collab_doc_meta(&self, object_id: &str) -> Result<CollabDocMeta, ClientError> {
         let url = self.api_url(&["collab-docs", object_id, "meta"])?;
         let resp = self
-            .http
-            .get(url)
+            .deadline_get(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -719,8 +801,7 @@ impl ApiClient {
     /// is the reconciliation source for them.
     pub async fn list_collab_docs(&self) -> Result<CollabDocListResponse, ClientError> {
         let resp = self
-            .http
-            .get(self.api_url(&["collab-docs"])?)
+            .deadline_get(self.api_url(&["collab-docs"])?)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -739,9 +820,7 @@ impl ApiClient {
         title: &str,
     ) -> Result<CollabDocMeta, ClientError> {
         let url = self.api_url(&["collab-docs", object_id])?;
-        let resp = self
-            .http
-            .patch(url)
+        let resp = with_deadline(self.http.patch(url))
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -760,8 +839,7 @@ impl ApiClient {
     pub async fn delete_collab_doc(&self, object_id: &str) -> Result<(), ClientError> {
         let url = self.api_url(&["collab-docs", object_id])?;
         let resp = self
-            .http
-            .delete(url)
+            .deadline_delete(url)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -781,7 +859,7 @@ impl ApiClient {
 /// WebSocket path. Built explicitly because reqwest's own rustls wiring would
 /// otherwise pull aws-lc-rs and the platform verifier.
 #[cfg(not(target_family = "wasm"))]
-fn default_tls_config() -> rustls::ClientConfig {
+pub(crate) fn default_tls_config() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut config = rustls::ClientConfig::builder()
@@ -796,6 +874,43 @@ fn default_tls_config() -> rustls::ClientConfig {
 /// disabled so API requests only ever go to the configured host. The wasm
 /// builder does not expose these knobs; the browser enforces its own
 /// fetch/redirect policy there.
+#[cfg(not(target_family = "wasm"))]
+/// Deadline for the small calls: auth, metadata, listings. Payload transfers
+/// are left out — they are large by nature and keep the per-chunk read timeout
+/// instead, so a slow link does not cancel a download that is making progress.
+const METADATA_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The browser client cannot be given connect or read timeouts, so every
+/// request carries this deadline instead; without one a hung request never
+/// completes and the caller waits forever.
+#[cfg(target_family = "wasm")]
+const BROWSER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn with_deadline(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        request.timeout(METADATA_REQUEST_TIMEOUT)
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        request.timeout(BROWSER_REQUEST_TIMEOUT)
+    }
+}
+
+/// Payload transfers are large by nature. Native bounds them with the
+/// per-chunk read timeout, which does not cancel a download that is still
+/// making progress; the browser has no such option and takes the deadline.
+fn with_transfer_deadline(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        request
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        request.timeout(BROWSER_REQUEST_TIMEOUT)
+    }
+}
+
 #[cfg(not(target_family = "wasm"))]
 fn build_http_client() -> Result<Client, ClientError> {
     crate::ensure_crypto_provider();
@@ -883,6 +998,55 @@ fn body_preview(bytes: &[u8]) -> String {
         .join(" ")
 }
 
+/// Server text ends up in UI banners and in the log, so it is bounded and
+/// stripped of control characters first: the server is not trusted to send
+/// something a terminal or a text layout can be steered by.
+fn sanitized_server_message(message: &str) -> String {
+    let mut clean = String::with_capacity(message.len().min(MAX_SERVER_MESSAGE_BYTES));
+    for character in message.chars() {
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if clean.len() + character.len_utf8() > MAX_SERVER_MESSAGE_BYTES {
+            break;
+        }
+        clean.push(character);
+    }
+    clean
+}
+
+/// Build the error a refused request stands for, from the parts every
+/// transport can supply: the status, the content type, and the body bytes.
+///
+/// The WebSocket handshake is the second transport. Its failures come from
+/// tungstenite rather than reqwest, but a rejected handshake still carries an
+/// HTTP response, and the status in it decides whether the session is over or
+/// the client should retry.
+pub(crate) fn api_error_from_parts(
+    status: u16,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> ClientError {
+    let mut error = if is_json_content_type(content_type) {
+        serde_json::from_slice::<ErrorResponse>(bytes).unwrap_or_else(|_| {
+            ErrorResponse::new(
+                ApiErrorCode::from_http_status(status),
+                format!(
+                    "HTTP {status} with invalid error body: {}",
+                    body_preview(bytes)
+                ),
+            )
+        })
+    } else {
+        ErrorResponse::new(ApiErrorCode::from_http_status(status), body_preview(bytes))
+    };
+    error.message = sanitized_server_message(&error.message);
+
+    ClientError::Api { status, error }
+}
+
 async fn api_error_from_response(resp: reqwest::Response) -> ClientError {
     let status = resp.status().as_u16();
     let content_type = resp
@@ -893,21 +1057,7 @@ async fn api_error_from_response(resp: reqwest::Response) -> ClientError {
     let bytes = read_response_body_limited(resp, MAX_ERROR_RESPONSE_BYTES)
         .await
         .unwrap_or_default();
-    let error = if is_json_content_type(content_type.as_deref()) {
-        serde_json::from_slice::<ErrorResponse>(&bytes).unwrap_or_else(|_| {
-            ErrorResponse::new(
-                ApiErrorCode::from_http_status(status),
-                format!(
-                    "HTTP {status} with invalid error body: {}",
-                    body_preview(&bytes)
-                ),
-            )
-        })
-    } else {
-        ErrorResponse::new(ApiErrorCode::from_http_status(status), body_preview(&bytes))
-    };
-
-    ClientError::Api { status, error }
+    api_error_from_parts(status, content_type.as_deref(), &bytes)
 }
 
 async fn read_response_body_limited(
@@ -957,11 +1107,11 @@ fn is_json_content_type(value: Option<&str>) -> bool {
 pub fn encrypt_clipboard_meta(
     meta: &ClipboardMeta,
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV1,
+    envelope_body: &ObjectEnvelopeBody,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
     let json = serde_json::to_vec(meta)
         .map_err(|e| crypto::CryptoError::Encrypt(format!("json: {}", e)))?;
-    let aad = crypto::object_meta_aad_v1(envelope_body)?;
+    let aad = crypto::object_meta_aad(envelope_body)?;
     let (nonce, ciphertext) = crypto::encrypt(encryption_key, &json, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
@@ -971,9 +1121,9 @@ pub fn decrypt_clipboard_meta(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV1,
+    envelope_body: &ObjectEnvelopeBody,
 ) -> Result<ClipboardMeta, crypto::CryptoError> {
-    let aad = crypto::object_meta_aad_v1(envelope_body)?;
+    let aad = crypto::object_meta_aad(envelope_body)?;
     let plaintext = crypto::decrypt(encryption_key, nonce, ciphertext, &aad)?;
     serde_json::from_slice(&plaintext)
         .map_err(|e| crypto::CryptoError::Decrypt(format!("json: {}", e)))
@@ -983,10 +1133,10 @@ pub fn decrypt_clipboard_meta(
 pub fn encrypt_clipboard_payload(
     data: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV1,
+    envelope_body: &ObjectEnvelopeBody,
     payload_id: ObjectPayloadId,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
-    let aad = crypto::object_payload_aad_v1(envelope_body, payload_id)?;
+    let aad = crypto::object_payload_aad(envelope_body, payload_id)?;
     let (nonce, ciphertext) = crypto::encrypt(encryption_key, data, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
@@ -996,10 +1146,10 @@ pub fn decrypt_clipboard_payload(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV1,
+    envelope_body: &ObjectEnvelopeBody,
     payload_id: ObjectPayloadId,
 ) -> Result<Vec<u8>, crypto::CryptoError> {
-    let aad = crypto::object_payload_aad_v1(envelope_body, payload_id)?;
+    let aad = crypto::object_payload_aad(envelope_body, payload_id)?;
     crypto::decrypt(encryption_key, nonce, ciphertext, &aad)
 }
 
@@ -1007,11 +1157,11 @@ pub fn decrypt_clipboard_payload(
 pub fn encrypt_file_meta_bytes(
     meta: &FileMeta,
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV1,
+    envelope_body: &ObjectEnvelopeBody,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
     let json = serde_json::to_vec(meta)
         .map_err(|e| crypto::CryptoError::Encrypt(format!("json: {}", e)))?;
-    let aad = crypto::object_meta_aad_v1(envelope_body)?;
+    let aad = crypto::object_meta_aad(envelope_body)?;
     let (nonce, ciphertext) = crypto::encrypt(encryption_key, &json, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
@@ -1021,9 +1171,9 @@ pub fn decrypt_file_meta_bytes(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV1,
+    envelope_body: &ObjectEnvelopeBody,
 ) -> Result<FileMeta, crypto::CryptoError> {
-    let aad = crypto::object_meta_aad_v1(envelope_body)?;
+    let aad = crypto::object_meta_aad(envelope_body)?;
     let plaintext = crypto::decrypt(encryption_key, nonce, ciphertext, &aad)?;
     decode_file_meta_plaintext(&plaintext)
 }
@@ -1037,10 +1187,10 @@ fn decode_file_meta_plaintext(plaintext: &[u8]) -> Result<FileMeta, crypto::Cryp
 pub fn encrypt_file_blob_bytes(
     data: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV1,
+    envelope_body: &ObjectEnvelopeBody,
     payload_id: ObjectPayloadId,
 ) -> Result<(Vec<u8>, Vec<u8>), crypto::CryptoError> {
-    let aad = crypto::object_payload_aad_v1(envelope_body, payload_id)?;
+    let aad = crypto::object_payload_aad(envelope_body, payload_id)?;
     let (nonce, ciphertext) = crypto::encrypt(encryption_key, data, &aad)?;
     Ok((nonce.to_vec(), ciphertext))
 }
@@ -1050,10 +1200,10 @@ pub fn decrypt_file_blob_bytes(
     nonce: &[u8],
     ciphertext: &[u8],
     encryption_key: &[u8; 32],
-    envelope_body: &ObjectEnvelopeBodyV1,
+    envelope_body: &ObjectEnvelopeBody,
     payload_id: ObjectPayloadId,
 ) -> Result<Vec<u8>, crypto::CryptoError> {
-    let aad = crypto::object_payload_aad_v1(envelope_body, payload_id)?;
+    let aad = crypto::object_payload_aad(envelope_body, payload_id)?;
     crypto::decrypt(encryption_key, nonce, ciphertext, &aad)
 }
 
@@ -1071,6 +1221,11 @@ pub enum ClientError {
     WebSocket(String),
     #[error("Local store error: {0}")]
     LocalStore(String),
+    /// The server served a revision that contradicts the one this device
+    /// already accepted. The device keeps what it holds; a reconciliation pass
+    /// skips the object rather than failing.
+    #[error("Refused revision: {0}")]
+    RevisionRejected(String),
     /// No active session: a token, device identity, signing key, or encryption
     /// key required for this action is missing. The client must log in first.
     #[error("Not authenticated; sign in first")]
@@ -1123,6 +1278,11 @@ pub enum ClientError {
         context: &'static str,
         source: std::io::Error,
     },
+    /// A caller-supplied argument was malformed — a timestamp that will not
+    /// parse, a window whose end precedes its start. Distinct from
+    /// `UnexpectedResponse`, which blames the server.
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
     /// The action is not available in this build or on this platform.
     #[error("{0}")]
     Unsupported(String),
@@ -1134,17 +1294,19 @@ pub enum ClientError {
 mod crypto_tests {
     use super::*;
 
-    fn envelope_body(object_id: uuid::Uuid, payload_id: uuid::Uuid) -> ObjectEnvelopeBodyV1 {
-        ObjectEnvelopeBodyV1 {
+    fn envelope_body(object_id: uuid::Uuid, payload_id: uuid::Uuid) -> ObjectEnvelopeBody {
+        ObjectEnvelopeBody {
             object_id: object_id.into(),
             object_type: ObjectKind::File,
-            object_version: 1,
+            envelope_version: crypto::OBJECT_ENVELOPE_VERSION,
+            revision: 1,
+            parent_hash: None,
             source_device_id: uuid::Uuid::now_v7().into(),
             created_at: "2026-05-31T00:00:00Z".into(),
             operation: ObjectEnvelopeOperation::Create,
             meta_nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
             sha256_meta_ciphertext: vec![0_u8; crypto::SHA256_BYTES],
-            payloads: vec![ObjectEnvelopePayloadV1 {
+            payloads: vec![ObjectEnvelopePayload {
                 id: payload_id.into(),
                 nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
                 ciphertext_size: 0,
@@ -1200,6 +1362,9 @@ impl ClientError {
             Self::Crypto(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.to_string()),
             Self::WebSocket(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.clone()),
             Self::LocalStore(error) => ErrorResponse::new(ApiErrorCode::Storage, error.clone()),
+            Self::RevisionRejected(error) => {
+                ErrorResponse::new(ApiErrorCode::Unknown, error.clone())
+            }
             Self::NotAuthenticated | Self::NoResumableDeviceIdentity => {
                 ErrorResponse::new(ApiErrorCode::Unauthorized, self.to_string())
             }
@@ -1213,7 +1378,7 @@ impl ClientError {
                 ErrorResponse::new(ApiErrorCode::NotFound, self.to_string())
             }
             Self::InvalidId { .. } => ErrorResponse::new(ApiErrorCode::InvalidId, self.to_string()),
-            Self::InvalidServerUrl(_) => {
+            Self::InvalidServerUrl(_) | Self::InvalidArgument(_) => {
                 ErrorResponse::new(ApiErrorCode::BadRequest, self.to_string())
             }
             Self::UnexpectedObjectKind { .. } => {
@@ -1231,7 +1396,14 @@ impl ClientError {
 
 impl From<crate::local_store::LocalStoreError> for ClientError {
     fn from(error: crate::local_store::LocalStoreError) -> Self {
-        Self::LocalStore(error.to_string())
+        // A refused revision keeps its own type: callers treat it as a skipped
+        // object rather than a failed operation.
+        match error {
+            crate::local_store::LocalStoreError::RevisionRejected(reason) => {
+                Self::RevisionRejected(reason)
+            }
+            error => Self::LocalStore(error.to_string()),
+        }
     }
 }
 
@@ -1334,6 +1506,22 @@ mod tests {
         )));
         assert!(!is_postcard_content_type(Some("application/json")));
         assert!(!is_postcard_content_type(None));
+    }
+
+    #[test]
+    fn server_messages_are_stripped_and_clamped() {
+        // Control characters would otherwise reach a terminal log and a UI
+        // banner verbatim.
+        assert_eq!(
+            sanitized_server_message("bad\u{1b}[2Jrequest\n"),
+            "bad [2Jrequest ",
+        );
+        let long = sanitized_server_message(&"x".repeat(MAX_SERVER_MESSAGE_BYTES * 2));
+        assert_eq!(long.len(), MAX_SERVER_MESSAGE_BYTES);
+        // A clamp must not split a character in half.
+        let wide = sanitized_server_message(&"\u{00e9}".repeat(MAX_SERVER_MESSAGE_BYTES));
+        assert!(wide.len() <= MAX_SERVER_MESSAGE_BYTES);
+        assert!(wide.chars().all(|character| character == '\u{00e9}'));
     }
 
     #[test]

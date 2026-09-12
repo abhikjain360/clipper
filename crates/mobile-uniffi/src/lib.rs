@@ -1,6 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
-use clipper_app_types::{AppState, ClipboardPayload, CollabItem, DeviceInfo};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use clipper_app_types::{AlarmView, AppState, ClipboardPayload, CollabItem, DeviceInfo};
 use clipper_client::{
     api_client::ClientError,
     engine::{SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
@@ -24,6 +25,32 @@ pub enum MobileError {
     },
     #[error("mobile data directory is unavailable")]
     DataDirUnavailable,
+    #[error("invalid session resume key")]
+    InvalidResumeKey,
+    #[error("saved session is no longer valid; sign in again")]
+    SessionResumeRejected,
+}
+
+/// Revocable session material for biometric-gated storage. Never contains the
+/// passphrase, and deliberately has no Debug implementation.
+#[derive(uniffi::Record)]
+pub struct MobileSessionResumeMaterial {
+    pub token: String,
+    pub data_key: String,
+    pub wrapping_key: String,
+}
+
+fn decode_resume_key(value: &str) -> Result<Zeroizing<[u8; 32]>, MobileError> {
+    let bytes = Zeroizing::new(
+        STANDARD
+            .decode(value)
+            .map_err(|_| MobileError::InvalidResumeKey)?,
+    );
+    let key = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| MobileError::InvalidResumeKey)?;
+    Ok(Zeroizing::new(key))
 }
 
 impl From<ClientError> for MobileError {
@@ -128,6 +155,49 @@ impl MobileClipperClient {
         Ok(())
     }
 
+    pub async fn session_resume_material(&self) -> Option<MobileSessionResumeMaterial> {
+        self.engine
+            .session_resume_material()
+            .await
+            .map(|material| MobileSessionResumeMaterial {
+                token: material.token,
+                data_key: STANDARD.encode(material.data_key.as_slice()),
+                wrapping_key: STANDARD.encode(material.device_identity_wrapping_key.as_slice()),
+            })
+    }
+
+    pub async fn resume(
+        &self,
+        token: String,
+        data_key: String,
+        wrapping_key: String,
+        username: String,
+        device_name: String,
+        server_url: String,
+    ) -> Result<(), MobileError> {
+        self.ensure_requested_base_url(&server_url)?;
+        let data_key = Zeroizing::new(data_key);
+        let wrapping_key = Zeroizing::new(wrapping_key);
+        self.engine
+            .resume_with_platform(
+                token,
+                decode_resume_key(&data_key)?,
+                decode_resume_key(&wrapping_key)?,
+                &username,
+                &self.device_name(device_name),
+            )
+            .await
+            .map_err(|error| match error {
+                ClientError::Api {
+                    status: 401 | 403, ..
+                }
+                | ClientError::NotAuthenticated
+                | ClientError::NoResumableDeviceIdentity => MobileError::SessionResumeRejected,
+                other => MobileError::from(other),
+            })?;
+        Ok(())
+    }
+
     pub async fn get_state(&self) -> AppState {
         self.engine.get_state().await
     }
@@ -147,6 +217,22 @@ impl MobileClipperClient {
             .wait_for_state_change_after(seen_version)
             .await?;
         Ok(version as f64)
+    }
+
+    /// Alarms due within `within_hours`, soonest first.
+    ///
+    /// The Android layer registers each as a one-shot exact alarm and mirrors
+    /// the list to device-protected storage so a reboot can re-register them
+    /// before the user unlocks — at which point nothing encrypted is readable.
+    pub async fn next_alarms(
+        &self,
+        within_hours: u32,
+        observer_zone: String,
+    ) -> Result<Vec<AlarmView>, MobileError> {
+        Ok(self
+            .engine
+            .next_alarms(within_hours, &observer_zone)
+            .await?)
     }
 
     pub async fn refresh(&self) -> Result<(), MobileError> {
@@ -286,6 +372,17 @@ fn js_number_to_version(version: f64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_keys_require_exactly_32_decoded_bytes() {
+        assert!(decode_resume_key("not base64").is_err());
+        assert!(decode_resume_key(&STANDARD.encode([1_u8; 31])).is_err());
+        assert!(decode_resume_key(&STANDARD.encode([1_u8; 33])).is_err());
+        assert_eq!(
+            *decode_resume_key(&STANDARD.encode([7_u8; 32])).expect("key"),
+            [7_u8; 32]
+        );
+    }
 
     #[test]
     fn creates_client_with_explicit_data_dir() {

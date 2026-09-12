@@ -1,9 +1,12 @@
 use std::sync::{Arc, LazyLock, RwLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use clipper_client::engine::{AppState, ClipboardPayload, SyncEngine, TEXT_CLIPBOARD_MIME_TYPE};
+use clipper_client::engine::{
+    AppState, ClipboardPayload, ScheduleItem, SyncEngine, TEXT_CLIPBOARD_MIME_TYPE,
+};
 use js_sys::{Object, Promise, Reflect, Uint8Array};
-use tokio::sync::watch;
+use serde::Serialize;
+use tokio::sync::{Mutex, watch};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 use zeroize::{Zeroize, Zeroizing};
@@ -12,46 +15,63 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_DEVICE_NAME: &str = "Web";
 const PLATFORM: &str = "web";
 
-/// Holds the single [`SyncEngine`] for the page's lifetime.
-///
-/// Unlike the daemon — a long-lived process that rebuilds its engine across many
-/// login sessions — the browser client lives for one page load, so it builds the
-/// engine once, lazily, on the first login/register using the server URL that
-/// request carries (the login form sources it from `VITE_SERVER_URL`). This
-/// mirrors the mobile UniFFI client, which is constructed with a runtime base
-/// URL rather than a compile-time constant; `DEFAULT_BASE_URL` is only the
-/// dev/localhost fallback when no URL is supplied. Once built, the engine's URL
-/// is fixed (see [`ensure_requested_base_url`]); a page reload starts fresh.
+/// Holds the engine for the current browser login attempt or session.
 struct EngineHolder {
-    slot: RwLock<Option<Arc<SyncEngine>>>,
-    // Bumped when the engine is installed so a `wait_for_state_change` that began
-    // before login (no engine yet) wakes and begins tracking the new engine.
-    installed: watch::Sender<u64>,
+    slot: RwLock<Option<HeldEngine>>,
+    // Serializes login, registration, resume and logout across their awaits.
+    auth: Mutex<()>,
+    // Bumped whenever the held engine changes. It is also the high half of the
+    // public state version, so replacing an engine cannot move that version
+    // backwards.
+    installed: watch::Sender<u32>,
+}
+
+#[derive(Clone)]
+struct HeldEngine {
+    engine: Arc<SyncEngine>,
+    generation: u32,
 }
 
 static HOLDER: LazyLock<EngineHolder> = LazyLock::new(|| {
     let (installed, _) = watch::channel(0);
     EngineHolder {
         slot: RwLock::new(None),
+        auth: Mutex::new(()),
         installed,
     }
 });
 
 impl EngineHolder {
     fn engine(&self) -> Option<Arc<SyncEngine>> {
-        self.slot.read().expect("engine slot poisoned").clone()
+        self.slot
+            .read()
+            .expect("engine slot poisoned")
+            .as_ref()
+            .map(|held| Arc::clone(&held.engine))
     }
 
-    /// Return the engine, building it bound to `requested` the first time. Once an
-    /// engine exists, `requested` must match its base URL; an empty request
-    /// imposes no constraint. The body holds no `.await`, so on the single-threaded
-    /// wasm runtime the check-and-build is atomic.
-    fn get_or_build(&self, requested: &str) -> Result<Arc<SyncEngine>, JsValue> {
-        let mut slot = self.slot.write().expect("engine slot poisoned");
-        if let Some(engine) = slot.as_ref() {
-            ensure_requested_base_url(engine, requested)?;
-            return Ok(Arc::clone(engine));
+    /// An engine bound to `requested`.
+    ///
+    /// A different URL replaces a logged-out engine left behind by a failed
+    /// attempt. An authenticated engine stays pinned to its server. The caller
+    /// holds `auth`, so the state check and the replacement are one
+    /// transition.
+    async fn get_or_build(&self, requested: &str) -> Result<Arc<SyncEngine>, JsValue> {
+        let held = self.slot.read().expect("engine slot poisoned").clone();
+        if let Some(held) = held {
+            if requested_base_url_matches(&held.engine, requested) {
+                return Ok(held.engine);
+            }
+            if held.engine.get_state().await.session.is_some() {
+                // Neither URL goes in the message: it is rendered in the page,
+                // and a server address can carry a token or a host the user did
+                // not mean to show.
+                return Err(js_error(
+                    "Server URL is fixed while logged in; log out to change it",
+                ));
+            }
         }
+        let mut slot = self.slot.write().expect("engine slot poisoned");
         let trimmed = requested.trim();
         let url = if trimmed.is_empty() {
             DEFAULT_BASE_URL
@@ -59,11 +79,27 @@ impl EngineHolder {
             trimmed
         };
         let engine = SyncEngine::try_new_with_data_dir(url, "web").map_err(js_error)?;
-        *slot = Some(Arc::clone(&engine));
+        let generation = self.installed.borrow().wrapping_add(1);
+        *slot = Some(HeldEngine {
+            engine: Arc::clone(&engine),
+            generation,
+        });
         drop(slot);
-        self.installed
-            .send_modify(|generation| *generation = generation.wrapping_add(1));
+        self.installed.send_replace(generation);
         Ok(engine)
+    }
+
+    fn clear_if_current(&self, engine: &Arc<SyncEngine>) {
+        let mut slot = self.slot.write().expect("engine slot poisoned");
+        if slot
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(&held.engine, engine))
+        {
+            *slot = None;
+            let generation = self.installed.borrow().wrapping_add(1);
+            drop(slot);
+            self.installed.send_replace(generation);
+        }
     }
 
     async fn current_state(&self) -> AppState {
@@ -74,23 +110,47 @@ impl EngineHolder {
     }
 
     fn state_version(&self) -> u64 {
-        self.engine().map_or(0, |engine| engine.state_version())
+        self.slot
+            .read()
+            .expect("engine slot poisoned")
+            .as_ref()
+            .map_or_else(
+                || compose_version(*self.installed.borrow(), 0),
+                |held| compose_version(held.generation, held.engine.state_version()),
+            )
     }
 
-    /// Suspend until the state version advances past `seen`. Before login there is
-    /// no engine and the version is fixed at 0, so wait for an engine to be
-    /// installed; afterwards delegate to the engine's own change watch. The engine
-    /// lives for the rest of the page, so its version stays monotonic.
+    /// Waits until the held engine changes or its state advances.
+    ///
+    /// The generation in the public version keeps replacement monotonic, and
+    /// wakes a waiter still subscribed to the previous engine.
     async fn wait_for_state_change(&self, seen: u64) -> Result<u64, JsValue> {
         // Subscribe before the first check so an install that races the check is
         // not missed.
         let mut installed = self.installed.subscribe();
         loop {
-            if let Some(engine) = self.engine() {
-                return engine
-                    .wait_for_state_change_after(seen)
-                    .await
-                    .map_err(js_error);
+            let held = self.slot.read().expect("engine slot poisoned").clone();
+            if let Some(held) = held {
+                let seen_generation = (seen >> 32) as u32;
+                if seen_generation != held.generation {
+                    return Ok(compose_version(
+                        held.generation,
+                        held.engine.state_version(),
+                    ));
+                }
+                let local_seen = seen & u32::MAX as u64;
+                tokio::select! {
+                    changed = held.engine.wait_for_state_change_after(local_seen) => {
+                        return changed.map(|version| compose_version(held.generation, version)).map_err(js_error);
+                    }
+                    changed = installed.changed() => {
+                        changed.map_err(|_| js_error("engine holder closed"))?;
+                        continue;
+                    }
+                }
+            }
+            if seen != compose_version(*installed.borrow(), 0) {
+                return Ok(compose_version(*installed.borrow(), 0));
             }
             installed
                 .changed()
@@ -100,8 +160,11 @@ impl EngineHolder {
     }
 }
 
-/// Resolve the engine for an operation that requires a session, erroring if the
-/// user has not logged in or registered yet this page load.
+fn compose_version(generation: u32, engine_version: u64) -> u64 {
+    (u64::from(generation) << 32) | engine_version.min(u32::MAX as u64)
+}
+
+/// Resolve the engine for an operation that requires a session.
 fn engine_or_error() -> Result<Arc<SyncEngine>, JsValue> {
     HOLDER.engine().ok_or_else(|| js_error("Not logged in"))
 }
@@ -134,8 +197,9 @@ pub fn login(
     server_url: String,
 ) -> Promise {
     ok_promise(async move {
+        let _auth = HOLDER.auth.lock().await;
         let passphrase = Zeroizing::new(passphrase);
-        let engine = HOLDER.get_or_build(&server_url)?;
+        let engine = HOLDER.get_or_build(&server_url).await?;
         engine
             .login_with_platform(
                 &passphrase,
@@ -158,9 +222,10 @@ pub fn register(
     server_url: String,
 ) -> Promise {
     ok_promise(async move {
+        let _auth = HOLDER.auth.lock().await;
         let access_key = Zeroizing::new(access_key);
         let passphrase = Zeroizing::new(passphrase);
-        let engine = HOLDER.get_or_build(&server_url)?;
+        let engine = HOLDER.get_or_build(&server_url).await?;
         let username = engine
             .register_with_platform(
                 &access_key,
@@ -189,9 +254,10 @@ pub fn resume(
     server_url: String,
 ) -> Promise {
     ok_promise(async move {
+        let _auth = HOLDER.auth.lock().await;
         let data_key = decode_resume_key(&data_key)?;
         let wrapping_key = decode_resume_key(&wrapping_key)?;
-        let engine = HOLDER.get_or_build(&server_url)?;
+        let engine = HOLDER.get_or_build(&server_url).await?;
         engine
             .resume_with_platform(
                 token,
@@ -227,12 +293,12 @@ pub fn session_resume_material() -> Promise {
         Reflect::set(
             &object,
             &JsValue::from("dataKey"),
-            &JsValue::from(STANDARD.encode(&*material.data_key)),
+            &JsValue::from(STANDARD.encode(material.data_key.as_slice())),
         )?;
         Reflect::set(
             &object,
             &JsValue::from("wrappingKey"),
-            &JsValue::from(STANDARD.encode(&*material.device_identity_wrapping_key)),
+            &JsValue::from(STANDARD.encode(material.device_identity_wrapping_key.as_slice())),
         )?;
         Ok(object.into())
     })
@@ -241,8 +307,10 @@ pub fn session_resume_material() -> Promise {
 #[wasm_bindgen(js_name = logout)]
 pub fn logout() -> Promise {
     ok_promise(async {
+        let _auth = HOLDER.auth.lock().await;
         if let Some(engine) = HOLDER.engine() {
             engine.logout().await.map_err(js_error)?;
+            HOLDER.clear_if_current(&engine);
         }
         Ok(JsValue::UNDEFINED)
     })
@@ -252,8 +320,7 @@ pub fn logout() -> Promise {
 pub fn get_state() -> Promise {
     ok_promise(async {
         let state = HOLDER.current_state().await;
-        let value = serde_wasm_bindgen::to_value(&state).map_err(js_error)?;
-        Ok(value)
+        to_js(&state)
     })
 }
 
@@ -345,6 +412,131 @@ pub fn delete_file(file_id: String) -> Promise {
     })
 }
 
+/// Create a schedule series from its JSON form.
+///
+/// The item crosses as JSON, not as flattened arguments: a recurrence rule
+/// does not reduce to a handful of strings. `packages/shared` owns the
+/// matching TypeScript shape.
+#[wasm_bindgen(js_name = createScheduleItem)]
+pub fn create_schedule_item(item: JsValue) -> Promise {
+    ok_promise(async move {
+        let item: ScheduleItem = serde_wasm_bindgen::from_value(item).map_err(js_error)?;
+        let object_id = engine_or_error()?
+            .create_schedule_item(item)
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::from_str(&object_id))
+    })
+}
+
+/// Replace a series with an edited version. Returns the new object id.
+#[wasm_bindgen(js_name = updateScheduleItem)]
+pub fn update_schedule_item(object_id: String, item: JsValue, expected_revision: f64) -> Promise {
+    ok_promise(async move {
+        let item: ScheduleItem = serde_wasm_bindgen::from_value(item).map_err(js_error)?;
+        if !expected_revision.is_finite()
+            || expected_revision < 1.0
+            || expected_revision.fract() != 0.0
+            || expected_revision > 9_007_199_254_740_991.0
+        {
+            return Err(js_error("Invalid schedule revision"));
+        }
+        let replacement = engine_or_error()?
+            .update_schedule_item(&object_id, item, expected_revision as u64)
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::from_str(&replacement))
+    })
+}
+
+#[wasm_bindgen(js_name = deleteScheduleObject)]
+pub fn delete_schedule_object(object_id: String) -> Promise {
+    ok_promise(async move {
+        engine_or_error()?
+            .delete_schedule_object(&object_id)
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::UNDEFINED)
+    })
+}
+
+/// Expand every series into the occurrences that fall in `[from, to)`.
+///
+/// `observer_zone` is an IANA name; it resolves floating and all-day spans,
+/// which have no zone of their own.
+#[wasm_bindgen(js_name = expandSchedule)]
+pub fn expand_schedule(from: String, to: String, observer_zone: String) -> Promise {
+    ok_promise(async move {
+        let occurrences = engine_or_error()?
+            .expand_schedule(&from, &to, &observer_zone)
+            .await
+            .map_err(js_error)?;
+        to_js(&occurrences)
+    })
+}
+
+/// Start the timer using the opaque context returned by expansion.
+/// Omit the context for unplanned work.
+#[wasm_bindgen(js_name = startActual)]
+pub fn start_actual(plan_context: Option<String>) -> Promise {
+    ok_promise(async move {
+        let object_id = engine_or_error()?
+            .start_actual(plan_context.as_deref())
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::from_str(&object_id))
+    })
+}
+
+#[wasm_bindgen(js_name = stopActual)]
+pub fn stop_actual(object_id: String) -> Promise {
+    ok_promise(async move {
+        let replacement = engine_or_error()?
+            .stop_actual(&object_id)
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::from_str(&replacement))
+    })
+}
+
+#[wasm_bindgen(js_name = actualsBetween)]
+pub fn actuals_between(from: String, to: String) -> Promise {
+    ok_promise(async move {
+        let actuals = engine_or_error()?
+            .actuals_between(&from, &to)
+            .await
+            .map_err(js_error)?;
+        to_js(&actuals)
+    })
+}
+
+#[wasm_bindgen(js_name = addCalendarSource)]
+pub fn add_calendar_source(name: String, url: String) -> Promise {
+    ok_promise(async move {
+        let object_id = engine_or_error()?
+            .add_calendar_source(&name, &url)
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::from_str(&object_id))
+    })
+}
+
+/// Pull a calendar feed and reconcile it.
+///
+/// Rejects in the browser: a page cannot read a third-party calendar URL
+/// without CORS headers no provider sends. Sources sync from the desktop or
+/// mobile app, and their events reach the browser through normal object sync.
+#[wasm_bindgen(js_name = syncCalendarSource)]
+pub fn sync_calendar_source(object_id: String) -> Promise {
+    ok_promise(async move {
+        let report = engine_or_error()?
+            .sync_calendar_source(&object_id)
+            .await
+            .map_err(js_error)?;
+        to_js(&report)
+    })
+}
+
 #[wasm_bindgen(js_name = createCollabDoc)]
 pub fn create_collab_doc() -> Promise {
     ok_promise(async {
@@ -352,8 +544,7 @@ pub fn create_collab_doc() -> Promise {
             .create_collab_doc()
             .await
             .map_err(js_error)?;
-        let value = serde_wasm_bindgen::to_value(&item).map_err(js_error)?;
-        Ok(value)
+        to_js(&item)
     })
 }
 
@@ -375,8 +566,7 @@ pub fn rename_collab_doc(object_id: String, title: String) -> Promise {
             .rename_collab_doc(&object_id, &title)
             .await
             .map_err(js_error)?;
-        let value = serde_wasm_bindgen::to_value(&item).map_err(js_error)?;
-        Ok(value)
+        to_js(&item)
     })
 }
 
@@ -387,8 +577,7 @@ pub fn get_collab_doc_meta(object_id: String) -> Promise {
             .get_collab_doc_meta(&object_id)
             .await
             .map_err(js_error)?;
-        let value = serde_wasm_bindgen::to_value(&item).map_err(js_error)?;
-        Ok(value)
+        to_js(&item)
     })
 }
 
@@ -396,8 +585,7 @@ pub fn get_collab_doc_meta(object_id: String) -> Promise {
 pub fn list_devices() -> Promise {
     ok_promise(async {
         let devices = engine_or_error()?.list_devices().await.map_err(js_error)?;
-        let value = serde_wasm_bindgen::to_value(&devices).map_err(js_error)?;
-        Ok(value)
+        to_js(&devices)
     })
 }
 
@@ -412,21 +600,11 @@ pub fn remove_device(device_id: String) -> Promise {
     })
 }
 
-/// Guard that the engine's bound URL matches a later per-request URL. An empty
-/// request imposes no constraint. The engine binds to the first login/register
-/// URL, so this only rejects an attempt to switch servers without a page reload.
-fn ensure_requested_base_url(engine: &SyncEngine, requested: &str) -> Result<(), JsValue> {
-    let requested = requested.trim();
-    if requested.is_empty() {
-        return Ok(());
-    }
-    let configured = engine.base_url();
-    if normalize_server_url(requested) == normalize_server_url(&configured) {
-        return Ok(());
-    }
-    Err(js_error(format!(
-        "Server URL is fixed for this session: configured {configured}, requested {requested}"
-    )))
+/// An empty request means the current server. A nonempty one names the server
+/// it wants.
+fn requested_base_url_matches(engine: &SyncEngine, requested: &str) -> bool {
+    requested.trim().is_empty()
+        || normalize_server_url(requested) == normalize_server_url(&engine.base_url())
 }
 
 fn normalize_server_url(url: &str) -> &str {
@@ -473,6 +651,15 @@ where
 
 fn js_error(error: impl ToString) -> JsValue {
     js_sys::Error::new(&error.to_string()).into()
+}
+
+/// Converts a value to JavaScript, writing an absent `Option` as `null`.
+///
+/// `serde_wasm_bindgen::to_value` writes `undefined` instead, which does not
+/// match the `null` the Tauri commands return for the same fields.
+fn to_js<T: Serialize + ?Sized>(value: &T) -> Result<JsValue, JsValue> {
+    let serializer = serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true);
+    value.serialize(&serializer).map_err(js_error)
 }
 
 fn clipboard_payload_value(payload: ClipboardPayload) -> Result<JsValue, JsValue> {

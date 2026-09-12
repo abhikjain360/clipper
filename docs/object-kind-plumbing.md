@@ -26,7 +26,7 @@ alone: **86 occurrences across 7 Rust files**
 `server/routes/collab.rs: 10`, `client/local_store.rs: 10`, plus 1 each in
 `client/api_client.rs`, `server/ws.rs`, `server/state.rs`) — but the variant
 literals are the minority of the real cost, which lives in the per-kind
-*shapes* around them.
+_shapes_ around them.
 
 Legend: **MECH** = mechanical (same shape repeated per kind; a checklist edit);
 **SPEC** = kind-specific (real domain logic no registry can write for you).
@@ -39,14 +39,14 @@ Legend: **MECH** = mechanical (same shape repeated per kind; a checklist edit);
 
 `Collab` was threaded end-to-end by six commits on `main`:
 
-| SHA (short) | Date | Message | Files | +/- |
-|---|---|---|---|---|
-| `746c259` | 2026-06-14 | feat: collab docs schema, api types, and server CRUD routes | 13 | +791/-18 |
-| `8cffd25` | 2026-06-14 | feat: collab docs schema, api types, and server CRUD routes (client/daemon/web half) | 13 | +861/-39 |
-| `c3ca0c8` | 2026-06-20 | mobile: get the Android app building/running and wire collab docs through the bridge | 9 | +170/-17 |
-| `e36ec32` | 2026-06-20 | mobile: add collab docs UI and support per-login server selection | 3 | +174/-22 |
-| `d14be93` | 2026-06-27 | feat(collab): live editing, language selector, editor vim toggle | 15 | +1450/-104 |
-| `0295964` | 2026-08-26 | fix(collab): renameable docs, correct share links, working desktop editor | 43 | +1695/-164 |
+| SHA (short) | Date       | Message                                                                              | Files | +/-        |
+| ----------- | ---------- | ------------------------------------------------------------------------------------ | ----- | ---------- |
+| `746c259`   | 2026-06-14 | feat: collab docs schema, api types, and server CRUD routes                          | 13    | +791/-18   |
+| `8cffd25`   | 2026-06-14 | feat: collab docs schema, api types, and server CRUD routes (client/daemon/web half) | 13    | +861/-39   |
+| `c3ca0c8`   | 2026-06-20 | mobile: get the Android app building/running and wire collab docs through the bridge | 9     | +170/-17   |
+| `e36ec32`   | 2026-06-20 | mobile: add collab docs UI and support per-login server selection                    | 3     | +174/-22   |
+| `d14be93`   | 2026-06-27 | feat(collab): live editing, language selector, editor vim toggle                     | 15    | +1450/-104 |
+| `0295964`   | 2026-08-26 | fix(collab): renameable docs, correct share links, working desktop editor            | 43    | +1695/-164 |
 
 The minimal end-to-end threading is `746c259` + `8cffd25`; everything after is
 domain behavior (Y-sync live editing, sharing, rename, mobile viewer).
@@ -75,7 +75,7 @@ Consolidated, deduplicated file list across all six commits (~45 unique files):
   `web/package.json`, `mobile/package.json`, `mobile/metro.config.js`,
   `patches/uniffi-bindgen-react-native@0.31.0-3.patch`
 
-Note that collab is the *expensive* kind template: it is server-visible, has a
+Note that collab is the _expensive_ kind template: it is server-visible, has a
 dedicated table, dedicated JSON routes, a Y-sync WebSocket, and public share
 links. A new **encrypted** kind (the likely shape of schedule/habits/tasks)
 reuses the generic `/api/objects/*` pipeline and is substantially cheaper —
@@ -85,25 +85,25 @@ touch, minus `collab.rs`, `collab_sync.rs`, `entity/collab_docs.rs`,
 
 ### api-types (`crates/api-types/src/lib.rs`)
 
-| Line | Code (quoted) | Change for new kind | Class |
-|---|---|---|---|
-| 311 | `pub enum ObjectKind { Clipboard, File, Collab }` | Add variant; `serde`/`strum` snake_case wire name auto-derives. | MECH |
-| 322 | `pub enum ObjectEventType { Created, Updated, Deleted }` with doc *"Only collab docs can be updated… encrypted objects are immutable"* | No structural change, but the doc and every server CHECK constraint encoding this policy must be revisited if the new kind mutates. | SPEC (policy) |
-| 299 | `pub struct ClipboardMeta { mime_type, size }` | Add per-kind encrypted metadata struct (e.g. `ScheduleEventMeta`). | SPEC |
-| 837 | `pub struct FileMeta { … }` | Same. | SPEC |
-| 527–571 | `RenameCollabDocRequest`, `CreateCollabDocResponse`, `CollabDocMeta`, `CollabDocListResponse`, `ShareMeta` | Only if the new kind is server-visible. | SPEC |
-| 357 | `pub object_type: ObjectKind` in `ObjectEnvelopeBodyV1` | None — flows through envelope/AAD automatically. | MECH (zero) |
-| 408 | `pub kind: ObjectKind` in `ObjectInitRequest` | None. | MECH (zero) |
-| 486 | `pub kind: ObjectKind` in `ObjectListItem` | None. | MECH (zero) |
-| 623 | `object_kind: ObjectKind` in `WsServerMessage::Event` | None. | MECH (zero) |
+| Line    | Code (quoted)                                                                                                                          | Change for new kind                                                                                                                 | Class         |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| 311     | `pub enum ObjectKind { Clipboard, File, Collab }`                                                                                      | Add variant; `serde`/`strum` snake_case wire name auto-derives.                                                                     | MECH          |
+| 322     | `pub enum ObjectEventType { Created, Updated, Deleted }` with doc _"Only collab docs can be updated… encrypted objects are immutable"_ | No structural change, but the doc and every server CHECK constraint encoding this policy must be revisited if the new kind mutates. | SPEC (policy) |
+| 299     | `pub struct ClipboardMeta { mime_type, size }`                                                                                         | Add per-kind encrypted metadata struct (e.g. `ScheduleEventMeta`).                                                                  | SPEC          |
+| 837     | `pub struct FileMeta { … }`                                                                                                            | Same.                                                                                                                               | SPEC          |
+| 527–571 | `RenameCollabDocRequest`, `CreateCollabDocResponse`, `CollabDocMeta`, `CollabDocListResponse`, `ShareMeta`                             | Only if the new kind is server-visible.                                                                                             | SPEC          |
+| 357     | `pub object_type: ObjectKind` in `ObjectEnvelopeBodyV1`                                                                                | None — flows through envelope/AAD automatically.                                                                                    | MECH (zero)   |
+| 408     | `pub kind: ObjectKind` in `ObjectInitRequest`                                                                                          | None.                                                                                                                               | MECH (zero)   |
+| 486     | `pub kind: ObjectKind` in `ObjectListItem`                                                                                             | None.                                                                                                                               | MECH (zero)   |
+| 623     | `object_kind: ObjectKind` in `WsServerMessage::Event`                                                                                  | None.                                                                                                                               | MECH (zero)   |
 
 ### app-types (`crates/app-types/src/lib.rs`) — the UniFFI-derivation layer
 
-| Line | Code | Change | Class |
-|---|---|---|---|
-| 17, 29, 49 | `DecryptedClipboardItem`, `DecryptedFileItem`, `CollabItem` — each `#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]` | Add one display record per kind. Fields are kind-shaped (`text` vs `filename` vs `title`/`share_url`). | SPEC (but tiny) |
-| 96–98 | `pub clipboard_items: Vec<DecryptedClipboardItem>, pub files: Vec<DecryptedFileItem>, pub collab_docs: Vec<CollabItem>` inside `AppState` (itself a `uniffi::Record`) | Add one `Vec` field. | MECH |
-| 137 | `pub struct ClipboardPayload { mime_type, bytes, text }` | Add on-demand payload struct if the kind has lazy payloads. | SPEC |
+| Line       | Code                                                                                                                                                                  | Change                                                                                                 | Class           |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | --------------- |
+| 17, 29, 49 | `DecryptedClipboardItem`, `DecryptedFileItem`, `CollabItem` — each `#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]`                                          | Add one display record per kind. Fields are kind-shaped (`text` vs `filename` vs `title`/`share_url`). | SPEC (but tiny) |
+| 96–98      | `pub clipboard_items: Vec<DecryptedClipboardItem>, pub files: Vec<DecryptedFileItem>, pub collab_docs: Vec<CollabItem>` inside `AppState` (itself a `uniffi::Record`) | Add one `Vec` field.                                                                                   | MECH            |
+| 137        | `pub struct ClipboardPayload { mime_type, bytes, text }`                                                                                                              | Add on-demand payload struct if the kind has lazy payloads.                                            | SPEC            |
 
 ### core (`crates/core`) — crypto
 
@@ -113,53 +113,53 @@ This is the best-generalized layer already.
 
 ### client engine (`crates/client/src/engine.rs`) — the densest Rust layer
 
-| Line | Code | Change | Class |
-|---|---|---|---|
-| 543–711 | `pub async fn send_clipboard_payload(...)` — builds `ObjectKind::Clipboard` + `ClipboardMeta` envelope, dedups, calls `persist_local_clipboard_present_encrypted` | New `send_<kind>` creator; MIME/dup rules are domain logic. | SPEC |
-| 880–994 | `pub async fn upload_file_bytes(...)` — `ObjectKind::File` + `FileMeta` | New creator (or generalize). | SPEC |
-| 996–1031 | `download_file_bytes` checks `file_item.kind != ObjectKind::File` | New downloader; kind check is mechanical, dialog/stream logic isn't. | MECH + SPEC |
-| 1068–1085 | `delete_file` → `apply_local_delete(ObjectKind::File, …)` | New delete wrapper. | MECH |
-| 1097–1165 | `create_collab_doc`, `rename_collab_doc`, `delete_collab_doc` (client-side seq allocation) | Only for server-visible kinds. | SPEC |
-| 1181–1189 | `publish_visible_state` assigns `state.clipboard_items / files / collab_docs` | Add one assignment. | MECH |
-| 1191–1221 | `start_reconciliation` spawns `snapshot_files`, `snapshot_clipboard`, `snapshot_collab_docs` | Spawn one more snapshot task. | MECH |
-| 1248–1275 | `handle_ws_text` matches `ObjectEventType::Updated if object_kind == ObjectKind::Collab` and `Deleted if kind == File \|\| Collab` | Decide the new kind's event semantics. | SPEC (policy) |
-| 1292–1443 | `snapshot_files` / `snapshot_clipboard` / `snapshot_collab_docs` — `list_objects(Some(kind), …)` + `sweep_kind(kind, …)` (collab uses dedicated `list_collab_docs()`) | Add `snapshot_<kind>`; the encrypted two are near-identical clones. | MECH |
-| 1456–1514 | `persist_file_snapshot_item`, `persist_clipboard_snapshot_item`, `persist_collab_snapshot_item` | Add persist helper. | MECH |
-| 1705–1726 | `materialize_object` match: `Clipboard => decrypt_clipboard_object_item_with_api…`, `File => decrypt_file_object_item…`, `Collab => {}` | Add a materialization arm. | SPEC (decryption differs) |
+| Line      | Code                                                                                                                                                                  | Change                                                               | Class                     |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------- |
+| 543–711   | `pub async fn send_clipboard_payload(...)` — builds `ObjectKind::Clipboard` + `ClipboardMeta` envelope, dedups, calls `persist_local_clipboard_present_encrypted`     | New `send_<kind>` creator; MIME/dup rules are domain logic.          | SPEC                      |
+| 880–994   | `pub async fn upload_file_bytes(...)` — `ObjectKind::File` + `FileMeta`                                                                                               | New creator (or generalize).                                         | SPEC                      |
+| 996–1031  | `download_file_bytes` checks `file_item.kind != ObjectKind::File`                                                                                                     | New downloader; kind check is mechanical, dialog/stream logic isn't. | MECH + SPEC               |
+| 1068–1085 | `delete_file` → `apply_local_delete(ObjectKind::File, …)`                                                                                                             | New delete wrapper.                                                  | MECH                      |
+| 1097–1165 | `create_collab_doc`, `rename_collab_doc`, `delete_collab_doc` (client-side seq allocation)                                                                            | Only for server-visible kinds.                                       | SPEC                      |
+| 1181–1189 | `publish_visible_state` assigns `state.clipboard_items / files / collab_docs`                                                                                         | Add one assignment.                                                  | MECH                      |
+| 1191–1221 | `start_reconciliation` spawns `snapshot_files`, `snapshot_clipboard`, `snapshot_collab_docs`                                                                          | Spawn one more snapshot task.                                        | MECH                      |
+| 1248–1275 | `handle_ws_text` matches `ObjectEventType::Updated if object_kind == ObjectKind::Collab` and `Deleted if kind == File \|\| Collab`                                    | Decide the new kind's event semantics.                               | SPEC (policy)             |
+| 1292–1443 | `snapshot_files` / `snapshot_clipboard` / `snapshot_collab_docs` — `list_objects(Some(kind), …)` + `sweep_kind(kind, …)` (collab uses dedicated `list_collab_docs()`) | Add `snapshot_<kind>`; the encrypted two are near-identical clones.  | MECH                      |
+| 1456–1514 | `persist_file_snapshot_item`, `persist_clipboard_snapshot_item`, `persist_collab_snapshot_item`                                                                       | Add persist helper.                                                  | MECH                      |
+| 1705–1726 | `materialize_object` match: `Clipboard => decrypt_clipboard_object_item_with_api…`, `File => decrypt_file_object_item…`, `Collab => {}`                               | Add a materialization arm.                                           | SPEC (decryption differs) |
 
 ### client api_client (`crates/client/src/api_client.rs`)
 
-| Line | Code | Change | Class |
-|---|---|---|---|
+| Line     | Code                                                                                                                                                                                                              | Change                                                                                                          | Class             |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------- |
 | 956–1058 | `encrypt_clipboard_meta` / `decrypt_clipboard_meta` / `encrypt_clipboard_payload` / `decrypt_clipboard_payload` / `encrypt_file_meta_bytes` / … `_blob_bytes` — all thin AEAD wrappers around `K` + `ObjectAadV1` | Add meta/payload encrypt+decrypt helpers per encrypted kind. The bodies are clones; only the meta type differs. | MECH (near-clone) |
-| 686–774 | `create_collab_doc`, `get_collab_doc_meta`, `list_collab_docs`, `rename_collab_doc`, `delete_collab_doc` — JSON (not postcard) endpoints | Only for server-visible kinds. | SPEC |
-| 577–611 | `list_objects(kind: Option<ObjectKind>, …)` | None — already generic. | MECH (zero) |
+| 686–774  | `create_collab_doc`, `get_collab_doc_meta`, `list_collab_docs`, `rename_collab_doc`, `delete_collab_doc` — JSON (not postcard) endpoints                                                                          | Only for server-visible kinds.                                                                                  | SPEC              |
+| 577–611  | `list_objects(kind: Option<ObjectKind>, …)`                                                                                                                                                                       | None — already generic.                                                                                         | MECH (zero)       |
 
 ### client local_store (`crates/client/src/local_store.rs`) — second densest
 
-| Line | Code | Change | Class |
-|---|---|---|---|
-| 52–58 | `enum LocalObjectData { Clipboard(LocalClipboardRecord), File(LocalFileRecord), Collab(LocalCollabRecord) }` (`#[serde(tag = "kind", content = "record")]`) | Add variant + record struct. | MECH |
-| 60–80 | `LocalClipboardRecord { text, mime_type, payload_size }`, `LocalFileRecord { filename, … }`, `LocalCollabRecord { title, share_token, … }` | Record fields are kind-shaped. | SPEC (tiny) |
-| 121–126 | `enum StoredPresentContent { Encrypted(EncryptedObject), Collab(StoredCollabRecord) }` | Binary choice per new kind: encrypted blob or plaintext. | SPEC (one word) |
-| 180–184 | `struct LocalVisibleState { clipboard_items, files, collab_docs }` | Add field. | MECH |
-| 234–695 | Six persist fns: `persist_local_{clipboard,file,collab}_present*` + `_inner` variants | Two near-clone persist helpers per kind. | MECH |
-| 814–838 | `recent_clipboard_items_inner`, `file_items_inner`, `collab_items_inner` | Add one filter fn. | MECH |
-| 852–872 | `decrypt_stored_object_record_preview` match over `ObjectKind::{Clipboard, File, Collab}` | Add preview arm; the decrypt is kind-shaped. | SPEC |
-| 1173–1185, 1391–1406 | `remove_payloads_for_object` special-cases `ObjectKind::Clipboard` (sidecar payload layout) | Extend if the new kind has sidecar payloads. | SPEC |
-| 1544–1627 | `decrypt_file_record`, `clipboard_item_from_record`, `file_item_from_record`, `collab_item_from_record` | Add `<kind>_item_from_record`. | MECH |
+| Line                 | Code                                                                                                                                                        | Change                                                   | Class           |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | --------------- |
+| 52–58                | `enum LocalObjectData { Clipboard(LocalClipboardRecord), File(LocalFileRecord), Collab(LocalCollabRecord) }` (`#[serde(tag = "kind", content = "record")]`) | Add variant + record struct.                             | MECH            |
+| 60–80                | `LocalClipboardRecord { text, mime_type, payload_size }`, `LocalFileRecord { filename, … }`, `LocalCollabRecord { title, share_token, … }`                  | Record fields are kind-shaped.                           | SPEC (tiny)     |
+| 121–126              | `enum StoredPresentContent { Encrypted(EncryptedObject), Collab(StoredCollabRecord) }`                                                                      | Binary choice per new kind: encrypted blob or plaintext. | SPEC (one word) |
+| 180–184              | `struct LocalVisibleState { clipboard_items, files, collab_docs }`                                                                                          | Add field.                                               | MECH            |
+| 234–695              | Six persist fns: `persist_local_{clipboard,file,collab}_present*` + `_inner` variants                                                                       | Two near-clone persist helpers per kind.                 | MECH            |
+| 814–838              | `recent_clipboard_items_inner`, `file_items_inner`, `collab_items_inner`                                                                                    | Add one filter fn.                                       | MECH            |
+| 852–872              | `decrypt_stored_object_record_preview` match over `ObjectKind::{Clipboard, File, Collab}`                                                                   | Add preview arm; the decrypt is kind-shaped.             | SPEC            |
+| 1173–1185, 1391–1406 | `remove_payloads_for_object` special-cases `ObjectKind::Clipboard` (sidecar payload layout)                                                                 | Extend if the new kind has sidecar payloads.             | SPEC            |
+| 1544–1627            | `decrypt_file_record`, `clipboard_item_from_record`, `file_item_from_record`, `collab_item_from_record`                                                     | Add `<kind>_item_from_record`.                           | MECH            |
 
 ### server routes — generic objects (`crates/server/src/routes/objects.rs`)
 
-| Line | Code | Change | Class |
-|---|---|---|---|
-| 188–202 | `let expires_at = match req.kind { ObjectKind::Clipboard => …, ObjectKind::File \| ObjectKind::Collab => None }` | Add TTL policy arm. | SPEC (policy, one line) |
-| 331–335, 790–796 | `broadcast_created(…)`; `if kind == ObjectKind::Clipboard { spawn_clipboard_trim(…) }` | Post-create side effects (retention trim) per kind. | SPEC |
-| 903–955 | `list_objects` parses `kind` query; applies `retained_clipboard_object_ids` only for Clipboard | Retention filter per kind. | SPEC |
-| 1091–1163 | `retained_clipboard_object_ids_raw`, `ensure_object_read_retained` (Clipboard-only) | Analogous retention if needed. | SPEC |
-| 1438–1448 | `if kind != ObjectKind::File { return Err(ObjectDeleteUnsupported) }` | Delete policy per kind. | SPEC (policy) |
-| 1539 | `object_kind: Set("file".into())` in the delete `event_log` row | **Hardcoded literal** — already a latent bug/assumption; must become `kind.to_string()` before a second deletable kind exists. | MECH (fix first) |
-| 250, 306, 774, 1270, 1317 | `kind: Set(kind.to_string())`, `insert_created_event(…, kind, …)`, list/download paths | None — generic. | MECH (zero) |
+| Line                      | Code                                                                                                             | Change                                                                                                                         | Class                   |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
+| 188–202                   | `let expires_at = match req.kind { ObjectKind::Clipboard => …, ObjectKind::File \| ObjectKind::Collab => None }` | Add TTL policy arm.                                                                                                            | SPEC (policy, one line) |
+| 331–335, 790–796          | `broadcast_created(…)`; `if kind == ObjectKind::Clipboard { spawn_clipboard_trim(…) }`                           | Post-create side effects (retention trim) per kind.                                                                            | SPEC                    |
+| 903–955                   | `list_objects` parses `kind` query; applies `retained_clipboard_object_ids` only for Clipboard                   | Retention filter per kind.                                                                                                     | SPEC                    |
+| 1091–1163                 | `retained_clipboard_object_ids_raw`, `ensure_object_read_retained` (Clipboard-only)                              | Analogous retention if needed.                                                                                                 | SPEC                    |
+| 1438–1448                 | `if kind != ObjectKind::File { return Err(ObjectDeleteUnsupported) }`                                            | Delete policy per kind.                                                                                                        | SPEC (policy)           |
+| 1539                      | `object_kind: Set("file".into())` in the delete `event_log` row                                                  | **Hardcoded literal** — already a latent bug/assumption; must become `kind.to_string()` before a second deletable kind exists. | MECH (fix first)        |
+| 250, 306, 774, 1270, 1317 | `kind: Set(kind.to_string())`, `insert_created_event(…, kind, …)`, list/download paths                           | None — generic.                                                                                                                | MECH (zero)             |
 
 ### server routes — collab (`crates/server/src/routes/collab.rs`, ~7 endpoints)
 
@@ -172,30 +172,30 @@ collab is server-visible. An encrypted kind skips this file entirely.
 
 ### server support files
 
-| File:line | Code | Change | Class |
-|---|---|---|---|
-| `migration/m20260312_000001_create_tables.rs:179` | `.check(Expr::col(Objects::Kind).is_in(["clipboard", "file"]))` | Extend (superseded by m20260615's `CHECK (kind IN ('clipboard','file','collab'))` at line 75; a new kind needs a new migration widening it). | MECH |
-| `migration/m20260615_000002_collab_docs.rs:203,206` | `CHECK (object_kind IN ('clipboard','file','collab'))`, `(event_type='deleted' AND object_kind IN ('file','collab'))` | Widen; delete eligibility is a policy choice. | MECH + SPEC |
-| `migration/m20260826_000003_collab_doc_title.rs:44–48` | `event_type IN ('created','updated','deleted')`, `updated` restricted to `object_kind='collab'` | Widen if the new kind mutates. | SPEC (policy) |
-| `entity/collab_docs.rs` + `entity/mod.rs` | Dedicated SeaORM table | Only for server-visible kinds; then `nix run .#server-entities`. | SPEC |
-| `cleanup.rs:65–152` | `cleanup_expired_clipboard_objects`, `cleanup_excess_clipboard_objects`, `trim_user_clipboard` | Clone per kind with TTL/cap retention. | MECH (near-clone) |
-| `state.rs:54,383–409` | collab room map, `acquire_collab_room`/`release_collab_room` | Only for live-sync kinds. | SPEC |
-| `ws.rs:88–97,418–441` | `WsBroadcast { object_kind: ObjectKind, … }`, `get_latest_seq` | None — generic (one test fixture uses `ObjectKind::File`). | MECH (zero) |
+| File:line                                              | Code                                                                                                                  | Change                                                                                                                                       | Class             |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `migration/m20260312_000001_create_tables.rs:179`      | `.check(Expr::col(Objects::Kind).is_in(["clipboard", "file"]))`                                                       | Extend (superseded by m20260615's `CHECK (kind IN ('clipboard','file','collab'))` at line 75; a new kind needs a new migration widening it). | MECH              |
+| `migration/m20260615_000002_collab_docs.rs:203,206`    | `CHECK (object_kind IN ('clipboard','file','collab'))`, `(event_type='deleted' AND object_kind IN ('file','collab'))` | Widen; delete eligibility is a policy choice.                                                                                                | MECH + SPEC       |
+| `migration/m20260826_000003_collab_doc_title.rs:44–48` | `event_type IN ('created','updated','deleted')`, `updated` restricted to `object_kind='collab'`                       | Widen if the new kind mutates.                                                                                                               | SPEC (policy)     |
+| `entity/collab_docs.rs` + `entity/mod.rs`              | Dedicated SeaORM table                                                                                                | Only for server-visible kinds; then `nix run .#server-entities`.                                                                             | SPEC              |
+| `cleanup.rs:65–152`                                    | `cleanup_expired_clipboard_objects`, `cleanup_excess_clipboard_objects`, `trim_user_clipboard`                        | Clone per kind with TTL/cap retention.                                                                                                       | MECH (near-clone) |
+| `state.rs:54,383–409`                                  | collab room map, `acquire_collab_room`/`release_collab_room`                                                          | Only for live-sync kinds.                                                                                                                    | SPEC              |
+| `ws.rs:88–97,418–441`                                  | `WsBroadcast { object_kind: ObjectKind, … }`, `get_latest_seq`                                                        | None — generic (one test fixture uses `ObjectKind::File`).                                                                                   | MECH (zero)       |
 
 ### daemon-types protocol (`crates/daemon-types/src/protocol.rs`)
 
-| Line | Code | Change | Class |
-|---|---|---|---|
-| 66–86 | `enum DaemonCommand { … SendClipboard(SendClipboardParams), SendClipboardPayload(…), CopyToLocal(…), ClipboardPayload(…), UploadFile(…), DownloadFile(…), DeleteFile(…), CreateCollabDoc, DeleteCollabDoc(…), RenameCollabDoc(…), GetCollabDocMeta(…) }` | Add 1–4 variants per kind. | MECH |
-| 145–201 | Per-variant params structs (`SendClipboardParams { text }`, `UploadFileParams { file_path }`, `RenameCollabDocParams { object_id, title }`, …) | Add params/result structs. | MECH |
-| 358 | test fixture JSON containing `clipboard_items`, `files`, `collab_docs` | Update fixture. | MECH |
+| Line    | Code                                                                                                                                                                                                                                                     | Change                     | Class |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | ----- |
+| 66–86   | `enum DaemonCommand { … SendClipboard(SendClipboardParams), SendClipboardPayload(…), CopyToLocal(…), ClipboardPayload(…), UploadFile(…), DownloadFile(…), DeleteFile(…), CreateCollabDoc, DeleteCollabDoc(…), RenameCollabDoc(…), GetCollabDocMeta(…) }` | Add 1–4 variants per kind. | MECH  |
+| 145–201 | Per-variant params structs (`SendClipboardParams { text }`, `UploadFileParams { file_path }`, `RenameCollabDocParams { object_id, title }`, …)                                                                                                           | Add params/result structs. | MECH  |
+| 358     | test fixture JSON containing `clipboard_items`, `files`, `collab_docs`                                                                                                                                                                                   | Update fixture.            | MECH  |
 
 ### daemon handler (`crates/daemon/src/handler.rs`)
 
-| Line | Code | Change | Class |
-|---|---|---|---|
-| 392–434 | `match command { DaemonCommand::SendClipboard(..) => …, CreateCollabDoc => cmd_create_collab_doc(..), … }` | Add dispatch arm(s). | MECH |
-| 578–729 | `cmd_send_clipboard`, `cmd_upload_file`, `cmd_download_file`, `cmd_delete_file`, `cmd_create_collab_doc`, `cmd_delete_collab_doc`, `cmd_rename_collab_doc`, `cmd_get_collab_doc_meta` | Add thin handler(s) calling the engine. | MECH |
+| Line    | Code                                                                                                                                                                                  | Change                                  | Class |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- | ----- |
+| 392–434 | `match command { DaemonCommand::SendClipboard(..) => …, CreateCollabDoc => cmd_create_collab_doc(..), … }`                                                                            | Add dispatch arm(s).                    | MECH  |
+| 578–729 | `cmd_send_clipboard`, `cmd_upload_file`, `cmd_download_file`, `cmd_delete_file`, `cmd_create_collab_doc`, `cmd_delete_collab_doc`, `cmd_rename_collab_doc`, `cmd_get_collab_doc_meta` | Add thin handler(s) calling the engine. | MECH  |
 
 ### web-wasm (`crates/web-wasm/src/lib.rs`)
 
@@ -214,39 +214,39 @@ collab is server-visible. An encrypted kind skips this file entirely.
 
 ### web/src-tauri (`web/src-tauri/src/lib.rs`)
 
-| Line | Code | Change | Class |
-|---|---|---|---|
-| 69–138 | `generate_handler!([…, send_clipboard_text, upload_file_bytes, create_collab_doc, …])` | Register new commands. | MECH |
-| 237–499 | 12 `#[tauri::command]` fns, each forwarding one `DaemonCommand` variant | Add per-kind commands. | MECH |
+| Line    | Code                                                                                   | Change                 | Class |
+| ------- | -------------------------------------------------------------------------------------- | ---------------------- | ----- |
+| 69–138  | `generate_handler!([…, send_clipboard_text, upload_file_bytes, create_collab_doc, …])` | Register new commands. | MECH  |
+| 237–499 | 12 `#[tauri::command]` fns, each forwarding one `DaemonCommand` variant                | Add per-kind commands. | MECH  |
 
 ### packages/shared (`packages/shared/src/types.ts`, `index.ts`)
 
-| Line | Code | Change | Class |
-|---|---|---|---|
-| 3, 12, 21 | `ClipboardItem`, `FileItem`, `CollabItem` record types | Add `*Item` type. | MECH |
-| 62–64 | `clipboard_items: ClipboardItem[]; files: FileItem[]; collab_docs: CollabItem[]` in `AppState` | Add list field. | MECH |
-| 101–114 | `ClipperBackend` methods: `sendClipboardText`, `sendClipboardPayload`, `clipboardPayload`, `uploadFileBytes`, `downloadFileBytes`, `deleteFile`, `createCollabDoc`, `deleteCollabDoc`, `renameCollabDoc`, `getCollabDocMeta`, plus optional native-only hooks (`sendCurrentClipboardText?`, `uploadFileFromDialog?`, …) | Add 3–6 method signatures. | MECH |
+| Line      | Code                                                                                                                                                                                                                                                                                                                    | Change                     | Class |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | ----- |
+| 3, 12, 21 | `ClipboardItem`, `FileItem`, `CollabItem` record types                                                                                                                                                                                                                                                                  | Add `*Item` type.          | MECH  |
+| 62–64     | `clipboard_items: ClipboardItem[]; files: FileItem[]; collab_docs: CollabItem[]` in `AppState`                                                                                                                                                                                                                          | Add list field.            | MECH  |
+| 101–114   | `ClipperBackend` methods: `sendClipboardText`, `sendClipboardPayload`, `clipboardPayload`, `uploadFileBytes`, `downloadFileBytes`, `deleteFile`, `createCollabDoc`, `deleteCollabDoc`, `renameCollabDoc`, `getCollabDocMeta`, plus optional native-only hooks (`sendCurrentClipboardText?`, `uploadFileFromDialog?`, …) | Add 3–6 method signatures. | MECH  |
 
 ### web/src (shared React UI)
 
-| File:line | Code | Change | Class |
-|---|---|---|---|
-| `backend/tauri.ts:30–51` | One `invoke("<snake_case_cmd>", …)` per `ClipperBackend` method | Add mappings. | MECH |
-| `backend/index.ts:38–42,178` | `readClipboardText`, `writeClipboardText`, `resolveServerUrl` | Platform helpers are kind-shaped. | SPEC |
-| `App.tsx:399–453` | Nav buttons + `<Route>`s for `/`, `/files`, `/collab`, `/collab/:id` | Add nav + routes. | MECH |
-| `App.tsx:465,581,823,933` | `ClipboardPanel`, `FilesPanel`, `CollabPanel`, `CollabDocView` | Implement list/detail panels. | SPEC (real UI) |
-| `App.tsx:1115,1193,1423,1442` | `TitleField`, `SharePage`, `collabTitle`, `shareLink` | Collab/share-specific. | SPEC |
-| `CodeEditor.tsx` (whole file), `languages.ts:84` | Y-sync provider lifecycle, `DEFAULT_COLLAB_LANGUAGE_ID` | Only for live-collab kinds. | SPEC |
+| File:line                                        | Code                                                                 | Change                            | Class          |
+| ------------------------------------------------ | -------------------------------------------------------------------- | --------------------------------- | -------------- |
+| `backend/tauri.ts:30–51`                         | One `invoke("<snake_case_cmd>", …)` per `ClipperBackend` method      | Add mappings.                     | MECH           |
+| `backend/index.ts:38–42,178`                     | `readClipboardText`, `writeClipboardText`, `resolveServerUrl`        | Platform helpers are kind-shaped. | SPEC           |
+| `App.tsx:399–453`                                | Nav buttons + `<Route>`s for `/`, `/files`, `/collab`, `/collab/:id` | Add nav + routes.                 | MECH           |
+| `App.tsx:465,581,823,933`                        | `ClipboardPanel`, `FilesPanel`, `CollabPanel`, `CollabDocView`       | Implement list/detail panels.     | SPEC (real UI) |
+| `App.tsx:1115,1193,1423,1442`                    | `TitleField`, `SharePage`, `collabTitle`, `shareLink`                | Collab/share-specific.            | SPEC           |
+| `CodeEditor.tsx` (whole file), `languages.ts:84` | Y-sync provider lifecycle, `DEFAULT_COLLAB_LANGUAGE_ID`              | Only for live-collab kinds.       | SPEC           |
 
 ### mobile/src
 
-| File:line | Code | Change | Class |
-|---|---|---|---|
-| `App.tsx:54` | `type TabName = "clipboard" \| "files" \| "devices" \| "collab"` | Add tab literal. | MECH |
-| `App.tsx:348–388` | `<Tabs.Tab>`/`<Tabs.Content>` per kind | Add tab + content. | MECH |
+| File:line                  | Code                                                                                                         | Change                    | Class          |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------- | -------------- |
+| `App.tsx:54`               | `type TabName = "clipboard" \| "files" \| "devices" \| "collab"`                                             | Add tab literal.          | MECH           |
+| `App.tsx:348–388`          | `<Tabs.Tab>`/`<Tabs.Content>` per kind                                                                       | Add tab + content.        | MECH           |
 | `App.tsx:399–557,719–1080` | `ClipboardPanel`, `FilesPanel`, `CollabPanel`, `CollabDocReader`, `RenameDocDialog`, status label/color maps | Implement panels/dialogs. | SPEC (real UI) |
-| `backend.ts:35–65` | `readClipboardText`, `writeClipboardText`, `pickUploadFile`, `shareDownloadedFile` | Platform helpers. | SPEC |
-| `collabDoc.ts` (whole) | `subscribeToCollabDoc`, `collabWsUrl`, `CollabDocStatus` | Only for live-sync kinds. | SPEC |
+| `backend.ts:35–65`         | `readClipboardText`, `writeClipboardText`, `pickUploadFile`, `shareDownloadedFile`                           | Platform helpers.         | SPEC           |
+| `collabDoc.ts` (whole)     | `subscribeToCollabDoc`, `collabWsUrl`, `CollabDocStatus`                                                     | Only for live-sync kinds. | SPEC           |
 
 ### packages/mobile-bridge + generated bindings
 
@@ -261,14 +261,15 @@ record + factory + `FfiConverterType*` + sequence converter per kind),
 `generated/clipper_mobile_uniffi.ts` (1139 lines; 10 kind-scoped methods +
 checksums), `generated/clipper_mobile_uniffi-ffi.ts`, and
 `web/src/generated/wasm/clipper_web_wasm.{d.ts,js}` (10 kind-scoped exports
-each). Cost is zero *if* the codegen stays healthy; each new `uniffi::Record`
+each). Cost is zero _if_ the codegen stays healthy; each new `uniffi::Record`
 and `#[uniffi::export]` is ~60–100 generated lines.
 
 ### Reconciliation of methods (a) and (b)
 
 The two methods agree. Every file in the consolidated collab commit list is
 also a grep hit for per-kind structure, and vice versa, with three caveats:
-- grep misses *new* files a kind introduces (`collab.rs`, `collab_sync.rs`,
+
+- grep misses _new_ files a kind introduces (`collab.rs`, `collab_sync.rs`,
   `entity/collab_docs.rs`, migrations, `CodeEditor.tsx`, `collabDoc.ts`) —
   method (b) catches these.
 - method (b)'s diffs contain one-time collateral that is not per-kind cost
@@ -283,32 +284,32 @@ also a grep hit for per-kind structure, and vice versa, with three caveats:
 
 Approximate per-kind touchpoints (hand-written sites; generated code excluded):
 
-| Layer | Files | Sites | MECH | SPEC |
-|---|---|---|---|---|
-| api-types | 1 | ~10 | 8 (5 zero-change) | 2–5 |
-| app-types | 1 | ~5 | 1 | 4 (all tiny) |
-| core | 0 | 0 | — | — |
-| client engine | 1 | ~25 | 14 | 11 |
-| client api_client | 1 | ~8 | 2 (near-clones) | 6 |
-| client local_store | 1 | ~15 | 9 | 6 |
-| server routes/objects | 1 | ~12 | 5 | 7 |
-| server routes/collab (+sync) | 2 | ~7 | 0 | 7 |
-| migrations/entities | 3–5 | ~10 | 6 | 4 |
-| server cleanup/state | 2 | ~5 | 3 (near-clones) | 2 |
-| daemon-types + daemon | 2 | ~8 | 8 | 0 |
-| web-wasm | 1 | 4–6 | all | 0 |
-| mobile-uniffi | 1 | 4–6 | all | 0 |
-| web/src-tauri | 1 | 5–7 | all | 0 |
-| packages/shared | 2 | ~22 | 21 | 1 |
-| web/src | 6 | ~40 | ~20 | ~20 |
-| mobile/src | 3 | ~38 | ~15 | ~23 |
-| mobile-bridge (hand-written) | 1 | ~19 | all | 0 |
-| **Total** | ~30 files | **~225 sites** | **~135 (60%)** | **~90 (40%)** |
+| Layer                        | Files     | Sites          | MECH              | SPEC          |
+| ---------------------------- | --------- | -------------- | ----------------- | ------------- |
+| api-types                    | 1         | ~10            | 8 (5 zero-change) | 2–5           |
+| app-types                    | 1         | ~5             | 1                 | 4 (all tiny)  |
+| core                         | 0         | 0              | —                 | —             |
+| client engine                | 1         | ~25            | 14                | 11            |
+| client api_client            | 1         | ~8             | 2 (near-clones)   | 6             |
+| client local_store           | 1         | ~15            | 9                 | 6             |
+| server routes/objects        | 1         | ~12            | 5                 | 7             |
+| server routes/collab (+sync) | 2         | ~7             | 0                 | 7             |
+| migrations/entities          | 3–5       | ~10            | 6                 | 4             |
+| server cleanup/state         | 2         | ~5             | 3 (near-clones)   | 2             |
+| daemon-types + daemon        | 2         | ~8             | 8                 | 0             |
+| web-wasm                     | 1         | 4–6            | all               | 0             |
+| mobile-uniffi                | 1         | 4–6            | all               | 0             |
+| web/src-tauri                | 1         | 5–7            | all               | 0             |
+| packages/shared              | 2         | ~22            | 21                | 1             |
+| web/src                      | 6         | ~40            | ~20               | ~20           |
+| mobile/src                   | 3         | ~38            | ~15               | ~23           |
+| mobile-bridge (hand-written) | 1         | ~19            | all               | 0             |
+| **Total**                    | ~30 files | **~225 sites** | **~135 (60%)**    | **~90 (40%)** |
 
 The four layers that dominate:
 
 1. **The UI pair (`web/src` + `mobile/src`), ~78 sites.** But this is mostly
-   *real product work* (panels, viewers, dialogs) that no refactoring removes —
+   _real product work_ (panels, viewers, dialogs) that no refactoring removes —
    it is the point of adding a module. Only the nav/route/tab wiring (~35
    sites) is boilerplate.
 2. **The adapter triple (`web-wasm`, `mobile-uniffi`, `web/src-tauri`) plus
@@ -451,7 +452,7 @@ pub struct DisplayObject {
 This deletes ~15 of the local_store touchpoints and keeps the invariant the
 current enum exists for (a collab record can never carry ciphertext fields —
 that invariant moves from "two enum variants per family" to "two enum variants
-total", which is *stronger*, not weaker).
+total", which is _stronger_, not weaker).
 
 ### 3.3 Surviving UniFFI — the hardest constraint
 
@@ -459,7 +460,7 @@ total", which is *stronger*, not weaker).
 item structs, and UniFFI has no generics: `AppState { objects: Vec<DisplayObject<T>> }`
 cannot cross the FFI. Options, with a recommendation:
 
-**Option 1 — tagged enum payload (recommended).** UniFFI *does* support
+**Option 1 — tagged enum payload (recommended).** UniFFI _does_ support
 non-generic enums with named-field variants (`uniffi::Enum`), and serde
 supports the matching externally/internally tagged shape. Keep one generic
 container + one closed enum of kind views:
@@ -499,7 +500,7 @@ pub struct AppState {
 Cost per new kind at this boundary: **one enum variant** in `DisplayView`
 (~5 lines) — instead of a new record + `AppState` field + `LocalVisibleState`
 field + TS `AppState` field + bridge mapping. The TS side gets a proper
-discriminated union (`view.kind`), which is *better* for module UIs than
+discriminated union (`view.kind`), which is _better_ for module UIs than
 three parallel arrays. Caveat: verify `uniffi-bindgen-react-native` generates
 tagged enums cleanly (the repo already patches that codegen —
 `patches/uniffi-bindgen-react-native@0.31.0-5.patch` — so this is the first
@@ -553,7 +554,7 @@ pub struct CreateObjectParams {
 }
 ```
 
-Kind-shaped *platform* operations stay per-kind because they genuinely are:
+Kind-shaped _platform_ operations stay per-kind because they genuinely are:
 `SendCurrentClipboard` (reads the OS clipboard), `UploadFileFromDialog`,
 `DownloadFileToDialog` — these are shell capabilities, not sync operations.
 That leaves ~4 generic commands + a small number of platform helpers per
@@ -561,7 +562,7 @@ shell, versus today's 10 per-kind commands.
 
 ### 3.5 The wasm-bindgen boundary (`crates/web-wasm`)
 
-wasm-bindgen has the same no-generics limit, but the *state* path is already
+wasm-bindgen has the same no-generics limit, but the _state_ path is already
 generic: `getState`/`waitForStateChange` return `serde_wasm_bindgen` JsValues,
 so the `AppState` reshape in 3.3 flows to TS with zero new exports. Only
 commands are per-kind exports today. Mirror 3.4:
@@ -616,13 +617,22 @@ the "domain logic plus UI" target.
 
 ### (A) Encrypted objects gain mutation (`revision: u64`)
 
+> Historical proposal, superseded by the implemented envelope design. Current
+> envelopes start at format version 1 and object revision 1; append uses
+> `POST /api/objects/{id}/revisions`, not the proposed PUT. Exact same-head reads
+> are allowed, while rollback and same-revision replacement are rejected.
+> Native SQLite stores accepted anchors separately from cached records; the
+> proposed `PendingUpdate` marker and kind registry are not implemented.
+> See [object-envelopes.md](object-envelopes.md) for current guarantees and the
+> separate revision-specific historical-read path.
+
 Changes to the design above:
 
 - **Envelope/AAD**: `ObjectEnvelopeBodyV1` gains `revision: u64` (garde
   `range(min = 0)`), and `ObjectAadV1` gains the same field so a server cannot
   replay an old revision's ciphertext under the same identity — the AAD
   projection in `docs/object-envelopes.md` binds exactly the identity fields,
-  and revision is now one. Practically this is `ObjectEnvelopeBodyV2` /
+  and revision is now one. Practically this is `ObjectEnvelopeBody` /
   `object_version = 2` (postcard is positional; `Canon(body)` changes shape),
   and `validate_object_init_envelope` / `verify_object_list_item_envelope`
   accept v2. Repo policy ("do not preserve legacy schema… unless asked")
@@ -643,7 +653,7 @@ Changes to the design above:
 Registry impact: **small**. `KindModule` gains `MUTABLE` and an optional
 `merge_meta`/`build_update`; the generic `UpdateObject` command and
 `updateObject` exports already exist from 3.4/3.5. Mutable kinds are the
-*same* machinery with one more envelope field and one more event arm.
+_same_ machinery with one more envelope field and one more event arm.
 
 ### (B) Encrypted objects stay immutable (create-new-then-tombstone)
 
@@ -665,8 +675,8 @@ Registry impact: **small**. `KindModule` gains `MUTABLE` and an optional
 - **IPC/IPC exports**: no `UpdateObject` at all; the UI's "edit" is
   `CreateObject` + `DeleteObject` composed in the engine.
 
-Registry impact: also small, but the complexity moves into *client-side chain
-folding* and *retention policy edge cases*, and every new module re-answers
+Registry impact: also small, but the complexity moves into _client-side chain
+folding_ and _retention policy edge cases_, and every new module re-answers
 "how do I edit?" individually. **(A) generalizes better**: one revision
 counter benefits every future mutable module; (B) leaves each module to invent
 its own chain semantics inside encrypted JSON. If any of schedule/habits/tasks
@@ -688,7 +698,7 @@ of per-module chain logic.
 2. **Server kind assumptions are stringly-typed and scattered.** The SQLite
    CHECK constraints hardcode kind lists in three migrations
    (`m20260312:179,306`, `m20260615:75,203,206`, `m20260826:44–48`) and
-   *capability* lists (`deleted` ∈ file/collab, `updated` ∈ collab) separately
+   _capability_ lists (`deleted` ∈ file/collab, `updated` ∈ collab) separately
    from kind lists — a `KindPolicy` table must drive future migrations or they
    will drift from the Rust registry. `objects.rs:1539`'s literal
    `Set("file".into())` shows this drift has already started.
@@ -722,7 +732,7 @@ of per-module chain logic.
 7. **Server-visible vs. encrypted is a fork, not a spectrum.** Collab bypasses
    the envelope pipeline entirely (plaintext table, JSON routes, Y-sync
    socket). The registry's `SERVER_VISIBLE` flag papers over two genuinely
-   different stacks; if module #2 ever needs *both* (encrypted content,
+   different stacks; if module #2 ever needs _both_ (encrypted content,
    server-queryable schedule ranges — very plausible for a calendar), neither
    existing track fits, and the design needs a third: encrypted payload +
    server-visible index columns. Worth deciding before the schedule module,

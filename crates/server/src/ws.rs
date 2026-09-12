@@ -179,6 +179,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
         debug!(device_id = %device_id, "WebSocket rejected: per-user connection cap reached");
         return close_with_error(socket, WsError::ConnectionLimit).await;
     };
+    // Then the process-wide ceiling, so many accounts together cannot exhaust
+    // FDs/tasks either. Held alongside the per-user slot above.
+    let Ok(_global) = state.ws_global_cap().try_acquire_owned() else {
+        debug!(device_id = %device_id, "WebSocket rejected: global connection cap reached");
+        return close_with_error(socket, WsError::ConnectionLimit).await;
+    };
 
     // Wait for the hello message, but bound how long a silent client can hold
     // the connection (and its task + file descriptor) before sending anything.
@@ -424,13 +430,15 @@ pub(crate) async fn get_latest_seq(state: &AppState, user_id: Uuid) -> Result<i6
         .into_tuple::<i64>()
         .one(state.db())
         .await?;
+    // Tombstoned objects are included deliberately: their seq was published,
+    // and a watermark that skipped them would move backwards when the newest
+    // thing a user did was a delete.
     let latest_object_seq: Option<i64> = objects::Entity::find()
         .filter(objects::Column::UserId.eq(user_id))
-        .filter(objects::Column::Status.eq("complete"))
-        .filter(objects::Column::CreatedSeq.is_not_null())
-        .order_by(objects::Column::CreatedSeq, Order::Desc)
+        .filter(objects::Column::PublishedSeq.is_not_null())
+        .order_by(objects::Column::PublishedSeq, Order::Desc)
         .select_only()
-        .column(objects::Column::CreatedSeq)
+        .column(objects::Column::PublishedSeq)
         .into_tuple::<Option<i64>>()
         .one(state.db())
         .await?

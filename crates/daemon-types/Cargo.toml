@@ -7,11 +7,14 @@ license-file.workspace = true
 [dependencies]
 clipper-api-types.workspace = true
 clipper-app-types.workspace = true
+clipper-schedule.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 strum.workspace = true
 zeroize.workspace = true
 
-[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+[target.'cfg(target_os = "macos")'.dependencies]
 dirs.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc.workspace = true

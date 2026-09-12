@@ -15,6 +15,12 @@ const require = createRequire(import.meta.url);
 // react-native-web copy, whose peer context matches our react 19.2.8.
 const reactNativeWebDir = path.dirname(require.resolve("react-native-web/package.json"));
 
+// frame-ancestors is header-only; the rest of the policy remains in index.html.
+const securityHeaders = {
+    "Content-Security-Policy": "frame-ancestors 'none'",
+    "X-Frame-Options": "DENY",
+};
+
 export default defineConfig({
     define: {
         // Build-time server URL, injected from the build environment so hosted
@@ -36,11 +42,13 @@ export default defineConfig({
         }),
     ],
     server: {
+        headers: securityHeaders,
         host: "127.0.0.1",
         port: 53880,
         strictPort: false,
     },
     preview: {
+        headers: securityHeaders,
         host: "127.0.0.1",
         port: 53880,
         strictPort: false,

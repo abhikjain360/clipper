@@ -1,0 +1,27 @@
+[package]
+name = "clipper-schedule"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+
+[dependencies]
+clipper-api-types.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+rrule.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid = { workspace = true, features = ["js", "serde", "v4", "v5"] }
+calcard = "0.3.13"
+
+[dev-dependencies]
+uuid = { workspace = true, features = ["v4", "v5"] }
+postcard.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+
+# `calcard` pulls `getrandom` 0.3 through `ahash`. Enable its browser backend so
+# clients can parse already-downloaded encrypted import snapshots in wasm.
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom03 = { package = "getrandom", version = "0.3.4", features = ["wasm_js"] }
