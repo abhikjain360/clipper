@@ -76,7 +76,11 @@ export async function shareDownloadedFile(
       await Sharing.shareAsync(file.uri, { mimeType });
     }
   } finally {
-    file.delete();
+    try {
+      file.delete();
+    } catch {
+      // The file may not exist when creation fails.
+    }
   }
 }
 

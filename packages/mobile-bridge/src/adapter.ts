@@ -121,7 +121,9 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     stopActual: async () => {
       throw new Error("The timer is not available on mobile yet");
     },
-    actualsBetween: async () => [],
+    actualsBetween: async () => {
+      throw new Error("actualsBetween is not supported on mobile");
+    },
     updateScheduleItem: async () => {
       throw new Error("Editing schedule items is not available on mobile yet");
     },
