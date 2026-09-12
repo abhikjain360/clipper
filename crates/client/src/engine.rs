@@ -600,6 +600,16 @@ impl SyncEngine {
         true
     }
 
+    /// Whether the session `epoch` names is still the installed one.
+    ///
+    /// Both login and logout bump `history_epoch` while holding the encryption
+    /// key write lock, so a caller that holds a read guard and sees an
+    /// unchanged epoch knows the keys and the profile database are still the
+    /// ones its session opened.
+    fn session_is_current(&self, epoch: u64) -> bool {
+        self.history_epoch.load(Ordering::SeqCst) == epoch
+    }
+
     // ── Devices ──
 
     /// List the user's registered devices, marking the one this client is
@@ -1142,6 +1152,10 @@ impl SyncEngine {
     }
 
     pub async fn download_file_bytes(&self, file_id: &str) -> Result<Vec<u8>, ClientError> {
+        // Read before the network work, so the retention below can tell
+        // whether the session that asked for this file is still the one
+        // running when the bytes come back.
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
         let (file_item, payload, encrypted_blob) = {
             let api = &self.api;
             let file_item = api.get_object(file_id).await?;
@@ -1175,7 +1189,7 @@ impl SyncEngine {
             &file_item.envelope.body,
             payload.id,
         )?;
-        self.retain_downloaded_file(&file_item, &encryption_key)
+        self.retain_downloaded_file(&file_item, &encryption_key, epoch)
             .await?;
         info!(file_id = %file_id, "File downloaded");
         Ok(plaintext)
@@ -1187,12 +1201,30 @@ impl SyncEngine {
     /// that path stores anything, so without this the anchor never advances and
     /// the server can serve revision 3 and then revision 2 to the same device.
     /// The head is stored the way a fetched file is stored anywhere else.
+    ///
+    /// `epoch` is the session the download was started under. A slow download
+    /// can finish after the user has logged out and back in as someone else,
+    /// and this write goes to whichever profile database is mounted now, so a
+    /// download from the previous account is dropped instead of stored and
+    /// shown. The key read guard holds the session still for the whole write:
+    /// login and logout both bump the epoch under the write lock. The store
+    /// generation is the wrong fence here — it changes on every WebSocket
+    /// reconnect, and a download still has to advance the anchor across one.
     async fn retain_downloaded_file(
         &self,
         item: &ObjectListItem,
         encryption_key: &[u8; 32],
+        epoch: u64,
     ) -> Result<(), ClientError> {
         let object_id = item.id.to_string();
+        let _active_key = self.encryption_key.read().await;
+        if !self.session_is_current(epoch) {
+            debug!(
+                file_id = %object_id,
+                "Dropping a download that outlived the session it was started under",
+            );
+            return Ok(());
+        }
         // Already at this revision: the record is the one this would write.
         if self
             .local_store
@@ -4384,6 +4416,139 @@ mod tests {
         assert!(
             engine.get_state().await.clipboard_items.is_empty(),
             "a straggling snapshot must not repopulate the screen",
+        );
+    }
+
+    const RETAIN_TEST_KEY: [u8; 32] = [7; 32];
+
+    /// A signed file list item whose meta decrypts under `RETAIN_TEST_KEY`, so
+    /// a retention can run end to end without a server.
+    fn signed_file_item(filename: &str) -> ObjectListItem {
+        let object_id: ObjectId = uuid::Uuid::now_v7().into();
+        let payload_id: ObjectPayloadId = uuid::Uuid::now_v7().into();
+        let device_id: DeviceId = uuid::Uuid::now_v7().into();
+        let signing_key = crypto::generate_device_signing_secret_key();
+        let public_key = crypto::device_signing_public_key(&signing_key);
+        let created_at = "2026-09-12T00:00:00Z".to_string();
+        let aad_body = object_envelope_body_for_aad(
+            object_id,
+            ObjectKind::File,
+            EnvelopePlacement::Create,
+            device_id,
+            created_at.clone(),
+            vec![payload_id],
+        );
+        let meta = FileMeta {
+            filename: filename.into(),
+            mime_type: "text/plain".into(),
+            size: Some(0),
+        };
+        let (meta_nonce, meta_ciphertext) =
+            encrypt_file_meta_bytes(&meta, &RETAIN_TEST_KEY, &aad_body).expect("meta encrypt");
+        let payload = ObjectEnvelopePayload {
+            id: payload_id,
+            nonce: vec![0_u8; crypto::XCHACHA20_NONCE_BYTES],
+            ciphertext_size: 0,
+            sha256_ciphertext: crypto::sha256(&[]).to_vec(),
+        };
+        let body = object_envelope_body(
+            object_id,
+            ObjectKind::File,
+            EnvelopePlacement::Create,
+            device_id,
+            created_at.clone(),
+            meta_nonce.clone(),
+            crypto::sha256(&meta_ciphertext).to_vec(),
+            vec![payload.clone()],
+        );
+        let signature = crypto::sign_object_envelope_body(&signing_key, &body).expect("sign");
+        ObjectListItem {
+            id: object_id,
+            kind: ObjectKind::File,
+            revision: 1,
+            created_seq: 1,
+            meta_nonce,
+            meta_ciphertext,
+            payloads: vec![ObjectPayloadDescriptor {
+                id: payload_id,
+                nonce: payload.nonce,
+                ciphertext_size: payload.ciphertext_size,
+                sha256_ciphertext: payload.sha256_ciphertext,
+            }],
+            created_at,
+            source_device_id: device_id,
+            source_device_signing_public_key: Some(public_key.to_vec()),
+            envelope: ObjectEnvelope { body, signature },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_download_that_outlives_its_session_is_not_retained() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", temp.path());
+        engine.local_store.set_profile("profile-a".into());
+        open_session(&engine).await;
+        let epoch = engine.history_epoch.load(Ordering::SeqCst);
+
+        // The download was started here; the user then logged out and logged
+        // in as someone else while the bytes were still coming.
+        engine.logout().await.expect("logout clears local state");
+        engine.local_store.set_profile("profile-b".into());
+        open_session(&engine).await;
+
+        let item = signed_file_item("account-a-secret.txt");
+        engine
+            .retain_downloaded_file(&item, &RETAIN_TEST_KEY, epoch)
+            .await
+            .expect("a fenced retention is not a failure");
+
+        assert!(
+            engine
+                .local_store
+                .local_head(&item.id.to_string())
+                .await
+                .expect("local head")
+                .is_none(),
+            "the record must not land in the profile of the session that replaced it",
+        );
+        assert!(
+            engine.get_state().await.files.is_empty(),
+            "the filename must not be published into the new session's files",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_download_that_finishes_inside_its_session_is_retained() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", temp.path());
+        engine.local_store.set_profile("profile-a".into());
+        open_session(&engine).await;
+        let epoch = engine.history_epoch.load(Ordering::SeqCst);
+
+        let item = signed_file_item("still-mine.txt");
+        engine
+            .retain_downloaded_file(&item, &RETAIN_TEST_KEY, epoch)
+            .await
+            .expect("retention");
+
+        assert_eq!(
+            engine
+                .local_store
+                .local_head(&item.id.to_string())
+                .await
+                .expect("local head")
+                .map(|head| head.revision),
+            Some(1),
+            "an unchanged session must still advance the revision anchor",
+        );
+        assert_eq!(
+            engine
+                .get_state()
+                .await
+                .files
+                .first()
+                .map(|file| file.filename.clone()),
+            Some("still-mine.txt".to_string()),
         );
     }
 
