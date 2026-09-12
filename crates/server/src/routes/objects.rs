@@ -255,8 +255,7 @@ pub async fn init_object(
         })
         .collect();
     let payload_count = req.payloads.len();
-    let object_storage_bytes = init_request_storage_bytes(&req)?;
-    let payload_models: Vec<_> = req
+    let object_storage_bytes = init_request_storage_bytes(&req)?;    let payload_models: Vec<_> = req
         .payloads
         .iter()
         .map(|payload| {
@@ -1062,7 +1061,7 @@ pub async fn revise_object(
         })
         .collect();
     let payload_count = req.payloads.len();
-    let revision_storage_bytes = req.payloads.iter().try_fold(0_i64, |total, payload| {
+    let payload_bytes = req.payloads.iter().try_fold(0_i64, |total, payload| {
         total.checked_add(payload.ciphertext_size).ok_or_else(|| {
             ApiError::from_code_with_message(
                 ApiErrorCode::PayloadTooLarge,
@@ -1070,6 +1069,21 @@ pub async fn revise_object(
             )
         })
     })?;
+    // The metadata ciphertext is stored per revision alongside the payloads,
+    // so it costs quota the same way. See `revision_cost_bytes`.
+    let meta_len = i64::try_from(req.meta_ciphertext.len()).map_err(|_| {
+        ApiError::from_code_with_message(
+            ApiErrorCode::PayloadTooLarge,
+            "Object metadata ciphertext exceeds maximum size",
+        )
+    })?;
+    let revision_storage_bytes =
+        storage_quota::revision_cost_bytes(meta_len, payload_bytes).ok_or_else(|| {
+            ApiError::from_code_with_message(
+                ApiErrorCode::PayloadTooLarge,
+                "Object sizes exceed maximum size",
+            )
+        })?;
     let payload_models: Vec<_> = req
         .payloads
         .iter()
@@ -2171,7 +2185,8 @@ pub async fn purge_object(
     }
 
     // Every revision's payloads, not just the head's: the whole chain goes, and
-    // the bytes it held are exactly what the purge is reclaiming.
+    // the bytes it held are exactly what the purge is reclaiming. The same
+    // holds for every revision's metadata ciphertext.
     let payload_rows: Vec<(String, i64)> = object_payloads::Entity::find()
         .filter(object_payloads::Column::ObjectId.eq(object_uuid))
         .select_only()
@@ -2188,7 +2203,7 @@ pub async fn purge_object(
             );
             ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
-    let storage_bytes = payload_rows
+    let payload_bytes = payload_rows
         .iter()
         .try_fold(0_i64, |total, (_, size)| {
             if *size < 0 {
@@ -2200,6 +2215,34 @@ pub async fn purge_object(
             error!(
                 object_id = %object_uuid,
                 "Object payload sizes overflowed while deleting object",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+    let meta_bytes: i64 = object_revisions::Entity::find()
+        .filter(object_revisions::Column::ObjectId.eq(object_uuid))
+        .select_only()
+        .column_as(
+            storage_quota::meta_bytes_sum_expr(),
+            "meta_bytes",
+        )
+        .into_tuple::<Option<i64>>()
+        .one(&txn)
+        .await
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                error = %e,
+                "Failed to sum revision metadata for delete",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?
+        .flatten()
+        .unwrap_or(0);
+    let storage_bytes =
+        storage_quota::revision_cost_bytes(meta_bytes, payload_bytes).ok_or_else(|| {
+            error!(
+                object_id = %object_uuid,
+                "Object sizes overflowed while deleting object",
             );
             ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
         })?;
@@ -2596,7 +2639,7 @@ async fn object_for_upload(
 }
 
 fn init_request_storage_bytes(req: &ObjectInitRequest) -> Result<i64, ApiError> {
-    req.payloads.iter().try_fold(0_i64, |total, payload| {
+    let payload_bytes = req.payloads.iter().try_fold(0_i64, |total, payload| {
         if payload.ciphertext_size < 0 {
             return Err(ApiError::from_code_with_message(
                 ApiErrorCode::InvalidPayloadSize,
@@ -2609,6 +2652,20 @@ fn init_request_storage_bytes(req: &ObjectInitRequest) -> Result<i64, ApiError> 
                 "Object payload sizes exceed maximum size",
             )
         })
+    })?;
+    // The metadata ciphertext is stored per revision alongside the payloads,
+    // so it costs quota the same way. See `revision_cost_bytes`.
+    let meta_len = i64::try_from(req.meta_ciphertext.len()).map_err(|_| {
+        ApiError::from_code_with_message(
+            ApiErrorCode::PayloadTooLarge,
+            "Object metadata ciphertext exceeds maximum size",
+        )
+    })?;
+    storage_quota::revision_cost_bytes(meta_len, payload_bytes).ok_or_else(|| {
+        ApiError::from_code_with_message(
+            ApiErrorCode::PayloadTooLarge,
+            "Object sizes exceed maximum size",
+        )
     })
 }
 
@@ -4155,7 +4212,9 @@ mod tests {
         async fn a_revision_charges_bytes_but_not_an_object() {
             let (state, _dir) = test_state().await;
             let (user_id, device_id, object_id, key) = seeded(&state).await;
-            assert_eq!(user_storage_usage(&state, user_id).await, (5, 1));
+            // "first" (5 payload bytes) plus the 18 metadata bytes in
+            // `init_request`.
+            assert_eq!(user_storage_usage(&state, user_id).await, (23, 1));
 
             revise_with(
                 &state,
@@ -4171,9 +4230,298 @@ mod tests {
 
             assert_eq!(
                 user_storage_usage(&state, user_id).await,
-                (11, 1),
+                (45, 1),
                 "retained history is stored bytes and has to be charged, but \
                  editing must not consume an object slot",
+            );
+        }
+    }
+
+    /// Quota accounting for metadata ciphertext bytes: each stored revision
+    /// costs its payload bytes plus its metadata bytes, and every release
+    /// path returns exactly that.
+    mod quota_metadata {
+        use super::*;
+
+        /// Init with caller-chosen metadata, so the quota tests can name
+        /// exact sizes instead of repeating the fixed test fixture.
+        fn init_request_with_meta(
+            object_id: String,
+            payload_id: String,
+            kind: ObjectKind,
+            meta_ciphertext: Vec<u8>,
+            ciphertext: &[u8],
+            device_id: Uuid,
+            signing_secret_key: &[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
+        ) -> ObjectInitRequest {
+            let meta_nonce = vec![1_u8; XCHACHA20_NONCE_BYTES];
+            let payload_nonce = vec![2_u8; XCHACHA20_NONCE_BYTES];
+            let payload_hash = sha256(ciphertext).to_vec();
+            let envelope = signed_envelope(
+                object_id.parse().expect("object id"),
+                kind,
+                meta_nonce.clone(),
+                &meta_ciphertext,
+                vec![ObjectEnvelopePayload {
+                    id: payload_id.parse().expect("payload id"),
+                    nonce: payload_nonce.clone(),
+                    ciphertext_size: ciphertext.len() as i64,
+                    sha256_ciphertext: payload_hash.clone(),
+                }],
+                device_id,
+                signing_secret_key,
+            );
+            ObjectInitRequest {
+                id: object_id.parse().expect("object id"),
+                kind,
+                meta_nonce,
+                meta_ciphertext,
+                payloads: vec![ObjectPayloadInit {
+                    id: payload_id.parse().expect("payload id"),
+                    nonce: payload_nonce,
+                    ciphertext_size: ciphertext.len() as i64,
+                    sha256_ciphertext: payload_hash,
+                    inline_ciphertext: Some(ciphertext.to_vec()),
+                }],
+                envelope,
+            }
+        }
+
+        /// Append a payload-free revision with caller-chosen metadata. It
+        /// completes inline, so there is no upload step.
+        #[allow(clippy::too_many_arguments)]
+        async fn revise_meta_only(
+            state: &AppState,
+            user_id: Uuid,
+            device_id: Uuid,
+            object_id: &str,
+            kind: ObjectKind,
+            operation: ObjectEnvelopeOperation,
+            meta_ciphertext: Vec<u8>,
+            signing_secret_key: &[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES],
+        ) -> Result<ObjectInitResponse, ApiError> {
+            let object_uuid: Uuid = object_id.parse().expect("object id");
+            let (head_revision, parent_hash) = head_of(state, object_uuid).await;
+            let meta_nonce = vec![12_u8; XCHACHA20_NONCE_BYTES];
+            let envelope = signed_envelope_at(
+                object_uuid.into(),
+                kind,
+                head_revision + 1,
+                Some(parent_hash),
+                operation,
+                meta_nonce.clone(),
+                &meta_ciphertext,
+                Vec::new(),
+                device_id,
+                signing_secret_key,
+            );
+            revise_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path(object_id.to_string()),
+                postcard(ObjectReviseRequest {
+                    meta_nonce,
+                    meta_ciphertext,
+                    payloads: Vec::new(),
+                    envelope,
+                }),
+            )
+            .await
+            .map(|Postcard(resp)| resp)
+        }
+
+        #[tokio::test]
+        async fn init_charges_payload_and_metadata_bytes() {
+            let (state, _dir) = test_state().await;
+            let user_id = insert_user(&state).await;
+            let device_id = Uuid::now_v7();
+            let key = insert_device(&state, user_id, device_id).await;
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request_with_meta(
+                    Uuid::now_v7().to_string(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    vec![9_u8; 100],
+                    b"abc",
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("init");
+            assert_eq!(
+                user_storage_usage(&state, user_id).await,
+                (103, 1),
+                "init reserves the 3 payload bytes plus the 100 metadata bytes",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_payload_free_revision_charges_its_metadata_bytes() {
+            let (state, _dir) = test_state().await;
+            let user_id = insert_user(&state).await;
+            let device_id = Uuid::now_v7();
+            let key = insert_device(&state, user_id, device_id).await;
+            let object_id = Uuid::now_v7().to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request(
+                    object_id.clone(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    b"first",
+                    true,
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("init");
+            let (before, _) = user_storage_usage(&state, user_id).await;
+            revise_meta_only(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                ObjectEnvelopeOperation::Delete,
+                vec![4_u8; 64],
+                &key,
+            )
+            .await
+            .expect("tombstone");
+            assert_eq!(
+                user_storage_usage(&state, user_id).await,
+                (before + 64, 1),
+                "a revision with no payloads still stores 64 metadata bytes",
+            );
+        }
+
+        #[tokio::test]
+        async fn purge_releases_payload_and_metadata_for_the_whole_chain() {
+            let (state, _dir) = test_state().await;
+            let user_id = insert_user(&state).await;
+            let device_id = Uuid::now_v7();
+            let key = insert_device(&state, user_id, device_id).await;
+            let object_id = Uuid::now_v7().to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request(
+                    object_id.clone(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    b"first",
+                    true,
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("init");
+            revise_with(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                b"second",
+                &key,
+            )
+            .await
+            .expect("revise");
+            tombstone_object(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                &key,
+            )
+            .await
+            .expect("tombstone");
+            // Genesis 5 + 18, revision 6 + 16, tombstone 0 + 28.
+            assert_eq!(
+                user_storage_usage(&state, user_id).await,
+                (73, 1),
+                "every revision in the chain holds charged bytes",
+            );
+
+            purge_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path(object_id),
+            )
+            .await
+            .expect("purge");
+            assert_eq!(
+                user_storage_usage(&state, user_id).await,
+                (0, 0),
+                "purge releases payload and metadata bytes for the whole chain",
+            );
+        }
+
+        #[tokio::test]
+        async fn metadata_only_revisions_eventually_exceed_the_byte_quota() {
+            let (state, _dir) = test_state_with_user_quotas(600, 100).await;
+            let user_id = insert_user(&state).await;
+            let device_id = Uuid::now_v7();
+            let key = insert_device(&state, user_id, device_id).await;
+            let object_id = Uuid::now_v7().to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request(
+                    object_id.clone(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    b"x",
+                    true,
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("init");
+
+            // Repeat tombstones, each carrying 512 metadata bytes and no
+            // payloads. Only a delete revision may carry no payloads, and one
+            // follows the last the same way any revision follows its head.
+            // Without a metadata charge this loop would run forever for zero
+            // quota.
+            let mut refused = false;
+            for _ in 0..20 {
+                match revise_meta_only(
+                    &state,
+                    user_id,
+                    device_id,
+                    &object_id,
+                    ObjectKind::Schedule,
+                    ObjectEnvelopeOperation::Delete,
+                    vec![0xA5; 512],
+                    &key,
+                )
+                .await
+                {
+                    Ok(_) => {}
+                    Err(error)
+                        if error.body().code == ApiErrorCode::StorageQuotaExceeded =>
+                    {
+                        assert_eq!(error.status(), StatusCode::INSUFFICIENT_STORAGE);
+                        refused = true;
+                        break;
+                    }
+                    Err(error) => panic!("unexpected revision error: {error:?}"),
+                }
+            }
+            assert!(refused, "512-byte metadata revisions must hit a 600-byte quota");
+            let (bytes, _) = user_storage_usage(&state, user_id).await;
+            assert!(
+                bytes <= 600,
+                "usage {bytes} must stay within the 600-byte quota",
             );
         }
     }
@@ -4980,7 +5328,7 @@ mod tests {
         );
         assert_eq!(
             user_storage_usage(&state, user_id).await,
-            (ciphertext.len() as i64, 1),
+            (ciphertext.len() as i64 + b"encrypted metadata".len() as i64, 1),
             "failed completion leaves reserved quota unchanged",
         );
     }
@@ -5130,7 +5478,10 @@ mod tests {
         .expect("init");
         assert_eq!(
             user_storage_usage(&state, user_id).await,
-            (ciphertext.len() as i64, 1),
+            (
+                ciphertext.len() as i64 + b"encrypted metadata".len() as i64,
+                1
+            ),
             "file init reserves user storage quota",
         );
 
@@ -5183,7 +5534,12 @@ mod tests {
         assert!(object.deleted_at.is_some());
         assert_eq!(
             user_storage_usage(&state, user_id).await,
-            (ciphertext.len() as i64, 1),
+            (
+                ciphertext.len() as i64
+                    + b"encrypted metadata".len() as i64
+                    + b"encrypted tombstone metadata".len() as i64,
+                1
+            ),
             "a tombstone reclaims nothing; purging does",
         );
 
@@ -5343,7 +5699,9 @@ mod tests {
 
     #[tokio::test]
     async fn init_rejects_user_storage_quota_and_rolls_back_inline_file() {
-        let (state, data_dir) = test_state_with_user_quotas(8, 100).await;
+        // 26 bytes: the 8-byte payload plus the 18 metadata bytes in
+        // `init_request`. The first init fills the quota exactly.
+        let (state, data_dir) = test_state_with_user_quotas(26, 100).await;
         let user_id = insert_user(&state).await;
         let device_id = Uuid::now_v7();
         let signing_secret_key = insert_device(&state, user_id, device_id).await;
@@ -5365,7 +5723,7 @@ mod tests {
         )
         .await
         .expect("first init fits quota");
-        assert_eq!(user_storage_usage(&state, user_id).await, (8, 1));
+        assert_eq!(user_storage_usage(&state, user_id).await, (26, 1));
 
         let second_object_id = Uuid::now_v7().to_string();
         let second_payload_id = Uuid::now_v7().to_string();
@@ -5389,7 +5747,7 @@ mod tests {
         assert_eq!(err.body().code, ApiErrorCode::StorageQuotaExceeded);
         assert_eq!(
             user_storage_usage(&state, user_id).await,
-            (8, 1),
+            (26, 1),
             "failed quota reservation rolls back user counters",
         );
 
@@ -5437,7 +5795,9 @@ mod tests {
         )
         .await
         .expect("first init fits object quota");
-        assert_eq!(user_storage_usage(&state, user_id).await, (5, 1));
+        // "first" (5 payload bytes) plus the 18 metadata bytes in
+        // `init_request`.
+        assert_eq!(user_storage_usage(&state, user_id).await, (23, 1));
 
         let second_object_id = Uuid::now_v7().to_string();
         let second_payload_id = Uuid::now_v7().to_string();
@@ -5461,7 +5821,7 @@ mod tests {
         assert_eq!(err.body().code, ApiErrorCode::StorageQuotaExceeded);
         assert_eq!(
             user_storage_usage(&state, user_id).await,
-            (5, 1),
+            (23, 1),
             "failed object-count reservation leaves user counters unchanged",
         );
 
@@ -5590,9 +5950,10 @@ mod tests {
         crate::cleanup::trim_user_clipboard(&state, user_id)
             .await
             .expect("trim");
+        // Two survivors at 8 payload bytes plus 18 metadata bytes each.
         assert_eq!(
             user_storage_usage(&state, user_id).await,
-            (16, 2),
+            (52, 2),
             "clipboard trim releases user storage quota",
         );
 

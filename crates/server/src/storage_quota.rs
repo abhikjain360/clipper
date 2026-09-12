@@ -1,6 +1,7 @@
 use sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, JoinType, QueryFilter,
-    QuerySelect, RelationTrait, sea_query::Expr,
+    QuerySelect, RelationTrait,
+    sea_query::{Expr, Func, SimpleExpr},
 };
 use uuid::Uuid;
 
@@ -11,6 +12,32 @@ pub(crate) struct UserStorageUsage {
     pub user_id: Uuid,
     pub object_count: i64,
     pub storage_bytes: i64,
+}
+
+/// What one stored revision costs: payload ciphertext bytes plus metadata
+/// ciphertext bytes. Both sides of the quota go through this definition. The
+/// write paths call `revision_cost_bytes` with the request's sizes before
+/// reserving. The release aggregations below add the payload sum to the
+/// metadata sum with the same function, so the two cannot drift apart.
+pub(crate) fn revision_cost_bytes(
+    meta_ciphertext_len: i64,
+    payload_bytes: i64,
+) -> Option<i64> {
+    if meta_ciphertext_len < 0 || payload_bytes < 0 {
+        return None;
+    }
+    meta_ciphertext_len.checked_add(payload_bytes)
+}
+
+/// `SUM(LENGTH(object_revisions.meta_ciphertext))` as a select expression.
+/// SQLite `LENGTH` on a blob counts bytes, which is what is stored.
+///
+/// This stays separate from the payload sum because the release queries join
+/// revisions to payloads. Summing metadata over the joined rows would count
+/// one revision's metadata once per payload instead of once.
+pub(crate) fn meta_bytes_sum_expr() -> SimpleExpr {
+    Func::sum(Func::cust("LENGTH").arg(Expr::col(object_revisions::Column::MetaCiphertext)))
+        .into()
 }
 
 /// Reserve room for one write.
@@ -122,7 +149,7 @@ where
         );
     }
 
-    object_revisions::Entity::find()
+    let payload_bytes_by_user: Vec<(Uuid, Option<i64>)> = object_revisions::Entity::find()
         .join(
             JoinType::InnerJoin,
             object_revisions::Relation::Objects.def(),
@@ -131,7 +158,7 @@ where
             JoinType::LeftJoin,
             object_revisions::Relation::ObjectPayloads.def(),
         )
-        .filter(matches)
+        .filter(matches.clone())
         .select_only()
         .column(objects::Column::UserId)
         .column_as(
@@ -139,25 +166,27 @@ where
             "storage_bytes",
         )
         .group_by(objects::Column::UserId)
-        .into_tuple::<(Uuid, Option<i64>)>()
+        .into_tuple()
         .all(db)
-        .await?
-        .into_iter()
-        .map(|(user_id, storage_bytes)| {
-            let storage_bytes = storage_bytes.unwrap_or(0);
-            if storage_bytes < 0 {
-                Err(DbErr::Custom(format!(
-                    "negative storage quota aggregate for {user_id}",
-                )))
-            } else {
-                Ok(UserStorageUsage {
-                    user_id,
-                    object_count: 0,
-                    storage_bytes,
-                })
-            }
-        })
-        .collect()
+        .await?;
+
+    // Metadata is summed without the payload join, so a revision with several
+    // payloads counts its metadata once. See `meta_bytes_sum_expr`.
+    let meta_bytes_by_user: Vec<(Uuid, Option<i64>)> = object_revisions::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            object_revisions::Relation::Objects.def(),
+        )
+        .filter(matches)
+        .select_only()
+        .column(objects::Column::UserId)
+        .column_as(meta_bytes_sum_expr(), "meta_bytes")
+        .group_by(objects::Column::UserId)
+        .into_tuple()
+        .all(db)
+        .await?;
+
+    merge_usage(payload_bytes_by_user, meta_bytes_by_user)
 }
 
 pub(crate) async fn object_usage_by_user<C>(
@@ -174,7 +203,7 @@ where
     // Two hops now, and the sum runs over every revision's payloads rather
     // than one set per object. That is the point: retained history is real
     // stored bytes, so it has to be charged.
-    objects::Entity::find()
+    let payload_bytes_by_user: Vec<(Uuid, i64, Option<i64>)> = objects::Entity::find()
         .join(JoinType::LeftJoin, objects::Relation::ObjectRevisions.def())
         .join(
             JoinType::LeftJoin,
@@ -192,13 +221,49 @@ where
             "storage_bytes",
         )
         .group_by(objects::Column::UserId)
-        .into_tuple::<(Uuid, i64, Option<i64>)>()
+        .into_tuple()
         .all(db)
-        .await?
+        .await?;
+
+    // Metadata is summed without the payload join, so a revision with several
+    // payloads counts its metadata once. See `meta_bytes_sum_expr`.
+    let meta_bytes_by_user: Vec<(Uuid, Option<i64>)> = object_revisions::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            object_revisions::Relation::Objects.def(),
+        )
+        .filter(object_revisions::Column::ObjectId.is_in(object_ids.to_vec()))
+        .select_only()
+        .column(objects::Column::UserId)
+        .column_as(meta_bytes_sum_expr(), "meta_bytes")
+        .group_by(objects::Column::UserId)
+        .into_tuple()
+        .all(db)
+        .await?;
+
+    let mut meta_by_user = std::collections::HashMap::new();
+    for (user_id, meta_bytes) in meta_bytes_by_user {
+        let meta_bytes = meta_bytes.unwrap_or(0);
+        if meta_bytes < 0 {
+            return Err(DbErr::Custom(format!(
+                "negative storage quota aggregate for {user_id}",
+            )));
+        }
+        meta_by_user.insert(user_id, meta_bytes);
+    }
+
+    payload_bytes_by_user
         .into_iter()
-        .map(|(user_id, object_count, storage_bytes)| {
-            let storage_bytes = storage_bytes.unwrap_or(0);
-            if object_count < 0 || storage_bytes < 0 {
+        .map(|(user_id, object_count, payload_bytes)| {
+            let payload_bytes = payload_bytes.unwrap_or(0);
+            let meta_bytes = meta_by_user.remove(&user_id).unwrap_or(0);
+            let storage_bytes =
+                revision_cost_bytes(meta_bytes, payload_bytes).ok_or_else(|| {
+                    DbErr::Custom(format!(
+                        "invalid storage quota aggregate for {user_id}",
+                    ))
+                })?;
+            if object_count < 0 {
                 Err(DbErr::Custom(format!(
                     "negative storage quota aggregate for {user_id}",
                 )))
@@ -209,6 +274,55 @@ where
                     storage_bytes,
                 })
             }
+        })
+        .collect()
+}
+
+/// Combine per-user payload and metadata sums into revision costs.
+///
+/// Every user appears in at most one of the two inputs: a revision without
+/// payloads has no payload row, and a user with no revisions is absent from
+/// both. Either side alone still costs what it holds.
+fn merge_usage(
+    payload_bytes_by_user: Vec<(Uuid, Option<i64>)>,
+    meta_bytes_by_user: Vec<(Uuid, Option<i64>)>,
+) -> Result<Vec<UserStorageUsage>, DbErr> {
+    let mut usage_by_user = std::collections::HashMap::new();
+    for (user_id, payload_bytes) in payload_bytes_by_user {
+        let payload_bytes = payload_bytes.unwrap_or(0);
+        if payload_bytes < 0 {
+            return Err(DbErr::Custom(format!(
+                "negative storage quota aggregate for {user_id}",
+            )));
+        }
+        usage_by_user.insert(user_id, (payload_bytes, 0_i64));
+    }
+    for (user_id, meta_bytes) in meta_bytes_by_user {
+        let meta_bytes = meta_bytes.unwrap_or(0);
+        if meta_bytes < 0 {
+            return Err(DbErr::Custom(format!(
+                "negative storage quota aggregate for {user_id}",
+            )));
+        }
+        usage_by_user
+            .entry(user_id)
+            .and_modify(|(_, meta)| *meta = meta_bytes)
+            .or_insert((0, meta_bytes));
+    }
+    usage_by_user
+        .into_iter()
+        .map(|(user_id, (payload_bytes, meta_bytes))| {
+            let storage_bytes =
+                revision_cost_bytes(meta_bytes, payload_bytes).ok_or_else(|| {
+                    DbErr::Custom(format!(
+                        "invalid storage quota aggregate for {user_id}",
+                    ))
+                })?;
+            Ok(UserStorageUsage {
+                user_id,
+                object_count: 0,
+                storage_bytes,
+            })
         })
         .collect()
 }
