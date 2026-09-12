@@ -397,6 +397,67 @@ fn all_day_series_on_a_skipped_date_reports_a_zero_length_day() {
     );
 }
 
+/// A series that started before a skipped civil date still expands a later
+/// window. Candidates before the window are skipped before resolving, so the
+/// unresolvable Dec 30 all-day span never fails an expansion that does not
+/// include it.
+#[test]
+fn series_starting_before_a_skipped_date_expands_a_later_window() {
+    let item = ScheduleItem {
+        id: ScheduleItemId::new(),
+        title: "apia".to_string(),
+        span: ScheduleSpan::AllDay {
+            start: NaiveDate::from_ymd_opt(2011, 12, 29).expect("valid date"),
+            days: NonZeroU32::new(1).expect("non-zero"),
+        },
+        recurrence: daily(),
+        reference: None,
+        alarm: None,
+    };
+    let out = expand(
+        &item,
+        &[],
+        &expansion(
+            utc(2012, 1, 2, 0, 0),
+            utc(2012, 1, 3, 0, 0),
+            Tz::Pacific__Apia,
+        ),
+    )
+    .expect("candidates before the window must not fail the expansion");
+    let ids: Vec<_> = out.iter().map(|o| o.recurrence_id).collect();
+    assert_eq!(
+        ids,
+        vec![RecurrenceId::Date(
+            NaiveDate::from_ymd_opt(2012, 1, 3).expect("valid date")
+        )],
+        "a Jan 3 all-day span starts Jan 2 10:00Z, inside the window"
+    );
+}
+
+/// The pre-filter keeps a candidate dated before the window when it resolves
+/// into it: a floating 23:30 in UTC-10 is 09:30Z the next day.
+#[test]
+fn pre_filter_keeps_a_day_before_candidate_resolving_into_the_window() {
+    let item = timed_item(TimedStart::Floating(local("20260601T233000")), daily());
+    let out = expand(
+        &item,
+        &[],
+        &expansion(
+            utc(2026, 6, 11, 0, 0),
+            utc(2026, 6, 12, 0, 0),
+            Tz::Pacific__Tahiti,
+        ),
+    )
+    .expect("expands");
+    assert_eq!(out.len(), 1);
+    assert_eq!(
+        out[0].recurrence_id,
+        RecurrenceId::Floating(local("20260610T233000")),
+        "the wall clock is the day before the window in UTC terms"
+    );
+    assert_eq!(out[0].span.start(), utc(2026, 6, 11, 9, 30));
+}
+
 /// Santiago and Havana spring forward at 00:00, so local midnight itself is the
 /// missing hour on the transition day. An all-day series must still produce
 /// every date: the midnight shifts forward and the day is 23 hours long.
