@@ -432,7 +432,7 @@ impl LocalStore {
         sync_meta: StoredObjectSyncMeta,
     ) -> Result<(), LocalStoreError> {
         let object_id = identity.object_id;
-        self.validate_encrypted_revision_advance(object_id, &encrypted.object)
+        self.validate_encrypted_revision_advance(object_id, &encrypted.object.envelope.body)
             .await?;
         // A delete that landed after this create wins: re-persisting would
         // resurrect a record the user already removed on another device.
@@ -874,7 +874,7 @@ impl LocalStore {
         encrypted: &EncryptedInlineObject,
         sync_meta: StoredObjectSyncMeta,
     ) -> Result<(), LocalStoreError> {
-        self.validate_encrypted_revision_advance(item_id, &encrypted.object)
+        self.validate_encrypted_revision_advance(item_id, &encrypted.object.envelope.body)
             .await?;
         if let Some(StoredObjectRecord::Deleted(record)) =
             self.stored_object_record(item_id).await?
@@ -919,7 +919,7 @@ impl LocalStore {
         event_seq: i64,
         seen_generation: Option<u64>,
     ) -> Result<(), LocalStoreError> {
-        self.validate_encrypted_revision_advance(item_id, encrypted)
+        self.validate_encrypted_revision_advance(item_id, &encrypted.envelope.body)
             .await?;
         if let Some(StoredObjectRecord::Deleted(record)) =
             self.stored_object_record(item_id).await?
@@ -963,8 +963,21 @@ impl LocalStore {
         event_seq: i64,
         seen_generation: Option<u64>,
     ) -> Result<(), LocalStoreError> {
-        if let Some(StoredObjectRecord::Deleted(record)) =
-            self.stored_object_record(item_id).await?
+        let existing = self.stored_object_record(item_id).await?;
+        // A collab listing is server-visible metadata with no signed chain, so
+        // it proves nothing about an encrypted object held under the same id.
+        // Writing it would replace that object's record and drop the anchor
+        // with it, after which the server could replay an older revision.
+        if let Some(record) = existing.as_ref()
+            && revision_anchor_for_record(record)?.is_some()
+        {
+            tracing::warn!(
+                object_id = %item_id,
+                "Ignoring a collab listing for an object that holds a revision anchor",
+            );
+            return Ok(());
+        }
+        if let Some(StoredObjectRecord::Deleted(record)) = existing.as_ref()
             && record.event_seq > event_seq
         {
             return Ok(());
@@ -1101,10 +1114,35 @@ impl LocalStore {
             None => None,
         };
         let revision_anchor = match tombstone_head {
-            Some(head) => Some(StoredRevisionAnchor {
-                head,
-                kind: StoredRevisionAnchorKind::Tombstone,
-            }),
+            // A tombstone this device signed still has to follow the anchor it
+            // already holds. A delete response that arrives after another
+            // device's later revision was accepted carries an older head, and
+            // taking it would lower the anchor and let the revisions in
+            // between be replayed.
+            Some(head) => {
+                if let Some(anchor) = retained_anchor {
+                    if head.revision < anchor.head.revision {
+                        return Err(revision_anchor_error(
+                            object_id,
+                            head.revision,
+                            "rolls back the retained revision anchor",
+                        ));
+                    }
+                    if head.revision == anchor.head.revision
+                        && head.parent_hash != anchor.head.parent_hash
+                    {
+                        return Err(revision_anchor_error(
+                            object_id,
+                            head.revision,
+                            "changes the already accepted revision body",
+                        ));
+                    }
+                }
+                Some(StoredRevisionAnchor {
+                    head,
+                    kind: StoredRevisionAnchorKind::Tombstone,
+                })
+            }
             None => retained_anchor.map(|mut anchor| {
                 anchor.kind = StoredRevisionAnchorKind::ObservedDelete;
                 anchor
@@ -1430,6 +1468,22 @@ impl LocalStore {
         }
     }
 
+    /// Check a served revision against the durable anchor before the caller
+    /// commits to it.
+    ///
+    /// Takes the sync lock, so callers that are not already inside a store
+    /// write use this. The rules are the ones every encrypted write obeys, so
+    /// a revision that passes here is one persistence will also accept.
+    pub async fn validate_incoming_revision(
+        &self,
+        object_id: &str,
+        body: &ObjectEnvelopeBody,
+    ) -> Result<(), LocalStoreError> {
+        let _sync = self.sync.lock().await;
+        self.validate_encrypted_revision_advance(object_id, body)
+            .await
+    }
+
     /// Re-check chain monotonicity while the caller holds the sync lock.
     ///
     /// Network materialization performs the same check before decrypting, but
@@ -1439,7 +1493,7 @@ impl LocalStore {
     async fn validate_encrypted_revision_advance(
         &self,
         object_id: &str,
-        encrypted: &EncryptedObject,
+        incoming: &ObjectEnvelopeBody,
     ) -> Result<(), LocalStoreError> {
         let Some(record) = self.stored_object_record(object_id).await? else {
             return Ok(());
@@ -1447,7 +1501,6 @@ impl LocalStore {
         let Some(anchor) = revision_anchor_for_record(&record)? else {
             return Ok(());
         };
-        let incoming = &encrypted.envelope.body;
 
         if let StoredObjectRecord::Deleted(marker) | StoredObjectRecord::PendingCreate(marker) =
             &record
@@ -2703,12 +2756,14 @@ pub enum LocalStoreError {
 #[cfg(test)]
 mod tests {
     use clipper_core::models::{
-        ClipboardMeta, OBJECT_ENVELOPE_SIGNATURE_BYTES, ObjectEnvelopeBody,
+        ClipboardMeta, FileMeta, OBJECT_ENVELOPE_SIGNATURE_BYTES, ObjectEnvelopeBody,
         ObjectEnvelopeOperation, ObjectEnvelopePayload,
     };
 
     use super::*;
-    use crate::api_client::{encrypt_clipboard_meta, encrypt_clipboard_payload};
+    use crate::api_client::{
+        encrypt_clipboard_meta, encrypt_clipboard_payload, encrypt_file_meta_bytes,
+    };
 
     const TEST_KEY: [u8; 32] = [7; 32];
     const TEST_DEVICE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -2795,6 +2850,87 @@ mod tests {
                 },
             },
             payload_ciphertext,
+        }
+    }
+
+    fn file_item(id: &str, created_at: &str) -> DecryptedFileItem {
+        DecryptedFileItem {
+            id: id.into(),
+            filename: "notes.txt".into(),
+            mime_type: "text/plain".into(),
+            blob_size: 5,
+            created_at: created_at.into(),
+            source_device_id: TEST_DEVICE_ID.into(),
+        }
+    }
+
+    /// A file object at one revision. Files keep no cached payload, so the
+    /// encrypted meta and the envelope are the whole record.
+    fn encrypted_file_at(
+        item: &DecryptedFileItem,
+        revision: u64,
+        parent_hash: Option<[u8; crypto::SHA256_BYTES]>,
+        operation: ObjectEnvelopeOperation,
+    ) -> EncryptedObject {
+        let object_id = item.id.parse().expect("object id");
+        let payload_id = uuid::Uuid::now_v7().into();
+        let source_device_id = item.source_device_id.parse().expect("device id");
+        let aad_body = ObjectEnvelopeBody {
+            object_id,
+            object_type: ObjectKind::File,
+            envelope_version: crypto::OBJECT_ENVELOPE_VERSION,
+            revision,
+            parent_hash,
+            source_device_id,
+            created_at: item.created_at.clone(),
+            operation,
+            meta_nonce: Vec::new(),
+            sha256_meta_ciphertext: Vec::new(),
+            payloads: vec![ObjectEnvelopePayload {
+                id: payload_id,
+                nonce: Vec::new(),
+                ciphertext_size: item.blob_size,
+                sha256_ciphertext: Vec::new(),
+            }],
+        };
+        let meta = FileMeta {
+            filename: item.filename.clone(),
+            mime_type: item.mime_type.clone(),
+            size: Some(item.blob_size),
+        };
+        let (meta_nonce, meta_ciphertext) =
+            encrypt_file_meta_bytes(&meta, &TEST_KEY, &aad_body).expect("meta encrypt");
+        let envelope_body = ObjectEnvelopeBody {
+            meta_nonce: meta_nonce.clone(),
+            sha256_meta_ciphertext: crypto::sha256(&meta_ciphertext).to_vec(),
+            ..aad_body
+        };
+        EncryptedObject {
+            meta_nonce,
+            meta_ciphertext,
+            payloads: vec![ObjectPayloadDescriptor {
+                id: payload_id,
+                nonce: vec![0; crypto::XCHACHA20_NONCE_BYTES],
+                ciphertext_size: item.blob_size,
+                sha256_ciphertext: crypto::sha256(&[]).to_vec(),
+            }],
+            created_at: item.created_at.clone(),
+            source_device_id: item.source_device_id.clone(),
+            envelope: ObjectEnvelope {
+                body: envelope_body,
+                signature: vec![0; OBJECT_ENVELOPE_SIGNATURE_BYTES],
+            },
+        }
+    }
+
+    fn collab_item(id: &str, created_at: &str) -> CollabItem {
+        CollabItem {
+            id: id.into(),
+            title: "shared doc".into(),
+            share_token: "share-token".into(),
+            share_url: None,
+            created_at: created_at.into(),
+            updated_at: created_at.into(),
         }
     }
 
@@ -3734,5 +3870,350 @@ mod tests {
                 .is_none(),
             "the cached ciphertext should go with the object row",
         );
+    }
+
+    /// A collab listing is plaintext server metadata with no signed chain.
+    /// Writing one under the id of an encrypted object replaced that object's
+    /// record, and the next collab sweep then dropped the record and its
+    /// anchor — after which revision 1 could be replayed unchallenged.
+    #[tokio::test]
+    async fn a_collab_listing_cannot_erase_an_encrypted_objects_anchor() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let file = file_item(
+            "dddddddd-1111-4111-8111-111111111111",
+            "2026-01-15T00:00:00+00:00",
+        );
+        let revision_one = encrypted_file_at(&file, 1, None, ObjectEnvelopeOperation::Create);
+        let revision_five = encrypted_file_at(
+            &file,
+            5,
+            Some([5; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        store
+            .persist_local_file_present_encrypted(&file, &revision_five, 5, 5, 10)
+            .await
+            .expect("persist revision five");
+        let head = store.local_head(&file.id).await.expect("head");
+        assert_eq!(head.expect("held head").revision, 5);
+
+        store
+            .persist_local_collab_present(
+                &collab_item(&file.id, &file.created_at),
+                TEST_DEVICE_ID,
+                6,
+                6,
+                10,
+            )
+            .await
+            .expect("a collab listing for a held object is ignored, not an error");
+
+        let generation = store.start_generation().await;
+        store
+            .sweep_kind(ObjectKind::Collab, generation, 10, 10)
+            .await
+            .expect("sweep")
+            .expect("current generation");
+
+        assert_eq!(
+            store.local_head(&file.id).await.expect("head"),
+            head,
+            "a collab listing and sweep must not touch an encrypted object's head",
+        );
+        store
+            .persist_local_file_present_encrypted(&file, &revision_one, 7, 7, 10)
+            .await
+            .expect_err("a collab listing must not open the door to an older revision");
+    }
+
+    /// The same hole, closed at the storage boundary: a record with no chain of
+    /// its own must not take one away, and neither must forgetting an object.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn a_chainless_record_cannot_take_an_anchor_away() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let entry = item(
+            "dddddddd-2222-4222-8222-222222222222",
+            "revision two",
+            "2026-01-15T00:00:00+00:00",
+        );
+        let revision_two = encrypted_clipboard_at(
+            &entry,
+            entry.text.as_bytes(),
+            2,
+            Some([2; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &entry,
+                entry.text.as_bytes(),
+                &revision_two,
+                2,
+                2,
+                10,
+            )
+            .await
+            .expect("persist revision two");
+        let held = store
+            .stored_object_record(&entry.id)
+            .await
+            .expect("record")
+            .expect("held record");
+
+        let collab_record = StoredObjectRecord::Present(Box::new(StoredPresentObjectRecord {
+            id: entry.id.clone(),
+            kind: ObjectKind::Collab,
+            seen_generation: None,
+            event_seq: 3,
+            created_seq: 3,
+            content: StoredPresentContent::Collab(StoredCollabRecord {
+                title: "shared doc".into(),
+                share_token: "share-token".into(),
+                share_url: None,
+                created_at: entry.created_at.clone(),
+                source_device_id: TEST_DEVICE_ID.into(),
+                updated_at: entry.created_at.clone(),
+            }),
+        }));
+        store
+            .write_stored_object_record(&collab_record)
+            .await
+            .expect_err("a chainless record must not replace a held anchor");
+        store
+            .remove_stored_object_record_and_payloads(&held)
+            .await
+            .expect_err("an object with a chain position must not be forgotten");
+
+        assert_eq!(
+            store
+                .local_head(&entry.id)
+                .await
+                .expect("head")
+                .expect("held head")
+                .revision,
+            2,
+        );
+    }
+
+    /// A locally signed delete whose response is delayed carries an older head
+    /// than the revision another device published in the meantime. Taking it
+    /// would lower the anchor and let the revisions in between be replayed.
+    #[tokio::test]
+    async fn a_late_local_tombstone_cannot_lower_the_anchor() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let entry = item(
+            "dddddddd-3333-4333-8333-333333333333",
+            "revision four",
+            "2026-01-16T00:00:00+00:00",
+        );
+        let revision_four = encrypted_clipboard_at(
+            &entry,
+            entry.text.as_bytes(),
+            4,
+            Some([4; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &entry,
+                entry.text.as_bytes(),
+                &revision_four,
+                4,
+                4,
+                10,
+            )
+            .await
+            .expect("persist revision four");
+        let head = store.local_head(&entry.id).await.expect("head");
+
+        let error = store
+            .apply_local_tombstone(
+                ObjectKind::Clipboard,
+                &entry.id,
+                99,
+                LocalHead {
+                    revision: 2,
+                    parent_hash: [1; crypto::SHA256_BYTES],
+                },
+                10,
+            )
+            .await
+            .expect_err("a late delete response must not lower the anchor");
+        assert!(
+            error
+                .to_string()
+                .contains("rolls back the retained revision anchor"),
+            "unexpected error: {error}",
+        );
+        assert_eq!(store.local_head(&entry.id).await.expect("head"), head);
+        assert!(matches!(
+            store.stored_object_record(&entry.id).await.expect("record"),
+            Some(StoredObjectRecord::Present(_)),
+        ));
+    }
+
+    /// `local_head` reports nothing for an object that is locally gone, so a
+    /// check driven by it alone ignores an absent object's anchor. This check
+    /// reads the anchor itself.
+    #[tokio::test]
+    async fn validating_an_incoming_revision_honours_an_absent_anchor() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let entry = item(
+            "dddddddd-4444-4444-8444-444444444444",
+            "revision three",
+            "2026-01-17T00:00:00+00:00",
+        );
+        let revision_two = encrypted_clipboard_at(
+            &entry,
+            b"revision two",
+            2,
+            Some([2; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        let revision_three = encrypted_clipboard_at(
+            &entry,
+            entry.text.as_bytes(),
+            3,
+            Some([3; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        let other_three = encrypted_clipboard_at(
+            &entry,
+            b"another three",
+            3,
+            Some([9; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        let parent_hash = crypto::object_envelope_parent_hash(&revision_three.object.envelope.body)
+            .expect("parent hash");
+        let revision_four = encrypted_clipboard_at(
+            &entry,
+            b"revision four",
+            4,
+            Some(parent_hash),
+            ObjectEnvelopeOperation::Revise,
+        );
+        let unchained_four = encrypted_clipboard_at(
+            &entry,
+            b"revision four",
+            4,
+            Some([0; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &entry,
+                entry.text.as_bytes(),
+                &revision_three,
+                3,
+                3,
+                10,
+            )
+            .await
+            .expect("persist revision three");
+        let generation = store.start_generation().await;
+        store
+            .sweep_kind(ObjectKind::Clipboard, generation, 10, 10)
+            .await
+            .expect("sweep")
+            .expect("current generation");
+        assert!(
+            store.local_head(&entry.id).await.expect("head").is_none(),
+            "an absent object holds an anchor but reports no head",
+        );
+
+        store
+            .validate_incoming_revision(&entry.id, &revision_two.object.envelope.body)
+            .await
+            .expect_err("an older revision must be refused");
+        store
+            .validate_incoming_revision(&entry.id, &other_three.object.envelope.body)
+            .await
+            .expect_err("a different body at the accepted revision must be refused");
+        store
+            .validate_incoming_revision(&entry.id, &unchained_four.object.envelope.body)
+            .await
+            .expect_err("a successor that does not chain must be refused");
+        store
+            .validate_incoming_revision(&entry.id, &revision_three.object.envelope.body)
+            .await
+            .expect("the accepted head may reappear after mere absence");
+        store
+            .validate_incoming_revision(&entry.id, &revision_four.object.envelope.body)
+            .await
+            .expect("the immediate successor is accepted");
+    }
+
+    /// A delete event with no tombstone body proves one revision followed the
+    /// last visible head, so a restored object has to be two revisions on.
+    #[tokio::test]
+    async fn validating_an_incoming_revision_honours_an_observed_delete_anchor() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let entry = item(
+            "dddddddd-5555-4555-8555-555555555555",
+            "revision three",
+            "2026-01-18T00:00:00+00:00",
+        );
+        let revision_three = encrypted_clipboard_at(
+            &entry,
+            entry.text.as_bytes(),
+            3,
+            Some([3; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        let revision_four = encrypted_clipboard_at(
+            &entry,
+            b"revision four",
+            4,
+            Some([4; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        let revision_five = encrypted_clipboard_at(
+            &entry,
+            b"revision five",
+            5,
+            Some([5; crypto::SHA256_BYTES]),
+            ObjectEnvelopeOperation::Revise,
+        );
+        store
+            .persist_local_clipboard_present_encrypted(
+                &entry,
+                entry.text.as_bytes(),
+                &revision_three,
+                3,
+                3,
+                10,
+            )
+            .await
+            .expect("persist revision three");
+        store
+            .apply_live_delete(ObjectKind::Clipboard, &entry.id, 4, 0, 10)
+            .await
+            .expect("observe delete")
+            .expect("current generation");
+        assert!(
+            store.local_head(&entry.id).await.expect("head").is_none(),
+            "an observed delete leaves an anchor but no head",
+        );
+
+        store
+            .validate_incoming_revision(&entry.id, &revision_four.object.envelope.body)
+            .await
+            .expect_err("the revision the tombstone replaced must be refused");
+        store
+            .validate_incoming_revision(&entry.id, &revision_five.object.envelope.body)
+            .await
+            .expect("a restore past the tombstone is accepted");
     }
 }

@@ -353,7 +353,16 @@ pub(super) fn write_record(
                     present.seen_generation,
                     Some(anchor),
                 )?,
+                // A record with no chain of its own must not take one away.
+                // A collab listing served under the id of an encrypted object
+                // would otherwise erase that object's accepted revision.
                 None => {
+                    if anchor_has_chain_position(&transaction, &present.id)? {
+                        return Err(LocalStoreError::EncryptedCache(format!(
+                            "object {} holds a revision anchor no chainless record may replace",
+                            present.id
+                        )));
+                    }
                     transaction.execute(
                         "DELETE FROM object_anchors WHERE object_id = ?1",
                         params![present.id],
@@ -424,11 +433,18 @@ pub(super) fn delete_payload(
 /// Only for objects with nothing to protect — a collab doc, which has no
 /// chain, or a record too damaged to yield one. Anything else should be left
 /// as an anchor instead; see `LocalStore::discard_unreadable_cache_entry`.
+/// An object whose anchor records a chain position is refused here rather than
+/// forgotten, because nothing the server holds can restore that memory.
 pub(super) fn forget_object(
     connection: &mut Connection,
     object_id: &str,
 ) -> Result<(), LocalStoreError> {
     let transaction = connection.transaction()?;
+    if anchor_has_chain_position(&transaction, object_id)? {
+        return Err(LocalStoreError::EncryptedCache(format!(
+            "object {object_id} holds a revision anchor and must not be forgotten"
+        )));
+    }
     transaction.execute("DELETE FROM objects WHERE id = ?1", params![object_id])?;
     transaction.execute(
         "DELETE FROM object_anchors WHERE object_id = ?1",
@@ -436,6 +452,22 @@ pub(super) fn forget_object(
     )?;
     transaction.commit()?;
     Ok(())
+}
+
+/// Whether the object's anchor row records a chain position, rather than only
+/// the ordering guard a deleted object leaves behind.
+fn anchor_has_chain_position(
+    connection: &Connection,
+    object_id: &str,
+) -> Result<bool, LocalStoreError> {
+    let found: Option<i64> = connection
+        .query_row(
+            "SELECT 1 FROM object_anchors WHERE object_id = ?1 AND anchor_kind IS NOT NULL",
+            params![object_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
 }
 
 #[allow(clippy::too_many_arguments)]

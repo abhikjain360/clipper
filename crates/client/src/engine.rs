@@ -1116,6 +1116,11 @@ impl SyncEngine {
             let api = &self.api;
             let file_item = api.get_object(file_id).await?;
             verify_object_list_item_envelope(&file_item)?;
+            if file_item.id.to_string() != file_id {
+                return Err(ClientError::UnexpectedResponse(format!(
+                    "download of object {file_id} returned mismatched identity"
+                )));
+            }
             self.check_revision_advance(&file_item).await?;
             if file_item.kind != ObjectKind::File {
                 return Err(ClientError::UnexpectedObjectKind {
@@ -1132,21 +1137,54 @@ impl SyncEngine {
             (file_item, payload, blob)
         };
 
-        let plaintext = {
-            let encryption_key = self.encryption_key.read().await;
-            let encryption_key = encryption_key
-                .as_ref()
-                .ok_or(ClientError::NotAuthenticated)?;
-            decrypt_file_blob_bytes(
-                &payload.nonce,
-                &encrypted_blob,
-                encryption_key,
-                &file_item.envelope.body,
-                payload.id,
-            )?
-        };
+        let encryption_key = self.current_encryption_key().await?;
+        let plaintext = decrypt_file_blob_bytes(
+            &payload.nonce,
+            &encrypted_blob,
+            &encryption_key,
+            &file_item.envelope.body,
+            payload.id,
+        )?;
+        self.retain_downloaded_file(&file_item, &encryption_key)
+            .await?;
         info!(file_id = %file_id, "File downloaded");
         Ok(plaintext)
+    }
+
+    /// Record the revision a download accepted.
+    ///
+    /// A download verifies a file's head and then decrypts it, but nothing on
+    /// that path stores anything, so without this the anchor never advances and
+    /// the server can serve revision 3 and then revision 2 to the same device.
+    /// The head is stored the way a fetched file is stored anywhere else.
+    async fn retain_downloaded_file(
+        &self,
+        item: &ObjectListItem,
+        encryption_key: &[u8; 32],
+    ) -> Result<(), ClientError> {
+        let object_id = item.id.to_string();
+        // Already at this revision: the record is the one this would write.
+        if self
+            .local_store
+            .local_head(&object_id)
+            .await?
+            .is_some_and(|head| head.revision >= item.revision)
+        {
+            return Ok(());
+        }
+        let file = decrypt_file_object_item(item, encryption_key)?;
+        let visible = self
+            .local_store
+            .persist_local_file_present_encrypted(
+                &file,
+                &encrypted_object_from_list_item(item),
+                item.created_seq,
+                item.created_seq,
+                RECENT_CLIPBOARD_LIMIT,
+            )
+            .await?;
+        self.publish_visible_state(visible).await;
+        Ok(())
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -1684,12 +1722,15 @@ impl SyncEngine {
     /// substitutes a revision leaves a hash that does not match. A larger jump
     /// cannot be checked locally, because the revisions in between were never
     /// seen.
+    ///
+    /// The store owns the rules, because it owns the anchors: an object that is
+    /// gone locally still has one, and a check driven by the held head alone
+    /// would ignore it.
     async fn check_revision_advance(&self, item: &ObjectListItem) -> Result<(), ClientError> {
-        let object_id = item.id.to_string();
-        let Some(head) = self.local_store.local_head(&object_id).await? else {
-            return Ok(());
-        };
-        validate_revision_advance(item, head)
+        self.local_store
+            .validate_incoming_revision(&item.id.to_string(), &item.envelope.body)
+            .await
+            .map_err(Into::into)
     }
 
     /// The chain position this client holds for an object, or a typed error.
@@ -3813,32 +3854,6 @@ fn object_envelope_error(message: impl Into<String>) -> ClientError {
     ClientError::Crypto(crypto::CryptoError::Signature(message.into()))
 }
 
-fn validate_revision_advance(item: &ObjectListItem, head: LocalHead) -> Result<(), ClientError> {
-    if item.revision < head.revision {
-        return Err(object_envelope_error(format!(
-            "server served revision {} of {} after this device saw {}",
-            item.revision, item.id, head.revision,
-        )));
-    }
-    if item.revision == head.revision
-        && crypto::object_envelope_parent_hash(&item.envelope.body)? != head.parent_hash
-    {
-        return Err(object_envelope_error(format!(
-            "server changed the envelope of already-held revision {} of {}",
-            item.revision, item.id,
-        )));
-    }
-    if head.revision.checked_add(1) == Some(item.revision)
-        && item.envelope.body.parent_hash != Some(head.parent_hash)
-    {
-        return Err(object_envelope_error(format!(
-            "revision {} of {} does not chain to the revision this device holds",
-            item.revision, item.id,
-        )));
-    }
-    Ok(())
-}
-
 fn decrypt_file_object_item(
     item: &ObjectListItem,
     encryption_key: &[u8; 32],
@@ -4006,34 +4021,6 @@ mod tests {
         assert!(validate_snapshot_page(&page, None, 10).is_err());
         page.next_after = None;
         validate_snapshot_page(&page, Some(cursor), 10).expect("empty last page");
-    }
-
-    #[test]
-    fn a_held_revision_cannot_be_replaced_by_a_different_envelope() {
-        let mut item = signed_item_with_payload_count(1);
-        let head = LocalHead {
-            revision: item.revision,
-            parent_hash: crypto::object_envelope_parent_hash(&item.envelope.body).expect("hash"),
-        };
-        validate_revision_advance(&item, head).expect("same head");
-        item.envelope.body.created_at = "2026-09-08T12:00:00Z".into();
-        assert!(validate_revision_advance(&item, head).is_err());
-        item.revision = 2;
-        item.envelope.body.revision = 2;
-        item.envelope.body.parent_hash = Some(head.parent_hash);
-        validate_revision_advance(&item, head).expect("valid successor");
-        item.envelope.body.parent_hash = Some([0; crypto::SHA256_BYTES]);
-        assert!(validate_revision_advance(&item, head).is_err());
-        assert!(
-            validate_revision_advance(
-                &item,
-                LocalHead {
-                    revision: 3,
-                    ..head
-                }
-            )
-            .is_err()
-        );
     }
 
     #[cfg(not(target_family = "wasm"))]
