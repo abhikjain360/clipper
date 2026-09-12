@@ -21,6 +21,13 @@ this format version.
 - Object metadata and payloads use XChaCha20-Poly1305.
 - `H` is SHA-256. `Canon` is postcard serialization, whose field order is part
   of the canonical bytes.
+- A device key signs two message types, each under its own domain string:
+  `clipper:object-envelope:v1` for envelope bodies and
+  `clipper:device-login-proof:v1` for login proofs. The signed message is the
+  domain followed by the canonical body bytes, so a signature over one message
+  type is not a signature over the other.
+- The AEAD associated data uses two further domain strings,
+  `clipper:object-meta-aad:v1` and `clipper:object-payload-aad:v1`.
 
 The server never learns the OPAQUE export key or `K`.
 
@@ -43,7 +50,7 @@ body = (
   [(payload_id, payload_nonce, ciphertext_size, H(payload_ciphertext)), ...]
 )
 
-signature = Sign(sk_D, Canon(body))
+signature = Sign(sk_D, "clipper:object-envelope:v1" ‖ Canon(body))
 ```
 
 Revision 1 has no parent and must use `create`. Every later revision has a
@@ -52,7 +59,8 @@ tombstone with no payloads. The server keeps earlier revisions, so restoring an
 object means appending a new `revise` revision after the tombstone. Purging is a
 separate irreversible operation.
 
-The parent hash is over the canonical signed body, excluding the signature. A
+The parent hash is over the canonical signed body, excluding the signature and
+the signing domain prefix. A
 client writing revision `n + 1` names the exact head body it accepted at `n`.
 The server rejects a wrong revision number, a wrong parent hash, or a concurrent
 writer that lost the `(object_id, revision)` uniqueness race with
@@ -72,8 +80,20 @@ A_meta = Canon((
   None
 ))
 
-A_payload_i = the same projection with payload_id_i in the final field
+A_payload_i = Canon((
+  "clipper:object-payload-aad:v1",
+  object_id, object_type, envelope_version,
+  revision, parent_hash,
+  source_device_id, created_at, operation,
+  [payload_id_1, ...],
+  payload_id_i
+))
 ```
+
+The two projections differ in two fields: the leading domain string and the
+final payload id. The domain string alone separates metadata from payloads, so
+sealed metadata does not open in a payload slot even if the final field
+happened to match.
 
 Nonces, sizes, and ciphertext hashes are excluded from the AAD because the
 ciphertext does not exist when its AAD is constructed. They are included in the
@@ -200,7 +220,10 @@ while retaining all response/body checks and the load-bearing AEAD verification.
 The device signing secret is stored wrapped with a separate key derived from
 the OPAQUE export key using
 `clipper:opaque-export:device-identity-wrap-key:v1`. The local record uses
-XChaCha20-Poly1305 with the label
-`clipper:wrap:device-signing-secret:v1`. Native files and directories are
-permission-restricted and written atomically. Plaintext or forged legacy
-identity records are rejected rather than migrated.
+XChaCha20-Poly1305, and its AAD is
+`Canon((clipper:wrap:device-signing-secret:v1, record_version, device_id,
+profile_id))`. That binds the record's cleartext header to the secret, so a
+rewritten `device_id` or a record copied between profiles fails to unwrap.
+Native files and directories are permission-restricted and written atomically.
+Plaintext or forged legacy identity records are rejected rather than migrated,
+and so is a malformed `device_id`.
