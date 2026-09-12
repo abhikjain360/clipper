@@ -2962,7 +2962,7 @@ impl SyncEngine {
         let object_id_text = object_id.to_string();
         let should_materialize = self
             .local_store
-            .mark_pending_create(kind, &object_id_text, event_seq, generation)
+            .mark_pending_fetch(kind, &object_id_text, event_seq, generation)
             .await?;
 
         if should_materialize {
@@ -2988,8 +2988,7 @@ impl SyncEngine {
     /// Refetch an object whose head moved to a new revision.
     ///
     /// Same materialisation as a creation: the object is pulled and the local
-    /// copy replaced. It goes through `mark_pending_update`, because the
-    /// create path ignores an object it already holds.
+    /// copy replaced.
     async fn handle_updated_object_event(
         self: &Arc<Self>,
         generation: u64,
@@ -3000,7 +2999,7 @@ impl SyncEngine {
         let object_id_text = object_id.to_string();
         let should_materialize = self
             .local_store
-            .mark_pending_update(kind, &object_id_text, event_seq, generation)
+            .mark_pending_fetch(kind, &object_id_text, event_seq, generation)
             .await?;
         if !should_materialize {
             return Ok(());
@@ -4625,7 +4624,7 @@ mod tests {
         assert!(
             !engine
                 .local_store
-                .mark_pending_create(
+                .mark_pending_fetch(
                     ObjectKind::Clipboard,
                     "33333333-3333-4333-8333-333333333333",
                     1,
@@ -4781,6 +4780,91 @@ mod tests {
             signal.has_changed().expect("signal open"),
             "a refresh asked for during the connection must restart it",
         );
+    }
+
+    /// The server emits a create when a visible revision follows a tombstone,
+    /// and it lets live events arrive out of order. A create that overtakes
+    /// its tombstone has to fetch the new head: ignoring it leaves the
+    /// revision the tombstone ended on screen, and the tombstone that follows
+    /// is then dropped as stale.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn a_revival_that_overtakes_its_tombstone_still_fetches_the_new_head() {
+        use super::adversarial_history_tests::{
+            HISTORY_TEST_DEVICE_ID, encrypted_schedule_object, source_record,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", temp.path());
+        engine.local_store.set_profile("profile-a".into());
+        let generation = engine.local_store.start_generation().await;
+        let id = uuid::Uuid::now_v7().to_string();
+
+        let record = source_record("before the delete");
+        let encrypted = encrypted_schedule_object(&record, &id, 1, None);
+        engine
+            .local_store
+            .persist_snapshot_schedule_present_encrypted(
+                StoredObjectIdentity {
+                    object_id: &id,
+                    created_at: "2026-09-12T00:00:00Z",
+                    source_device_id: HISTORY_TEST_DEVICE_ID,
+                },
+                record,
+                &encrypted,
+                10,
+                generation,
+                100,
+            )
+            .await
+            .expect("cache revision 1");
+
+        assert!(
+            engine
+                .local_store
+                .mark_pending_fetch(ObjectKind::Schedule, &id, 30, generation)
+                .await
+                .expect("marker"),
+            "a create newer than the cached revision must fetch the head",
+        );
+
+        // What that fetch returns: the revision the revival published.
+        let revived = source_record("after the revival");
+        let revived_encrypted = encrypted_schedule_object(&revived, &id, 3, None);
+        engine
+            .local_store
+            .persist_snapshot_schedule_present_encrypted(
+                StoredObjectIdentity {
+                    object_id: &id,
+                    created_at: "2026-09-12T00:00:00Z",
+                    source_device_id: HISTORY_TEST_DEVICE_ID,
+                },
+                revived,
+                &revived_encrypted,
+                30,
+                generation,
+                100,
+            )
+            .await
+            .expect("cache revision 3");
+
+        engine
+            .local_store
+            .apply_live_delete(ObjectKind::Schedule, &id, 20, generation, 100)
+            .await
+            .expect("late delete");
+
+        let records = engine
+            .local_store
+            .schedule_records_with_heads()
+            .await
+            .expect("records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].1.as_source().expect("source").name,
+            "after the revival",
+        );
+        assert_eq!(records[0].2.revision, 3);
     }
 
     const RETAIN_TEST_KEY: [u8; 32] = [7; 32];
@@ -5355,7 +5439,7 @@ mod adversarial_history_tests {
     pub(super) const HISTORY_TEST_KEY: [u8; 32] = [1; 32];
     pub(super) const HISTORY_TEST_DEVICE_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
-    fn source_record(name: &str) -> ScheduleRecord {
+    pub(super) fn source_record(name: &str) -> ScheduleRecord {
         ScheduleRecord::Source(Box::new(CalendarSource {
             id: SourceId::new(),
             name: name.into(),
