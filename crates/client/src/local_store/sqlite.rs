@@ -291,27 +291,30 @@ pub(super) fn live_records(
         };
         let record = match (pending, content) {
             (true, _) => StoredObjectRecord::PendingCreate(marker(id)),
-            (false, Some(content)) => match serde_json::from_slice::<StoredPresentContent>(&content)
-            {
-                Ok(content) => StoredObjectRecord::Present(Box::new(StoredPresentObjectRecord {
-                    id,
-                    kind,
-                    seen_generation,
-                    event_seq,
-                    created_seq,
-                    content,
-                })),
-                // Unreadable content is a broken cache entry, and the answer to
-                // one is to fetch it again. Keep the chain position it proved
-                // while it was readable, the way an absent object does.
-                Err(error) => {
-                    tracing::warn!(object_id = %id, "Local cache row will not parse: {error}");
-                    if anchor.is_none() {
-                        continue;
+            (false, Some(content)) => {
+                match serde_json::from_slice::<StoredPresentContent>(&content) {
+                    Ok(content) => {
+                        StoredObjectRecord::Present(Box::new(StoredPresentObjectRecord {
+                            id,
+                            kind,
+                            seen_generation,
+                            event_seq,
+                            created_seq,
+                            content,
+                        }))
                     }
-                    StoredObjectRecord::Deleted(marker(id))
+                    // Unreadable content is a broken cache entry, and the answer to
+                    // one is to fetch it again. Keep the chain position it proved
+                    // while it was readable, the way an absent object does.
+                    Err(error) => {
+                        tracing::warn!(object_id = %id, "Local cache row will not parse: {error}");
+                        if anchor.is_none() {
+                            continue;
+                        }
+                        StoredObjectRecord::Deleted(marker(id))
+                    }
                 }
-            },
+            }
             // A held object with no content is a row this code never writes.
             (false, None) => {
                 tracing::warn!(object_id = %id, "Skipping a held object with no content");

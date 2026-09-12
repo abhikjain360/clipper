@@ -15,8 +15,7 @@ use clipper_core::models::{
 };
 use rusqlite::params;
 
-use super::sqlite;
-use super::*;
+use super::{sqlite, *};
 use crate::api_client::{encrypt_clipboard_meta, encrypt_clipboard_payload};
 
 const TEST_KEY: [u8; 32] = [7; 32];
@@ -68,7 +67,8 @@ fn encrypted_clipboard_at(
     let (meta_nonce, meta_ciphertext) =
         encrypt_clipboard_meta(&meta, &TEST_KEY, &aad_body).expect("meta encrypt");
     let (payload_nonce, payload_ciphertext) =
-        encrypt_clipboard_payload(payload, &TEST_KEY, &aad_body, payload_id).expect("payload encrypt");
+        encrypt_clipboard_payload(payload, &TEST_KEY, &aad_body, payload_id)
+            .expect("payload encrypt");
     let envelope_payload = ObjectEnvelopePayload {
         id: payload_id,
         nonce: payload_nonce.clone(),
@@ -146,13 +146,7 @@ async fn served_revision_older_than_accepted_anchor_is_rejected() {
         "two",
         "2026-01-01T00:00:00+00:00",
     );
-    let rev1 = encrypted_clipboard_at(
-        &entry,
-        b"one",
-        1,
-        None,
-        ObjectEnvelopeOperation::Create,
-    );
+    let rev1 = encrypted_clipboard_at(&entry, b"one", 1, None, ObjectEnvelopeOperation::Create);
     let rev2 = successor(&entry, &rev1, "two");
     store
         .persist_local_clipboard_present_encrypted(&entry, b"two", &rev2, 2, 2, 10)
@@ -178,13 +172,7 @@ async fn different_body_at_the_accepted_revision_is_rejected() {
         "body A",
         "2026-01-01T00:00:00+00:00",
     );
-    let rev1 = encrypted_clipboard_at(
-        &entry,
-        b"one",
-        1,
-        None,
-        ObjectEnvelopeOperation::Create,
-    );
+    let rev1 = encrypted_clipboard_at(&entry, b"one", 1, None, ObjectEnvelopeOperation::Create);
     let rev2_a = successor(&entry, &rev1, "body A");
     store
         .persist_local_clipboard_present_encrypted(&entry, b"body A", &rev2_a, 2, 2, 10)
@@ -218,13 +206,7 @@ async fn successor_with_wrong_parent_hash_is_rejected() {
         "one",
         "2026-01-01T00:00:00+00:00",
     );
-    let rev1 = encrypted_clipboard_at(
-        &entry,
-        b"one",
-        1,
-        None,
-        ObjectEnvelopeOperation::Create,
-    );
+    let rev1 = encrypted_clipboard_at(&entry, b"one", 1, None, ObjectEnvelopeOperation::Create);
     store
         .persist_local_clipboard_present_encrypted(&entry, b"one", &rev1, 1, 1, 10)
         .await
@@ -259,13 +241,7 @@ async fn skipped_link_is_accepted_as_documented() {
         "three",
         "2026-01-01T00:00:00+00:00",
     );
-    let rev1 = encrypted_clipboard_at(
-        &entry,
-        b"one",
-        1,
-        None,
-        ObjectEnvelopeOperation::Create,
-    );
+    let rev1 = encrypted_clipboard_at(&entry, b"one", 1, None, ObjectEnvelopeOperation::Create);
     store
         .persist_local_clipboard_present_encrypted(&entry, b"one", &rev1, 1, 1, 10)
         .await
@@ -285,7 +261,10 @@ async fn skipped_link_is_accepted_as_documented() {
         .persist_local_clipboard_present_encrypted(&entry, b"three", &rev3, 2, 2, 10)
         .await
         .expect("a discontinuous jump forward is accepted by design");
-    assert_eq!(store.local_head(&entry.id).await.expect("head"), Some(head_of(&rev3)));
+    assert_eq!(
+        store.local_head(&entry.id).await.expect("head"),
+        Some(head_of(&rev3))
+    );
 }
 
 #[tokio::test]
@@ -298,13 +277,7 @@ async fn event_stream_delete_requires_two_newer_revisions() {
         "two",
         "2026-01-01T00:00:00+00:00",
     );
-    let rev1 = encrypted_clipboard_at(
-        &entry,
-        b"one",
-        1,
-        None,
-        ObjectEnvelopeOperation::Create,
-    );
+    let rev1 = encrypted_clipboard_at(&entry, b"one", 1, None, ObjectEnvelopeOperation::Create);
     let rev2 = successor(&entry, &rev1, "two");
     store
         .persist_local_clipboard_present_encrypted(&entry, b"two", &rev2, 2, 2, 10)
@@ -336,7 +309,10 @@ async fn event_stream_delete_requires_two_newer_revisions() {
         .persist_local_clipboard_present_encrypted(&entry, b"four", &rev4, 5, 5, 10)
         .await
         .expect("head+2 is the minimum for an observed-delete revival");
-    assert_eq!(store.local_head(&entry.id).await.expect("head"), Some(head_of(&rev4)));
+    assert_eq!(
+        store.local_head(&entry.id).await.expect("head"),
+        Some(head_of(&rev4))
+    );
 }
 
 #[tokio::test]
@@ -350,13 +326,7 @@ async fn not_found_absence_keeps_the_anchor_and_allows_the_same_head() {
         "two",
         "2026-01-01T00:00:00+00:00",
     );
-    let rev1 = encrypted_clipboard_at(
-        &entry,
-        b"one",
-        1,
-        None,
-        ObjectEnvelopeOperation::Create,
-    );
+    let rev1 = encrypted_clipboard_at(&entry, b"one", 1, None, ObjectEnvelopeOperation::Create);
     let rev2 = successor(&entry, &rev1, "two");
     store
         .persist_local_clipboard_present_encrypted(&entry, b"two", &rev2, 2, 2, 10)
@@ -394,13 +364,7 @@ async fn signed_tombstone_chains_the_restore_and_rejects_wrong_parent() {
         "one",
         "2026-01-01T00:00:00+00:00",
     );
-    let rev1 = encrypted_clipboard_at(
-        &entry,
-        b"one",
-        1,
-        None,
-        ObjectEnvelopeOperation::Create,
-    );
+    let rev1 = encrypted_clipboard_at(&entry, b"one", 1, None, ObjectEnvelopeOperation::Create);
     store
         .persist_local_clipboard_present_encrypted(&entry, b"one", &rev1, 1, 1, 10)
         .await
@@ -460,13 +424,7 @@ async fn undecryptable_payload_bytes_keep_the_anchor() {
         "two",
         "2026-01-01T00:00:00+00:00",
     );
-    let rev1 = encrypted_clipboard_at(
-        &entry,
-        b"one",
-        1,
-        None,
-        ObjectEnvelopeOperation::Create,
-    );
+    let rev1 = encrypted_clipboard_at(&entry, b"one", 1, None, ObjectEnvelopeOperation::Create);
     let rev2 = successor(&entry, &rev1, "two");
     store
         .persist_local_clipboard_present_encrypted(&entry, b"two", &rev2, 2, 2, 10)
@@ -519,13 +477,7 @@ async fn cache_row_eviction_keeps_the_anchor() {
         "one",
         "2026-01-01T00:00:00+00:00",
     );
-    let rev1 = encrypted_clipboard_at(
-        &entry,
-        b"one",
-        1,
-        None,
-        ObjectEnvelopeOperation::Create,
-    );
+    let rev1 = encrypted_clipboard_at(&entry, b"one", 1, None, ObjectEnvelopeOperation::Create);
     store
         .persist_local_clipboard_present_encrypted(&entry, b"one", &rev1, 1, 1, 10)
         .await
@@ -551,19 +503,17 @@ async fn cache_row_eviction_keeps_the_anchor() {
     match &marker {
         StoredObjectRecord::Deleted(marker) => {
             let anchor = marker.revision_anchor.expect("the anchor must survive");
-            assert_eq!(anchor.head, head, "the anchor must record the accepted head");
+            assert_eq!(
+                anchor.head, head,
+                "the anchor must record the accepted head"
+            );
         }
         other => panic!("expected a deleted marker, got {other:?}"),
     }
     // A different body at the accepted revision proves the anchor survived:
     // it must be rejected, where a forgotten anchor would accept anything.
-    let different_body = encrypted_clipboard_at(
-        &entry,
-        b"forgery",
-        1,
-        None,
-        ObjectEnvelopeOperation::Create,
-    );
+    let different_body =
+        encrypted_clipboard_at(&entry, b"forgery", 1, None, ObjectEnvelopeOperation::Create);
     let error = restarted
         .persist_local_clipboard_present_encrypted(&entry, b"forgery", &different_body, 2, 2, 10)
         .await
@@ -646,13 +596,7 @@ async fn payload_write_rejected_for_a_marker_leaves_no_partial_record() {
         "one",
         "2026-01-01T00:00:00+00:00",
     );
-    let rev1 = encrypted_clipboard_at(
-        &entry,
-        b"one",
-        1,
-        None,
-        ObjectEnvelopeOperation::Create,
-    );
+    let rev1 = encrypted_clipboard_at(&entry, b"one", 1, None, ObjectEnvelopeOperation::Create);
     store
         .persist_local_clipboard_present_encrypted(&entry, b"one", &rev1, 1, 1, 10)
         .await
@@ -664,13 +608,20 @@ async fn payload_write_rejected_for_a_marker_leaves_no_partial_record() {
 
     // The storage layer refuses a payload on a non-present record. Whatever it
     // refuses must leave no partial state behind.
-    let marker = store.stored_object_record(&entry.id).await.expect("marker read");
+    let marker = store
+        .stored_object_record(&entry.id)
+        .await
+        .expect("marker read");
     let Some(StoredObjectRecord::Deleted(marker)) = marker else {
         panic!("expected a deleted marker");
     };
     let error = store
         .with_database(|connection| {
-            sqlite::write_record(connection, &StoredObjectRecord::Deleted(marker), Some(b"nope"))
+            sqlite::write_record(
+                connection,
+                &StoredObjectRecord::Deleted(marker),
+                Some(b"nope"),
+            )
         })
         .await
         .expect_err("a payload on a deleted marker must be refused");
@@ -682,7 +633,10 @@ async fn payload_write_rejected_for_a_marker_leaves_no_partial_record() {
     let restarted = new_store(&tmp);
     assert!(
         matches!(
-            restarted.stored_object_record(&entry.id).await.expect("record"),
+            restarted
+                .stored_object_record(&entry.id)
+                .await
+                .expect("record"),
             Some(StoredObjectRecord::Deleted(_))
         ),
         "the refused write must not have disturbed the marker"
@@ -756,11 +710,18 @@ async fn concurrent_writers_to_one_object_never_leave_torn_state() {
             succeeded.push((text, visible));
         }
     }
-    assert!(!succeeded.is_empty(), "at least the genesis write must land");
+    assert!(
+        !succeeded.is_empty(),
+        "at least the genesis write must land"
+    );
 
     // Whatever revision won, the record, its payload, and the memory copy must
     // all describe that same revision, never a torn mix.
-    let head = store.local_head(&entry.id).await.expect("head").expect("a head");
+    let head = store
+        .local_head(&entry.id)
+        .await
+        .expect("head")
+        .expect("a head");
     let record = store
         .stored_object_record(&entry.id)
         .await
@@ -770,7 +731,9 @@ async fn concurrent_writers_to_one_object_never_leave_torn_state() {
         panic!("expected a present record");
     };
     assert_eq!(
-        local_head_from_present(&present).expect("stored head").revision,
+        local_head_from_present(&present)
+            .expect("stored head")
+            .revision,
         head.revision,
         "the stored record must agree with the anchor"
     );
@@ -889,13 +852,7 @@ async fn snapshot_item_at_lower_revision_than_local_is_rejected() {
         "two",
         "2026-01-01T00:00:00+00:00",
     );
-    let rev1 = encrypted_clipboard_at(
-        &entry,
-        b"one",
-        1,
-        None,
-        ObjectEnvelopeOperation::Create,
-    );
+    let rev1 = encrypted_clipboard_at(&entry, b"one", 1, None, ObjectEnvelopeOperation::Create);
     let rev2 = successor(&entry, &rev1, "two");
     store
         .persist_local_clipboard_present_encrypted(&entry, b"two", &rev2, 2, 2, 10)
@@ -924,7 +881,10 @@ async fn snapshot_item_at_lower_revision_than_local_is_rejected() {
     );
 
     // The newer local copy must be untouched.
-    assert_eq!(store.local_head(&entry.id).await.expect("head"), Some(head_of(&rev2)));
+    assert_eq!(
+        store.local_head(&entry.id).await.expect("head"),
+        Some(head_of(&rev2))
+    );
 }
 
 // ── Hydration robustness ──
@@ -1090,13 +1050,7 @@ async fn corrupt_anchor_row_must_not_brick_every_later_event_for_that_object() {
         "one",
         "2026-01-01T00:00:00+00:00",
     );
-    let rev1 = encrypted_clipboard_at(
-        &entry,
-        b"one",
-        1,
-        None,
-        ObjectEnvelopeOperation::Create,
-    );
+    let rev1 = encrypted_clipboard_at(&entry, b"one", 1, None, ObjectEnvelopeOperation::Create);
     store
         .persist_local_clipboard_present_encrypted(&entry, b"one", &rev1, 1, 1, 10)
         .await
@@ -1121,7 +1075,12 @@ async fn corrupt_anchor_row_must_not_brick_every_later_event_for_that_object() {
     // A later create event for the same id arrives. This must not fail; the
     // worst acceptable outcome is re-fetching with reduced rollback protection.
     restarted
-        .mark_pending_create(ObjectKind::Clipboard, &entry.id, 50, restarted.start_generation().await)
+        .mark_pending_create(
+            ObjectKind::Clipboard,
+            &entry.id,
+            50,
+            restarted.start_generation().await,
+        )
         .await
         .expect("a create event after anchor corruption must not error");
 }

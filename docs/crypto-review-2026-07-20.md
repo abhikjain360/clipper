@@ -175,7 +175,7 @@ Re-derived from code so the surface does not get re-litigated:
 ### CR4 — [Low] `device_id` is plaintext and unauthenticated in the device-identity record
 
 > Resolved. The wrap AAD is now `label ‖ record version ‖ device_id ‖
-> profile_id`, the record version is 3, and a malformed `device_id` is an error
+profile_id`, the record version is 3, and a malformed `device_id` is an error
 > instead of a re-mint. Closes R25. The original finding follows.
 
 - **Files:** `crates/client/src/local_store.rs:1713-1738` (wrap/unwrap with the constant
