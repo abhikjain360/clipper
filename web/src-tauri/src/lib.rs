@@ -4,6 +4,8 @@ mod ipc_secret;
 
 use std::{path::PathBuf, sync::OnceLock};
 
+use rand::RngExt;
+
 use clipper_app_types::{
     ActualView, AppState, CollabItem, DeviceInfo, IngestReport, OccurrenceView,
 };
@@ -26,6 +28,10 @@ use zeroize::Zeroizing;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
+#[cfg_attr(not(unix), allow(dead_code))]
+const PRIVATE_DIR_MODE: u32 = 0o700;
+#[cfg(unix)]
+const PRIVATE_FILE_MODE: u32 = 0o600;
 
 struct DesktopBackend {
     daemon: DaemonClient,
@@ -370,10 +376,11 @@ async fn upload_file_bytes(
     _mime_type: String,
     bytes: Vec<u8>,
 ) -> CommandResult<String> {
-    let tmp = temp_path(&format!("upload-{filename}"));
-    tokio::fs::write(&tmp, &bytes)
-        .await
-        .map_err(|e| CommandError::Client(format!("temp write: {e}")))?;
+    let tmp = create_private_temp_file("upload", &filename).await?;
+    if let Err(e) = tokio::fs::write(&tmp, &bytes).await {
+        tokio::fs::remove_file(&tmp).await.ok();
+        return Err(CommandError::Client(format!("temp write: {e}")));
+    }
     let result = backend
         .daemon
         .send_result::<UploadFileResult>(DaemonCommand::UploadFile(UploadFileParams {
@@ -417,7 +424,8 @@ async fn download_file_bytes(
     backend: State<'_, DesktopBackend>,
     file_id: String,
 ) -> CommandResult<Vec<u8>> {
-    let tmp = temp_path(&format!("download-{file_id}"));
+    // Reserve a 0600 path first so the daemon's write keeps a private mode.
+    let tmp = create_private_temp_file("download", &file_id).await?;
     let result = backend
         .daemon
         .send_ok(DaemonCommand::DownloadFile(DownloadFileParams {
@@ -429,9 +437,13 @@ async fn download_file_bytes(
         tokio::fs::remove_file(&tmp).await.ok();
         return Err(err.into());
     }
-    let bytes = tokio::fs::read(&tmp)
-        .await
-        .map_err(|e| CommandError::Client(format!("temp read: {e}")))?;
+    let bytes = match tokio::fs::read(&tmp).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tokio::fs::remove_file(&tmp).await.ok();
+            return Err(CommandError::Client(format!("temp read: {e}")));
+        }
+    };
     tokio::fs::remove_file(&tmp).await.ok();
     Ok(bytes)
 }
@@ -693,18 +705,104 @@ fn safe_dialog_filename(filename: &str) -> String {
     }
 }
 
-fn temp_path(suffix: &str) -> PathBuf {
-    let safe: String = suffix
+fn staging_dir() -> PathBuf {
+    dirs::cache_dir()
+        .or_else(dirs::data_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Clipper")
+        .join("staging")
+}
+
+fn ensure_private_staging_dir() -> Result<PathBuf, CommandError> {
+    let dir = staging_dir();
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CommandError::Client(format!("staging dir: {e}")))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        match std::fs::DirBuilder::new()
+            .mode(PRIVATE_DIR_MODE)
+            .create(&dir)
+        {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(CommandError::Client(format!("staging dir: {e}"))),
+        }
+        let meta = std::fs::symlink_metadata(&dir)
+            .map_err(|e| CommandError::Client(format!("staging dir: {e}")))?;
+        if !meta.is_dir() {
+            return Err(CommandError::Client("staging path is not a directory".into()));
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))
+            .map_err(|e| CommandError::Client(format!("staging dir: {e}")))?;
+    }
+    #[cfg(not(unix))]
+    {
+        match std::fs::DirBuilder::new().create(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(CommandError::Client(format!("staging dir: {e}"))),
+        }
+        let meta = std::fs::metadata(&dir)
+            .map_err(|e| CommandError::Client(format!("staging dir: {e}")))?;
+        if !meta.is_dir() {
+            return Err(CommandError::Client("staging path is not a directory".into()));
+        }
+    }
+    Ok(dir)
+}
+
+fn sanitize_temp_prefix(value: &str) -> String {
+    let safe: String = value
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '.' {
+            if c.is_ascii_alphanumeric() || c == '-' {
                 c
             } else {
                 '_'
             }
         })
         .collect();
-    std::env::temp_dir().join(format!("clipper-{}-{}", std::process::id(), safe))
+    let short: String = safe.chars().take(20).collect();
+    if short.is_empty() {
+        "file".to_string()
+    } else {
+        short
+    }
+}
+
+fn random_hex_suffix() -> String {
+    let mut bytes = [0u8; 8];
+    rand::rng().fill(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+async fn create_private_temp_file(kind: &str, hint: &str) -> Result<PathBuf, CommandError> {
+    let dir = ensure_private_staging_dir()?;
+    let prefix = sanitize_temp_prefix(hint);
+    for _ in 0..10 {
+        let name = format!(
+            "clipper-{}-{}-{}-{}",
+            kind,
+            prefix,
+            std::process::id(),
+            random_hex_suffix()
+        );
+        let path = dir.join(name);
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(PRIVATE_FILE_MODE);
+        match options.open(&path).await {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(CommandError::Client(format!("temp create: {e}"))),
+        }
+    }
+    Err(CommandError::Client("temp create: too many collisions".into()))
 }
 
 fn non_empty_string(s: String) -> Option<String> {
