@@ -75,7 +75,7 @@ async fn cleanup_expired_clipboard_objects(state: &AppState) -> CleanupResult<()
         .await?;
 
     if !expired_ids.is_empty() {
-        let count = delete_clipboard_objects(state, &expired_ids).await?;
+        let count = delete_objects_and_release_usage(state, &expired_ids).await?;
         info!(count, "Cleaned up expired clipboard objects");
     }
 
@@ -148,11 +148,7 @@ pub(crate) async fn trim_user_clipboard(
     if excess_ids.is_empty() {
         return Ok(0);
     }
-    delete_clipboard_objects(state, &excess_ids).await
-}
-
-async fn delete_clipboard_objects(state: &AppState, ids: &[Uuid]) -> Result<usize, sea_orm::DbErr> {
-    delete_objects_and_release_usage(state, ids).await
+    delete_objects_and_release_usage(state, &excess_ids).await
 }
 
 async fn cleanup_old_events(state: &AppState) -> CleanupResult<()> {
