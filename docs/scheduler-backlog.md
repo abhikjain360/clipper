@@ -79,6 +79,19 @@ If code and these notes disagree, verify the code and correct the notes.
       SQLite removed the per-tombstone file cost; it did not bound lifetime growth
       or make hydration of all held objects inexpensive.
 
+- [ ] A user action that itself gets a 401 (an upload, a delete) reports the
+      error but does not end the session; only the snapshot and WebSocket
+      paths do (`end_refused_session_for`, `end_refused_session_for_epoch` in
+      `crates/client/src/engine.rs`). Route those through the same helper.
+      Noted by the third-pass review on 2026-09-12.
+- [ ] `hydrate_ciphertext_cache` in `crates/client/src/engine.rs` replaces the
+      memory map without holding the store's `sync` lock. It runs inside
+      `finish_auth` before the new session's WebSocket starts, so nothing
+      races it today; make it take the lock so that stays true by
+      construction.
+- [ ] The web client drops the logout and validate response bodies unread, so
+      Chrome logs `net::ERR_ABORTED` for both although the server processes
+      them. Read the body (or use `keepalive`) to keep network logs clean.
 - [ ] `LocalStore::discard_cached_payload` is a no-op on native (SQLite
       cascades the payload with the record) but the shared delete and absence
       paths in `local_store.rs` still call it before every marker write. Move
@@ -128,6 +141,8 @@ The code does one defensible thing today; none of these blocks the review.
 - [ ] Collab writes carry no server ordering key, so a rename can revert locally
       until the next snapshot. Needs the server to return the committed `seq`.
 - [ ] Any skipped event still rejects the whole import replacement.
+- [ ] Deleting a file appends a tombstone and nothing purges it, so a full
+      account cannot free space from the UI. Decide when the client purges.
 - [ ] Security items of class C in
       [security-inventory-2026-09-12.md](security-inventory-2026-09-12.md).
 
