@@ -786,30 +786,15 @@ impl LocalStore {
         self.visible_state_inner(visible_clipboard_limit).await
     }
 
-    pub async fn mark_pending_create(
-        &self,
-        kind: ObjectKind,
-        object_id: &str,
-        created_seq: i64,
-        generation: u64,
-    ) -> Result<bool, LocalStoreError> {
-        let object_id = validate_item_id(object_id)?;
-        let sync = self.sync.lock().await;
-        if sync.generation != generation {
-            return Ok(false);
-        }
-        self.mark_pending_create_inner(kind, &object_id, created_seq, generation)
-            .await
-    }
-
-    /// Mark an object as needing a refetch because a new revision is its head.
+    /// Mark an object as needing a fetch because an event named a head newer
+    /// than the cached one.
     ///
-    /// The difference from `mark_pending_create` is the one case that matters:
-    /// an object already held locally. A create event for one of those is a
-    /// duplicate and is ignored, which was right while objects were immutable.
-    /// An update event for one means the content changed underneath the same
-    /// id, so it has to be fetched again.
-    pub async fn mark_pending_update(
+    /// Create and update events both land here, because they mean the same
+    /// thing for an object already held: its cached revision is stale. The
+    /// server emits a create when a visible revision follows a tombstone, and
+    /// it lets live events arrive out of order, so that create can reach this
+    /// device before the tombstone it revives.
+    pub async fn mark_pending_fetch(
         &self,
         kind: ObjectKind,
         object_id: &str,
@@ -821,27 +806,8 @@ impl LocalStore {
         if sync.generation != generation {
             return Ok(false);
         }
-        match self.stored_object_record(&object_id).await? {
-            // A delete that landed after this update wins, exactly as for a
-            // create: re-fetching would resurrect a removed object.
-            Some(StoredObjectRecord::Deleted(record)) if record.event_seq > event_seq => Ok(false),
-            // Already at or past this revision; nothing to do.
-            Some(StoredObjectRecord::Present(record)) if record.event_seq >= event_seq => Ok(false),
-            Some(StoredObjectRecord::Present(mut record)) => {
-                record.event_seq = event_seq;
-                record.created_seq = event_seq;
-                record.seen_generation = Some(generation);
-                self.write_stored_object_record(&StoredObjectRecord::Present(record))
-                    .await?;
-                Ok(true)
-            }
-            // Never seen, or seen only as a marker: the create path already
-            // does the right thing for both.
-            _ => {
-                self.mark_pending_create_inner(kind, &object_id, event_seq, generation)
-                    .await
-            }
-        }
+        self.mark_pending_fetch_inner(kind, &object_id, event_seq, generation)
+            .await
     }
 
     pub async fn apply_local_delete(
@@ -1133,37 +1099,39 @@ impl LocalStore {
         self.write_memory_record(local_record).await
     }
 
-    async fn mark_pending_create_inner(
+    async fn mark_pending_fetch_inner(
         &self,
         kind: ObjectKind,
         object_id: &str,
-        created_seq: i64,
+        event_seq: i64,
         generation: u64,
     ) -> Result<bool, LocalStoreError> {
         match self.stored_object_record(object_id).await? {
-            Some(StoredObjectRecord::Deleted(record)) if record.event_seq > created_seq => {
-                Ok(false)
-            }
-            Some(StoredObjectRecord::Present(record)) if record.event_seq >= created_seq => {
-                Ok(false)
-            }
+            // A delete that landed after this event wins: fetching would
+            // resurrect an object already removed on another device.
+            Some(StoredObjectRecord::Deleted(record)) if record.event_seq > event_seq => Ok(false),
+            // Already at or past this event; nothing to do.
+            Some(StoredObjectRecord::Present(record)) if record.event_seq >= event_seq => Ok(false),
+            // The cached revision is older than the event, so it is stale and
+            // the head has to be fetched. The revision check on persist keeps
+            // the fetched revision from rolling the cache back.
             Some(StoredObjectRecord::Present(mut record)) => {
-                record.event_seq = created_seq;
-                record.created_seq = created_seq;
+                record.event_seq = event_seq;
+                record.created_seq = event_seq;
                 record.seen_generation = Some(generation);
                 self.write_stored_object_record(&StoredObjectRecord::Present(record))
                     .await?;
-                Ok(false)
+                Ok(true)
             }
             // A fetch is already outstanding for this object. A duplicate
             // event (same sequence) does not need a second fetch. A newer
             // event does: the outstanding fetch may have read an older head,
             // and the revision check on persist keeps the two ordered.
             Some(StoredObjectRecord::PendingCreate(mut record)) => {
-                let newer = created_seq > record.event_seq;
+                let newer = event_seq > record.event_seq;
                 if newer {
-                    record.event_seq = created_seq;
-                    record.created_seq = created_seq;
+                    record.event_seq = event_seq;
+                    record.created_seq = event_seq;
                 }
                 record.seen_generation = Some(generation);
                 self.write_stored_object_record(&StoredObjectRecord::PendingCreate(record))
@@ -1175,8 +1143,8 @@ impl LocalStore {
                     id: object_id.to_string(),
                     kind,
                     seen_generation: Some(generation),
-                    event_seq: created_seq,
-                    created_seq,
+                    event_seq,
+                    created_seq: event_seq,
                     revision_anchor: record.revision_anchor,
                 });
                 self.write_stored_object_record(&pending).await?;
@@ -1187,8 +1155,8 @@ impl LocalStore {
                     id: object_id.to_string(),
                     kind,
                     seen_generation: Some(generation),
-                    event_seq: created_seq,
-                    created_seq,
+                    event_seq,
+                    created_seq: event_seq,
                     revision_anchor: None,
                 });
                 self.write_stored_object_record(&record).await?;
@@ -3736,29 +3704,71 @@ mod tests {
 
         assert!(
             store
-                .mark_pending_create(ObjectKind::Schedule, id, 10, generation)
+                .mark_pending_fetch(ObjectKind::Schedule, id, 10, generation)
                 .await
                 .expect("first create")
         );
         assert!(
             !store
-                .mark_pending_create(ObjectKind::Schedule, id, 10, generation)
+                .mark_pending_fetch(ObjectKind::Schedule, id, 10, generation)
                 .await
                 .expect("duplicate create"),
             "a duplicate event must not start a second fetch"
         );
         assert!(
             store
-                .mark_pending_update(ObjectKind::Schedule, id, 11, generation)
+                .mark_pending_fetch(ObjectKind::Schedule, id, 11, generation)
                 .await
                 .expect("newer update"),
             "a newer event must fetch again"
         );
         assert!(
             !store
-                .mark_pending_update(ObjectKind::Schedule, id, 11, generation)
+                .mark_pending_fetch(ObjectKind::Schedule, id, 11, generation)
                 .await
                 .expect("repeated update")
+        );
+    }
+
+    /// A create event for an object already held means the cached revision is
+    /// stale, so it is fetched again. Only a repeat of the same event is a
+    /// duplicate.
+    #[tokio::test]
+    async fn a_create_for_a_held_object_fetches_only_when_it_is_newer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let generation = store.start_generation().await;
+        let entry = item(
+            "77777777-7777-4777-8777-777777777777",
+            "held",
+            "2026-01-05T00:00:00+00:00",
+        );
+        store
+            .persist_snapshot_clipboard_present_encrypted(
+                &entry,
+                entry.text.as_bytes(),
+                &encrypted_clipboard(&entry, entry.text.as_bytes()),
+                10,
+                generation,
+                10,
+            )
+            .await
+            .expect("cache the object");
+
+        assert!(
+            store
+                .mark_pending_fetch(ObjectKind::Clipboard, &entry.id, 30, generation)
+                .await
+                .expect("newer create"),
+            "a create newer than the cached revision must fetch the head"
+        );
+        assert!(
+            !store
+                .mark_pending_fetch(ObjectKind::Clipboard, &entry.id, 30, generation)
+                .await
+                .expect("duplicate create"),
+            "a duplicate event must not start a second fetch"
         );
     }
 
