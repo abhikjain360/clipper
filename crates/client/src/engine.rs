@@ -19,7 +19,7 @@ pub use clipper_schedule::{
     RruleEngine, ScheduleItem, ScheduleSpan, SourceId, SourceKind, TimeRange,
 };
 use futures_util::{StreamExt, stream};
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::sync::{Mutex, RwLock, RwLockReadGuard, watch};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
@@ -650,6 +650,30 @@ impl SyncEngine {
         Ok(self.local_store.start_generation().await)
     }
 
+    /// Hold the session `epoch` names still across a local write.
+    ///
+    /// A user-initiated write encrypts under the session key, waits for the
+    /// server, and only then persists. Login and logout bump the epoch while
+    /// holding the key write lock, so a caller that takes this guard and finds
+    /// the epoch unchanged keeps the session fixed for as long as it holds the
+    /// guard: the profile database it writes and the state it publishes are
+    /// its own session's.
+    ///
+    /// A caller whose session ended gets `NotAuthenticated` and writes
+    /// nothing. The object is already on the server under the account that
+    /// made it, and that account's next reconciliation lists it.
+    async fn hold_session_for_write(
+        &self,
+        epoch: u64,
+    ) -> Result<RwLockReadGuard<'_, Option<Zeroizing<[u8; 32]>>>, ClientError> {
+        let active_key = self.encryption_key.read().await;
+        if !self.session_is_current(epoch) {
+            debug!("Dropping a write whose session ended while the server call was in flight");
+            return Err(ClientError::NotAuthenticated);
+        }
+        Ok(active_key)
+    }
+
     // ── Devices ──
 
     /// List the user's registered devices, marking the one this client is
@@ -730,6 +754,9 @@ impl SyncEngine {
             });
         }
 
+        // Read before the network work, so the persist below can tell whether
+        // the session that started this push is still the one running.
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
         let encryption_key = self.current_encryption_key().await?;
         let payload_digest = clipboard_payload_digest(mime_type, data);
         {
@@ -859,6 +886,7 @@ impl SyncEngine {
             created_at,
             source_device_id: device_id,
         };
+        let _session = self.hold_session_for_write(epoch).await?;
         let visible = self
             .local_store
             .persist_local_clipboard_present_encrypted(
@@ -1079,6 +1107,9 @@ impl SyncEngine {
         data: &[u8],
     ) -> Result<String, ClientError> {
         check_upload_plaintext_size(data.len())?;
+        // Read before the network work, so the persist below can tell whether
+        // the session that started this upload is still the one running.
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
         let filename = safe_object_filename(filename);
         let mime_type =
             normalized_mime_type(mime_type).unwrap_or_else(|| mime_guess_from_filename(&filename));
@@ -1176,6 +1207,7 @@ impl SyncEngine {
             created_at,
             source_device_id: device_id,
         };
+        let _session = self.hold_session_for_write(epoch).await?;
         let visible = self
             .local_store
             .persist_local_file_present_encrypted(
@@ -1406,6 +1438,11 @@ impl SyncEngine {
         record: ScheduleRecord,
         placement: EnvelopePlacement,
     ) -> Result<i64, ClientError> {
+        // Read before the network work, so the persist below can tell whether
+        // the session that started this write is still the one running. The
+        // timer paths hold `actual_write`, which a login or logout does not
+        // take, so this is their only fence.
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
         let encryption_key = self.current_encryption_key().await?;
         let (device_id, device_id_typed, signing_key) =
             self.current_device_signing_context().await?;
@@ -1513,6 +1550,7 @@ impl SyncEngine {
             )
             .await?;
 
+        let _session = self.hold_session_for_write(epoch).await?;
         let visible = self
             .local_store
             .persist_local_schedule_present_encrypted(
@@ -2266,10 +2304,14 @@ impl SyncEngine {
     /// of the same magnitude sorts correctly and is superseded by any later
     /// `deleted` event).
     pub async fn create_collab_doc(&self) -> Result<CollabItem, ClientError> {
+        // Read before the network work, so the persist below can tell whether
+        // the session that created the doc is still the one running.
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
         let response = self.api.create_collab_doc().await?;
         let item = collab_item_from_meta(&response.doc);
         let object_id = item.id.clone();
         let created_seq = collab_created_seq(&item.created_at);
+        let _session = self.hold_session_for_write(epoch).await?;
         let visible = self
             .local_store
             .persist_local_collab_present(
@@ -2294,6 +2336,9 @@ impl SyncEngine {
         object_id: &str,
         title: &str,
     ) -> Result<CollabItem, ClientError> {
+        // Read before the network work, so the persist below can tell whether
+        // the session that renamed the doc is still the one running.
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
         let meta = self.api.rename_collab_doc(object_id, title).await?;
         if meta.object_id.to_string() != object_id {
             return Err(ClientError::UnexpectedResponse(format!(
@@ -2310,6 +2355,7 @@ impl SyncEngine {
         // make a later remote delete look stale and be dropped, until the next
         // reconciliation sweep clears the record.
         let event_seq = chrono::Utc::now().timestamp_micros();
+        let _session = self.hold_session_for_write(epoch).await?;
         let visible = self
             .local_store
             .persist_local_collab_present(&item, "", created_seq, event_seq, RECENT_CLIPBOARD_LIMIT)
@@ -2324,8 +2370,12 @@ impl SyncEngine {
     /// so a local wall-clock microsecond seq tombstones the record; it is always
     /// later than the create seq, so the delete wins.
     pub async fn delete_collab_doc(&self, object_id: &str) -> Result<(), ClientError> {
+        // Read before the network work, so the tombstone below can tell whether
+        // the session that deleted the doc is still the one running.
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
         self.api.delete_collab_doc(object_id).await?;
         let delete_seq = chrono::Utc::now().timestamp_micros();
+        let _session = self.hold_session_for_write(epoch).await?;
         let visible = self
             .local_store
             .apply_local_delete(
@@ -4645,6 +4695,133 @@ mod tests {
                 .first()
                 .map(|file| file.filename.clone()),
             Some("still-mine.txt".to_string()),
+        );
+    }
+
+    /// The upload's HTTP round trip is held open while the user logs out and
+    /// logs in as someone else, so the response comes back into a session that
+    /// is no longer the one that encrypted the file.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn an_upload_that_outlives_its_session_is_not_persisted() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listen");
+        let engine = SyncEngine::new_with_data_dir(
+            &format!("http://{}", listener.local_addr().expect("address")),
+            temp.path(),
+        );
+        engine.local_store.set_profile("profile-a".into());
+        open_session(&engine).await;
+        *engine.encryption_key.write().await = Some(Zeroizing::new([7; 32]));
+        *engine.device_signing_key.write().await =
+            Some(crypto::generate_device_signing_secret_key().into());
+        engine.api.restore_token("session-a".into());
+
+        let (sent, received) = tokio::sync::oneshot::channel();
+        let (release, resumed) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            let body = loop {
+                let read = socket.read(&mut buffer).await.expect("read");
+                assert!(read > 0, "the upload request ended before its body");
+                request.extend_from_slice(&buffer[..read]);
+                let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .expect("a content length")
+                    .trim()
+                    .parse()
+                    .expect("a numeric content length");
+                if request.len() >= end + 4 + length {
+                    break request[end + 4..end + 4 + length].to_vec();
+                }
+            };
+            let init: ObjectInitRequest = postcard::from_bytes(&body).expect("an init request");
+            sent.send(init.id.to_string()).expect("report the object id");
+
+            // Answer only once the replacement session is installed.
+            resumed.await.expect("release");
+            let response = postcard::to_allocvec(&ObjectInitResponse::Complete { created_seq: 100 })
+                .expect("encode the response");
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {POSTCARD_CONTENT_TYPE}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        response.len(),
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("response headers");
+            socket.write_all(&response).await.expect("response body");
+        });
+
+        let writer = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .upload_file_bytes("account-a-secret.txt", None, b"private account A")
+                    .await
+            })
+        };
+        let file_id = received.await.expect("the request reached the server");
+
+        {
+            let _calendar = engine.calendar_write.lock().await;
+            engine.clear_local_session().await;
+            engine.api.restore_token("session-b".into());
+            engine
+                .finish_auth(
+                    "device-b",
+                    "account-b".into(),
+                    uuid::Uuid::now_v7().to_string(),
+                    Zeroizing::new([8; 32]),
+                    Zeroizing::new([9; 32]),
+                    DeviceSigningIdentity {
+                        device_id: None,
+                        signing_secret_key: crypto::generate_device_signing_secret_key().into(),
+                    },
+                )
+                .await
+                .expect("the replacement session signs in");
+        }
+        release.send(()).expect("answer the upload");
+
+        assert!(
+            matches!(
+                writer.await.expect("the upload task"),
+                Err(ClientError::NotAuthenticated),
+            ),
+            "an upload whose session ended must fail instead of persisting",
+        );
+        server.await.expect("server");
+        assert!(
+            engine
+                .local_store
+                .local_head(&file_id)
+                .await
+                .expect("local head")
+                .is_none(),
+            "the record must not land in the profile of the session that replaced it",
+        );
+        let state = engine.get_state().await;
+        assert_eq!(
+            state.session.expect("the replacement session").username,
+            "account-b",
+        );
+        assert!(
+            state.files.is_empty(),
+            "the filename must not be published into the new session's files",
         );
     }
 
