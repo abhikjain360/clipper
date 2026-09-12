@@ -989,6 +989,7 @@ mod tests {
     use sea_orm::{ActiveModelTrait, Database, QuerySelect, Set};
     use tempfile::TempDir;
     use tower::ServiceExt;
+    use zeroize::Zeroizing;
 
     use super::*;
     use crate::{
@@ -1190,7 +1191,10 @@ mod tests {
         Postcard::validated(value).expect("valid request")
     }
 
-    fn challenge_request(username: &str, passphrase: &[u8]) -> (LoginChallengeRequest, Vec<u8>) {
+    fn challenge_request(
+        username: &str,
+        passphrase: &[u8],
+    ) -> (LoginChallengeRequest, Zeroizing<Vec<u8>>) {
         let (credential_request, client_state) =
             crypto::opaque_client_login_start(passphrase).expect("client login start");
         (
@@ -1206,7 +1210,7 @@ mod tests {
         access_key: &str,
         username: &str,
         passphrase: &[u8],
-    ) -> (RegisterStartRequest, Vec<u8>) {
+    ) -> (RegisterStartRequest, Zeroizing<Vec<u8>>) {
         let (registration_request, client_state) =
             crypto::opaque_client_register_start(passphrase).expect("client register start");
         (

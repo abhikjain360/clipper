@@ -33,12 +33,47 @@ const ACCESS_KEY_HASH_PARAMS_DEFAULT: Argon2Params = Argon2Params {
     p_cost: 1,
 };
 
+/// OPAQUE key-stretching cost, in kibibytes of memory.
+pub const OPAQUE_KSF_M_COST_KIB: u32 = 19 * 1024;
+/// OPAQUE key-stretching cost, in iterations.
+pub const OPAQUE_KSF_T_COST: u32 = 2;
+/// OPAQUE key-stretching degree of parallelism.
+pub const OPAQUE_KSF_P_COST: u32 = 1;
+
 struct ClipperOpaqueCipherSuite;
 
 impl opaque_ke::CipherSuite for ClipperOpaqueCipherSuite {
     type OprfCs = opaque_ke::Ristretto255;
     type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, sha2::Sha512>;
     type Ksf = opaque_ke::argon2::Argon2<'static>;
+}
+
+/// Argon2id parameters for the OPAQUE key stretching function.
+///
+/// These are the `argon2` crate's current defaults, written out so they are
+/// pinned rather than inherited. The cost feeds `rwd`, so a dependency bump
+/// that moved the default would silently change every derived key and break
+/// logins. Changing these values requires re-registration.
+fn opaque_ksf_params() -> Result<opaque_ke::argon2::Params, CryptoError> {
+    // The output length stays unset. The KSF hashes the OPRF output, which is
+    // 64 bytes under SHA-512; a pinned 32-byte length would reject it.
+    opaque_ke::argon2::Params::new(
+        OPAQUE_KSF_M_COST_KIB,
+        OPAQUE_KSF_T_COST,
+        OPAQUE_KSF_P_COST,
+        None,
+    )
+    .map_err(|e| CryptoError::Kdf(e.to_string()))
+}
+
+/// Build the OPAQUE key stretching function. Registration and login must pass
+/// the same one, or their `rwd` values differ.
+fn opaque_ksf() -> Result<opaque_ke::argon2::Argon2<'static>, CryptoError> {
+    Ok(opaque_ke::argon2::Argon2::new(
+        opaque_ke::argon2::Algorithm::Argon2id,
+        opaque_ke::argon2::Version::V0x13,
+        opaque_ksf_params()?,
+    ))
 }
 
 pub struct OpaqueRegistrationFinish {
@@ -131,6 +166,18 @@ pub fn device_login_proof_body_bytes(
     postcard::to_allocvec(body).map_err(|e| CryptoError::Signature(format!("postcard: {e}")))
 }
 
+/// Prefix the canonical body bytes with their message-type domain.
+///
+/// One device key signs both object envelopes and login proofs. The domain
+/// makes the two signed messages disjoint, so a signature over one message
+/// type can never be presented as a signature over the other.
+fn domain_separated(domain: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(domain.len() + body.len());
+    message.extend_from_slice(domain);
+    message.extend_from_slice(body);
+    message
+}
+
 /// Sign a versioned object envelope body with the source device key.
 pub fn sign_object_envelope_body(
     secret_key: &[u8; DEVICE_SIGNING_SECRET_KEY_BYTES],
@@ -138,7 +185,8 @@ pub fn sign_object_envelope_body(
 ) -> Result<Vec<u8>, CryptoError> {
     let signing_key = SigningKey::from_bytes(secret_key);
     let body = object_envelope_body_bytes(body)?;
-    Ok(signing_key.sign(&body).to_bytes().to_vec())
+    let message = domain_separated(SIGN_DOMAIN_OBJECT_ENVELOPE_V1, &body);
+    Ok(signing_key.sign(&message).to_bytes().to_vec())
 }
 
 /// Sign a login proof body with the local device key.
@@ -148,7 +196,8 @@ pub fn sign_device_login_proof_body(
 ) -> Result<Vec<u8>, CryptoError> {
     let signing_key = SigningKey::from_bytes(secret_key);
     let body = device_login_proof_body_bytes(body)?;
-    Ok(signing_key.sign(&body).to_bytes().to_vec())
+    let message = domain_separated(SIGN_DOMAIN_DEVICE_LOGIN_PROOF_V1, &body);
+    Ok(signing_key.sign(&message).to_bytes().to_vec())
 }
 
 /// Verify the source device signature over an object envelope.
@@ -157,7 +206,13 @@ pub fn verify_object_envelope_signature(
     envelope: &ObjectEnvelope,
 ) -> Result<(), CryptoError> {
     let body = object_envelope_body_bytes(&envelope.body)?;
-    verify_device_signature(public_key, &body, &envelope.signature, "object signature")
+    let message = domain_separated(SIGN_DOMAIN_OBJECT_ENVELOPE_V1, &body);
+    verify_device_signature(
+        public_key,
+        &message,
+        &envelope.signature,
+        "object signature",
+    )
 }
 
 /// Verify a device login proof signature.
@@ -167,7 +222,8 @@ pub fn verify_device_login_proof_signature(
     signature: &[u8],
 ) -> Result<(), CryptoError> {
     let body = device_login_proof_body_bytes(body)?;
-    verify_device_signature(public_key, &body, signature, "device login proof")
+    let message = domain_separated(SIGN_DOMAIN_DEVICE_LOGIN_PROOF_V1, &body);
+    verify_device_signature(public_key, &message, signature, "device login proof")
 }
 
 fn verify_device_signature(
@@ -431,8 +487,15 @@ pub fn opaque_new_server_setup() -> Vec<u8> {
 /// Picks blind `r ← Z_q`, computes `M = r · H(pw)`, returns
 /// `(RegistrationRequest = M, state_C)`. `state_C` carries `(r, pw, ...)`
 /// and must be held until `opaque_client_register_finish`.
+///
+/// The serialized state is secret. It holds both `r` and `M`, so anyone who
+/// reads it recovers `H(pw) = r⁻¹ · M` and can run an offline dictionary
+/// attack with no Argon2 cost per guess. It is returned in `Zeroizing` so the
+/// copy is wiped when the caller drops it.
 /// See `docs/opaque.md`.
-pub fn opaque_client_register_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+pub fn opaque_client_register_start(
+    passphrase: &[u8],
+) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CryptoError> {
     let mut rng = opaque_rand::rngs::OsRng;
     let start =
         opaque_ke::ClientRegistration::<ClipperOpaqueCipherSuite>::start(&mut rng, passphrase)
@@ -440,7 +503,7 @@ pub fn opaque_client_register_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u
 
     Ok((
         start.message.serialize().to_vec(),
-        start.state.serialize().to_vec(),
+        Zeroizing::new(start.state.serialize().to_vec()),
     ))
 }
 
@@ -465,12 +528,16 @@ pub fn opaque_client_register_finish(
         registration_response,
     )
     .map_err(opaque_error)?;
+    let ksf = opaque_ksf()?;
     let finish = client_registration
         .finish(
             &mut rng,
             passphrase,
             response,
-            opaque_ke::ClientRegistrationFinishParameters::default(),
+            opaque_ke::ClientRegistrationFinishParameters {
+                ksf: Some(&ksf),
+                ..Default::default()
+            },
         )
         .map_err(opaque_error)?;
 
@@ -531,15 +598,22 @@ pub fn opaque_server_register_finish(registration_upload: &[u8]) -> Result<Vec<u
 /// `nonce_C ← random`; returns
 /// `CredentialRequest = M ‖ ke1` where `M = r · H(pw)` and
 /// `ke1 = nonce_C ‖ X_C`, plus `state_C = (r, pw, x_C, nonce_C, ke1)`.
+///
+/// The serialized state is secret, for the same reason as in
+/// `opaque_client_register_start`: it holds `r` and `M`, which together give
+/// `H(pw)` and an Argon2-free offline dictionary oracle. It is returned in
+/// `Zeroizing` so the copy is wiped when the caller drops it.
 /// See `docs/opaque.md`.
-pub fn opaque_client_login_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+pub fn opaque_client_login_start(
+    passphrase: &[u8],
+) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CryptoError> {
     let mut rng = opaque_rand::rngs::OsRng;
     let start = opaque_ke::ClientLogin::<ClipperOpaqueCipherSuite>::start(&mut rng, passphrase)
         .map_err(opaque_error)?;
 
     Ok((
         start.message.serialize().to_vec(),
-        start.state.serialize().to_vec(),
+        Zeroizing::new(start.state.serialize().to_vec()),
     ))
 }
 
@@ -569,12 +643,16 @@ pub fn opaque_client_login_finish(
     let response =
         opaque_ke::CredentialResponse::<ClipperOpaqueCipherSuite>::deserialize(credential_response)
             .map_err(opaque_error)?;
+    let ksf = opaque_ksf()?;
     let finish = client_login
         .finish(
             &mut rng,
             passphrase,
             response,
-            opaque_ke::ClientLoginFinishParameters::default(),
+            opaque_ke::ClientLoginFinishParameters {
+                ksf: Some(&ksf),
+                ..Default::default()
+            },
         )
         .map_err(opaque_error)?;
 
@@ -738,6 +816,15 @@ pub enum CryptoError {
     #[error("OPAQUE error: {0}")]
     Opaque(String),
 }
+
+// ── Device signature domains ──
+//
+// One Ed25519 device key signs two message types. Each signed message is the
+// domain string followed by the canonical body bytes, so the two sets of
+// signed messages cannot overlap. The strings differ from their first
+// distinguishing byte, so no prefix of one is a prefix of the other.
+pub const SIGN_DOMAIN_OBJECT_ENVELOPE_V1: &[u8] = b"clipper:object-envelope:v1";
+pub const SIGN_DOMAIN_DEVICE_LOGIN_PROOF_V1: &[u8] = b"clipper:device-login-proof:v1";
 
 // ── Associated data constants ──
 pub const AAD_CLIPBOARD_V1: &[u8] = b"clipper:clipboard:v1";
@@ -933,6 +1020,24 @@ mod tests {
         let key1 = derive_key(b"same-pass", b"salt-for-profile1", &params).unwrap();
         let key2 = derive_key(b"same-pass", b"salt-for-profile2", &params).unwrap();
         assert_ne!(&*key1, &*key2);
+    }
+
+    /// The OPAQUE key stretching cost is part of the credential. Registration
+    /// and login must use the same values, and changing them invalidates every
+    /// stored password file, so they are asserted rather than inherited from a
+    /// dependency default.
+    #[test]
+    fn test_opaque_ksf_parameters_are_pinned() {
+        assert_eq!(OPAQUE_KSF_M_COST_KIB, 19 * 1024);
+        assert_eq!(OPAQUE_KSF_T_COST, 2);
+        assert_eq!(OPAQUE_KSF_P_COST, 1);
+
+        let params = opaque_ksf_params().expect("ksf params");
+        assert_eq!(params.m_cost(), OPAQUE_KSF_M_COST_KIB);
+        assert_eq!(params.t_cost(), OPAQUE_KSF_T_COST);
+        assert_eq!(params.p_cost(), OPAQUE_KSF_P_COST);
+        // The KSF hashes the 64-byte OPRF output, so no output length is set.
+        assert_eq!(params.output_len(), None);
     }
 
     const TEST_CREDENTIAL_IDENTIFIER: &[u8] = b"clipper:test:user";
@@ -1303,5 +1408,129 @@ mod object_aad {
                 "a parent differing in {field} hashes the same, so it can be swapped in",
             );
         }
+    }
+}
+
+/// Guards for device signature domain separation.
+///
+/// One device key signs object envelopes and login proofs. Signing raw
+/// canonical bytes would leave the two message spaces adjacent; the domain
+/// prefix keeps them disjoint. These tests hold that line: a signature made
+/// under the wrong domain, or under no domain at all, must not verify.
+#[cfg(test)]
+mod signature_domains {
+    use std::str::FromStr;
+
+    use clipper_api_types::{DeviceId, ObjectId, ObjectKind};
+
+    use super::*;
+
+    const SECRET: [u8; DEVICE_SIGNING_SECRET_KEY_BYTES] = [9; DEVICE_SIGNING_SECRET_KEY_BYTES];
+
+    fn uuid_str(tag: u64) -> String {
+        format!("00000000-0000-4000-8000-{tag:012x}")
+    }
+
+    fn envelope_body() -> ObjectEnvelopeBody {
+        ObjectEnvelopeBody {
+            object_id: ObjectId::from_str(&uuid_str(1)).expect("object id"),
+            object_type: ObjectKind::Clipboard,
+            envelope_version: OBJECT_ENVELOPE_VERSION,
+            revision: 1,
+            parent_hash: None,
+            source_device_id: DeviceId::from_str(&uuid_str(2)).expect("device id"),
+            created_at: "2026-09-08T10:00:00Z".to_string(),
+            operation: ObjectEnvelopeOperation::Create,
+            meta_nonce: vec![3; XCHACHA20_NONCE_BYTES],
+            sha256_meta_ciphertext: vec![4; SHA256_BYTES],
+            payloads: Vec::new(),
+        }
+    }
+
+    fn proof_body() -> DeviceLoginProofBodyV1 {
+        DeviceLoginProofBodyV1 {
+            version: DEVICE_LOGIN_PROOF_VERSION,
+            challenge_id: "challenge".to_string(),
+            challenge: vec![5; DEVICE_LOGIN_PROOF_CHALLENGE_BYTES],
+            username: "user".to_string(),
+            device_id: DeviceId::from_str(&uuid_str(2)).expect("device id"),
+            device_signing_public_key: device_signing_public_key(&SECRET).to_vec(),
+        }
+    }
+
+    /// Sign arbitrary bytes with the test device key, bypassing the helpers.
+    fn sign_raw(message: &[u8]) -> Vec<u8> {
+        SigningKey::from_bytes(&SECRET).sign(message).to_bytes().to_vec()
+    }
+
+    #[test]
+    fn an_envelope_signature_needs_the_envelope_domain() {
+        let public = device_signing_public_key(&SECRET);
+        let body = envelope_body();
+        let canon = object_envelope_body_bytes(&body).expect("canonical body");
+
+        let verify = |signature: Vec<u8>| {
+            verify_object_envelope_signature(
+                &public,
+                &ObjectEnvelope {
+                    body: body.clone(),
+                    signature,
+                },
+            )
+        };
+
+        verify(sign_object_envelope_body(&SECRET, &body).expect("sign")).expect("own domain");
+        assert!(
+            verify(sign_raw(&domain_separated(
+                SIGN_DOMAIN_DEVICE_LOGIN_PROOF_V1,
+                &canon
+            )))
+            .is_err(),
+            "the login-proof domain verified as an envelope",
+        );
+        assert!(
+            verify(sign_raw(&canon)).is_err(),
+            "undomained canonical bytes verified as an envelope",
+        );
+    }
+
+    #[test]
+    fn a_login_proof_signature_needs_the_login_proof_domain() {
+        let public = device_signing_public_key(&SECRET);
+        let body = proof_body();
+        let canon = device_login_proof_body_bytes(&body).expect("canonical body");
+
+        verify_device_login_proof_signature(
+            &public,
+            &body,
+            &sign_device_login_proof_body(&SECRET, &body).expect("sign"),
+        )
+        .expect("own domain");
+        assert!(
+            verify_device_login_proof_signature(
+                &public,
+                &body,
+                &sign_raw(&domain_separated(SIGN_DOMAIN_OBJECT_ENVELOPE_V1, &canon)),
+            )
+            .is_err(),
+            "the envelope domain verified as a login proof",
+        );
+        assert!(
+            verify_device_login_proof_signature(&public, &body, &sign_raw(&canon)).is_err(),
+            "undomained canonical bytes verified as a login proof",
+        );
+    }
+
+    /// The signed bytes are the domain followed by the canonical body, and the
+    /// canonical body itself is unchanged — the parent hash is taken over it.
+    #[test]
+    fn the_domain_is_a_prefix_of_the_canonical_body() {
+        let canon = object_envelope_body_bytes(&envelope_body()).expect("canonical body");
+        let message = domain_separated(SIGN_DOMAIN_OBJECT_ENVELOPE_V1, &canon);
+
+        assert!(message.starts_with(SIGN_DOMAIN_OBJECT_ENVELOPE_V1));
+        assert_eq!(&message[SIGN_DOMAIN_OBJECT_ENVELOPE_V1.len()..], &canon[..]);
+        assert!(!SIGN_DOMAIN_OBJECT_ENVELOPE_V1.starts_with(SIGN_DOMAIN_DEVICE_LOGIN_PROOF_V1));
+        assert!(!SIGN_DOMAIN_DEVICE_LOGIN_PROOF_V1.starts_with(SIGN_DOMAIN_OBJECT_ENVELOPE_V1));
     }
 }

@@ -7,8 +7,9 @@
 > and the device signature scheme. Out of scope: the broader web-XSS, Android,
 > and sync-availability surfaces already covered by the client audit.
 >
-> **Status: documentation only.** No code was changed. Recommendations are
-> prose; nothing here has been applied.
+> **Status: the review itself changed no code.** Findings applied since are
+> marked with a resolution note above the original text; the rest are still
+> prose.
 
 ## Method
 
@@ -117,6 +118,13 @@ Re-derived from code so the surface does not get re-litigated:
 
 ### CR2 — [Info / Medium] OPAQUE KSF is the argon2 crate default, unpinned, at OWASP's floor
 
+> Partly resolved: the parameters are now written out in `crypto.rs`
+> (`OPAQUE_KSF_M_COST_KIB` / `OPAQUE_KSF_T_COST` / `OPAQUE_KSF_P_COST`), passed
+> to both client finish calls, asserted by a test, and documented in
+> `docs/opaque.md`. The silent-drift hazard is closed. The cost was deliberately
+> not raised; that part of the recommendation remains open. The original
+> finding follows.
+
 - **Files:** `crates/core/src/crypto.rs:37-42` (`ClipperOpaqueCipherSuite`,
   `type Ksf = opaque_ke::argon2::Argon2<'static>`) ·
   `argon2-0.5.3/src/params.rs:42-61` (`DEFAULT_M_COST = 19 * 1024`, `DEFAULT_T_COST = 2`,
@@ -142,6 +150,11 @@ Re-derived from code so the surface does not get re-litigated:
 
 ### CR3 — [Info] Device key signs two message types with no domain separation
 
+> Resolved. Envelope bodies are signed under `clipper:object-envelope:v1` and
+> login proofs under `clipper:device-login-proof:v1`, in the sign and verify
+> helpers both sides already go through. Closes R38/R39. The original finding
+> follows.
+
 - **Files:** `crates/core/src/crypto.rs:108-160` (`sign_object_envelope_body`,
   `sign_device_login_proof_body`, both signing raw postcard bytes) ·
   `crates/api-types/src/lib.rs:282` (`DeviceLoginProofBodyV1`), `:344` (`ObjectEnvelopeBodyV1`)
@@ -160,6 +173,10 @@ Re-derived from code so the surface does not get re-litigated:
   into each body) so the two signed messages can never collide.
 
 ### CR4 — [Low] `device_id` is plaintext and unauthenticated in the device-identity record
+
+> Resolved. The wrap AAD is now `label ‖ record version ‖ device_id ‖
+> profile_id`, the record version is 3, and a malformed `device_id` is an error
+> instead of a re-mint. Closes R25. The original finding follows.
 
 - **Files:** `crates/client/src/local_store.rs:1713-1738` (wrap/unwrap with the constant
   `AAD_WRAP_DEVICE_SIGNING_SECRET_V1`) · `docs/local-at-rest-encryption.md` ("Flagged gaps")
