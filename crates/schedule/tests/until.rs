@@ -4,12 +4,12 @@
 //! comparison and the instant comparison disagree. A DATE `UNTIL` keeps
 //! wall-clock meaning and covers its whole day.
 
-use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use clipper_schedule::{
     BlockDuration, Cadence, Expansion, Frequency, ImportedRuleResolver, Recurrence, RecurrenceEnd,
-    RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, ScheduleSpan, TimeRange,
-    TimedStart,
+    RecurrenceEngine, RecurrenceId, RruleEngine, ScheduleItem, ScheduleItemId, ScheduleSpan,
+    TimeRange, TimedStart,
 };
 
 fn local(text: &str) -> NaiveDateTime {
@@ -156,5 +156,71 @@ fn date_until_includes_the_whole_last_day() {
     assert_eq!(
         starts,
         vec![utc(2026, 3, 28, 1, 30), utc(2026, 3, 29, 1, 30)]
+    );
+}
+
+fn local_midnight_window(zone: Tz, from: (i32, u32, u32), to: (i32, u32, u32)) -> TimeRange {
+    let midnight = |(year, month, day): (i32, u32, u32)| {
+        zone.with_ymd_and_hms(year, month, day, 0, 0, 0)
+            .single()
+            .expect("this local midnight exists")
+            .with_timezone(&Utc)
+    };
+    TimeRange::new(midnight(from), midnight(to)).expect("non-empty window")
+}
+
+/// A candidate admitted only by the UNTIL slack that cannot resolve is past
+/// the cutoff, so it is skipped. Samoa skipped 2011-12-30 entirely: the cutoff
+/// 2011-12-30T09:59Z reads as 23:59 on the 29th in Apia, the scan bound admits
+/// the 30th, and the all-day span on the 30th has no length. Only the 29th
+/// remains.
+#[test]
+fn until_slack_skips_an_unresolvable_day_past_the_cutoff() {
+    let item = ScheduleItem {
+        id: ScheduleItemId::new(),
+        title: "apia".to_string(),
+        span: ScheduleSpan::AllDay {
+            start: NaiveDate::from_ymd_opt(2011, 12, 28).expect("valid date"),
+            days: std::num::NonZeroU32::new(1).expect("non-zero"),
+        },
+        recurrence: Recurrence::Every(
+            Cadence::each(Frequency::Daily).ending(RecurrenceEnd::On(utc(2011, 12, 30, 9, 59))),
+        ),
+        reference: None,
+        alarm: None,
+    };
+    let expansion = Expansion {
+        window: local_midnight_window(Tz::Pacific__Apia, (2011, 12, 29), (2011, 12, 31)),
+        observer: Tz::Pacific__Apia,
+    };
+    let out = RruleEngine::new()
+        .occurrences(&item, &[], &expansion)
+        .expect("the skipped day past the cutoff must not fail the window");
+    let ids: Vec<_> = out.iter().map(|o| o.recurrence_id).collect();
+    assert_eq!(
+        ids,
+        vec![RecurrenceId::Date(
+            NaiveDate::from_ymd_opt(2011, 12, 29).expect("valid date")
+        )],
+        "only December 29 resolves before the cutoff"
+    );
+    assert_eq!(out[0].span.start(), utc(2011, 12, 29, 10, 0));
+}
+
+/// A resolved candidate is judged on the instant, never on the wall clock.
+/// October 25 02:45 Berlin resolves to the first fold, 00:45Z, which is before
+/// the 01:30Z cutoff, so it stays in although its wall clock is later than the
+/// cutoff's wall clock of 02:30.
+#[test]
+fn resolved_fold_candidate_keeps_instant_cutoff_despite_later_wall_clock() {
+    let item = cadence_item(
+        "20261024T024500",
+        RecurrenceEnd::On(utc(2026, 10, 25, 1, 30)),
+    );
+    let starts = expand(&item, &fall_back_expansion()).expect("expands");
+    assert_eq!(
+        starts,
+        vec![utc(2026, 10, 24, 0, 45), utc(2026, 10, 25, 0, 45)],
+        "the October 25 fold resolves before the cutoff and must be kept"
     );
 }
