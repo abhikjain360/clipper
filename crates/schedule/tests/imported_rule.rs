@@ -75,6 +75,16 @@ fn converted_cadences_have_the_same_occurrences_as_the_imported_rule() {
             "{rule}"
         );
     }
+    // BYMONTHDAY expands a yearly rule to every month, so without BYMONTH it
+    // is twelve days a year, not one.
+    let rule = "FREQ=YEARLY;BYMONTHDAY=15;COUNT=6";
+    assert!(
+        matches!(
+            Recurrence::from_imported_rule(rule, local, import_id(), "event@example.com").unwrap(),
+            Recurrence::Imported { .. }
+        ),
+        "{rule} must stay imported"
+    );
 }
 
 #[test]
