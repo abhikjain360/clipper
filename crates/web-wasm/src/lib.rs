@@ -62,11 +62,12 @@ impl EngineHolder {
                 return Ok(held.engine);
             }
             if held.engine.get_state().await.session.is_some() {
-                return Err(js_error(format!(
-                    "Server URL is fixed while logged in: configured {}, requested {}",
-                    held.engine.base_url(),
-                    requested.trim()
-                )));
+                // Neither URL goes in the message: it is rendered in the page,
+                // and a server address can carry a token or a host the user did
+                // not mean to show.
+                return Err(js_error(
+                    "Server URL is fixed while logged in; log out to change it",
+                ));
             }
         }
         let mut slot = self.slot.write().expect("engine slot poisoned");

@@ -108,6 +108,10 @@ const MAX_CLIPBOARD_PAYLOAD_CIPHERTEXT_BYTES: i64 = (MAX_CLIPBOARD_PAYLOAD_BYTES
 /// server's default `max_file_blob_bytes` so a hostile server cannot advertise
 /// a multi-GiB size and OOM the client during a download.
 const MAX_FILE_PAYLOAD_CIPHERTEXT_BYTES: i64 = 512 * 1024 * 1024;
+/// Ceiling on the plaintext this client will encrypt and upload. The same
+/// figure as the server's default `max_file_blob_bytes`, refused here so a huge
+/// file fails before the whole ciphertext is built in memory.
+const MAX_FILE_UPLOAD_PLAINTEXT_BYTES: usize = 512 * 1024 * 1024;
 #[cfg(target_family = "wasm")]
 const WS_TICKET_PROTOCOL: &str = "clipper-ticket";
 
@@ -391,7 +395,9 @@ impl SyncEngine {
         self.api.restore_token(token);
         if let Err(error) = self.api.validate_session().await {
             // Never leave a dead token resident; force a clean re-login instead.
-            self.api.clear_token();
+            if !self.end_refused_session(&error).await {
+                self.api.clear_token();
+            }
             return Err(error);
         }
 
@@ -549,6 +555,20 @@ impl SyncEngine {
         if let Err(error) = self.api.logout().await {
             warn!(%error, "Server-side logout failed; clearing local session anyway");
         }
+        self.clear_local_session().await;
+        info!("Logged out");
+        Ok(())
+    }
+
+    /// Drop everything this session holds.
+    ///
+    /// Shared by logout, removing this device, and a session the server has
+    /// definitively refused: all three must leave no key material resident and
+    /// no in-flight sync write able to land. Bumping the store generation is
+    /// what fences those writes — without it a straggling snapshot or live
+    /// event still passes the generation check and writes into whichever
+    /// profile database the next login opens.
+    async fn clear_local_session(&self) {
         self.api.clear_token();
         {
             let mut active_key = self.encryption_key.write().await;
@@ -560,18 +580,23 @@ impl SyncEngine {
         *self.device_signing_key.write().await = None;
         *self.device_identity_wrapping_key.write().await = None;
         self.local_store.clear_memory().await;
-        self.schedule_history.lock().await.clear();
-        // Fence in-flight sync writes. Without this a straggling snapshot or
-        // live event still passes the generation check and writes into
-        // whichever profile database the next login opens.
         self.local_store.start_generation().await;
-        {
-            let mut state = self.state.write().await;
-            *state = AppState::default();
-        }
+        *self.state.write().await = AppState::default();
         self.bump_version();
-        info!("Logged out");
-        Ok(())
+    }
+
+    /// End a session the server has refused.
+    ///
+    /// Only a 401 counts. A dropped WebSocket or a network error is a reason to
+    /// retry, and tearing the session down for one would log the user out every
+    /// time their connection blinked.
+    async fn end_refused_session(&self, error: &ClientError) -> bool {
+        if !session_refused(error) {
+            return false;
+        }
+        warn!("The server refused this session; signing out");
+        self.clear_local_session().await;
+        true
     }
 
     // ── Devices ──
@@ -613,21 +638,7 @@ impl SyncEngine {
             if let Err(error) = &result {
                 warn!(%error, "Removing current device failed server-side; clearing local session anyway");
             }
-            self.api.clear_token();
-            {
-                let mut active_key = self.encryption_key.write().await;
-                self.history_epoch.fetch_add(1, Ordering::SeqCst);
-                *active_key = None;
-                self.schedule_history.lock().await.clear();
-                self.import_rules.lock().await.clear();
-            }
-            *self.device_signing_key.write().await = None;
-            *self.device_identity_wrapping_key.write().await = None;
-            self.local_store.clear_memory().await;
-            self.schedule_history.lock().await.clear();
-            self.local_store.start_generation().await;
-            *self.state.write().await = AppState::default();
-            self.bump_version();
+            self.clear_local_session().await;
             info!("Removed the current device; local session cleared");
             return Ok(());
         }
@@ -716,9 +727,10 @@ impl SyncEngine {
         let payload_id_typed: ObjectPayloadId = payload_uuid.into();
         let created_at = chrono::Utc::now().to_rfc3339();
         let plaintext_size = data.len() as i64;
-        let aad_body = create_object_envelope_body_for_aad(
+        let aad_body = object_envelope_body_for_aad(
             object_id_typed,
             ObjectKind::Clipboard,
+            EnvelopePlacement::Create,
             device_id_typed,
             created_at.clone(),
             vec![payload_id_typed],
@@ -742,9 +754,10 @@ impl SyncEngine {
 
         let payload_hash = crypto::sha256(&encrypted_payload).to_vec();
         let payload_size = encrypted_payload.len() as i64;
-        let envelope_body = create_object_envelope_body(
+        let envelope_body = object_envelope_body(
             object_id_typed,
             ObjectKind::Clipboard,
+            EnvelopePlacement::Create,
             device_id_typed,
             created_at.clone(),
             meta_nonce.clone(),
@@ -1014,6 +1027,7 @@ impl SyncEngine {
         mime_type: Option<&str>,
         data: &[u8],
     ) -> Result<String, ClientError> {
+        check_upload_plaintext_size(data.len())?;
         let filename = safe_object_filename(filename);
         let mime_type =
             normalized_mime_type(mime_type).unwrap_or_else(|| mime_guess_from_filename(&filename));
@@ -1034,9 +1048,10 @@ impl SyncEngine {
         let file_id_typed: ObjectId = file_uuid.into();
         let payload_id_typed: ObjectPayloadId = payload_uuid.into();
         let created_at = chrono::Utc::now().to_rfc3339();
-        let aad_body = create_object_envelope_body_for_aad(
+        let aad_body = object_envelope_body_for_aad(
             file_id_typed,
             ObjectKind::File,
+            EnvelopePlacement::Create,
             device_id_typed,
             created_at.clone(),
             vec![payload_id_typed],
@@ -1055,9 +1070,10 @@ impl SyncEngine {
 
         let blob_hash = crypto::sha256(&encrypted_blob).to_vec();
         let blob_size = encrypted_blob.len() as i64;
-        let envelope_body = create_object_envelope_body(
+        let envelope_body = object_envelope_body(
             file_id_typed,
             ObjectKind::File,
+            EnvelopePlacement::Create,
             device_id_typed,
             created_at.clone(),
             meta_nonce.clone(),
@@ -1535,8 +1551,8 @@ impl SyncEngine {
             let refreshed = self.local_store.schedule_records_with_heads().await?;
             self.validate_plan_context(planned, &refreshed).await?;
         }
-        if let Some(running) = self.running_actual().await {
-            self.stop_actual_inner(&running.0).await?;
+        if let Some(running) = self.running_actual_id().await {
+            self.stop_actual_inner(&running).await?;
         }
         self.create_schedule_record(ScheduleRecord::Actual(Box::new(
             clipper_schedule::ActualRecord {
@@ -1641,18 +1657,17 @@ impl SyncEngine {
         Ok(out)
     }
 
-    /// The running timer as `(object id, view)`, if one is running.
-    async fn running_actual(&self) -> Option<(String, ActualView)> {
-        let records = self.local_store.schedule_records_with_ids().await;
-        for (object_id, record) in &records {
-            let ScheduleRecord::Actual(actual) = record else {
-                continue;
-            };
-            if matches!(actual.span, clipper_schedule::ActualSpan::Running { .. }) {
-                return Some((object_id.clone(), actual_view(object_id, actual, "")));
-            }
-        }
-        None
+    /// The object id of the running timer, if one is running.
+    async fn running_actual_id(&self) -> Option<String> {
+        self.local_store
+            .schedule_records_with_ids()
+            .await
+            .into_iter()
+            .find(|(_, record)| {
+                matches!(record, ScheduleRecord::Actual(actual)
+                    if matches!(actual.span, clipper_schedule::ActualSpan::Running { .. }))
+            })
+            .map(|(object_id, _)| object_id)
     }
 
     /// Replace a schedule series with an edited version.
@@ -2208,6 +2223,11 @@ impl SyncEngine {
         title: &str,
     ) -> Result<CollabItem, ClientError> {
         let meta = self.api.rename_collab_doc(object_id, title).await?;
+        if meta.object_id.to_string() != object_id {
+            return Err(ClientError::UnexpectedResponse(format!(
+                "renamed collab doc {object_id} returned mismatched identity"
+            )));
+        }
         let item = collab_item_from_meta(&meta);
         let created_seq = collab_created_seq(&item.created_at);
         // The rename must not reorder the list, so the record keeps its creation
@@ -2309,6 +2329,7 @@ impl SyncEngine {
                 .await
             {
                 warn!("File snapshot failed: {}", error);
+                file_engine.end_refused_session(&error).await;
             }
         });
 
@@ -2319,6 +2340,7 @@ impl SyncEngine {
                 .await
             {
                 warn!("Clipboard snapshot failed: {}", error);
+                clipboard_engine.end_refused_session(&error).await;
             }
         });
 
@@ -2329,6 +2351,7 @@ impl SyncEngine {
                 .await
             {
                 warn!("Collab doc snapshot failed: {}", error);
+                collab_engine.end_refused_session(&error).await;
             }
         });
 
@@ -2339,6 +2362,7 @@ impl SyncEngine {
                 .await
             {
                 warn!("Schedule snapshot failed: {}", error);
+                schedule_engine.end_refused_session(&error).await;
             }
         });
     }
@@ -3000,6 +3024,11 @@ impl SyncEngine {
             }
             Err(error) => return Err(error),
         };
+        if meta.object_id != object_id {
+            return Err(ClientError::UnexpectedResponse(format!(
+                "materialized collab doc {object_id} returned mismatched identity"
+            )));
+        }
         let item = collab_item_from_meta(&meta);
         let created_seq = collab_created_seq(&item.created_at);
         self.persist_collab_snapshot_item(&item, created_seq, generation)
@@ -3698,22 +3727,6 @@ fn optional_device_id(device_id: Option<&str>) -> Result<Option<DeviceId>, Clien
         .transpose()
 }
 
-fn create_object_envelope_body_for_aad(
-    object_id: ObjectId,
-    kind: ObjectKind,
-    source_device_id: DeviceId,
-    created_at: String,
-    payload_ids: Vec<ObjectPayloadId>,
-) -> ObjectEnvelopeBody {
-    object_envelope_body_for_aad(
-        object_id,
-        kind,
-        EnvelopePlacement::Create,
-        source_device_id,
-        created_at,
-        payload_ids,
-    )
-}
 
 /// The projection the AAD is computed from, before the ciphertexts exist.
 ///
@@ -3786,26 +3799,6 @@ impl EnvelopePlacement {
     }
 }
 
-fn create_object_envelope_body(
-    object_id: ObjectId,
-    kind: ObjectKind,
-    source_device_id: DeviceId,
-    created_at: String,
-    meta_nonce: Vec<u8>,
-    sha256_meta_ciphertext: Vec<u8>,
-    payloads: Vec<ObjectEnvelopePayload>,
-) -> ObjectEnvelopeBody {
-    object_envelope_body(
-        object_id,
-        kind,
-        EnvelopePlacement::Create,
-        source_device_id,
-        created_at,
-        meta_nonce,
-        sha256_meta_ciphertext,
-        payloads,
-    )
-}
 
 #[allow(clippy::too_many_arguments)]
 fn object_envelope_body(
@@ -3939,6 +3932,19 @@ fn stopped_span(
     TimeRange::new(started, end).map_err(|error| ClientError::InvalidArgument(error.to_string()))
 }
 
+/// Refuse a file this client will not upload.
+///
+/// Checked before encryption: the whole ciphertext is built in memory, so an
+/// oversized file should fail immediately rather than after the work.
+fn check_upload_plaintext_size(size: usize) -> Result<(), ClientError> {
+    if size > MAX_FILE_UPLOAD_PLAINTEXT_BYTES {
+        return Err(ClientError::InvalidArgument(format!(
+            "file is {size} bytes, over the {MAX_FILE_UPLOAD_PLAINTEXT_BYTES}-byte upload limit"
+        )));
+    }
+    Ok(())
+}
+
 fn object_envelope_error(message: impl Into<String>) -> ClientError {
     ClientError::Crypto(crypto::CryptoError::Signature(message.into()))
 }
@@ -4046,6 +4052,13 @@ fn top_level_mime_type(mime_type: &str) -> String {
 
 fn is_not_found_error(error: &ClientError) -> bool {
     matches!(error, ClientError::Api { status, .. } if *status == 404)
+}
+
+/// The server refused this session's token. Only an HTTP 401 says that: a
+/// transport error, a closed WebSocket, or any other status is a reason to
+/// retry, not to sign out.
+fn session_refused(error: &ClientError) -> bool {
+    matches!(error, ClientError::Api { status, .. } if *status == 401)
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -4423,6 +4436,53 @@ mod tests {
         assert_eq!(
             state.clipboard_items.first().map(|item| item.text.clone()),
             Some("newer".to_string()),
+        );
+    }
+
+    #[test]
+    fn only_a_refused_token_ends_the_session() {
+        assert!(session_refused(&ClientError::Api {
+            status: 401,
+            error: ErrorResponse::new(ApiErrorCode::Unauthorized, "expired"),
+        }));
+        // Everything else is a reason to retry, not to sign out.
+        assert!(!session_refused(&ClientError::Api {
+            status: 403,
+            error: ErrorResponse::new(ApiErrorCode::Unknown, "forbidden"),
+        }));
+        assert!(!session_refused(&ClientError::WebSocket("closed".into())));
+        assert!(!session_refused(&ClientError::NotAuthenticated));
+    }
+
+    #[tokio::test]
+    async fn a_refused_session_is_torn_down_once() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:8787", temp.path());
+        open_session(&engine).await;
+        let refused = ClientError::Api {
+            status: 401,
+            error: ErrorResponse::new(ApiErrorCode::Unauthorized, "expired"),
+        };
+        assert!(engine.end_refused_session(&refused).await);
+        assert!(engine.get_state().await.session.is_none());
+
+        open_session(&engine).await;
+        assert!(
+            !engine
+                .end_refused_session(&ClientError::WebSocket("closed".into()))
+                .await,
+        );
+        assert!(engine.get_state().await.session.is_some());
+    }
+
+    #[test]
+    fn an_oversized_upload_is_refused_before_encryption() {
+        check_upload_plaintext_size(MAX_FILE_UPLOAD_PLAINTEXT_BYTES).expect("at the limit");
+        let error = check_upload_plaintext_size(MAX_FILE_UPLOAD_PLAINTEXT_BYTES + 1)
+            .expect_err("over the limit");
+        assert!(
+            matches!(error, ClientError::InvalidArgument(ref message) if message.contains("upload limit")),
+            "unexpected error: {error:?}",
         );
     }
 

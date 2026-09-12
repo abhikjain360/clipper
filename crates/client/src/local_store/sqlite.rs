@@ -417,6 +417,9 @@ pub(super) fn read_payload(
         .map_err(Into::into)
 }
 
+/// Only the browser store deletes a payload on its own; on native the row
+/// cascades with its object. Kept for the test that simulates a lost payload.
+#[cfg(test)]
 pub(super) fn delete_payload(
     connection: &Connection,
     object_id: &str,
