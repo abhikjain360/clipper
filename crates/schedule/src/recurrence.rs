@@ -143,10 +143,7 @@ fn until_value_wall_clock(value: &str, zone: Tz) -> (String, Option<DateTime<Utc
     {
         let instant = Utc.from_utc_datetime(&instant);
         let bound = until_scan_bound(instant, zone);
-        return (
-            bound.format("%Y%m%dT%H%M%SZ").to_string(),
-            Some(instant),
-        );
+        return (bound.format("%Y%m%dT%H%M%SZ").to_string(), Some(instant));
     }
     if NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S").is_ok() {
         return (format!("{value}Z"), None);

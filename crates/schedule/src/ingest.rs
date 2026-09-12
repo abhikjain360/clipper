@@ -380,13 +380,10 @@ fn validate_rrule_numbers(text: &str) -> Result<(), IngestError> {
                         &mut count_seen
                     };
                     if *seen {
-                        return Err(IngestError::Malformed(format!(
-                            "RRULE has duplicate {key}"
-                        )));
+                        return Err(IngestError::Malformed(format!("RRULE has duplicate {key}")));
                     }
                     *seen = true;
-                    let all_zero =
-                        !number.is_empty() && number.bytes().all(|byte| byte == b'0');
+                    let all_zero = !number.is_empty() && number.bytes().all(|byte| byte == b'0');
                     let all_digits =
                         !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit());
                     let fits = if key == "INTERVAL" {

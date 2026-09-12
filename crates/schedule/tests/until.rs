@@ -110,7 +110,10 @@ fn instant_until_includes_fold_day_before_the_cutoff() {
         RecurrenceEnd::On(utc(2026, 10, 25, 1, 15)),
     );
     let starts = expand(&item, &fall_back_expansion()).expect("expands");
-    assert_eq!(starts, vec![utc(2026, 10, 24, 0, 30), utc(2026, 10, 25, 0, 30)]);
+    assert_eq!(
+        starts,
+        vec![utc(2026, 10, 24, 0, 30), utc(2026, 10, 25, 0, 30)]
+    );
 }
 
 /// The same fold case through an imported rule string.
@@ -118,7 +121,10 @@ fn instant_until_includes_fold_day_before_the_cutoff() {
 fn imported_instant_until_includes_fold_day_before_the_cutoff() {
     let (item, rules) = imported_item("20261024T023000", "FREQ=DAILY;UNTIL=20261025T011500Z");
     let starts = expand_imported(&item, rules, &fall_back_expansion()).expect("expands");
-    assert_eq!(starts, vec![utc(2026, 10, 24, 0, 30), utc(2026, 10, 25, 0, 30)]);
+    assert_eq!(
+        starts,
+        vec![utc(2026, 10, 24, 0, 30), utc(2026, 10, 25, 0, 30)]
+    );
 }
 
 /// Mar 29 02:30 Berlin is in the spring-forward gap and shifts to 03:30 CEST,
@@ -147,5 +153,8 @@ fn imported_instant_until_excludes_gap_day_after_the_cutoff() {
 fn date_until_includes_the_whole_last_day() {
     let (item, rules) = imported_item("20260328T023000", "FREQ=DAILY;UNTIL=20260329");
     let starts = expand_imported(&item, rules, &spring_forward_expansion()).expect("expands");
-    assert_eq!(starts, vec![utc(2026, 3, 28, 1, 30), utc(2026, 3, 29, 1, 30)]);
+    assert_eq!(
+        starts,
+        vec![utc(2026, 3, 28, 1, 30), utc(2026, 3, 29, 1, 30)]
+    );
 }
