@@ -926,7 +926,8 @@ mod tests {
         runtime.block_on(async {
             let write = write_private_upload_file(&upload_dir, "report.pdf", b"uploaded bytes");
             tokio::pin!(write);
-            let ready = std::future::poll_fn(|cx| Poll::Ready(write.as_mut().poll(cx).is_ready())).await;
+            let ready =
+                std::future::poll_fn(|cx| Poll::Ready(write.as_mut().poll(cx).is_ready())).await;
             assert!(!ready, "the open must go through the blocking pool");
 
             let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -938,7 +939,10 @@ mod tests {
             started_rx.await.unwrap();
 
             let early = tokio::time::timeout(Duration::from_millis(100), &mut write).await;
-            assert!(early.is_err(), "returned while the write was still queued: {early:?}");
+            assert!(
+                early.is_err(),
+                "returned while the write was still queued: {early:?}"
+            );
 
             release_tx.send(()).unwrap();
             blocker.await.unwrap();

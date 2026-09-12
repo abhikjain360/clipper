@@ -4725,15 +4725,22 @@ mod tests {
 
         assert!(!engine.get_state().await.is_logged_in());
         assert!(
-            engine.local_store.schedule_records_with_ids().await.is_empty(),
+            engine
+                .local_store
+                .schedule_records_with_ids()
+                .await
+                .is_empty(),
             "logout must leave no record of the signed-out account in memory",
         );
         assert!(
-            engine.next_alarms(3, "UTC").await.expect("alarms").is_empty(),
+            engine
+                .next_alarms(3, "UTC")
+                .await
+                .expect("alarms")
+                .is_empty(),
             "and no alarm of that account can still be read without a session",
         );
     }
-
 
     /// A refresh has to return. It runs on the caller's task — the daemon's
     /// IPC handler, or the mobile and browser bridges — and a blocked one
@@ -5049,12 +5056,14 @@ mod tests {
                 }
             };
             let init: ObjectInitRequest = postcard::from_bytes(&body).expect("an init request");
-            sent.send(init.id.to_string()).expect("report the object id");
+            sent.send(init.id.to_string())
+                .expect("report the object id");
 
             // Answer only once the replacement session is installed.
             resumed.await.expect("release");
-            let response = postcard::to_allocvec(&ObjectInitResponse::Complete { created_seq: 100 })
-                .expect("encode the response");
+            let response =
+                postcard::to_allocvec(&ObjectInitResponse::Complete { created_seq: 100 })
+                    .expect("encode the response");
             socket
                 .write_all(
                     format!(
@@ -5364,7 +5373,9 @@ mod tests {
             let mut request = [0; 4096];
             assert!(socket.read(&mut request).await.expect("read") > 0);
             socket
-                .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
                 .await
                 .expect("refuse the upgrade");
         });
