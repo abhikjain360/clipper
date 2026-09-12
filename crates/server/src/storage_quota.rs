@@ -41,7 +41,10 @@ pub(crate) fn meta_bytes_sum_expr() -> SimpleExpr {
 /// `objects_added` is 1 for a new object and 0 for a new revision of one that
 /// already exists: a revision consumes bytes but does not add to the object
 /// count, or editing a file repeatedly would exhaust the object quota without
-/// creating anything new.
+/// creating anything new. A zero-byte reservation still runs the predicates
+/// below, so an account already over its limit cannot write even a no-cost
+/// revision; only tombstones bypass the check, through
+/// `charge_user_storage`.
 pub(crate) async fn try_reserve_user_storage<C>(
     db: &C,
     user_id: Uuid,
@@ -59,14 +62,6 @@ where
         || !(0..=1).contains(&objects_added)
     {
         return Err(DbErr::Custom("invalid storage quota reservation".into()));
-    }
-    // Nothing to check when nothing is reserved: a revision with empty
-    // metadata and no payloads costs zero, and the predicates below would
-    // refuse a user already over a lowered limit a write that adds nothing.
-    // Tombstones do not take this path; they charge through
-    // `charge_user_storage` so a full account can always delete.
-    if storage_bytes == 0 && objects_added == 0 {
-        return Ok(true);
     }
     if storage_bytes > max_storage_bytes {
         return Ok(false);
@@ -94,8 +89,10 @@ where
 ///
 /// Only tombstone revisions use this. A tombstone is the only way to
 /// reclaim quota — purge requires one — so a user over a lowered limit must
-/// always be able to write it, and the tombstone metadata cap bounds the
-/// overage per object. The object count is unchanged.
+/// always be able to write it. The overage stays bounded: a tombstoned
+/// object accepts no second tombstone, and an over-limit account cannot
+/// write the revise that would revive it, so at most one capped tombstone
+/// per object sits above the limit. The object count is unchanged.
 pub(crate) async fn charge_user_storage<C>(
     db: &C,
     user_id: Uuid,
