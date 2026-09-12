@@ -1075,7 +1075,7 @@ async fn corrupt_anchor_row_must_not_brick_every_later_event_for_that_object() {
     // A later create event for the same id arrives. This must not fail; the
     // worst acceptable outcome is re-fetching with reduced rollback protection.
     restarted
-        .mark_pending_create(
+        .mark_pending_fetch(
             ObjectKind::Clipboard,
             &entry.id,
             50,
