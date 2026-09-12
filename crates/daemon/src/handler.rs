@@ -36,6 +36,11 @@ use crate::{
 
 const MAX_IPC_REQUEST_LINE_BYTES: usize = 32 * 1024 * 1024;
 
+/// Bound on the HMAC handshake. Mirrors WS_HELLO_TIMEOUT in
+/// crates/server/src/ws.rs. A peer that never answers must not hold a slot.
+pub(crate) const IPC_HANDSHAKE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Handle a single client connection.
@@ -49,7 +54,15 @@ pub async fn handle_connection(
     let writer = Arc::new(Mutex::new(write_half));
     let mut reader = BufReader::new(read_half);
 
-    if !authenticate_connection(&mut reader, &writer, &data_dir).await {
+    // Bound the handshake so a peer that connects and stays silent cannot
+    // hold a connection slot forever.
+    let authenticated = tokio::time::timeout(
+        IPC_HANDSHAKE_TIMEOUT,
+        authenticate_connection(&mut reader, &writer, &data_dir),
+    )
+    .await
+    .unwrap_or(false);
+    if !authenticated {
         return;
     }
 
