@@ -627,9 +627,9 @@ pub async fn upload_payload(
 
     // Bump the revision's server-assigned stored_at (and the object's
     // updated_at) so the orphan sweep treats an actively-progressing
-    // multi-payload upload as live rather than reaping it mid-flight. A
-    // failure here only risks an early reap on a later sweep — the payload is
-    // already durably stored — so log and continue.
+    // multi-payload upload as live rather than reaping it mid-flight. The
+    // payload is already durably stored, so a failure here only risks an early
+    // reap on a later sweep. Log and continue.
     let object_now = Utc::now().to_rfc3339();
     if let Err(e) = object_revisions::Entity::update_many()
         .col_expr(
@@ -1219,7 +1219,7 @@ pub async fn revise_object(
             }
         }
 
-        // No object is added — the chain already existed — so only bytes are
+        // The chain already existed, so no object is added and only bytes are
         // charged. Retained history is why they have to be charged at all.
         reserve_user_storage_quota(txn, state_ref, user_id, revision_storage_bytes, 0).await?;
 
@@ -1544,17 +1544,16 @@ pub async fn list_objects(
 
     // These generic object endpoints return the end-to-end-encrypted object
     // shape (`ObjectListItem`: meta ciphertext + envelope). Collab objects carry
-    // none of that — their content lives server-side in `collab_docs` and is
-    // fetched via `GET /api/collab-docs/:id/meta` — so exclude them here. This
-    // also keeps the `Vec<u8>` columns of `ListedObjectRow` from ever decoding a
+    // none of that: their content lives server-side in `collab_docs` and is
+    // fetched via `GET /api/collab-docs/:id/meta`. Excluding them here also
+    // keeps the `Vec<u8>` columns of `ListedObjectRow` from ever decoding a
     // NULL ciphertext.
     let mut q = objects::Entity::find()
         .join(JoinType::InnerJoin, head_revision_join())
         .filter(objects::Column::UserId.eq(auth.user_id))
-        // A tombstoned object stays in the table so its history — and any undo
-        // of the delete — survives, but it is not part of the live set. Clients
-        // learn it went away from the `deleted` event log row, exactly as they
-        // did when the row was destroyed.
+        // A tombstoned object stays in the table so its history, and any undo
+        // of the delete, survives. It is not part of the live set. Clients
+        // learn it went away from the `deleted` event log row.
         .filter(objects::Column::DeletedAt.is_null())
         .filter(objects::Column::CollabDocId.is_null());
 
@@ -2349,9 +2348,9 @@ pub async fn purge_object(
     remove_paths(paths).await;
 
     // No event and no broadcast. Every client already dropped this object when
-    // the tombstone revision landed — that is what a tombstone is for — so a
-    // second `deleted` would tell them nothing and would burn a seq. The
-    // returned seq is the one the deletion was published at.
+    // the tombstone revision landed, so a second `deleted` would tell them
+    // nothing and would burn a seq. The returned seq is the one the deletion
+    // was published at.
     let deleted_seq = published_seq.ok_or_else(|| {
         error!(
             object_id = %object_uuid,
@@ -2386,10 +2385,10 @@ enum ExpectedPlacement {
 
 /// The parts of an init or revise request the envelope is checked against.
 ///
-/// Both requests carry the same content under different type names, and this
-/// cross-check is the security boundary — the place a client's claims about an
-/// object are matched to what it actually signed. Two copies of it would drift,
-/// so there is one, and it takes the fields rather than either request type.
+/// Both requests carry the same content under different type names. This
+/// cross-check is the security boundary: it matches a client's claims about an
+/// object to what it actually signed. It takes the fields rather than either
+/// request type, so there is one copy of the check.
 struct EnvelopeContext<'a> {
     object_id: Uuid,
     kind: ObjectKind,
@@ -2422,7 +2421,7 @@ async fn validate_object_envelope(
             // The three together are the optimistic-concurrency check. A second
             // device that missed an edit computes the old parent hash and the
             // old revision number, and is refused here rather than silently
-            // overwriting — which is the whole reason the chain is hashed.
+            // overwriting.
             i64::try_from(body.revision).is_ok_and(|claimed| claimed == *revision)
                 && body.parent_hash.as_ref() == Some(parent_hash)
                 && matches!(
@@ -2592,8 +2591,8 @@ fn validate_envelope_payload(
 /// stable across the genesis and revise paths.
 ///
 /// The newest revision is returned whatever its status, so a caller can tell a
-/// finished upload apart from a missing one — which is what makes a repeated
-/// `complete_object` idempotent instead of a 404.
+/// finished upload apart from a missing one. A repeated `complete_object` is
+/// then idempotent instead of a 404.
 async fn object_for_upload(
     state: &AppState,
     user_id: Uuid,
@@ -6208,10 +6207,9 @@ mod tests {
         );
     }
 
-    /// The delete event row used to hardcode `object_kind: "file"`, which was
-    /// invisible while File was the only deletable kind. Schedule made it a live
-    /// bug: every schedule delete would have logged a file delete, and clients
-    /// reconciling by kind would have missed it entirely.
+    /// A delete event must log the deleted object's own kind. Clients
+    /// reconcile by kind, so a schedule delete logged as a file delete is one
+    /// they never see.
     #[tokio::test]
     async fn deleting_a_schedule_object_logs_its_own_kind() {
         let (state, _data_dir) = test_state().await;
