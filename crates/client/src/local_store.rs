@@ -306,6 +306,19 @@ impl LocalStore {
         }
     }
 
+    /// Hold the database open so a test can park a store write between its
+    /// generation check and the row it writes.
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) async fn hold_database_for_test(
+        &self,
+        entered: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let _database = self.database.lock().await;
+        entered.send(()).expect("report the held database");
+        release.await.expect("release the database");
+    }
+
     pub fn set_profile(&self, profile_id: String) {
         let mut current = self
             .profile_id
@@ -381,7 +394,19 @@ impl LocalStore {
             .await
     }
 
-    pub async fn clear_memory(&self) {
+    /// Fence the writes of the session that is ending, then drop what it left
+    /// in memory.
+    ///
+    /// Both steps happen under one hold of the sync lock, and that order is
+    /// the point. A writer that already passed its generation check holds the
+    /// sync lock, so it finishes before the clear runs; a writer that has not
+    /// taken the lock yet fails its check afterwards. Clearing memory on its
+    /// own takes only the memory lock, so a writer blocked on the database
+    /// would put the previous account's decrypted records back after the
+    /// clear.
+    pub async fn fence_and_clear_memory(&self) {
+        let mut sync = self.sync.lock().await;
+        sync.generation += 1;
         *self.memory.lock().await = MemoryState::default();
     }
 

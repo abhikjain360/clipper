@@ -465,11 +465,10 @@ impl SyncEngine {
             let epoch = self.history_epoch.fetch_add(1, Ordering::SeqCst) + 1;
             self.schedule_history.lock().await.clear();
             self.import_rules.lock().await.clear();
-            self.local_store.clear_memory().await;
             // Fence anything still in flight from the previous session: the
             // database below is a different profile's, and a straggling write
             // that still passed the old generation would land in it.
-            self.local_store.start_generation().await;
+            self.local_store.fence_and_clear_memory().await;
             self.local_store
                 .set_profile(profile_id_from_encryption_key(&encryption_key));
             *active_key = Some(encryption_key);
@@ -581,8 +580,7 @@ impl SyncEngine {
         }
         *self.device_signing_key.write().await = None;
         *self.device_identity_wrapping_key.write().await = None;
-        self.local_store.clear_memory().await;
-        self.local_store.start_generation().await;
+        self.local_store.fence_and_clear_memory().await;
         *self.state.write().await = AppState::default();
         self.bump_version();
     }
@@ -4565,6 +4563,97 @@ mod tests {
         );
     }
 
+    /// A snapshot writer that has already passed its generation check and is
+    /// waiting on the database must not put the signed-out account's records
+    /// back into memory after logout has cleared it.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn logout_clears_memory_after_a_writer_already_past_its_generation_check() {
+        use super::adversarial_history_tests::{
+            HISTORY_TEST_DEVICE_ID, HISTORY_TEST_KEY, encrypted_schedule_object,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", temp.path());
+        engine.local_store.set_profile("profile-a".into());
+        open_session(&engine).await;
+        *engine.encryption_key.write().await = Some(Zeroizing::new(HISTORY_TEST_KEY));
+        let generation = engine.local_store.start_generation().await;
+
+        // Hold the database, so the persist below parks between its generation
+        // check and the row it writes.
+        let (entered, held) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let holder = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .local_store
+                    .hold_database_for_test(entered, released)
+                    .await;
+            })
+        };
+        held.await.expect("the database is held");
+
+        let object_id = uuid::Uuid::now_v7().to_string();
+        let record = ScheduleRecord::Item(Box::new(ScheduleItem {
+            id: clipper_schedule::ScheduleItemId::new(),
+            title: "signed-out secret".into(),
+            span: ScheduleSpan::Timed {
+                start: clipper_schedule::TimedStart::Floating(
+                    (chrono::Utc::now() + chrono::TimeDelta::hours(1)).naive_utc(),
+                ),
+                duration: clipper_schedule::BlockDuration::from_minutes(30).expect("duration"),
+            },
+            recurrence: clipper_schedule::Recurrence::Once,
+            reference: None,
+            alarm: Some(clipper_schedule::AlarmPolicy::at_start()),
+        }));
+        let encrypted = encrypted_schedule_object(&record, &object_id, 1, None);
+        let persist = engine
+            .local_store
+            .persist_snapshot_schedule_present_encrypted(
+                StoredObjectIdentity {
+                    object_id: &object_id,
+                    created_at: "2026-09-12T00:00:00Z",
+                    source_device_id: HISTORY_TEST_DEVICE_ID,
+                },
+                record,
+                &encrypted,
+                10,
+                generation,
+                RECENT_CLIPBOARD_LIMIT,
+            );
+        tokio::pin!(persist);
+        assert!(
+            futures_util::poll!(&mut persist).is_pending(),
+            "the writer must be inside the store, past its generation check",
+        );
+
+        let clearing = engine.clear_local_session();
+        tokio::pin!(clearing);
+        assert!(
+            futures_util::poll!(&mut clearing).is_pending(),
+            "logout must wait for that writer rather than clear around it",
+        );
+        assert!(engine.encryption_key.read().await.is_none());
+
+        release.send(()).expect("release the database");
+        holder.await.expect("holder");
+        persist.await.expect("persist");
+        clearing.await;
+
+        assert!(!engine.get_state().await.is_logged_in());
+        assert!(
+            engine.local_store.schedule_records_with_ids().await.is_empty(),
+            "logout must leave no record of the signed-out account in memory",
+        );
+        assert!(
+            engine.next_alarms(3, "UTC").await.expect("alarms").is_empty(),
+            "and no alarm of that account can still be read without a session",
+        );
+    }
+
     const RETAIN_TEST_KEY: [u8; 32] = [7; 32];
 
     /// A signed file list item whose meta decrypts under `RETAIN_TEST_KEY`, so
@@ -5025,8 +5114,8 @@ mod tests {
 mod adversarial_history_tests {
     use super::*;
 
-    const HISTORY_TEST_KEY: [u8; 32] = [1; 32];
-    const HISTORY_TEST_DEVICE_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    pub(super) const HISTORY_TEST_KEY: [u8; 32] = [1; 32];
+    pub(super) const HISTORY_TEST_DEVICE_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
     fn source_record(name: &str) -> ScheduleRecord {
         ScheduleRecord::Source(Box::new(CalendarSource {
@@ -5042,7 +5131,7 @@ mod adversarial_history_tests {
         }))
     }
 
-    fn encrypted_schedule_object(
+    pub(super) fn encrypted_schedule_object(
         record: &ScheduleRecord,
         object_id: &str,
         revision: u64,
