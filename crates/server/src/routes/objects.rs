@@ -42,6 +42,13 @@ use crate::{
 /// of the dozen sites that assert it, so the genesis case stays greppable.
 const GENESIS_REVISION: i64 = 1;
 
+/// Tombstone revisions may not carry more metadata ciphertext than this. The
+/// client's tombstone encrypts an 18-byte plaintext with a 16-byte tag, so
+/// it sends 34 bytes; the cap leaves room for format growth while bounding
+/// how far one tombstone can push a user over their quota, since tombstones
+/// charge without a limit check (see `charge_user_storage`).
+const MAX_TOMBSTONE_META_CIPHERTEXT_BYTES: usize = 256;
+
 /// Validate a client-asserted object `created_at`, returning the parsed UTC
 /// instant so callers can derive `expires_at` without re-parsing.
 ///
@@ -1029,6 +1036,18 @@ pub async fn revise_object(
             "Only file and schedule objects can be deleted",
         ));
     }
+    // A second tombstone on a deleted object changes nothing, and it would be
+    // charged without a quota check below. Refuse it before any write.
+    if tombstone && was_tombstoned {
+        debug!(
+            object_id = %object_uuid,
+            "Rejected tombstone revision for an object that is already deleted",
+        );
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::ObjectDeleteUnsupported,
+            "Object is already deleted",
+        ));
+    }
     // A revise on any other kind would insert the revision row and then fail
     // the event_log CHECK (only file/schedule/collab may emit `updated`, and
     // collab never reaches here), leaving a pending row that blocks later
@@ -1042,6 +1061,23 @@ pub async fn revise_object(
         return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectReviseUnsupported,
             "Only file and schedule objects can be revised",
+        ));
+    }
+    // A tombstone's metadata is charged without a quota check (below), so
+    // its size needs its own bound; the general metadata limit is far
+    // higher. Payloads need no check here: the request's payload set must
+    // match the signed body, and api-types validation already refuses a
+    // delete revision whose body carries payloads.
+    if tombstone && req.meta_ciphertext.len() > MAX_TOMBSTONE_META_CIPHERTEXT_BYTES {
+        debug!(
+            object_id = %object_uuid,
+            meta_ciphertext_len = req.meta_ciphertext.len(),
+            max_tombstone_meta_ciphertext_bytes = MAX_TOMBSTONE_META_CIPHERTEXT_BYTES,
+            "Rejected tombstone revision with oversized metadata",
+        );
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::PayloadTooLarge,
+            "Tombstone metadata ciphertext exceeds maximum size",
         ));
     }
 
@@ -1220,9 +1256,28 @@ pub async fn revise_object(
             }
         }
 
-        // The chain already existed, so no object is added and only bytes are
-        // charged. Retained history is why they have to be charged at all.
-        reserve_user_storage_quota(txn, state_ref, user_id, revision_storage_bytes, 0).await?;
+        // The chain already existed, so no object is added and only bytes
+        // are charged. A tombstone is the only way to reclaim quota — purge
+        // requires one — so its bytes are charged without a limit check; the
+        // metadata cap above bounds the overage per object. Ordinary
+        // revisions keep the limited reservation: retained history is why
+        // they have to be charged at all.
+        if tombstone {
+            storage_quota::charge_user_storage(txn, user_id, revision_storage_bytes)
+                .await
+                .map_err(|e| {
+                    error!(
+                        user_id = %user_id,
+                        storage_bytes = revision_storage_bytes,
+                        error = %e,
+                        "Failed to charge user storage for tombstone revision",
+                    );
+                    ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+                })?;
+        } else {
+            reserve_user_storage_quota(txn, state_ref, user_id, revision_storage_bytes, 0)
+                .await?;
+        }
 
         if all_inline {
             let seq = state_ref.next_event_seq();
@@ -4483,7 +4538,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn metadata_only_revisions_eventually_exceed_the_byte_quota() {
+        async fn ordinary_revisions_eventually_exceed_the_byte_quota() {
             let (state, _dir) = test_state_with_user_quotas(600, 100).await;
             let user_id = insert_user(&state).await;
             let device_id = Uuid::now_v7();
@@ -4505,21 +4560,23 @@ mod tests {
             .await
             .expect("init");
 
-            // Repeat tombstones, each carrying 512 metadata bytes and no
-            // payloads. Only a delete revision may carry no payloads, and one
-            // follows the last the same way any revision follows its head.
-            // Without a metadata charge this loop would run forever for zero
-            // quota.
+            // Repeat revisions, each carrying a fresh 512-byte payload, so
+            // each charges bytes against the 600-byte quota. Tombstones are
+            // the only payload-free revision — api-types requires every
+            // create and revise to carry at least one payload — and they
+            // charge without a limit check, so ordinary revisions are what
+            // proves per-revision bytes still exhaust the quota. Without
+            // that charge this loop would run forever for zero quota.
+            let chunk = vec![0xA5; 512];
             let mut refused = false;
             for _ in 0..20 {
-                match revise_meta_only(
+                match revise_with(
                     &state,
                     user_id,
                     device_id,
                     &object_id,
                     ObjectKind::Schedule,
-                    ObjectEnvelopeOperation::Delete,
-                    vec![0xA5; 512],
+                    &chunk,
                     &key,
                 )
                 .await
@@ -4535,7 +4592,7 @@ mod tests {
             }
             assert!(
                 refused,
-                "512-byte metadata revisions must hit a 600-byte quota"
+                "512-byte payload revisions must hit a 600-byte quota"
             );
             let (bytes, _) = user_storage_usage(&state, user_id).await;
             assert!(
@@ -4545,8 +4602,8 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_zero_byte_tombstone_succeeds_above_the_quota_and_purge_releases() {
-            let (state, _dir) = test_state_with_user_quotas(50, 100).await;
+        async fn a_full_account_can_still_tombstone_and_purge_back_under_the_quota() {
+            let (state, _dir) = test_state_with_user_quotas(50, 1).await;
             let user_id = insert_user(&state).await;
             let device_id = Uuid::now_v7();
             let key = insert_device(&state, user_id, device_id).await;
@@ -4569,21 +4626,26 @@ mod tests {
             // Genesis "first" (5) plus the 18 metadata bytes.
             assert_eq!(user_storage_usage(&state, user_id).await, (23, 1));
 
-            // Push accounted usage over the limit the way lowering
-            // max_user_storage_bytes under existing data would.
+            // Push both counters over their limits the way lowering
+            // max_user_storage_bytes or max_user_objects under existing data
+            // would.
             users::Entity::update_many()
                 .col_expr(
                     users::Column::StorageBytes,
                     sea_orm::sea_query::Expr::value(1000),
+                )
+                .col_expr(
+                    users::Column::ObjectCount,
+                    sea_orm::sea_query::Expr::value(2),
                 )
                 .filter(users::Column::Id.eq(user_id))
                 .exec(state.db())
                 .await
                 .expect("inflate usage");
 
-            // Empty metadata reserves nothing, so this must succeed despite the
-            // over-quota counters; otherwise the object could never be purged
-            // back under the limit.
+            // What the client's tombstone sends: 18 plaintext bytes plus a
+            // 16-byte tag. It must land over both limits; otherwise the
+            // object could never be purged back under them.
             revise_meta_only(
                 &state,
                 user_id,
@@ -4591,11 +4653,16 @@ mod tests {
                 &object_id,
                 ObjectKind::Schedule,
                 ObjectEnvelopeOperation::Delete,
-                Vec::new(),
+                vec![0xDB; 34],
                 &key,
             )
             .await
-            .expect("zero-byte tombstone above the quota");
+            .expect("tombstone above both quotas");
+            assert_eq!(
+                user_storage_usage(&state, user_id).await,
+                (1034, 2),
+                "the tombstone charges its 34 metadata bytes with no limit check",
+            );
 
             purge_object(
                 State(state.clone()),
@@ -4606,8 +4673,205 @@ mod tests {
             .expect("purge");
             assert_eq!(
                 user_storage_usage(&state, user_id).await,
-                (977, 0),
-                "purge releases the whole chain",
+                (977, 1),
+                "purge releases the whole chain, tombstone metadata included",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_tombstone_with_oversized_metadata_is_rejected_without_a_write() {
+            let (state, _dir) = test_state().await;
+            let user_id = insert_user(&state).await;
+            let device_id = Uuid::now_v7();
+            let key = insert_device(&state, user_id, device_id).await;
+            let object_id = Uuid::now_v7().to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request(
+                    object_id.clone(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    b"first",
+                    true,
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("init");
+            let before = user_storage_usage(&state, user_id).await;
+            let object_uuid = object_id.parse::<Uuid>().expect("object id");
+
+            let err = revise_meta_only(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                ObjectEnvelopeOperation::Delete,
+                vec![0xA5; MAX_TOMBSTONE_META_CIPHERTEXT_BYTES + 1],
+                &key,
+            )
+            .await
+            .expect_err("oversized tombstone metadata must be rejected");
+            assert_eq!(err.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(err.body().code, ApiErrorCode::PayloadTooLarge);
+            assert_eq!(
+                user_storage_usage(&state, user_id).await,
+                before,
+                "rejected tombstone reserves nothing",
+            );
+            let revision_count = object_revisions::Entity::find()
+                .filter(object_revisions::Column::ObjectId.eq(object_uuid))
+                .count(state.db())
+                .await
+                .expect("revision count");
+            assert_eq!(
+                revision_count, 1,
+                "rejected tombstone writes no revision row",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_second_tombstone_is_rejected_without_a_write() {
+            let (state, _dir) = test_state().await;
+            let user_id = insert_user(&state).await;
+            let device_id = Uuid::now_v7();
+            let key = insert_device(&state, user_id, device_id).await;
+            let object_id = Uuid::now_v7().to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request(
+                    object_id.clone(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    b"first",
+                    true,
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("init");
+            tombstone_object(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                &key,
+            )
+            .await
+            .expect("first tombstone");
+            let after_first = user_storage_usage(&state, user_id).await;
+            let object_uuid = object_id.parse::<Uuid>().expect("object id");
+
+            let err = revise_meta_only(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                ObjectEnvelopeOperation::Delete,
+                vec![0xA5; 34],
+                &key,
+            )
+            .await
+            .expect_err("a second tombstone must be rejected");
+            assert_eq!(err.body().code, ApiErrorCode::ObjectDeleteUnsupported);
+            assert_eq!(
+                user_storage_usage(&state, user_id).await,
+                after_first,
+                "a rejected second tombstone charges nothing",
+            );
+            let revision_count = object_revisions::Entity::find()
+                .filter(object_revisions::Column::ObjectId.eq(object_uuid))
+                .count(state.db())
+                .await
+                .expect("revision count");
+            assert_eq!(
+                revision_count, 2,
+                "a rejected second tombstone writes no revision row",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_tombstone_with_a_payload_is_rejected_without_a_write() {
+            let (state, _dir) = test_state().await;
+            let user_id = insert_user(&state).await;
+            let device_id = Uuid::now_v7();
+            let key = insert_device(&state, user_id, device_id).await;
+            let object_id = Uuid::now_v7().to_string();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request(
+                    object_id.clone(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    b"first",
+                    true,
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .expect("init");
+            let before = user_storage_usage(&state, user_id).await;
+            let object_uuid = object_id.parse::<Uuid>().expect("object id");
+
+            // A delete revision whose signed body carries a payload
+            // descriptor, with the request matching it the way a
+            // misbehaving client could. Payload count is validated against
+            // the operation before any route runs, so the request is
+            // refused at the extractor and nothing is written.
+            let (head_revision, parent_hash) = head_of(&state, object_uuid).await;
+            let tombstone_payload_id: clipper_core::models::ObjectPayloadId =
+                Uuid::now_v7().into();
+            let meta_nonce = vec![13_u8; XCHACHA20_NONCE_BYTES];
+            let meta_ciphertext = b"tombstone metadata".to_vec();
+            let payload_nonce = vec![14_u8; XCHACHA20_NONCE_BYTES];
+            let payload_ciphertext = b"payload on a tombstone".to_vec();
+            let payload_hash = sha256(&payload_ciphertext).to_vec();
+            let envelope = signed_envelope_at(
+                object_uuid.into(),
+                ObjectKind::Schedule,
+                head_revision + 1,
+                Some(parent_hash),
+                ObjectEnvelopeOperation::Delete,
+                meta_nonce.clone(),
+                &meta_ciphertext,
+                vec![ObjectEnvelopePayload {
+                    id: tombstone_payload_id,
+                    nonce: payload_nonce.clone(),
+                    ciphertext_size: payload_ciphertext.len() as i64,
+                    sha256_ciphertext: payload_hash.clone(),
+                }],
+                device_id,
+                &key,
+            );
+            let result = Postcard::validated(ObjectReviseRequest {
+                meta_nonce,
+                meta_ciphertext,
+                payloads: vec![ObjectPayloadInit {
+                    id: tombstone_payload_id,
+                    nonce: payload_nonce,
+                    ciphertext_size: payload_ciphertext.len() as i64,
+                    sha256_ciphertext: payload_hash,
+                    inline_ciphertext: Some(payload_ciphertext),
+                }],
+                envelope,
+            });
+
+            let err = result.expect_err("a tombstone must not carry payloads");
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(err.body().code, ApiErrorCode::ValidationFailed);
+            assert_eq!(
+                user_storage_usage(&state, user_id).await,
+                before,
+                "rejected tombstone reserves nothing",
             );
         }
     }

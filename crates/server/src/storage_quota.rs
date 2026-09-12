@@ -60,9 +60,11 @@ where
     {
         return Err(DbErr::Custom("invalid storage quota reservation".into()));
     }
-    // No bytes and no object: nothing to check, so succeed without touching
-    // the row. A user over a lowered quota must still write payload-less
-    // tombstones (to purge back under it), mirroring `release_user_storage`.
+    // Nothing to check when nothing is reserved: a revision with empty
+    // metadata and no payloads costs zero, and the predicates below would
+    // refuse a user already over a lowered limit a write that adds nothing.
+    // Tombstones do not take this path; they charge through
+    // `charge_user_storage` so a full account can always delete.
     if storage_bytes == 0 && objects_added == 0 {
         return Ok(true);
     }
@@ -86,6 +88,43 @@ where
         .await?;
 
     Ok(result.rows_affected == 1)
+}
+
+/// Add stored bytes to a user's usage without a quota check.
+///
+/// Only tombstone revisions use this. A tombstone is the only way to
+/// reclaim quota — purge requires one — so a user over a lowered limit must
+/// always be able to write it, and the tombstone metadata cap bounds the
+/// overage per object. The object count is unchanged.
+pub(crate) async fn charge_user_storage<C>(
+    db: &C,
+    user_id: Uuid,
+    storage_bytes: i64,
+) -> Result<(), DbErr>
+where
+    C: ConnectionTrait,
+{
+    if storage_bytes < 0 {
+        return Err(DbErr::Custom("invalid storage quota charge".into()));
+    }
+
+    let result = users::Entity::update_many()
+        .col_expr(
+            users::Column::StorageBytes,
+            Expr::col(users::Column::StorageBytes).add(storage_bytes),
+        )
+        .filter(users::Column::Id.eq(user_id))
+        .exec(db)
+        .await?;
+
+    if result.rows_affected == 1 {
+        Ok(())
+    } else {
+        Err(DbErr::Custom(format!(
+            "storage quota charge affected {} user rows for {}",
+            result.rows_affected, user_id,
+        )))
+    }
 }
 
 pub(crate) async fn release_user_storage<C>(db: &C, usage: UserStorageUsage) -> Result<(), DbErr>
