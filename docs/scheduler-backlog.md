@@ -79,6 +79,13 @@ If code and these notes disagree, verify the code and correct the notes.
       SQLite removed the per-tombstone file cost; it did not bound lifetime growth
       or make hydration of all held objects inexpensive.
 
+- [ ] `LocalStore::discard_cached_payload` is a no-op on native (SQLite
+      cascades the payload with the record) but the shared delete and absence
+      paths in `local_store.rs` still call it before every marker write. Move
+      the browser payload removal into the browser marker-write
+      implementation and drop the call from the shared paths. Noted by the
+      second-pass review on 2026-09-12; no behavior change.
+
 ## Reliability findings and outstanding verification
 
 - [ ] **Immediate-post-boot Android ringing failure:** investigate and fix the

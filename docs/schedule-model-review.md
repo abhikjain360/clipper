@@ -124,9 +124,11 @@ observer timezone. It:
 
 1. Generates candidate wall-clock times using the `rrule` library (or directly
    resolves a one-off). The library is given a UTC wall-clock `DTSTART`, so it
-   does pure calendar arithmetic and never resolves a local time itself; every
-   candidate is then resolved through the policy in `time.rs`. A series whose
-   own start falls in a DST gap expands like any other, and a floating
+   does pure calendar arithmetic and never resolves a local time itself.
+   Candidates more than a day before the window are skipped; every other
+   candidate is resolved through the policy in `time.rs`. An `UNTIL` given as
+   an instant is applied to the resolved instant, not the wall clock. A series
+   whose own start falls in a DST gap expands like any other, and a floating
    identity is the same for every observer.
 2. Matches candidates to overrides, removing cancellations and substituting
    rescheduled spans.
@@ -227,9 +229,9 @@ exercises revisions, timers, feeds, and two-client sync against an isolated serv
 
 ## Validation status for the revision-aware change
 
-Rust workspace tests pass: 420 in total on the polished branch, including 140
-in the schedule crate (13 unit, 55 adversarial, 33 behaviour, 15 corpus, 2
-imported-rule, 22 ingest) and 104 in the server. The live integration covers
+Rust workspace tests pass: 445 in total after the second-pass fixes, including
+164 in the schedule crate (13 unit, 57 adversarial, 37 behaviour, 15 corpus, 2
+imported-rule, 35 ingest, 5 `UNTIL`) and 107 in the server. The live integration covers
 pinned plans through edits, overridden/provider occurrences, stale selections,
 deleted history, and unchanged sync heads. Workspace Clippy, wasm/mobile bridge
 checks, web type/lint/tests and standalone web build also pass. The 2026-09-12
