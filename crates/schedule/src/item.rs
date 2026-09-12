@@ -69,6 +69,7 @@ pub struct ScheduleItem {
     pub recurrence: Recurrence,
     /// The Clipper object this block is time for. Absent means bare labelled
     /// time, so the schedule works without any task subsystem.
+    #[serde(default)]
     pub reference: Option<ObjectId>,
     /// When this block rings. Absent means silent.
     #[serde(default)]

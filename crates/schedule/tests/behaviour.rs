@@ -736,6 +736,28 @@ fn the_wire_format_is_self_describing() {
     assert_eq!(back, item);
 }
 
+/// `reference` and `alarm` are optional in the TypeScript contract, so a
+/// payload that omits them must deserialize.
+#[test]
+fn an_item_without_a_reference_or_an_alarm_deserializes() {
+    let id = ScheduleItemId::new();
+    let json = serde_json::json!({
+        "id": id.to_string(),
+        "title": "Gym",
+        "span": {
+            "kind": "timed",
+            "start": {"kind": "floating", "at": "2026-06-10T07:00:00"},
+            "duration": 45,
+        },
+        "recurrence": {"kind": "once"},
+    });
+
+    let item: ScheduleItem = serde_json::from_value(json).expect("both fields are optional");
+    assert_eq!(item.id, id);
+    assert_eq!(item.reference, None);
+    assert_eq!(item.alarm, None);
+}
+
 /// An unsupported imported rule persists only its snapshot id and UID. The
 /// provider syntax stays in the runtime resolver.
 #[test]

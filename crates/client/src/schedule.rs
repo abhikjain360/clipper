@@ -336,6 +336,14 @@ pub fn zone_or_utc(name: &str) -> Tz {
     name.parse().unwrap_or(Tz::UTC)
 }
 
+/// The exact definition and override recorded when a timer started.
+#[derive(Debug, Clone)]
+pub struct RecordedPlan {
+    pub item: ScheduleItem,
+    pub override_data: Option<clipper_schedule::OccurrenceOverrideData>,
+    pub context: clipper_schedule::PlannedRef,
+}
+
 #[cfg(test)]
 mod tests {
     use clipper_schedule::{
@@ -404,12 +412,4 @@ mod tests {
         assert_eq!(zone_or_utc("Europe/Berlin"), Tz::Europe__Berlin);
         assert_eq!(zone_or_utc("Mars/Olympus_Mons"), Tz::UTC);
     }
-}
-
-/// The exact definition and override recorded when a timer started.
-#[derive(Debug, Clone)]
-pub struct RecordedPlan {
-    pub item: ScheduleItem,
-    pub override_data: Option<clipper_schedule::OccurrenceOverrideData>,
-    pub context: clipper_schedule::PlannedRef,
 }

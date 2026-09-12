@@ -328,6 +328,28 @@ fn parser_has_an_input_size_ceiling() {
 }
 
 #[test]
+fn a_feed_with_too_many_lines_is_rejected_before_parsing() {
+    // MAX_PROPERTIES + 2 * MAX_COMPONENTS + 1, counting the envelope lines.
+    let total_lines = 500_000 + 2 * 50_000 + 1;
+    let mut feed = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n");
+    for _ in 0..total_lines - 3 {
+        feed.push_str("X-A:1\r\n");
+    }
+    feed.push_str("END:VCALENDAR\r\n");
+    assert_eq!(feed.lines().count(), total_lines);
+    assert!(
+        feed.len() < 8 * 1024 * 1024,
+        "must not hit the size ceiling"
+    );
+    match parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()) {
+        Err(clipper_schedule::IngestError::LimitExceeded(message)) => {
+            assert_eq!(message, "too many calendar lines");
+        }
+        other => panic!("expected the line cap, got {other:?}"),
+    }
+}
+
+#[test]
 fn an_unknown_tzid_skips_the_event_instead_of_becoming_floating() {
     let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
 UID:unknown-zone@example.com\r\nSUMMARY:Unknown zone\r\n\

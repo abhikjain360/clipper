@@ -190,7 +190,7 @@ impl RruleEngine {
                 let resolved = item.span.resolve(expansion.observer)?;
                 return Ok(if expansion.window.contains(resolved.start()) {
                     vec![(
-                        recurrence_id(item, item.span.local_start(), expansion),
+                        recurrence_id(item, item.span.local_start(), expansion)?,
                         resolved,
                     )]
                 } else {
@@ -266,7 +266,7 @@ impl RruleEngine {
                     limit: self.max_candidates,
                 });
             }
-            spans.push((recurrence_id(item, local, expansion), resolved));
+            spans.push((recurrence_id(item, local, expansion)?, resolved));
         }
         Ok(spans)
     }
@@ -405,30 +405,27 @@ fn effective_zone(item: &ScheduleItem, observer: Tz) -> Tz {
 }
 
 /// An occurrence identity that is the same for every observer.
+///
+/// Fails when a zoned start does not resolve. `resolve` shifts a local time
+/// that does not exist rather than failing, so that does not happen today.
 fn recurrence_id(
     item: &ScheduleItem,
     local: chrono::NaiveDateTime,
     expansion: &Expansion,
-) -> RecurrenceId {
+) -> Result<RecurrenceId, TimeError> {
     match &item.span {
         ScheduleSpan::Timed {
             start: TimedStart::Floating(_),
             ..
-        } => RecurrenceId::Floating(local),
+        } => Ok(RecurrenceId::Floating(local)),
         ScheduleSpan::Timed {
             start: TimedStart::Zoned { zone, .. },
             ..
         } => {
             let start = TimedStart::Zoned { local, zone: *zone };
-            match start.resolve(expansion.observer) {
-                Ok(instant) => RecurrenceId::Instant(instant),
-                // `resolve` shifts a local time that does not exist rather
-                // than failing, so this arm never runs today. Fall back
-                // instead of panicking if that changes.
-                Err(_) => RecurrenceId::Floating(local),
-            }
+            Ok(RecurrenceId::Instant(start.resolve(expansion.observer)?))
         }
-        ScheduleSpan::AllDay { .. } => RecurrenceId::Date(local.date()),
+        ScheduleSpan::AllDay { .. } => Ok(RecurrenceId::Date(local.date())),
     }
 }
 

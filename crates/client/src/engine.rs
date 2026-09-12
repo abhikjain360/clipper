@@ -1846,28 +1846,28 @@ impl SyncEngine {
         for (object_id, record, head) in &records {
             // An owned block and an ingested event expand identically; only
             // their labelling differs.
-            let (series, label_source, cancelled) = match record {
-                ScheduleRecord::Item(item) => (Cow::Borrowed(&**item), None, false),
+            let Some(series) = schedule_context::series(record) else {
+                continue;
+            };
+            let (label_source, cancelled) = match record {
                 ScheduleRecord::Ingested(event) => {
-                    let Some(source_name) = source_names.get(&event.source) else {
+                    let Some(source) = source_names.get(&event.source) else {
                         // Removing a source hides its events, while retaining
                         // the records referenced by previously logged time.
                         continue;
                     };
                     if !ready_sources.contains(&event.source)
-                        || !source_name.contains_event(object_id, event)
+                        || !source.contains_event(object_id, event)
                     {
                         continue;
                     }
                     (
-                        Cow::Owned(ingested_as_series(event)),
-                        Some(source_name.name.as_str()),
+                        Some(source.name.as_str()),
                         event.status == IngestedStatus::Cancelled,
                     )
                 }
-                ScheduleRecord::Override(_)
-                | ScheduleRecord::Actual(_)
-                | ScheduleRecord::Source(_) => continue,
+                // Every other kind has no series, so it was skipped above.
+                _ => (None, false),
             };
             let all_day = matches!(series.span, ScheduleSpan::AllDay { .. });
             let imported = match &series.recurrence {
@@ -2001,10 +2001,11 @@ impl SyncEngine {
             };
             let overrides: Vec<_> = effective.into_iter().map(|(entry, _)| entry).collect();
             match engine.occurrences(item, &overrides, &expansion) {
+                // Every occurrence starts before `until + lead`, so every fire
+                // time is already before `until`.
                 Ok(occurrences) => alarms.extend(
                     clipper_schedule::plan_alarms(item, &occurrences, now)
                         .iter()
-                        .filter(|planned| planned.fire_at < until)
                         .map(|planned| AlarmView {
                             item_id: planned.item.to_string(),
                             occurrence_key: occurrence_key(&planned.recurrence_id),

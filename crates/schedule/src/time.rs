@@ -201,32 +201,30 @@ impl TimeRange {
 /// preserving its position within the gap. An ambiguous time in the autumn
 /// overlap takes the earlier (pre-transition) offset.
 fn resolve_local(zone: Tz, local: NaiveDateTime) -> Option<DateTime<Utc>> {
-    match zone.from_local_datetime(&local) {
-        LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
-        LocalResult::Ambiguous(first, second) => Some(first.min(second).with_timezone(&Utc)),
-        // Shift the wall clock forward by the transition's offset change,
-        // which keeps the time's position inside the gap. Jumping to the next
-        // valid whole hour instead gets half-hour transitions wrong (Lord
-        // Howe), and a four-hour search ceiling cannot cross Samoa's skipped
-        // date.
-        LocalResult::None => {
-            const SEARCH_MINUTES: i64 = 48 * 60;
-            let before = (1..=SEARCH_MINUTES)
-                .find_map(|minutes| one_local(zone, local - TimeDelta::minutes(minutes)))?;
-            let after = (1..=SEARCH_MINUTES)
-                .find_map(|minutes| one_local(zone, local + TimeDelta::minutes(minutes)))?;
-            let offset_change = i64::from(
-                after.offset().fix().local_minus_utc() - before.offset().fix().local_minus_utc(),
-            );
-            if offset_change <= 0 {
-                return None;
-            }
-            one_local(zone, local + TimeDelta::seconds(offset_change))
-                .map(|resolved| resolved.with_timezone(&Utc))
-        }
+    if let Some(resolved) = one_local(zone, local) {
+        return Some(resolved.with_timezone(&Utc));
     }
+    // The time is in a spring-forward gap. Shift the wall clock forward by the
+    // transition's offset change, which keeps the time's position inside the
+    // gap. Jumping to the next valid whole hour instead gets half-hour
+    // transitions wrong (Lord Howe), and a four-hour search ceiling cannot
+    // cross Samoa's skipped date.
+    const SEARCH_MINUTES: i64 = 48 * 60;
+    let before = (1..=SEARCH_MINUTES)
+        .find_map(|minutes| one_local(zone, local - TimeDelta::minutes(minutes)))?;
+    let after = (1..=SEARCH_MINUTES)
+        .find_map(|minutes| one_local(zone, local + TimeDelta::minutes(minutes)))?;
+    let offset_change =
+        i64::from(after.offset().fix().local_minus_utc() - before.offset().fix().local_minus_utc());
+    if offset_change <= 0 {
+        return None;
+    }
+    one_local(zone, local + TimeDelta::seconds(offset_change))
+        .map(|resolved| resolved.with_timezone(&Utc))
 }
 
+/// Resolve a wall-clock time that exists in `zone`, taking the earlier instant
+/// when the time is ambiguous. None when the time is in a gap.
 fn one_local(zone: Tz, local: NaiveDateTime) -> Option<DateTime<Tz>> {
     match zone.from_local_datetime(&local) {
         LocalResult::Single(dt) => Some(dt),
