@@ -336,11 +336,22 @@ held by an RAII guard (`WsConnectionGuard`) for the connection's lifetime and
 released on any exit — clean close, idle timeout, or socket error — and the
 per-user counter entry is dropped once it returns to zero.
 
-This is **independent of `max_user_devices`**: one device (e.g. a browser
-profile) can open several connections — multiple tabs, or transient reconnect
+This is **independent of `max_user_devices`**: one device (e.g. a browser profile)
+can open several connections — multiple tabs, or transient reconnect
 overlap — so the connection ceiling is its own knob, not derived from the device
-count. There is no global aggregate cap; total live connections are bounded only
-transitively (registered users × this per-user cap).
+count.
+
+### Process-wide concurrent WebSocket connections
+
+`limits.max_ws_connections` (default 1024) caps live `/api/ws` connections
+server-wide, across all users. `handle_socket` acquires a permit from a
+process-wide semaphore immediately after the per-user slot above; a connection
+arriving at the ceiling is rejected with the same typed `connection_limit`
+WebSocket error. The permit is held for the connection's lifetime alongside the
+per-user slot guard, so it is released on any exit. The collab Y-sync sockets
+(`GET /api/collab-docs/:id/ws`) are not covered by this ceiling; they are
+bounded per document room (`MAX_CONNS_PER_ROOM = 64`, hard-coded in
+`collab_sync.rs`).
 
 ### Per-user pending WebSocket tickets
 
@@ -386,8 +397,8 @@ override flag. The relevant sections:
 
 - `[rate_limit]` — the six bucket rates plus `prune_interval_secs`.
 - `[limits]` — `max_user_storage_bytes`, `max_user_objects`,
-  `max_user_devices`, `max_user_ws_connections`, `max_file_blob_bytes`,
-  `max_file_meta_ciphertext_bytes`, `max_object_meta_ciphertext_bytes`.
+  `max_user_devices`, `max_user_ws_connections`, `max_ws_connections`,
+  `max_file_blob_bytes`, `max_object_meta_ciphertext_bytes`.
 - `[auth]` — `max_pending_challenges`, `max_pending_ws_tickets`,
   `challenge_ttl_secs`.
 - `[clipboard]` — `max_items` (per-user clipboard retention) and `ttl_days`.
@@ -439,7 +450,8 @@ mistaken for safeguards that exist:
   metadata ciphertext count toward `storage_bytes`; the stored signed envelope
   bytes do not.
 
-- **No global aggregate cap on live WebSocket connections.** The per-user cap
-  (`max_user_ws_connections`) bounds each account, and the server ping / idle
-  close reaps dead connections, but the server-wide total is bounded only
-  transitively (registered users × the per-user cap), not by a global ceiling.
+- **No global aggregate cap on collab WebSocket connections.** The per-user cap
+  (`max_user_ws_connections`) and the process-wide ceiling
+  (`max_ws_connections`) bound the authenticated event sockets, and the server
+  ping / idle close reaps dead connections, but the unauthenticated collab
+  Y-sync sockets are bounded only per document room (`MAX_CONNS_PER_ROOM`).

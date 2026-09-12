@@ -64,6 +64,12 @@ where
     {
         return Err(DbErr::Custom("invalid storage quota reservation".into()));
     }
+    // No bytes and no object: nothing to check, so succeed without touching
+    // the row. A user over a lowered quota must still write payload-less
+    // tombstones (to purge back under it), mirroring `release_user_storage`.
+    if storage_bytes == 0 && objects_added == 0 {
+        return Ok(true);
+    }
     if storage_bytes > max_storage_bytes {
         return Ok(false);
     }

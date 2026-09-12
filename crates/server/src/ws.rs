@@ -179,6 +179,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
         debug!(device_id = %device_id, "WebSocket rejected: per-user connection cap reached");
         return close_with_error(socket, WsError::ConnectionLimit).await;
     };
+    // Then the process-wide ceiling, so many accounts together cannot exhaust
+    // FDs/tasks either. Held alongside the per-user slot above.
+    let Ok(_global) = state.ws_global_cap().try_acquire_owned() else {
+        debug!(device_id = %device_id, "WebSocket rejected: global connection cap reached");
+        return close_with_error(socket, WsError::ConnectionLimit).await;
+    };
 
     // Wait for the hello message, but bound how long a silent client can hold
     // the connection (and its task + file descriptor) before sending anything.

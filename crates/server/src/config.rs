@@ -16,6 +16,7 @@ const DEFAULT_MAX_USER_STORAGE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_USER_OBJECTS: u64 = 10_000;
 const DEFAULT_MAX_USER_DEVICES: u64 = 32;
 const DEFAULT_MAX_USER_WS_CONNECTIONS: u64 = 32;
+const DEFAULT_MAX_WS_CONNECTIONS: u64 = 1024;
 
 const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
     server: ServerDefaults {
@@ -40,12 +41,12 @@ const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
     },
     limits: LimitsConfig {
         max_file_blob_bytes: 512 * 1024 * 1024,
-        max_file_meta_ciphertext_bytes: 64 * 1024,
         max_object_meta_ciphertext_bytes: 64 * 1024,
         max_user_storage_bytes: DEFAULT_MAX_USER_STORAGE_BYTES,
         max_user_objects: DEFAULT_MAX_USER_OBJECTS,
         max_user_devices: DEFAULT_MAX_USER_DEVICES,
         max_user_ws_connections: DEFAULT_MAX_USER_WS_CONNECTIONS,
+        max_ws_connections: DEFAULT_MAX_WS_CONNECTIONS,
     },
     clipboard: ClipboardConfig {
         ttl_days: 7,
@@ -291,8 +292,6 @@ pub struct LimitsConfig {
     #[garde(custom(validate_max_file_blob_bytes))]
     pub max_file_blob_bytes: u64,
     #[garde(range(min = 1))]
-    pub max_file_meta_ciphertext_bytes: usize,
-    #[garde(range(min = 1))]
     pub max_object_meta_ciphertext_bytes: usize,
     #[garde(custom(validate_max_user_storage_bytes))]
     pub max_user_storage_bytes: u64,
@@ -308,6 +307,10 @@ pub struct LimitsConfig {
     /// connections (tabs, reconnect overlap), so this is its own ceiling.
     #[garde(range(min = 1))]
     pub max_user_ws_connections: u64,
+    /// Maximum live WebSocket connections server-wide, across all users.
+    /// Bounds total FD/task use no matter how many accounts connect at once.
+    #[garde(range(min = 1))]
+    pub max_ws_connections: u64,
 }
 
 impl LimitsConfig {
@@ -317,12 +320,12 @@ impl LimitsConfig {
             overrides,
             [
                 max_file_blob_bytes,
-                max_file_meta_ciphertext_bytes,
                 max_object_meta_ciphertext_bytes,
                 max_user_storage_bytes,
                 max_user_objects,
                 max_user_devices,
-                max_user_ws_connections
+                max_user_ws_connections,
+                max_ws_connections
             ]
         );
     }
@@ -533,9 +536,6 @@ pub struct LimitsConfigOverrides {
     /// Maximum encrypted file blob size.
     #[arg(long = "max-file-blob-bytes")]
     pub max_file_blob_bytes: Option<u64>,
-    /// Maximum encrypted file metadata size after base64 decoding.
-    #[arg(long = "max-file-meta-ciphertext-bytes")]
-    pub max_file_meta_ciphertext_bytes: Option<usize>,
     /// Maximum encrypted generic object metadata size.
     #[arg(long = "max-object-meta-ciphertext-bytes")]
     pub max_object_meta_ciphertext_bytes: Option<usize>,
@@ -551,6 +551,9 @@ pub struct LimitsConfigOverrides {
     /// Maximum concurrent live WebSocket connections per user.
     #[arg(long = "max-user-ws-connections")]
     pub max_user_ws_connections: Option<u64>,
+    /// Maximum live WebSocket connections server-wide, across all users.
+    #[arg(long = "max-ws-connections")]
+    pub max_ws_connections: Option<u64>,
 }
 
 #[derive(Args, Debug, Clone, Default, Deserialize)]
@@ -806,12 +809,12 @@ mod tests {
 
                 [limits]
                 max_file_blob_bytes = 1024
-                max_file_meta_ciphertext_bytes = 2048
                 max_object_meta_ciphertext_bytes = 4096
                 max_user_storage_bytes = 8192
                 max_user_objects = 12
                 max_user_devices = 5
                 max_user_ws_connections = 7
+                max_ws_connections = 9
 
                 [clipboard]
                 ttl_days = 2
@@ -853,12 +856,12 @@ mod tests {
         assert_eq!(config.auth.max_pending_challenges, 128);
         assert_eq!(config.auth.max_pending_ws_tickets, 256);
         assert_eq!(config.limits.max_file_blob_bytes, 1024);
-        assert_eq!(config.limits.max_file_meta_ciphertext_bytes, 2048);
         assert_eq!(config.limits.max_object_meta_ciphertext_bytes, 4096);
         assert_eq!(config.limits.max_user_storage_bytes, 8192);
         assert_eq!(config.limits.max_user_objects, 12);
         assert_eq!(config.limits.max_user_devices, 5);
         assert_eq!(config.limits.max_user_ws_connections, 7);
+        assert_eq!(config.limits.max_ws_connections, 9);
         assert_eq!(config.clipboard.ttl_days, 2);
         assert_eq!(config.clipboard.max_items, 25);
         assert_eq!(config.list.default_limit, 10);
@@ -912,6 +915,10 @@ mod tests {
 
         let mut config = ServerConfig::default();
         config.limits.max_user_ws_connections = 0;
+        assert!(config.validate_config().is_err());
+
+        let mut config = ServerConfig::default();
+        config.limits.max_ws_connections = 0;
         assert!(config.validate_config().is_err());
     }
 
