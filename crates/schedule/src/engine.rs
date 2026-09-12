@@ -233,9 +233,12 @@ impl RruleEngine {
         // erroring. The work it does stays capped either way.
         const MAX_SCANNED_CANDIDATES: u16 = u16::MAX;
         // The bound is a wall clock too, so it is the window end read in the
-        // expansion zone. One day of slack covers the offset between a
-        // candidate's wall clock and the instant it resolves to; the window
-        // check below is on the instant and decides the real edge.
+        // expansion zone, plus one day. One day of slack covers the offset
+        // between a candidate's wall clock and the instant it resolves to.
+        // Candidates on or past the bound cannot resolve into the window
+        // because the window end is exclusive, so the loop below skips them
+        // before resolving. The window check below is on the instant and
+        // decides the real edge.
         let before_local = expansion
             .window
             .end()
@@ -253,12 +256,15 @@ impl RruleEngine {
             });
         }
 
-        // Candidates far before the window cannot resolve into it, so skip
+        // Candidates far from the window cannot resolve into it, so skip
         // resolving them. Resolving every candidate from DTSTART would fail
-        // the whole expansion on an unresolvable date long before the window,
-        // such as an all-day span on a civil date the zone skipped. The bound
-        // is a wall clock like `before_local`, with the same day of slack;
-        // the window check below is on the instant and decides the real edge.
+        // the whole expansion on an unresolvable date far from the window,
+        // such as an all-day span on a civil date the zone skipped. Both
+        // bounds are wall clocks with one day of slack. The start bound keeps
+        // its edge because the window start is inclusive; the end bound skips
+        // its edge because the window end is exclusive and a candidate exactly
+        // on it resolves at or past the end. The window check below is on the
+        // instant and decides the real edge.
         let after_local = expansion
             .window
             .start()
@@ -271,10 +277,28 @@ impl RruleEngine {
         for occurrence in result.dates {
             // DTSTART was UTC, so this carries a wall clock, not an instant.
             let local = occurrence.naive_utc();
-            if local < after_local {
+            if local < after_local || local >= before_local {
                 continue;
             }
-            let resolved = span_at(item, local, zone).resolve(expansion.observer)?;
+            // An unresolvable candidate past an instant cutoff is past the
+            // cutoff. A wall clock that cannot resolve is in a gap, and a gap
+            // wall clock later than the cutoff's wall clock is always after
+            // the cutoff instant. Any other unresolvable candidate is a real
+            // error. Candidates that resolve are always judged on the instant
+            // below, never on the wall clock, because a fold can resolve a
+            // later wall clock to an earlier instant.
+            let resolved = match span_at(item, local, zone).resolve(expansion.observer) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    if let Some(cutoff) = until_cutoff {
+                        let cutoff_wall = cutoff.with_timezone(&zone).naive_local();
+                        if local > cutoff_wall {
+                            continue;
+                        }
+                    }
+                    return Err(error.into());
+                }
+            };
             if !expansion.window.contains(resolved.start()) {
                 continue;
             }

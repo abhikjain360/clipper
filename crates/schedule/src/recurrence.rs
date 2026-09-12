@@ -156,9 +156,13 @@ fn until_value_wall_clock(value: &str, zone: Tz) -> (String, Option<DateTime<Utc
 }
 
 /// The loose wall-clock bound `rrule` scans to for an instant `UNTIL`: the
-/// wall clock the instant shows in `zone`, plus one day. The slack means the
-/// bound is never tighter than the true cutoff, even across a whole skipped
-/// date such as Samoa's 2011 move.
+/// wall clock the instant shows in `zone`, plus one day. The slack keeps the
+/// bound at or past the true cutoff, even across a whole skipped date such as
+/// Samoa's 2011 move. Candidates the slack admits past the cutoff cannot
+/// resolve into the window when the window already ended, and a candidate that
+/// still fails to resolve past the cutoff's wall clock is skipped without
+/// failing the expansion. Candidates that resolve are always judged on the
+/// instant, never on the wall clock.
 pub(crate) fn until_scan_bound(instant: DateTime<Utc>, zone: Tz) -> NaiveDateTime {
     let wall = instant.with_timezone(&zone).naive_local();
     wall.checked_add_days(Days::new(1)).unwrap_or(wall)
