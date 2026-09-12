@@ -257,9 +257,14 @@ mod permission_tests {
 
     use super::*;
 
+    /// A scratch directory no other test in this process shares. Tests run on
+    /// parallel threads and can start inside the same clock tick, so the
+    /// clock alone is not unique; the counter is.
     fn unique_base() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "clipper-ipc-path-test-{}-{}",
+            "clipper-ipc-path-test-{}-{}-{serial}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
