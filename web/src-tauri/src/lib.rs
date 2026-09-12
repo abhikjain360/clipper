@@ -2,7 +2,10 @@ mod daemon_client;
 mod daemon_spawn;
 mod ipc_secret;
 
-use std::{path::{Path, PathBuf}, sync::OnceLock};
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 use clipper_app_types::{
     ActualView, AppState, CollabItem, DeviceInfo, IngestReport, OccurrenceView,
@@ -790,9 +793,7 @@ fn create_private_upload_dir() -> Result<PathBuf, CommandError> {
             Err(e) => return Err(CommandError::Client(format!("temp dir: {e}"))),
         }
     }
-    Err(CommandError::Client(
-        "temp dir: too many collisions".into(),
-    ))
+    Err(CommandError::Client("temp dir: too many collisions".into()))
 }
 
 fn upload_staging_path(upload_dir: &Path, filename: &str) -> PathBuf {

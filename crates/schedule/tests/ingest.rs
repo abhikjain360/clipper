@@ -698,7 +698,11 @@ fn a_numeric_wkst_is_rejected() {
         parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()).expect("the feed parses");
     assert!(outcome.events.is_empty());
     assert_eq!(outcome.skipped.len(), 1);
-    assert!(outcome.skipped[0].reason.contains("weekday"), "{:?}", outcome.skipped[0].reason);
+    assert!(
+        outcome.skipped[0].reason.contains("weekday"),
+        "{:?}",
+        outcome.skipped[0].reason
+    );
 }
 
 #[test]
