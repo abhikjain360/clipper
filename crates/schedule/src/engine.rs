@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
 };
 
-use chrono::{DateTime, TimeDelta, Utc, Weekday};
+use chrono::{DateTime, Days, TimeDelta, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use clipper_api_types::ObjectId;
 
@@ -22,7 +22,10 @@ use crate::{
         Occurrence, OccurrenceOrigin, OccurrenceOverrideData, OverrideChange, RecurrenceId,
         ScheduleItem,
     },
-    recurrence::{Cadence, Frequency, MonthlyRule, Recurrence, RecurrenceEnd, ValidatedRrule},
+    recurrence::{
+        Cadence, Frequency, MonthlyRule, Recurrence, RecurrenceEnd, ValidatedRrule,
+        until_wall_clock,
+    },
     time::{ScheduleSpan, TimeError, TimeRange, TimedStart},
 };
 
@@ -173,12 +176,14 @@ impl RruleEngine {
         }
     }
 
-    /// Rule-generated spans whose start lies in the window, before overrides.
+    /// Rule-generated occurrences whose start lies in the window, before
+    /// overrides. Each one is already resolved to an absolute interval.
     fn rule_spans(
         &self,
         item: &ScheduleItem,
         expansion: &Expansion,
-    ) -> Result<Vec<(RecurrenceId, ScheduleSpan)>, EngineError> {
+    ) -> Result<Vec<(RecurrenceId, TimeRange)>, EngineError> {
+        let zone = effective_zone(item, expansion.observer);
         let rule_line = match &item.recurrence {
             // A one-off has no rule to expand.
             Recurrence::Once => {
@@ -186,28 +191,32 @@ impl RruleEngine {
                 return Ok(if expansion.window.contains(resolved.start()) {
                     vec![(
                         recurrence_id(item, item.span.local_start(), expansion),
-                        item.span.clone(),
+                        resolved,
                     )]
                 } else {
                     Vec::new()
                 });
             }
-            Recurrence::Every(cadence) => rrule_line(cadence),
-            Recurrence::Imported { import, uid } => self
-                .imported_rules
-                .lookup(*import, uid)
-                .ok_or_else(|| EngineError::MissingImportedRule {
-                    import: *import,
-                    uid: uid.clone(),
-                })?
-                .as_str()
-                .to_string(),
+            Recurrence::Every(cadence) => rrule_line(cadence, zone),
+            Recurrence::Imported { import, uid } => until_wall_clock(
+                self.imported_rules
+                    .lookup(*import, uid)
+                    .ok_or_else(|| EngineError::MissingImportedRule {
+                        import: *import,
+                        uid: uid.clone(),
+                    })?
+                    .as_str(),
+                zone,
+            ),
         };
 
-        let zone = effective_zone(item, expansion.observer);
+        // Give `rrule` a UTC wall-clock DTSTART. It then does pure calendar
+        // arithmetic and never resolves a local time itself, so a series whose
+        // own start falls in a DST gap still expands. Every candidate comes
+        // back as a wall clock, and `ScheduleSpan::resolve` applies this
+        // crate's gap and fold policy to it below.
         let text = format!(
-            "DTSTART;TZID={}:{}\nRRULE:{}",
-            zone.name(),
+            "DTSTART:{}Z\nRRULE:{}",
             item.span.local_start().format("%Y%m%dT%H%M%S"),
             rule_line,
         );
@@ -223,12 +232,20 @@ impl RruleEngine {
         // an impossible sparse rule, so such a rule yields nothing instead of
         // erroring. The work it does stays capped either way.
         const MAX_SCANNED_CANDIDATES: u16 = u16::MAX;
-        let before = expansion
+        // The bound is a wall clock too, so it is the window end read in the
+        // expansion zone. One day of slack covers the offset between a
+        // candidate's wall clock and the instant it resolves to; the window
+        // check below is on the instant and decides the real edge.
+        let before_local = expansion
             .window
             .end()
-            .checked_sub_signed(TimeDelta::nanoseconds(1))
-            .expect("a non-empty window cannot end at chrono's minimum")
-            .with_timezone(&set.get_dt_start().timezone());
+            .with_timezone(&zone)
+            .naive_local()
+            .checked_add_days(Days::new(1))
+            .ok_or(TimeError::DateOverflow)?;
+        let before = Utc
+            .from_utc_datetime(&before_local)
+            .with_timezone(&rrule::Tz::UTC);
         let result = set.before(before).all(MAX_SCANNED_CANDIDATES);
         if result.limited {
             return Err(EngineError::ScanLimitExceeded {
@@ -238,8 +255,10 @@ impl RruleEngine {
 
         let mut spans = Vec::new();
         for occurrence in result.dates {
-            let instant = occurrence.with_timezone(&Utc);
-            if instant < expansion.window.start() {
+            // DTSTART was UTC, so this carries a wall clock, not an instant.
+            let local = occurrence.naive_utc();
+            let resolved = span_at(item, local, zone).resolve(expansion.observer)?;
+            if !expansion.window.contains(resolved.start()) {
                 continue;
             }
             if spans.len() >= self.max_candidates {
@@ -247,11 +266,7 @@ impl RruleEngine {
                     limit: self.max_candidates,
                 });
             }
-            let local = occurrence.naive_local();
-            spans.push((
-                recurrence_id(item, local, expansion),
-                span_at(item, local, zone),
-            ));
+            spans.push((recurrence_id(item, local, expansion), resolved));
         }
         Ok(spans)
     }
@@ -334,7 +349,7 @@ impl RecurrenceEngine for RruleEngine {
                 None => out.push(Occurrence {
                     item: item.id,
                     recurrence_id,
-                    span: span.resolve(expansion.observer)?,
+                    span,
                     origin: OccurrenceOrigin::Rule,
                 }),
             }
@@ -343,6 +358,10 @@ impl RecurrenceEngine for RruleEngine {
         // An override can move an occurrence into the window from a rule
         // position outside it. The loop above only walks rule positions inside
         // the window, so it misses those.
+        //
+        // This is also the `RDATE` path: an override naming an identity the
+        // rule never generates adds that occurrence. The caller is responsible
+        // for passing only overrides it trusts.
         for entry in relevant.values() {
             if handled.contains(&entry.recurrence_id) {
                 continue;
@@ -437,7 +456,9 @@ fn span_at(item: &ScheduleItem, local: chrono::NaiveDateTime, zone: Tz) -> Sched
     }
 }
 
-fn rrule_line(cadence: &Cadence) -> String {
+/// Builds the `RRULE` value for a cadence. `zone` is the zone the rule expands
+/// in; it only affects `UNTIL`.
+fn rrule_line(cadence: &Cadence, zone: Tz) -> String {
     // RFC 5545 requires FREQ first.
     let mut parts = Vec::new();
     match &cadence.frequency {
@@ -468,7 +489,17 @@ fn rrule_line(cadence: &Cadence) -> String {
         RecurrenceEnd::Never => {}
         RecurrenceEnd::After(count) => parts.push(format!("COUNT={count}")),
         RecurrenceEnd::On(instant) => {
-            parts.push(format!("UNTIL={}", instant.format("%Y%m%dT%H%M%SZ")));
+            // DTSTART is a UTC wall clock, so UNTIL must be one too: write the
+            // wall clock this instant shows in the expansion zone. Inside a
+            // fall-back hour that comparison can differ from the instant
+            // comparison by at most that hour.
+            parts.push(format!(
+                "UNTIL={}",
+                instant
+                    .with_timezone(&zone)
+                    .naive_local()
+                    .format("%Y%m%dT%H%M%SZ")
+            ));
         }
     }
     parts.join(";")

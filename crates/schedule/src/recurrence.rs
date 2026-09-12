@@ -11,7 +11,8 @@
 
 use std::{num::NonZeroU32, str::FromStr};
 
-use chrono::{DateTime, Month, Utc, Weekday};
+use chrono::{DateTime, Month, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday};
+use chrono_tz::Tz;
 use clipper_api_types::ObjectId;
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +59,15 @@ impl ValidatedRrule {
     pub fn new(rule: impl Into<String>) -> Result<Self, RecurrenceError> {
         let rule = rule.into();
         let trimmed = rule.trim().trim_start_matches("RRULE:").trim().to_string();
+        // An RFC 5545 rule value is ASCII. `rrule` 0.14 reads a `BYDAY` token
+        // by slicing its last two bytes without checking char boundaries, so a
+        // non-ASCII token panics inside the parser. Refuse those bytes here,
+        // before anything looks at the rule.
+        if !trimmed.is_ascii() {
+            return Err(RecurrenceError::UnparseableRule(
+                "rule contains a non-ASCII character".into(),
+            ));
+        }
         if trimmed.is_empty() {
             return Err(RecurrenceError::UnparseableRule("empty rule".into()));
         }
@@ -73,35 +83,67 @@ impl ValidatedRrule {
                 "rule contains a control character".into(),
             ));
         }
-        // UNTIL must match DTSTART's value kind, or be UTC for a timed
-        // DTSTART. The real start only arrives at expansion time, so probe
-        // each legal kind here.
-        let starts = [
-            "DTSTART:20200101T000000Z",
-            "DTSTART:20200101T000000",
-            "DTSTART:20200101",
-        ];
-        let mut last_error = None;
-        if !starts.iter().any(|start| {
-            let probe = format!("{start}\nRRULE:{trimmed}");
-            match rrule::RRuleSet::from_str(&probe) {
-                Ok(_) => true,
-                Err(error) => {
-                    last_error = Some(error.to_string());
-                    false
-                }
-            }
-        }) {
-            return Err(RecurrenceError::UnparseableRule(
-                last_error.unwrap_or_else(|| "invalid rule".to_string()),
-            ));
-        }
+        // One probe, in the shape expansion actually uses: a UTC wall-clock
+        // DTSTART and an UNTIL rewritten to match it. Probing another shape
+        // would accept rules that then fail on every expansion.
+        let probe = format!(
+            "DTSTART:20200101T000000Z\nRRULE:{}",
+            until_wall_clock(&trimmed, Tz::UTC)
+        );
+        rrule::RRuleSet::from_str(&probe)
+            .map_err(|error| RecurrenceError::UnparseableRule(error.to_string()))?;
         Ok(Self(trimmed))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Rewrites a rule's `UNTIL` into a UTC wall-clock value read in `zone`.
+///
+/// Expansion hands `rrule` a UTC wall-clock DTSTART, and `rrule` then demands a
+/// UTC `UNTIL`. The meaning stays "up to and including this wall-clock time":
+///
+/// - a DATE `YYYYMMDD` covers its whole day, so it becomes `...T235959Z`;
+/// - a floating `YYYYMMDDTHHMMSS` is already wall clock, so it only gains a `Z`;
+/// - a UTC `...Z` value is an instant, so it becomes the wall clock that
+///   instant shows in `zone`.
+///
+/// Inside a fall-back hour the wall-clock comparison can differ from the
+/// instant comparison by at most that hour. Every other part is left alone.
+pub(crate) fn until_wall_clock(rule: &str, zone: Tz) -> String {
+    rule.split(';')
+        .map(|part| match part.split_once('=') {
+            Some((key, value)) if key.eq_ignore_ascii_case("UNTIL") => {
+                format!("{key}={}", until_value_wall_clock(value, zone))
+            }
+            _ => part.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn until_value_wall_clock(value: &str, zone: Tz) -> String {
+    if let Some(instant) = value
+        .strip_suffix(['Z', 'z'])
+        .and_then(|text| NaiveDateTime::parse_from_str(text, "%Y%m%dT%H%M%S").ok())
+    {
+        return Utc
+            .from_utc_datetime(&instant)
+            .with_timezone(&zone)
+            .naive_local()
+            .format("%Y%m%dT%H%M%SZ")
+            .to_string();
+    }
+    if NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S").is_ok() {
+        return format!("{value}Z");
+    }
+    if NaiveDate::parse_from_str(value, "%Y%m%d").is_ok() {
+        return format!("{value}T235959Z");
+    }
+    // Not a shape this understands. Leave it for the parser to reject.
+    value.to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

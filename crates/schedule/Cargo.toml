@@ -16,6 +16,7 @@ calcard = "0.3.13"
 
 [dev-dependencies]
 uuid = { workspace = true, features = ["v4", "v5"] }
+postcard.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
