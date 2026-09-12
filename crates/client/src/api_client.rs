@@ -1017,6 +1017,36 @@ fn sanitized_server_message(message: &str) -> String {
     clean
 }
 
+/// Build the error a refused request stands for, from the parts every
+/// transport can supply: the status, the content type, and the body bytes.
+///
+/// The WebSocket handshake is the second transport. Its failures come from
+/// tungstenite rather than reqwest, but a rejected handshake still carries an
+/// HTTP response, and the status in it decides whether the session is over or
+/// the client should retry.
+pub(crate) fn api_error_from_parts(
+    status: u16,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> ClientError {
+    let mut error = if is_json_content_type(content_type) {
+        serde_json::from_slice::<ErrorResponse>(bytes).unwrap_or_else(|_| {
+            ErrorResponse::new(
+                ApiErrorCode::from_http_status(status),
+                format!(
+                    "HTTP {status} with invalid error body: {}",
+                    body_preview(bytes)
+                ),
+            )
+        })
+    } else {
+        ErrorResponse::new(ApiErrorCode::from_http_status(status), body_preview(bytes))
+    };
+    error.message = sanitized_server_message(&error.message);
+
+    ClientError::Api { status, error }
+}
+
 async fn api_error_from_response(resp: reqwest::Response) -> ClientError {
     let status = resp.status().as_u16();
     let content_type = resp
@@ -1027,22 +1057,7 @@ async fn api_error_from_response(resp: reqwest::Response) -> ClientError {
     let bytes = read_response_body_limited(resp, MAX_ERROR_RESPONSE_BYTES)
         .await
         .unwrap_or_default();
-    let mut error = if is_json_content_type(content_type.as_deref()) {
-        serde_json::from_slice::<ErrorResponse>(&bytes).unwrap_or_else(|_| {
-            ErrorResponse::new(
-                ApiErrorCode::from_http_status(status),
-                format!(
-                    "HTTP {status} with invalid error body: {}",
-                    body_preview(&bytes)
-                ),
-            )
-        })
-    } else {
-        ErrorResponse::new(ApiErrorCode::from_http_status(status), body_preview(&bytes))
-    };
-    error.message = sanitized_server_message(&error.message);
-
-    ClientError::Api { status, error }
+    api_error_from_parts(status, content_type.as_deref(), &bytes)
 }
 
 async fn read_response_body_limited(
