@@ -11,7 +11,7 @@
 
 use std::{num::NonZeroU32, str::FromStr};
 
-use chrono::{DateTime, Month, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday};
+use chrono::{DateTime, Days, Month, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use clipper_api_types::ObjectId;
 use serde::{Deserialize, Serialize};
@@ -88,7 +88,7 @@ impl ValidatedRrule {
         // would accept rules that then fail on every expansion.
         let probe = format!(
             "DTSTART:20200101T000000Z\nRRULE:{}",
-            until_wall_clock(&trimmed, Tz::UTC)
+            until_wall_clock(&trimmed, Tz::UTC).0
         );
         rrule::RRuleSet::from_str(&probe)
             .map_err(|error| RecurrenceError::UnparseableRule(error.to_string()))?;
@@ -100,50 +100,71 @@ impl ValidatedRrule {
     }
 }
 
-/// Rewrites a rule's `UNTIL` into a UTC wall-clock value read in `zone`.
+/// Rewrites a rule's `UNTIL` into a UTC wall-clock value read in `zone`, and
+/// reports the instant cutoff when the `UNTIL` names one.
 ///
 /// Expansion hands `rrule` a UTC wall-clock DTSTART, and `rrule` then demands a
-/// UTC `UNTIL`. The meaning stays "up to and including this wall-clock time":
+/// UTC `UNTIL`. The rewritten text is only a loose bound that stops `rrule`
+/// from scanning forever; the caller applies the returned instant as the true
+/// cutoff on each resolved occurrence:
 ///
+/// - a UTC `...Z` value is an instant. It becomes the wall clock that instant
+///   shows in `zone`, plus one day, and the instant itself is the inclusive
+///   cutoff. The day of slack covers any offset change between the wall clock
+///   and the instant it resolves to.
 /// - a DATE `YYYYMMDD` covers its whole day, so it becomes `...T235959Z`;
-/// - a floating `YYYYMMDDTHHMMSS` is already wall clock, so it only gains a `Z`;
-/// - a UTC `...Z` value is an instant, so it becomes the wall clock that
-///   instant shows in `zone`.
+/// - a floating `YYYYMMDDTHHMMSS` is already wall clock, so it only gains a `Z`.
 ///
-/// Inside a fall-back hour the wall-clock comparison can differ from the
-/// instant comparison by at most that hour. Every other part is left alone.
-pub(crate) fn until_wall_clock(rule: &str, zone: Tz) -> String {
-    rule.split(';')
+/// DATE and floating values keep wall-clock meaning and return no cutoff.
+/// Every other part is left alone.
+pub(crate) fn until_wall_clock(rule: &str, zone: Tz) -> (String, Option<DateTime<Utc>>) {
+    let mut cutoff = None;
+    let text = rule
+        .split(';')
         .map(|part| match part.split_once('=') {
             Some((key, value)) if key.eq_ignore_ascii_case("UNTIL") => {
-                format!("{key}={}", until_value_wall_clock(value, zone))
+                let (wall, instant) = until_value_wall_clock(value, zone);
+                if instant.is_some() {
+                    cutoff = instant;
+                }
+                format!("{key}={wall}")
             }
             _ => part.to_string(),
         })
         .collect::<Vec<_>>()
-        .join(";")
+        .join(";");
+    (text, cutoff)
 }
 
-fn until_value_wall_clock(value: &str, zone: Tz) -> String {
+fn until_value_wall_clock(value: &str, zone: Tz) -> (String, Option<DateTime<Utc>>) {
     if let Some(instant) = value
         .strip_suffix(['Z', 'z'])
         .and_then(|text| NaiveDateTime::parse_from_str(text, "%Y%m%dT%H%M%S").ok())
     {
-        return Utc
-            .from_utc_datetime(&instant)
-            .with_timezone(&zone)
-            .naive_local()
-            .format("%Y%m%dT%H%M%SZ")
-            .to_string();
+        let instant = Utc.from_utc_datetime(&instant);
+        let bound = until_scan_bound(instant, zone);
+        return (
+            bound.format("%Y%m%dT%H%M%SZ").to_string(),
+            Some(instant),
+        );
     }
     if NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S").is_ok() {
-        return format!("{value}Z");
+        return (format!("{value}Z"), None);
     }
     if NaiveDate::parse_from_str(value, "%Y%m%d").is_ok() {
-        return format!("{value}T235959Z");
+        return (format!("{value}T235959Z"), None);
     }
     // Not a shape this understands. Leave it for the parser to reject.
-    value.to_string()
+    (value.to_string(), None)
+}
+
+/// The loose wall-clock bound `rrule` scans to for an instant `UNTIL`: the
+/// wall clock the instant shows in `zone`, plus one day. The slack means the
+/// bound is never tighter than the true cutoff, even across a whole skipped
+/// date such as Samoa's 2011 move.
+pub(crate) fn until_scan_bound(instant: DateTime<Utc>, zone: Tz) -> NaiveDateTime {
+    let wall = instant.with_timezone(&zone).naive_local();
+    wall.checked_add_days(Days::new(1)).unwrap_or(wall)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
