@@ -248,7 +248,7 @@ pub struct LocalVisibleState {
     pub running_plan: Option<clipper_schedule::PlannedRef>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct LocalSyncControl {
     generation: u64,
 }
@@ -298,7 +298,10 @@ impl LocalStore {
         Self {
             base_dir: base_dir.into(),
             profile_id: RwLock::new(None),
-            sync: Mutex::new(LocalSyncControl::default()),
+            sync: Mutex::new(LocalSyncControl {
+                generation: u64::try_from(chrono::Utc::now().timestamp_micros())
+                    .unwrap_or_default(),
+            }),
             memory: Mutex::new(MemoryState::default()),
             visible_stamp: atomic::AtomicU64::new(0),
             #[cfg(not(target_family = "wasm"))]
@@ -343,8 +346,8 @@ impl LocalStore {
 
     /// Account for an object a pass listed but did not write.
     ///
-    /// A refused revision still proves the object is on the server, so the
-    /// sweep at the end of the pass must not treat it as gone.
+    /// A listed object the pass did not install is still on the server, so
+    /// the sweep at the end of the pass must not treat it as gone.
     pub async fn mark_snapshot_seen(
         &self,
         object_id: &str,
@@ -1449,17 +1452,16 @@ impl LocalStore {
 
     /// The schedule rows, each stamped with the revision it was read at.
     ///
-    /// The kind is matched first because reading a head is a database read and
-    /// a JSON parse. Asking for one per held object of any kind made every
-    /// publish cost a read per object, and `local_head` fails outright on a
-    /// collab record, which has no chain.
+    /// Only series records are read for a head, because reading a head is a
+    /// database read and a JSON parse, and no other record produces a view.
     async fn schedule_items_inner(
         &self,
         records: &[LocalObjectRecord],
     ) -> Result<Vec<ScheduleItemView>, LocalStoreError> {
         let mut views = Vec::new();
         for record in records {
-            if !matches!(record.data, LocalObjectData::Schedule(_)) {
+            if !matches!(&record.data, LocalObjectData::Schedule(schedule) if schedule.record.as_item().is_some())
+            {
                 continue;
             }
             if let Some(head) = self.local_head(&record.id).await?
@@ -1554,6 +1556,26 @@ impl LocalStore {
                 .map(|anchor| anchor.head)),
             Some(StoredObjectRecord::PendingCreate(_)) | None => Ok(None),
         }
+    }
+
+    pub async fn holds_newer_than(
+        &self,
+        object_id: &str,
+        revision: u64,
+    ) -> Result<bool, LocalStoreError> {
+        let _sync = self.sync.lock().await;
+        let Some(record) = self.stored_object_record(object_id).await? else {
+            return Ok(false);
+        };
+        let Some(anchor) = revision_anchor_for_record(&record)? else {
+            return Ok(false);
+        };
+        let first_acceptable = match anchor.kind {
+            StoredRevisionAnchorKind::Absent => anchor.head.revision,
+            StoredRevisionAnchorKind::Tombstone => anchor.head.revision.saturating_add(1),
+            StoredRevisionAnchorKind::ObservedDelete => anchor.head.revision.saturating_add(2),
+        };
+        Ok(revision < first_acceptable)
     }
 
     /// Check a served revision against the durable anchor before the caller
@@ -3953,7 +3975,13 @@ mod tests {
             parent_hash: [42; crypto::SHA256_BYTES],
         };
         store
-            .apply_live_delete(ObjectKind::Clipboard, &original.id, 2, 0, 10)
+            .apply_live_delete(
+                ObjectKind::Clipboard,
+                &original.id,
+                2,
+                store.current_generation().await,
+                10,
+            )
             .await
             .expect("observe delete")
             .expect("current generation");
@@ -4055,8 +4083,8 @@ mod tests {
             .expect("the refetched head is the one the anchor already accepted");
     }
 
-    /// S2's claim, as a test: the anchors are not in the cache, so throwing
-    /// the cache away cannot drop an anchor.
+    /// The anchors are not in the cache, so throwing the cache away cannot
+    /// drop an anchor.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn wiping_the_cache_leaves_every_anchor_standing() {
@@ -4751,7 +4779,13 @@ mod tests {
             .await
             .expect("persist revision three");
         store
-            .apply_live_delete(ObjectKind::Clipboard, &entry.id, 4, 0, 10)
+            .apply_live_delete(
+                ObjectKind::Clipboard,
+                &entry.id,
+                4,
+                store.current_generation().await,
+                10,
+            )
             .await
             .expect("observe delete")
             .expect("current generation");

@@ -1,6 +1,6 @@
 //! SQLite backing for the native local store.
 //!
-//! Two tables with different lifetimes (`docs/local-store-plan.md`, S2):
+//! Two tables with different lifetimes:
 //!
 //! - `objects`, with `object_payloads` hanging off it, is a cache. Every row
 //!   can be dropped and downloaded again.
@@ -166,7 +166,10 @@ pub(super) fn read_record(
             .map(|marker| marker.map(StoredObjectRecord::Deleted));
     };
 
-    let kind = object_kind(&kind)?;
+    let kind = match object_kind(&kind) {
+        Ok(kind) => kind,
+        Err(error) => return unreadable_cache_row(connection, object_id, &error.to_string()),
+    };
     let seen_generation = seen_generation.map(|generation| generation as u64);
     if pending {
         return Ok(Some(StoredObjectRecord::PendingCreate(
@@ -658,9 +661,19 @@ fn read_anchor_row(
     let Some((kind, event_seq, created_seq, seen_generation, ak, revision, hash)) = row else {
         return Ok(None);
     };
+    let kind = match object_kind(&kind) {
+        Ok(kind) => kind,
+        Err(error) => {
+            tracing::warn!(
+                object_id = %object_id,
+                "Ignoring a damaged revision anchor; this object loses rollback protection: {error}",
+            );
+            return Ok(None);
+        }
+    };
     Ok(Some(StoredSyncMarkerRecord {
         id: object_id.to_string(),
-        kind: object_kind(&kind)?,
+        kind,
         seen_generation: seen_generation.map(|generation| generation as u64),
         event_seq,
         created_seq,

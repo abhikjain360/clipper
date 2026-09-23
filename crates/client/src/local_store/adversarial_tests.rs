@@ -1,11 +1,6 @@
-//! Adversarial tests for the SQLite local store and its anchor invariants.
-//!
-//! These attack the seams the design docs call out (`docs/local-store-plan.md`,
-//! `docs/object-envelopes.md` "Client verification and rollback limits"):
+//! Adversarial tests for the SQLite local store and its anchor invariants:
 //! revision-anchor behaviour under hostile or corrupt inputs, transaction
 //! atomicity, concurrent writers, hydration robustness, and sweep semantics.
-//! Every test asserts the documented contract; where the store diverges the
-//! test fails and the divergence is the finding.
 
 use std::sync::Arc;
 
@@ -843,6 +838,47 @@ async fn repeated_snapshot_page_is_idempotent() {
 }
 
 #[tokio::test]
+async fn the_first_pass_after_a_restart_sweeps_an_object_the_previous_run_last_saw() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let entry = item(
+        "cccccccc-4444-4444-8444-444444444444",
+        "gone",
+        "2026-01-01T00:00:00+00:00",
+    );
+    let encrypted =
+        encrypted_clipboard_at(&entry, b"gone", 1, None, ObjectEnvelopeOperation::Create);
+    {
+        let store = new_store(&tmp);
+        store.fence_and_clear_memory().await;
+        let generation = store.start_generation().await;
+        store
+            .persist_snapshot_clipboard_present_encrypted(
+                &entry, b"gone", &encrypted, 1, generation, 10,
+            )
+            .await
+            .expect("snapshot persist")
+            .expect("current generation");
+    }
+
+    let restarted = new_store(&tmp);
+    restarted.fence_and_clear_memory().await;
+    let generation = restarted.start_generation().await;
+    restarted
+        .sweep_kind(ObjectKind::Clipboard, generation, 100, 10)
+        .await
+        .expect("sweep")
+        .expect("current generation");
+
+    assert!(matches!(
+        restarted
+            .stored_object_record(&entry.id)
+            .await
+            .expect("read"),
+        Some(StoredObjectRecord::Deleted(_))
+    ));
+}
+
+#[tokio::test]
 async fn snapshot_item_at_lower_revision_than_local_is_rejected() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let store = new_store(&tmp);
@@ -1035,6 +1071,45 @@ async fn live_row_with_null_content_must_not_brick_refetch_or_sweep() {
         )
         .await
         .expect("refetching the broken object must replace its row");
+}
+
+#[tokio::test]
+async fn an_unknown_stored_kind_degrades_the_object_instead_of_failing_its_reads() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = new_store(&tmp);
+    let entry = item(
+        "dddddddd-6666-4666-8666-666666666666",
+        "one",
+        "2026-01-01T00:00:00+00:00",
+    );
+    let rev1 = encrypted_clipboard_at(&entry, b"one", 1, None, ObjectEnvelopeOperation::Create);
+    store
+        .persist_local_clipboard_present_encrypted(&entry, b"one", &rev1, 1, 1, 10)
+        .await
+        .expect("persist");
+    store
+        .with_database(|connection| {
+            connection.execute(
+                "UPDATE objects SET kind = 'unknown' WHERE id = ?1",
+                params![&entry.id],
+            )?;
+            connection.execute(
+                "UPDATE object_anchors SET kind = 'unknown' WHERE object_id = ?1",
+                params![&entry.id],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("corrupt both kinds");
+
+    store
+        .local_head(&entry.id)
+        .await
+        .expect("a head read must not fail");
+    store
+        .persist_local_clipboard_present_encrypted(&entry, b"one", &rev1, 1, 1, 10)
+        .await
+        .expect("the refetch must replace the row");
 }
 
 #[tokio::test]
