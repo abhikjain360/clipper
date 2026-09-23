@@ -205,7 +205,7 @@ export type IngestReport = {
   added: number;
   updated: number;
   unchanged: number;
-  // Gone from the feed, so marked cancelled rather than erased.
+  // Event objects retired when an import is replaced; recordings are not included.
   tombstoned: number;
   // Entries this client could not read, reported rather than dropped.
   skipped: string[];

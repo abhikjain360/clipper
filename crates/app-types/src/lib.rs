@@ -206,7 +206,7 @@ pub struct CalendarSourceView {
     pub name: String,
     /// Protocol label, e.g. "ics".
     pub protocol: String,
-    /// The feed URL with its query stripped. A private iCalendar address is a
+    /// The feed URL's scheme and host only. A private iCalendar address is a
     /// credential, so the secret part never reaches a UI that might be
     /// screenshotted or logged.
     pub location: String,
