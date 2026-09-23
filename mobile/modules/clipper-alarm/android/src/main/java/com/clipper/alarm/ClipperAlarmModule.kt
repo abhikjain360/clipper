@@ -31,7 +31,7 @@ class ClipperAlarmModule : Module() {
          * Replace the entire registered set with the plan in [planJson].
          *
          * Returns how many were armed, at most `AlarmScheduler.MAX_REGISTERED`.
-         * Each fire rolls the horizon forward from the device-protected
+         * Each fire moves the alarm window forward from the device-protected
          * mirror.
          */
         Function("setAlarms") { planJson: String ->

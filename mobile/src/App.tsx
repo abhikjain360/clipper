@@ -90,9 +90,9 @@ const MONOSPACE_FONT = Platform.select({
  *
  * A week rather than a day, so a device that stays offline over a weekend still
  * rings on Monday. The registry itself holds far fewer at a time — each fire
- * rolls the horizon forward from the device-protected mirror.
+ * moves the alarm window forward from the device-protected mirror.
  */
-const ALARM_HORIZON_HOURS = 24 * 7;
+const ALARM_WINDOW_HOURS = 24 * 7;
 
 /** The device's IANA zone, which resolves floating alarms. */
 function deviceTimeZone(): string {
@@ -126,6 +126,9 @@ function ClipperApp() {
   // re-point the backend at a new server (a fresh native client), so the loop
   // must re-subscribe to that client's state channel instead of the old one's.
   const sessionKey = state?.session?.device_id ?? null;
+  const currentSessionKey = useRef(sessionKey);
+  currentSessionKey.current = sessionKey;
+  const previousSessionKey = useRef<string | null>(null);
 
   // Cold-start session resume. Empty deps + the component staying mounted across
   // background/refocus mean this runs exactly once per process launch: bringing a
@@ -201,6 +204,20 @@ function ClipperApp() {
   const [alarmRefreshGeneration, setAlarmRefreshGeneration] = useState(0);
 
   useEffect(() => {
+    const wasAuthenticated = previousSessionKey.current !== null;
+    previousSessionKey.current = sessionKey;
+    if (!wasAuthenticated || sessionKey !== null) return;
+
+    lastPushedPlan.current = null;
+    try {
+      cancelAllAlarms();
+    } catch {}
+    try {
+      dismissAlarm();
+    } catch {}
+  }, [sessionKey]);
+
+  useEffect(() => {
     const subscription = NativeAppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
         setAlarmRefreshGeneration((generation) => generation + 1);
@@ -213,10 +230,11 @@ function ClipperApp() {
     if (!alarmsSupported || !state?.session) return;
 
     let cancelled = false;
+    const effectSessionKey = sessionKey;
     void (async () => {
       try {
-        const alarms = await backend.nextAlarms?.(ALARM_HORIZON_HOURS, deviceTimeZone());
-        if (cancelled || !alarms) return;
+        const alarms = await backend.nextAlarms?.(ALARM_WINDOW_HOURS, deviceTimeZone());
+        if (cancelled || currentSessionKey.current !== effectSessionKey || !alarms) return;
         const plan = alarms.map((alarm) => ({
           itemId: alarm.item_id,
           occurrenceKey: alarm.occurrence_key,
@@ -224,7 +242,7 @@ function ClipperApp() {
           fireAtMillis: alarm.fire_at_millis,
           occurrenceStartMillis: alarm.occurrence_start_millis,
         }));
-        const fingerprint = `${sessionKey}:${alarmRefreshGeneration}:${JSON.stringify(plan)}`;
+        const fingerprint = `${effectSessionKey}:${alarmRefreshGeneration}:${JSON.stringify(plan)}`;
         if (fingerprint === lastPushedPlan.current) return;
         setAlarms(plan);
         lastPushedPlan.current = fingerprint;

@@ -46,8 +46,8 @@ class AlarmScheduler(private val context: Context) {
      * Replace every registered alarm with the nearest [MAX_REGISTERED] of [plan].
      *
      * The plan can cover weeks, but there is no need to hold hundreds of
-     * pending intents. Each fire re-arms from the mirror, so the horizon rolls
-     * forward on its own. Returns how many were registered.
+     * pending intents. Each fire re-arms from the mirror, so the alarm window
+     * moves forward on its own. Returns how many were registered.
      */
     fun replaceAll(plan: List<PlannedAlarm>): Int {
         cancelAll()
@@ -154,7 +154,7 @@ class AlarmScheduler(private val context: Context) {
         /**
          * How many alarms are held in the system registry at once. Each fire
          * re-arms from the mirror, so this bounds pending intents without
-         * bounding the horizon.
+         * bounding the alarm window.
          */
         const val MAX_REGISTERED = 24
     }
