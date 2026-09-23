@@ -37,6 +37,18 @@ export function repeatChoiceOf(recurrence: Recurrence): RepeatSelection {
     }
 }
 
+export function isDerivedMonthlyRule(recurrence: Recurrence, date: string): boolean {
+    if (recurrence.kind !== "every" || recurrence.interval !== 1) return false;
+    const frequency = recurrence.frequency;
+    const day = Number.parseInt(date.slice(8, 10), 10);
+    return (
+        frequency.unit === "monthly" &&
+        frequency.by === "on_day" &&
+        frequency.from === "from_start" &&
+        frequency.day === day
+    );
+}
+
 export function weekdaysOf(recurrence: Recurrence): Weekday[] | null {
     return recurrence.kind === "every" && recurrence.frequency.unit === "weekly"
         ? recurrence.frequency.weekdays

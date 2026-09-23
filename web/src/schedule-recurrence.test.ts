@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import type { Recurrence } from "@clipper/shared";
 
-import { buildRecurrence, repeatChoiceOf } from "./schedule-recurrence.ts";
+import { buildRecurrence, isDerivedMonthlyRule, repeatChoiceOf } from "./schedule-recurrence.ts";
 
 /// Narrow a rebuild to the repeating case so a test can read its parts. A
 /// rebuild that collapsed to `once` is a failure everywhere this is used.
@@ -73,6 +73,22 @@ test("a cadence the row cannot express reports custom, not once", () => {
         }),
         "weekdays",
     );
+});
+
+test("identifies the plain monthly rule derived from a start date", () => {
+    assert.equal(
+        isDerivedMonthlyRule(
+            {
+                kind: "every",
+                frequency: { unit: "monthly", by: "on_day", from: "from_start", day: 8 },
+                interval: 1,
+                end: { when: "never" },
+            },
+            "2026-09-08",
+        ),
+        true,
+    );
+    assert.equal(isDerivedMonthlyRule(secondTuesday, "2026-09-08"), false);
 });
 
 /// The row has no control for when a series stops, so a rebuild must not decide
