@@ -42,7 +42,7 @@ use crate::{
 };
 
 /// Bytes of randomness in a `share_token`. The token is the sole credential for
-/// unauthenticated share-link access (Phase 3), so it must be unguessable; 32
+/// unauthenticated share-link access, so it must be unguessable; 32
 /// bytes (256 bits) matches the WebSocket ticket secret.
 const SHARE_TOKEN_BYTES: usize = 32;
 

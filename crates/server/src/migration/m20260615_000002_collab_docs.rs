@@ -3,7 +3,7 @@
 //!
 //! Collab docs are the one server-visible object kind: the server applies and
 //! relays Y-CRDT updates, so `collab_docs.yjs_state` is plaintext (null until
-//! the first Y-sync edit in Phase 3). Clipboard and file objects keep their
+//! the first Y-sync edit). Clipboard and file objects keep their
 //! end-to-end-encrypted `meta_ciphertext`/`meta_nonce`/`envelope`; a collab
 //! object leaves all three null and points at a `collab_docs` row instead.
 //!
