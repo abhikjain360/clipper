@@ -178,39 +178,12 @@ export function SchedulePanel({
         }
     }, [weekStart, weekEnd, onError]);
 
-    const itemsKey = items.map((item) => `${item.id}:${item.definition_json}`).join("|");
-    const sourcesKey = sources
-        .map((source) =>
-            JSON.stringify([
-                source.id,
-                source.name,
-                source.protocol,
-                source.location,
-                source.enabled,
-                source.event_count,
-                source.raw_import_file_id,
-                source.raw_import_available,
-            ]),
-        )
-        .join("|");
-    const runningKey = running
-        ? JSON.stringify([
-              running.id,
-              running.item_id,
-              running.title,
-              running.start,
-              running.end,
-              running.running,
-          ])
-        : "";
-
-    // Re-expand when the window or relevant schedule, source, or timer content changes.
     useEffect(() => {
         void loadWeek();
         return () => {
             loadGeneration.current += 1;
         };
-    }, [loadWeek, itemsKey, sourcesKey, runningKey]);
+    }, [loadWeek, items, sources, running]);
 
     return (
         <YStack gap="$3">
