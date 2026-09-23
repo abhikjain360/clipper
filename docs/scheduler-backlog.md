@@ -1,7 +1,7 @@
 # Scheduler outstanding work and decisions
 
 Maintained entry point for “what is still left to do on the scheduler?” Last
-updated 2026-09-12. This is a durable project backlog, not a temporary review
+updated 2026-09-23. This is a durable project backlog, not a temporary review
 walkthrough. An unchecked item is outstanding, not authorization to implement
 it or a requirement to finish it before merging this PR.
 
@@ -38,8 +38,10 @@ If code and these notes disagree, verify the code and correct the notes.
       during retroactive association. Existing linked timers already pin the plan
       and applicable override at start; edits do not rewrite a running recording.
 - [ ] **Cross-device timer conflicts.** Decide how users resolve simultaneous
-      recordings started on different devices. Local commands are serialized;
-      there is no global single-timer transaction.
+      recordings started on different devices. Local commands are serialized
+      and a start stops every running timer this device has synced; there is
+      no global single-timer transaction, so two devices that have not synced
+      can each run one until the next start.
 - [ ] **Storage growth outside replaced imports.** Same-source refresh now
       purges the previous imported batch; recordings remain. The settled flow is in
       [calendar-imports.md](calendar-imports.md). Other immutable history is retained;
@@ -145,6 +147,27 @@ The code does one defensible thing today; none of these blocks the review.
       account cannot free space from the UI. Decide when the client purges.
 - [ ] Security items of class C in
       [security-inventory-2026-09-12.md](security-inventory-2026-09-12.md).
+
+## Decisions surfaced by the fourth review (2026-09-23)
+
+Described with options and a recommendation as B18 to B22 in
+[scheduler-rust-review-guide.md](scheduler-rust-review-guide.md#appendix-b-decisions-for-the-owner).
+
+- [ ] Charge a fixed cost per revision and per payload row, so zero-byte
+      revisions cannot add rows and files without limit.
+- [ ] Let a device replace its own pending revision after a failed streamed
+      revise, which today blocks the object for up to about two hours.
+- [ ] Re-arm floating and all-day Android alarms in the new zone after a
+      time-zone change, instead of at the old zone's clock time.
+- [ ] Turn on SQLite `fullfsync` on macOS, or correct the durability comment
+      in `sqlite.rs`.
+- [ ] Lift the size limit on a calendar source record: a refresh of a
+      calendar of roughly 3,300 events exceeds the 256 KiB schedule payload cap.
+- [ ] While an account is at its byte limit a running timer cannot be
+      stopped (part of the deleted-file quota decision above).
+- [ ] Servers upgraded through migration 5 keep the old payload files
+      (`{object}.{payload}.bin`, no revision in the name) in the objects
+      directory with no row pointing at them; delete them by hand.
 
 ## Existing boundaries, not promises of future fixes
 
