@@ -165,6 +165,10 @@ Described with options and a recommendation as B18 to B22 in
       calendar of roughly 3,300 events exceeds the 256 KiB schedule payload cap.
 - [ ] While an account is at its byte limit a running timer cannot be
       stopped (part of the deleted-file quota decision above).
+- [ ] The web week grid re-expands on every state publish, including
+      clipboard and file events, because `AppState` carries nothing that
+      changes when a recording or override arrives. Add a schedule content
+      key to `AppState` and key the grid's effect on it.
 - [ ] Servers upgraded through migration 5 keep the old payload files
       (`{object}.{payload}.bin`, no revision in the name) in the objects
       directory with no row pointing at them; delete them by hand.
