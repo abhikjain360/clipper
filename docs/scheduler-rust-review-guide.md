@@ -69,8 +69,10 @@ Order and what to check:
     An imported rule that `Cadence` cannot express losslessly is not stored
     as text; it is re-read from the raw ICS snapshot at expansion time.
   - `ValidatedRrule::new`: rejects non-ASCII and control characters, then
-    parses with the same DTSTART shape expansion uses. This is the only place
-    provider rule text is validated. Read it slowly.
+    parses in the shape expansion uses, with a DTSTART at the rule's own
+    rewritten `UNTIL` (2020-01-01 when there is none), so a rule that ended
+    years ago still validates. This is the only place provider rule text is
+    validated. Read it slowly.
   - `imported_rule::convert`: the allow-list of clauses that become a
     `Cadence`. Ask: can a rule convert and change meaning? (Every clause the
     converter does not understand must keep the rule `Imported`.) Check each
@@ -86,6 +88,8 @@ Order and what to check:
     (`until_wall_clock`, `until_scan_bound`, `rrule_line`). A candidate that
     cannot resolve (an all-day span on a skipped date) is dropped when its
     wall clock is past the cutoff's wall clock, and is an error otherwise.
+    A rule whose `UNTIL` bound is before the series start generates nothing;
+    overrides and `RDATE` additions still apply.
     Ask: where does each of the two limits (65,535 scanned, 10,000 in
     window) bite, and does exceeding either error rather than truncate?
   - `occurrences`: first loop applies cancellations and reschedules to rule
@@ -247,8 +251,10 @@ Questions to hold through stage 2:
     store's `sync` lock, so a writer that already passed its generation check
     finishes before the clear and cannot put the old account's records back.
   - `validate_snapshot_page`, `snapshot_files`, `snapshot_clipboard`,
-    `snapshot_schedule`: pages must advance inside a fixed watermark; a
-    stale page item is skipped, not fatal, and the sweep at the end still runs.
+    `snapshot_schedule`: pages must advance and stay at or below the stream
+    start seq; a stale page item is skipped, not fatal, and the sweep at the
+    end still runs. A listed item that fails to download or decrypt is marked
+    seen, so the sweep never drops the copy this device holds.
   - `handle_updated_object_event`, `materialize_object`,
     `handle_deleted_event`: live path. The server's `seq` decides ordering
     between events; the anchor decides what content is acceptable.
@@ -292,8 +298,10 @@ Questions for stage 3:
   - `write_schedule_record`, `write_tombstone`: every schedule write is one
     encrypted object with one inline payload, bounded at 256 KiB.
   - `start_actual`, `stop_actual_inner`: serialized by `actual_write`;
-    validate twice around the history await; stop the running timer, then
-    create; stop clamps the end to at least one second after the start.
+    validate twice around the history await; stop every running timer, then
+    create; stop clamps the end to at least one second after the start. Both
+    read the session epoch when the request arrives and fence their writes on
+    it (`write_schedule_record_for_session`).
   - `update_schedule_item`: the editor's expected revision must match; a
     structural edit is refused while local overrides exist; the series id
     must not change.
@@ -525,6 +533,49 @@ browser logs `net::ERR_ABORTED` for logout and validate because the client
 drops the response body unread; the server processes both. All three are in
 the backlog.
 
+### Fourth pass: whole-branch review (2026-09-23)
+
+A fourth review on 2026-09-23 read the whole branch again, split into six
+areas (domain crate, server and revision chain, client store, client sync and
+session, client schedule and import, process boundaries with the web, mobile
+and Android code), with probe tests for the suspected bugs. It verified the
+earlier fixes and found the defects below; the ones that needed no product
+decision are fixed on the branch. Some were on `main` before this branch and
+some complete an earlier fix that was partial; the table says which. New
+product decisions are B18 to B22 in Appendix B.
+
+| #   | Finding                                                                                                                                                                                                                   | Where                                                                     | Status                                                                                                |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| F1  | Rule validation always probed with a 2020 DTSTART, so any `UNTIL` before 2020 failed and one old ended series rejected the whole import. A Google feed with history could never be imported.                              | `recurrence.rs` `ValidatedRrule::new`                                     | Fixed in "Accept old, Outlook and BOM-prefixed calendar feeds and close the escaped RRULE bypass"     |
+| F2  | A rule whose `UNTIL` is before its own start failed every expansion of that series.                                                                                                                                       | `engine.rs` `rule_spans`                                                  | Fixed in the same commit; the rule now generates nothing                                              |
+| F3  | TZIDs were parsed as IANA names only, so Outlook and Office 365 feeds (`W. Europe Standard Time`) were rejected wholesale.                                                                                                | `ingest.rs` `feed_time_from_partial`                                      | Fixed in the same commit (calcard's resolver, named zones only)                                       |
+| F4  | A feed starting with a UTF-8 byte order mark failed the envelope check.                                                                                                                                                   | `ingest.rs` `parse_calendar`                                              | Fixed in the same commit                                                                              |
+| F5  | Backslash escapes (`INTER\VAL=65536`, `RRUL\E:`, `\"` inside a quoted parameter) hid numeric clauses from the pre-check, so calcard still narrowed them. R6 and T8 were incomplete.                                       | `ingest.rs` `value_separator`, `validate_rrule_numbers`                   | Fixed in the same commit; an RRULE line with a backslash is refused                                   |
+| F6  | A synced `Cadence.interval` above 65,535 (rrule's limit) failed every expansion of that series.                                                                                                                           | `recurrence.rs` `Cadence`                                                 | Fixed in the same commit; refused when built and when deserialized                                    |
+| F7  | The recurrence summary printed an `UNTIL` instant's UTC date, one day late for every series west of UTC.                                                                                                                  | `summary.rs`                                                              | Fixed in "Show a series' end date in its own zone"                                                    |
+| F8  | `created_at` had no length limit and revisions can cost zero bytes, so one request stored about 36 MB of uncharged rows.                                                                                                  | `api-types` `ObjectEnvelopeBody`                                          | Fixed in "Cap an envelope's created_at at 64 bytes"; the per-revision cost is B18                     |
+| F9  | Migration 5 dropped every encrypted object but kept `users.storage_bytes` and `users.object_count`, so upgraded accounts kept usage they could never free.                                                                | `m20260908_000005_object_revisions.rs`                                    | Fixed in "Reset storage counters in the migration that drops every encrypted object"                  |
+| F10 | The store's pass counter restarted at 0 every run, so the first pass after a restart matched the previous run's and swept nothing; deletions made while the device was away stayed visible. On `main` before this branch. | `local_store.rs` `LocalStore::new`, `sqlite.rs` `stale_object_ids`        | Fixed in "Harden client sync, timers and the WebSocket found in the fourth review"                    |
+| F11 | A listed item whose download failed was not marked seen, so the sweep dropped the held copy; a schedule item and its alarm vanished until the next pass. The clipboard path had the same gap on `main`.                   | `engine.rs` `keep_held_revision`, `snapshot_schedule`                     | Fixed in the same commit; a schedule item already held at the listed head is not downloaded again     |
+| F12 | Starting a timer stopped only the first running timer found, so a timer started on another device before sync kept running.                                                                                               | `engine.rs` `start_actual`                                                | Fixed in the same commit                                                                              |
+| F13 | Timer starts and stops read the session epoch inside the write, so a start queued across a logout and login ran in the new account. T1 was incomplete for the timer paths.                                                | `engine.rs` `start_actual`, `stop_actual`                                 | Fixed in the same commit                                                                              |
+| F14 | A write the server accepted but that another device's newer revision had already overtaken locally was reported to the user as an error.                                                                                  | `engine.rs` `publish_accepted_write`; `local_store.rs` `holds_newer_than` | Fixed in the same commit                                                                              |
+| F15 | An unknown `kind` text in a stored row or anchor still failed every read of that object. L3 was incomplete.                                                                                                               | `sqlite.rs` `read_record`, `read_anchor_row`                              | Fixed in the same commit                                                                              |
+| F16 | Building the visible state still read a head for every schedule record, not only series. A9 was incomplete.                                                                                                               | `local_store.rs` `schedule_items_inner`                                   | Fixed in the same commit                                                                              |
+| F17 | The browser WebSocket was never closed, so every Refresh left a socket open; after 32 the per-user cap refused live sync on every device. The code was on `main`; the T4 and T5 fixes made it reachable.                  | `engine.rs` `BrowserWs`                                                   | Fixed in the same commit                                                                              |
+| F18 | Browser uploads and downloads had a 60 s deadline for the whole body, so a transfer that needed longer failed on every retry.                                                                                             | `api_client.rs` `with_transfer_deadline`                                  | Fixed in "Scale the browser transfer deadline with the bytes moved" (60 s plus one second per 64 KiB) |
+| F19 | The native WebSocket had no connect, `hello_ack` or read timeout, so a half-open socket showed Connected forever. On `main` before this branch.                                                                           | `engine.rs` `ws_connect`                                                  | Fixed in "Harden client sync, timers and the WebSocket found in the fourth review" (30 s, 10 s, 75 s) |
+| F20 | The R27 fix dropped the newest event when a desktop IPC client's queue was full; every event is a full state, so the UI could stay on an older state.                                                                     | `daemon/src/clients.rs`                                                   | Fixed in "Keep only the newest state for each desktop IPC client"                                     |
+| F21 | Only the Logout button cancelled Android alarms, so a session the engine ended itself (device removed elsewhere) kept ringing the old account's alarms.                                                                   | `mobile/src/App.tsx`                                                      | Fixed in "Cancel Android alarms when the session ends without the Logout button"                      |
+| F22 | Moving a Monthly block to another date kept the old day of the month, so the block did not move.                                                                                                                          | `web/src/SchedulePanel.tsx`                                               | Fixed in "Move a monthly rule with its block and re-expand the week only on content changes"          |
+| F23 | The week grid and the next-occurrence sort re-ran their expansions on every state publish.                                                                                                                                | `web/src/SchedulePanel.tsx`                                               | Fixed in the same commit                                                                              |
+
+Also fixed: design-doc tags and the words `watermark` and `horizon` in code,
+three daemon tests that checked a constant and a tokio semaphore, two wrong
+comments, and a misplaced doc comment. `tombstone_schedule_object` was
+reported as unfenced; it is only reached under `calendar_write`, which every
+session change takes, so it needed no change.
+
 ## Appendix B: decisions for the owner
 
 None of these block the review. Each names what the code does today, the
@@ -590,4 +641,35 @@ alternative, and a recommendation.
   space from the UI (UI QA, 2026-09-12). Options: purge as soon as the server
   acknowledges the tombstone, which makes delete irreversible at once; purge
   once every device has observed the tombstone, which needs a signal the
-  server does not have; or an explicit "empty trash" action.
+  server does not have; or an explicit "empty trash" action. At the byte limit
+  a running timer also cannot be stopped, because the stop is a charged
+  revision.
+- **B18. A fixed cost per revision.** A revision is charged only its payload
+  and metadata ciphertext, both of which can be zero bytes, and revisions do
+  not count as objects. `created_at` is now capped, but an account can still
+  add revision, payload and event rows and empty payload files without limit.
+  Recommendation: charge the envelope length plus a fixed amount per payload
+  in `revision_cost_bytes`.
+- **B19. A streamed revise that fails midway.** Revision n+1 stays pending
+  and no other revision of that object is accepted until the orphan sweep
+  removes it, up to about two hours. A calendar source of a few thousand
+  events takes the streamed path, so one dropped connection blocks its
+  refresh and deletion. Options: let the same device replace its own pending
+  revision, or have the client retry upload and complete. Recommendation: the
+  first; it is server-side and small.
+- **B20. Floating alarms after a zone change on Android.** The alarm plan
+  carries instants computed in the zone the app last saw. On a zone change
+  the boot receiver re-arms the same instants, so a floating 07:00 alarm
+  rings at the old zone's 07:00 until the app is opened. Options: carry the
+  wall-clock fire time and a floating flag to Kotlin and convert on
+  `TIMEZONE_CHANGED`, or document the behaviour. Recommendation: the first.
+- **B21. SQLite durability on macOS.** The comment in `sqlite.rs` says the
+  store matches the file store it replaced, which synced with
+  `F_FULLFSYNC`; SQLite's `fullfsync` is off, so a commit survives an app
+  crash but not necessarily a power loss. Options: `PRAGMA fullfsync = ON`
+  (a full flush on every commit) or correct the comment.
+- **B22. Size of a calendar source record.** The record lists the event ids
+  of its active, pending and retired batches, about 39 bytes each, under the
+  256 KiB schedule payload cap. A refresh holds two batches, so a calendar of
+  roughly 3,300 events can no longer be refreshed. Options: raise the cap for
+  source records, or move each batch's member list into its own object.
