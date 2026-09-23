@@ -1771,6 +1771,17 @@ fn zero_interval_is_rejected_on_deserialize() {
     assert!(serde_json::from_value::<Cadence>(negative).is_err());
 }
 
+#[test]
+fn intervals_above_the_rrule_range_are_rejected() {
+    assert!(Cadence::every(Frequency::Daily, 65536).is_err());
+    let cadence = serde_json::json!({
+        "frequency": {"unit": "daily"},
+        "interval": 65536,
+        "end": {"when": "never"},
+    });
+    assert!(serde_json::from_value::<Cadence>(cadence).is_err());
+}
+
 /// A zero repeat count is rejected when deserializing.
 #[test]
 fn zero_count_is_rejected_on_deserialize() {

@@ -195,6 +195,7 @@ pub fn parse_ics(
     import: ObjectId,
 ) -> Result<IngestOutcome, IngestError> {
     let calendar = parse_calendar(text)?;
+    let resolver = calendar.build_tz_resolver();
 
     let mut outcome = IngestOutcome::default();
     let (masters, mut overrides, missing_override_uids) =
@@ -211,7 +212,7 @@ pub fn parse_ics(
             .as_ref()
             .and_then(|uid| overrides.remove(uid))
             .unwrap_or_default();
-        match event_from_component(component, &matching, source, import, uid.clone()) {
+        match event_from_component(component, &matching, source, import, uid.clone(), &resolver) {
             Ok(event) => outcome.events.push(event),
             Err(reason) => outcome.skipped.push(SkippedEvent {
                 uid,
@@ -295,6 +296,7 @@ fn partition_masters_and_overrides(
 fn parse_calendar(text: &str) -> Result<calcard::icalendar::ICalendar, IngestError> {
     use calcard::icalendar::ICalendar;
 
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     validate_calendar_envelope(text)?;
     // Counted before parsing. The component and property caps below only apply
     // once the parser has allocated the whole tree, which for 8 MiB of
@@ -347,7 +349,12 @@ fn validate_calendar_envelope(text: &str) -> Result<(), IngestError> {
 /// parameter value. A line with an unterminated quote has no value.
 fn value_separator(line: &str) -> Option<usize> {
     let mut in_quotes = false;
-    for (index, byte) in line.bytes().enumerate() {
+    let mut bytes = line.bytes().enumerate();
+    while let Some((index, byte)) = bytes.next() {
+        if byte == b'\\' {
+            bytes.next();
+            continue;
+        }
         if byte == b'"' {
             in_quotes = !in_quotes;
         } else if byte == b':' && !in_quotes {
@@ -373,9 +380,15 @@ fn validate_rrule_numbers(text: &str) -> Result<(), IngestError> {
             continue;
         };
         let (before, after) = line.split_at(colon);
-        let name = before.split(';').next().unwrap_or("").trim();
+        let unescaped_before = before.replace('\\', "");
+        let name = unescaped_before.split(';').next().unwrap_or("").trim();
         if !name.eq_ignore_ascii_case("RRULE") {
             continue;
+        }
+        if line.contains('\\') {
+            return Err(IngestError::Malformed(
+                "RRULE must not contain backslash escapes".to_string(),
+            ));
         }
         let value = &after[1..];
         let mut interval_seen = false;
@@ -495,11 +508,13 @@ fn event_from_component(
     source: SourceId,
     import: ObjectId,
     uid: Option<String>,
+    resolver: &calcard::icalendar::timezone::TzResolver<&str>,
 ) -> Result<IngestedEvent, IngestError> {
     let uid = uid.ok_or(IngestError::MissingUid)?;
     let id = IngestedEvent::derive_id(source, &uid);
-    let start = date_time_property(component, "DTSTART")?.ok_or(IngestError::MissingStart)?;
-    let end = date_time_property(component, "DTEND")?;
+    let start =
+        date_time_property(component, "DTSTART", resolver)?.ok_or(IngestError::MissingStart)?;
+    let end = date_time_property(component, "DTEND", resolver)?;
     let duration = duration_property(component)?;
 
     let span = span_from(&start, end.as_ref(), duration.as_ref(), None)?;
@@ -512,7 +527,7 @@ fn event_from_component(
         )?,
         None => Recurrence::Once,
     };
-    let overrides = recurrence_overrides(component, overrides, id, &span)?;
+    let overrides = recurrence_overrides(component, overrides, id, &span, resolver)?;
 
     Ok(IngestedEvent {
         id,
@@ -699,6 +714,7 @@ fn recurrence_overrides(
     overrides: &[&calcard::icalendar::ICalendarComponent],
     event_id: Uuid,
     master_span: &ScheduleSpan,
+    resolver: &calcard::icalendar::timezone::TzResolver<&str>,
 ) -> Result<Vec<OccurrenceOverrideData>, IngestError> {
     use std::collections::BTreeMap;
 
@@ -713,7 +729,7 @@ fn recurrence_overrides(
     let item = ScheduleItemId(event_id);
     let mut by_recurrence_id = BTreeMap::new();
 
-    for added in recurrence_times(master, "RDATE")? {
+    for added in recurrence_times(master, "RDATE", resolver)? {
         let recurrence_id = recurrence_id_for(master_span, &added)?;
         let span = span_at(master_span, &added)?;
         by_recurrence_id.insert(
@@ -738,14 +754,14 @@ fn recurrence_overrides(
         }) {
             return Err(IngestError::UnsupportedRecurrenceRange);
         }
-        let recurrence_time = feed_time_from_entry(recurrence_entry)?;
+        let recurrence_time = feed_time_from_entry(recurrence_entry, resolver)?;
         let recurrence_id = recurrence_id_for(master_span, &recurrence_time)?;
         let change = if text_property(override_data, "STATUS").as_deref() == Some("CANCELLED") {
             OverrideChange::Cancelled
         } else {
-            let start =
-                date_time_property(override_data, "DTSTART")?.ok_or(IngestError::MissingStart)?;
-            let end = date_time_property(override_data, "DTEND")?;
+            let start = date_time_property(override_data, "DTSTART", resolver)?
+                .ok_or(IngestError::MissingStart)?;
+            let end = date_time_property(override_data, "DTEND", resolver)?;
             let duration = duration_property(override_data)?;
             OverrideChange::Rescheduled(span_from(
                 &start,
@@ -763,7 +779,7 @@ fn recurrence_overrides(
     // RFC 5545 gives EXDATE precedence over inclusion dates, so apply it last.
     // A duplicated RDATE, or a detached component at the same recurrence
     // position, then cannot bring an excluded date back.
-    for excluded in recurrence_times(master, "EXDATE")? {
+    for excluded in recurrence_times(master, "EXDATE", resolver)? {
         let recurrence_id = recurrence_id_for(master_span, &excluded)?;
         by_recurrence_id.insert(
             recurrence_id,
@@ -863,6 +879,7 @@ fn recurrence_values_count(
 fn recurrence_times(
     component: &calcard::icalendar::ICalendarComponent,
     name: &str,
+    resolver: &calcard::icalendar::timezone::TzResolver<&str>,
 ) -> Result<Vec<FeedTime>, IngestError> {
     use calcard::icalendar::ICalendarValue;
 
@@ -875,7 +892,7 @@ fn recurrence_times(
         for value in &entry.values {
             match value {
                 ICalendarValue::PartialDateTime(partial) => {
-                    times.push(feed_time_from_partial(entry, partial)?);
+                    times.push(feed_time_from_partial(entry, partial, resolver)?);
                 }
                 _ => return Err(IngestError::UnsupportedRecurrenceDate),
             }
@@ -925,11 +942,12 @@ fn rrule_text(
 fn date_time_property(
     component: &calcard::icalendar::ICalendarComponent,
     name: &str,
+    resolver: &calcard::icalendar::timezone::TzResolver<&str>,
 ) -> Result<Option<FeedTime>, IngestError> {
     let Some(entry) = property(component, name) else {
         return Ok(None);
     };
-    feed_time_from_entry(entry).map(Some)
+    feed_time_from_entry(entry, resolver).map(Some)
 }
 
 fn property<'a>(
@@ -944,18 +962,20 @@ fn property<'a>(
 
 fn feed_time_from_entry(
     entry: &calcard::icalendar::ICalendarEntry,
+    resolver: &calcard::icalendar::timezone::TzResolver<&str>,
 ) -> Result<FeedTime, IngestError> {
     use calcard::icalendar::ICalendarValue;
 
     let Some(ICalendarValue::PartialDateTime(partial)) = entry.values.first() else {
         return Err(IngestError::InvalidDateTime);
     };
-    feed_time_from_partial(entry, partial)
+    feed_time_from_partial(entry, partial, resolver)
 }
 
 fn feed_time_from_partial(
     entry: &calcard::icalendar::ICalendarEntry,
     partial: &calcard::common::PartialDateTime,
+    resolver: &calcard::icalendar::timezone::TzResolver<&str>,
 ) -> Result<FeedTime, IngestError> {
     use calcard::icalendar::{ICalendarParameterName, ICalendarParameterValue};
 
@@ -983,10 +1003,13 @@ fn feed_time_from_partial(
         .find(|param| matches!(param.name, ICalendarParameterName::Tzid))
     {
         Some(param) => match &param.value {
-            ICalendarParameterValue::Text(name) => Some(
-                name.parse::<Tz>()
-                    .map_err(|_| IngestError::UnknownTimeZone(name.clone()))?,
-            ),
+            ICalendarParameterValue::Text(name) => {
+                let zone = resolver.resolve(name).and_then(|resolved| match resolved {
+                    calcard::common::timezone::Tz::Tz(zone) => Some(zone),
+                    _ => None,
+                });
+                Some(zone.ok_or_else(|| IngestError::UnknownTimeZone(name.clone()))?)
+            }
             _ => return Err(IngestError::InvalidDateTime),
         },
         None => None,
