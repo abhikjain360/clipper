@@ -199,6 +199,38 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
         1
     );
 
+    let running_timer = || {
+        ScheduleRecord::Actual(Box::new(clipper_schedule::ActualRecord {
+            id: clipper_schedule::ActualId::new(),
+            planned: None,
+            span: clipper_schedule::ActualSpan::Running {
+                started: Utc::now(),
+            },
+        }))
+    };
+    first
+        .create_schedule_record(running_timer())
+        .await
+        .expect("a timer started on the first device");
+    second
+        .create_schedule_record(running_timer())
+        .await
+        .expect("a timer started on the second device before it saw the first");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while first.running_actual_ids().await.len() < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the first device sees both running timers");
+    let replacement = first
+        .start_actual(None)
+        .await
+        .expect("start stops every running timer");
+    assert_eq!(first.running_actual_ids().await, vec![replacement.clone()]);
+    first.stop_actual(&replacement).await.expect("stop");
+    wait_for(&second, |state| state.running_actual.is_none()).await;
+
     exercise_revision_aware_plans(&first).await;
 
     let stale_head = second.local_head(&object_id).await.expect("old head");

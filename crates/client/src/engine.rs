@@ -31,8 +31,9 @@ use crate::{
     },
     local_store::{
         DeviceSigningIdentity, EncryptedInlineObject, EncryptedObject, LocalHead, LocalStore,
-        LocalVisibleState, StoredObjectIdentity, clipboard_display_text, is_text_mime_type,
-        normalized_clipboard_mime_type, top_level_mime_type, verify_payload_ciphertext,
+        LocalStoreError, LocalVisibleState, StoredObjectIdentity, clipboard_display_text,
+        is_text_mime_type, normalized_clipboard_mime_type, top_level_mime_type,
+        verify_payload_ciphertext,
     },
     schedule::{
         OccurrenceLabel, ScheduleRecord, actual_view, decrypt_schedule_meta,
@@ -58,14 +59,21 @@ const RECENT_CLIPBOARD_LIMIT: usize = 100;
 /// MIME type used for plain-text clipboard entries.
 pub const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
 const CLIPBOARD_HYDRATION_CONCURRENCY: usize = 8;
+#[cfg(not(target_family = "wasm"))]
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(target_family = "wasm"))]
+const WS_HELLO_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(not(target_family = "wasm"))]
+const WS_READ_TIMEOUT: Duration = Duration::from_secs(75);
 
-/// A snapshot must move forward inside its fixed watermark. Validate the
-/// response before persisting anything, including pages whose items fail to
-/// decrypt, so an untrusted server cannot trap reconciliation on one page.
+/// A snapshot must move forward and stay at or below the seq the stream
+/// started at. Validate the response before persisting anything, including
+/// pages whose items fail to decrypt, so an untrusted server cannot trap
+/// reconciliation on one page.
 fn validate_snapshot_page(
     page: &ObjectListResponse,
     after: Option<ObjectListCursor>,
-    watermark: i64,
+    stream_start_seq: i64,
 ) -> Result<(), ClientError> {
     let key = |cursor: ObjectListCursor| (cursor.created_seq, cursor.id.into_uuid());
     let mut previous = after.map(key);
@@ -76,9 +84,9 @@ fn validate_snapshot_page(
     }
     for item in &page.items {
         let current = (item.created_seq, item.id.into_uuid());
-        if item.created_seq > watermark || previous.is_some_and(|old| current <= old) {
+        if item.created_seq > stream_start_seq || previous.is_some_and(|old| current <= old) {
             return Err(ClientError::UnexpectedResponse(
-                "snapshot cursor did not advance within its watermark".into(),
+                "snapshot cursor did not advance within the stream start seq".into(),
             ));
         }
         previous = Some(current);
@@ -907,7 +915,7 @@ impl SyncEngine {
             source_device_id: device_id,
         };
         let _session = self.hold_session_for_write(epoch).await?;
-        let visible = self
+        let persisted = self
             .local_store
             .persist_local_clipboard_present_encrypted(
                 &item,
@@ -917,8 +925,13 @@ impl SyncEngine {
                 created_seq,
                 RECENT_CLIPBOARD_LIMIT,
             )
-            .await?;
-        self.publish_visible_state(visible).await;
+            .await;
+        self.publish_accepted_write(
+            &object_id,
+            encrypted.object.envelope.body.revision,
+            persisted,
+        )
+        .await?;
         info!(
             clipboard_id = %object_id,
             mime_type,
@@ -1228,7 +1241,7 @@ impl SyncEngine {
             source_device_id: device_id,
         };
         let _session = self.hold_session_for_write(epoch).await?;
-        let visible = self
+        let persisted = self
             .local_store
             .persist_local_file_present_encrypted(
                 &item,
@@ -1237,8 +1250,9 @@ impl SyncEngine {
                 created_seq,
                 RECENT_CLIPBOARD_LIMIT,
             )
+            .await;
+        self.publish_accepted_write(&file_id, encrypted.envelope.body.revision, persisted)
             .await?;
-        self.publish_visible_state(visible).await;
         info!(file_id = %file_id, filename = %filename, "File uploaded");
         Ok(file_id)
     }
@@ -1458,14 +1472,28 @@ impl SyncEngine {
         record: ScheduleRecord,
         placement: EnvelopePlacement,
     ) -> Result<i64, ClientError> {
-        // Read before the network work, so the persist below can tell whether
-        // the session that started this write is still the one running. The
-        // timer paths hold `actual_write`, which a login or logout does not
-        // take, so this is their only fence.
         let epoch = self.history_epoch.load(Ordering::SeqCst);
+        self.write_schedule_record_for_session(epoch, object_id, record, placement)
+            .await
+    }
+
+    /// The persist below is fenced on `epoch`, so a session that ended while
+    /// the server call was in flight gets nothing written into the next
+    /// profile. The timer paths hold `actual_write`, which a login or logout
+    /// does not take, so they read the epoch when the request arrives.
+    async fn write_schedule_record_for_session(
+        &self,
+        epoch: u64,
+        object_id: &str,
+        record: ScheduleRecord,
+        placement: EnvelopePlacement,
+    ) -> Result<i64, ClientError> {
         let encryption_key = self.current_encryption_key().await?;
         let (device_id, device_id_typed, signing_key) =
             self.current_device_signing_context().await?;
+        if !self.session_is_current(epoch) {
+            return Err(ClientError::NotAuthenticated);
+        }
 
         let object_uuid: uuid::Uuid =
             object_id.parse().map_err(|source| ClientError::InvalidId {
@@ -1571,7 +1599,7 @@ impl SyncEngine {
             .await?;
 
         let _session = self.hold_session_for_write(epoch).await?;
-        let visible = self
+        let persisted = self
             .local_store
             .persist_local_schedule_present_encrypted(
                 StoredObjectIdentity {
@@ -1585,9 +1613,42 @@ impl SyncEngine {
                 created_seq,
                 RECENT_CLIPBOARD_LIMIT,
             )
-            .await?;
-        self.publish_visible_state(visible).await;
+            .await;
+        self.publish_accepted_write(
+            object_id,
+            encrypted.object.envelope.body.revision,
+            persisted,
+        )
+        .await?;
         Ok(created_seq)
+    }
+
+    async fn publish_accepted_write(
+        &self,
+        object_id: &str,
+        revision: u64,
+        persisted: Result<LocalVisibleState, LocalStoreError>,
+    ) -> Result<(), ClientError> {
+        match persisted {
+            Ok(visible) => {
+                self.publish_visible_state(visible).await;
+                Ok(())
+            }
+            Err(LocalStoreError::RevisionRejected(reason))
+                if self
+                    .local_store
+                    .holds_newer_than(object_id, revision)
+                    .await? =>
+            {
+                warn!(
+                    object_id = %object_id,
+                    revision,
+                    "Kept a newer revision than this device's accepted write: {reason}",
+                );
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Append a tombstone: a signed revision with no payloads.
@@ -1660,6 +1721,7 @@ impl SyncEngine {
     /// Start unplanned time, or time against the exact context rendered by the calendar.
     /// Validate the plan before stopping another timer.
     pub async fn start_actual(&self, plan_context: Option<&str>) -> Result<String, ClientError> {
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
         let planned: Option<clipper_schedule::PlannedRef> = plan_context
             .map(|text| {
                 if text.len() > 8192 {
@@ -1672,6 +1734,9 @@ impl SyncEngine {
             })
             .transpose()?;
         let _write = self.actual_write.lock().await;
+        if !self.session_is_current(epoch) {
+            return Err(ClientError::NotAuthenticated);
+        }
         if let Some(planned) = &planned {
             self.schedule_revision(planned.schedule).await?;
             let records = self.local_store.schedule_records_with_heads().await?;
@@ -1681,19 +1746,25 @@ impl SyncEngine {
             let refreshed = self.local_store.schedule_records_with_heads().await?;
             self.validate_plan_context(planned, &refreshed).await?;
         }
-        if let Some(running) = self.running_actual_id().await {
-            self.stop_actual_inner(&running).await?;
+        for running in self.running_actual_ids().await {
+            self.stop_actual_inner(epoch, &running).await?;
         }
-        self.create_schedule_record(ScheduleRecord::Actual(Box::new(
-            clipper_schedule::ActualRecord {
+        let object_id = uuid::Uuid::now_v7().to_string();
+        self.write_schedule_record_for_session(
+            epoch,
+            &object_id,
+            ScheduleRecord::Actual(Box::new(clipper_schedule::ActualRecord {
                 id: clipper_schedule::ActualId::new(),
                 planned,
                 span: clipper_schedule::ActualSpan::Running {
                     started: chrono::Utc::now(),
                 },
-            },
-        )))
-        .await
+            })),
+            EnvelopePlacement::Create,
+        )
+        .await?;
+        info!(object_id = %object_id, "Timer started");
+        Ok(object_id)
     }
 
     /// Stop the timer, closing the record at now.
@@ -1702,11 +1773,12 @@ impl SyncEngine {
     /// and replaced on stop. Persisting progress on a tick would turn an hour
     /// of work into sixty retained revisions.
     pub async fn stop_actual(&self, object_id: &str) -> Result<String, ClientError> {
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
         let _write = self.actual_write.lock().await;
-        self.stop_actual_inner(object_id).await
+        self.stop_actual_inner(epoch, object_id).await
     }
 
-    async fn stop_actual_inner(&self, object_id: &str) -> Result<String, ClientError> {
+    async fn stop_actual_inner(&self, epoch: u64, object_id: &str) -> Result<String, ClientError> {
         let Some((_, record, head)) = self
             .local_store
             .schedule_records_with_heads()
@@ -1730,7 +1802,8 @@ impl SyncEngine {
         let mut stopped = *actual;
         stopped.span =
             clipper_schedule::ActualSpan::Complete(stopped_span(started, chrono::Utc::now())?);
-        self.write_schedule_record(
+        self.write_schedule_record_for_session(
+            epoch,
             object_id,
             ScheduleRecord::Actual(Box::new(stopped)),
             EnvelopePlacement::Revise(head),
@@ -1787,17 +1860,18 @@ impl SyncEngine {
         Ok(out)
     }
 
-    /// The object id of the running timer, if one is running.
-    async fn running_actual_id(&self) -> Option<String> {
+    /// The object ids of every running timer.
+    async fn running_actual_ids(&self) -> Vec<String> {
         self.local_store
             .schedule_records_with_ids()
             .await
             .into_iter()
-            .find(|(_, record)| {
+            .filter(|(_, record)| {
                 matches!(record, ScheduleRecord::Actual(actual)
                     if matches!(actual.span, clipper_schedule::ActualSpan::Running { .. }))
             })
             .map(|(object_id, _)| object_id)
+            .collect()
     }
 
     /// Replace a schedule series with an edited version.
@@ -2210,6 +2284,12 @@ impl SyncEngine {
                 .await?;
             validate_snapshot_page(&page, after, stream_start_seq)?;
             for item in page.items {
+                if self.holds_listed_head(&item).await {
+                    self.local_store
+                        .mark_snapshot_seen(&item.id.to_string(), generation)
+                        .await?;
+                    continue;
+                }
                 match self
                     .decrypt_schedule_object_item(api, &item, &encryption_key)
                     .await
@@ -2789,18 +2869,23 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// Account for a snapshot item this pass will not install.
+    /// Account for a listed item this pass will not install.
     ///
-    /// A refused revision is an ordinary interleave: the page was built before
-    /// a live event or this device's own write advanced the head. The object is
-    /// still on the server, so it is marked as seen and the sweep leaves it
-    /// alone, and the pass carries on. Any other error comes back unchanged.
+    /// The object is still on the server, so whatever this device holds for it
+    /// is marked as seen and the sweep leaves it alone. A refused revision is
+    /// an ordinary interleave: the page was built before a live event or this
+    /// device's own write advanced the head, so the pass carries on. Any other
+    /// error, such as a failed download, comes back unchanged after the held
+    /// copy is kept.
     async fn keep_held_revision(
         &self,
         item: &ObjectListItem,
         generation: u64,
         error: ClientError,
     ) -> Result<(), ClientError> {
+        self.local_store
+            .mark_snapshot_seen(&item.id.to_string(), generation)
+            .await?;
         let ClientError::RevisionRejected(reason) = &error else {
             return Err(error);
         };
@@ -2809,10 +2894,16 @@ impl SyncEngine {
             served_revision = item.revision,
             "Kept the revision this device holds: {reason}",
         );
-        self.local_store
-            .mark_snapshot_seen(&item.id.to_string(), generation)
-            .await?;
         Ok(())
+    }
+
+    async fn holds_listed_head(&self, item: &ObjectListItem) -> bool {
+        let Ok(Some(head)) = self.local_store.local_head(&item.id.to_string()).await else {
+            return false;
+        };
+        head.revision == item.revision
+            && crypto::object_envelope_parent_hash(&item.envelope.body)
+                .is_ok_and(|hash| hash == head.parent_hash)
     }
 
     async fn persist_file_snapshot_item(
@@ -3328,9 +3419,13 @@ impl SyncEngine {
             .body(())
             .map_err(|e| ClientError::WebSocket(e.to_string()))?;
 
-        let (ws_stream, _) = tokio_tungstenite::connect_async(request)
-            .await
-            .map_err(websocket_handshake_error)?;
+        let (ws_stream, _) = tokio::time::timeout(
+            WS_CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async(request),
+        )
+        .await
+        .map_err(|_| ClientError::WebSocket("timed out connecting".into()))?
+        .map_err(websocket_handshake_error)?;
 
         let (mut write, mut read) = ws_stream.split();
 
@@ -3342,40 +3437,44 @@ impl SyncEngine {
             .await
             .map_err(|e: tungstenite::Error| ClientError::WebSocket(e.to_string()))?;
 
-        let stream_start_seq = loop {
-            let msg = read
-                .next()
-                .await
-                .ok_or_else(|| ClientError::WebSocket("closed before hello_ack".into()))?
-                .map_err(|e: tungstenite::Error| ClientError::WebSocket(e.to_string()))?;
-            match msg {
-                tungstenite::Message::Text(text) => {
-                    match serde_json::from_str::<WsServerMessage>(&text) {
-                        Ok(WsServerMessage::HelloAck {
-                            stream_start_seq, ..
-                        }) => break stream_start_seq,
-                        Ok(WsServerMessage::Error { error }) => {
-                            return Err(ClientError::WebSocket(error.to_string()));
-                        }
-                        Ok(other) => {
-                            debug!("Ignoring WS message before hello_ack: {:?}", other);
-                        }
-                        Err(e) => {
-                            return Err(ClientError::WebSocket(format!(
-                                "failed to parse hello_ack: {e}"
-                            )));
+        let stream_start_seq = tokio::time::timeout(WS_HELLO_ACK_TIMEOUT, async {
+            loop {
+                let msg = read
+                    .next()
+                    .await
+                    .ok_or_else(|| ClientError::WebSocket("closed before hello_ack".into()))?
+                    .map_err(|e: tungstenite::Error| ClientError::WebSocket(e.to_string()))?;
+                match msg {
+                    tungstenite::Message::Text(text) => {
+                        match serde_json::from_str::<WsServerMessage>(&text) {
+                            Ok(WsServerMessage::HelloAck {
+                                stream_start_seq, ..
+                            }) => return Ok(stream_start_seq),
+                            Ok(WsServerMessage::Error { error }) => {
+                                return Err(ClientError::WebSocket(error.to_string()));
+                            }
+                            Ok(other) => {
+                                debug!("Ignoring WS message before hello_ack: {:?}", other);
+                            }
+                            Err(e) => {
+                                return Err(ClientError::WebSocket(format!(
+                                    "failed to parse hello_ack: {e}"
+                                )));
+                            }
                         }
                     }
+                    tungstenite::Message::Ping(data) => {
+                        _ = write.send(tungstenite::Message::Pong(data)).await;
+                    }
+                    tungstenite::Message::Close(_) => {
+                        return Err(ClientError::WebSocket("closed before hello_ack".into()));
+                    }
+                    _ => {}
                 }
-                tungstenite::Message::Ping(data) => {
-                    _ = write.send(tungstenite::Message::Pong(data)).await;
-                }
-                tungstenite::Message::Close(_) => {
-                    return Err(ClientError::WebSocket("closed before hello_ack".into()));
-                }
-                _ => {}
             }
-        };
+        })
+        .await
+        .map_err(|_| ClientError::WebSocket("timed out waiting for hello_ack".into()))??;
 
         // The session may have changed while the handshake was in flight.
         // Claiming the generation only for the session this socket
@@ -3403,7 +3502,12 @@ impl SyncEngine {
                     }
                     break;
                 }
-                msg_result = read.next() => {
+                msg_result = tokio::time::timeout(WS_READ_TIMEOUT, read.next()) => {
+                    let Ok(msg_result) = msg_result else {
+                        return Err(ClientError::WebSocket(
+                            "no message from the server within the read timeout".into(),
+                        ));
+                    };
                     let Some(msg_result) = msg_result else {
                         break;
                     };
@@ -3696,6 +3800,17 @@ impl BrowserWs {
                 None => return Ok(None),
             }
         }
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl Drop for BrowserWs {
+    fn drop(&mut self) {
+        self.socket.set_onopen(None);
+        self.socket.set_onmessage(None);
+        self.socket.set_onerror(None);
+        self.socket.set_onclose(None);
+        _ = self.socket.close();
     }
 }
 
@@ -4318,7 +4433,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_pages_must_advance_inside_the_watermark() {
+    fn snapshot_pages_must_advance_and_stay_at_or_below_the_stream_start() {
         let mut item = signed_item_with_payload_count(1);
         item.created_seq = 10;
         let cursor = ObjectListCursor {
@@ -4609,6 +4724,30 @@ mod tests {
         // An ordinary stop still ends now.
         let span = stopped_span(now - chrono::Duration::minutes(5), now).expect("span");
         assert_eq!(span.end(), now);
+    }
+
+    #[tokio::test]
+    async fn a_timer_start_queued_across_a_session_change_writes_nothing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", temp.path());
+        open_session(&engine).await;
+        *engine.encryption_key.write().await = Some(Zeroizing::new([1; 32]));
+        *engine.device_signing_key.write().await =
+            Some(Zeroizing::new([2; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]));
+
+        let held = engine.actual_write.lock().await;
+        let start = tokio::spawn({
+            let engine = Arc::clone(&engine);
+            async move { engine.start_actual(None).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        engine.history_epoch.fetch_add(1, Ordering::SeqCst);
+        drop(held);
+
+        assert!(matches!(
+            start.await.expect("start task"),
+            Err(ClientError::NotAuthenticated)
+        ));
     }
 
     #[tokio::test]
@@ -5532,6 +5671,69 @@ mod adversarial_history_tests {
             },
             payload_ciphertext,
         }
+    }
+
+    #[tokio::test]
+    async fn an_accepted_write_already_overtaken_locally_succeeds_but_a_conflicting_one_does_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", dir.path());
+        engine.local_store.set_profile("profile-a".into());
+        let object_id = uuid::Uuid::new_v4().to_string();
+        let identity = StoredObjectIdentity {
+            object_id: &object_id,
+            created_at: "2026-09-12T00:00:00Z",
+            source_device_id: HISTORY_TEST_DEVICE_ID,
+        };
+        let first_record = source_record("first");
+        let first = encrypted_schedule_object(&first_record, &object_id, 1, None);
+        let first_hash =
+            crypto::object_envelope_parent_hash(&first.object.envelope.body).expect("hash");
+        let second_record = source_record("second");
+        let second = encrypted_schedule_object(&second_record, &object_id, 2, Some(first_hash));
+        engine
+            .local_store
+            .persist_local_schedule_present_encrypted(identity, second_record, &second, 2, 2, 10)
+            .await
+            .expect("another device's newer revision arrives first");
+
+        let overtaken = engine
+            .local_store
+            .persist_local_schedule_present_encrypted(identity, first_record, &first, 1, 1, 10)
+            .await;
+        engine
+            .publish_accepted_write(&object_id, 1, overtaken)
+            .await
+            .expect("an accepted write that a newer revision overtook is not an error");
+
+        let other_record = source_record("other");
+        let conflicting = encrypted_schedule_object(&other_record, &object_id, 2, Some(first_hash));
+        let conflicted = engine
+            .local_store
+            .persist_local_schedule_present_encrypted(
+                identity,
+                other_record,
+                &conflicting,
+                2,
+                2,
+                10,
+            )
+            .await;
+        assert!(matches!(
+            engine
+                .publish_accepted_write(&object_id, 2, conflicted)
+                .await,
+            Err(ClientError::RevisionRejected(_))
+        ));
+        assert_eq!(
+            engine
+                .local_store
+                .local_head(&object_id)
+                .await
+                .expect("head")
+                .expect("held")
+                .revision,
+            2
+        );
     }
 
     /// The 64-entry cap drops everything already cached when a new read lands.
