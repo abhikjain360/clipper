@@ -349,12 +349,7 @@ fn validate_calendar_envelope(text: &str) -> Result<(), IngestError> {
 /// parameter value. A line with an unterminated quote has no value.
 fn value_separator(line: &str) -> Option<usize> {
     let mut in_quotes = false;
-    let mut bytes = line.bytes().enumerate();
-    while let Some((index, byte)) = bytes.next() {
-        if byte == b'\\' {
-            bytes.next();
-            continue;
-        }
+    for (index, byte) in line.bytes().enumerate() {
         if byte == b'"' {
             in_quotes = !in_quotes;
         } else if byte == b':' && !in_quotes {
@@ -376,27 +371,33 @@ fn value_separator(line: &str) -> Option<usize> {
 /// exactly is rejected rather than rewritten.
 fn validate_rrule_numbers(text: &str) -> Result<(), IngestError> {
     for line in unfold_content_lines(text) {
-        let Some(colon) = value_separator(&line) else {
-            continue;
-        };
-        let (before, after) = line.split_at(colon);
-        let unescaped_before = before.replace('\\', "");
-        let name = unescaped_before.split(';').next().unwrap_or("").trim();
+        let raw_name = &line[..line.find([';', ':']).unwrap_or(line.len())];
+        let name = name_characters(raw_name);
         if !name.eq_ignore_ascii_case("RRULE") {
             continue;
         }
-        if line.contains('\\') {
+        if name != raw_name || line.contains('\\') {
             return Err(IngestError::Malformed(
-                "RRULE must not contain backslash escapes".to_string(),
+                "RRULE line must have a plain name and no escapes".to_string(),
             ));
         }
-        let value = &after[1..];
+        let Some(colon) = value_separator(&line) else {
+            return Err(IngestError::Malformed(
+                "RRULE line has no value".to_string(),
+            ));
+        };
+        let value = &line[colon + 1..];
         let mut interval_seen = false;
         let mut count_seen = false;
         for part in value.split(';') {
             let Some((raw_key, raw_value)) = part.split_once('=') else {
                 continue;
             };
+            if name_characters(raw_key) != raw_key.trim() {
+                return Err(IngestError::Malformed(format!(
+                    "RRULE has a malformed key {raw_key}"
+                )));
+            }
             let key = raw_key.trim().to_ascii_uppercase();
             let number = raw_value.trim();
             let valid = match key.as_str() {
@@ -449,6 +450,12 @@ fn validate_rrule_numbers(text: &str) -> Result<(), IngestError> {
         }
     }
     Ok(())
+}
+
+fn name_characters(text: &str) -> String {
+    text.chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .collect()
 }
 
 /// Plain digits, the shape the parser preserves unchanged for an unsigned
@@ -1003,13 +1010,20 @@ fn feed_time_from_partial(
         .find(|param| matches!(param.name, ICalendarParameterName::Tzid))
     {
         Some(param) => match &param.value {
-            ICalendarParameterValue::Text(name) => {
-                let zone = resolver.resolve(name).and_then(|resolved| match resolved {
-                    calcard::common::timezone::Tz::Tz(zone) => Some(zone),
-                    _ => None,
-                });
-                Some(zone.ok_or_else(|| IngestError::UnknownTimeZone(name.clone()))?)
-            }
+            ICalendarParameterValue::Text(name) => Some(match name.parse::<Tz>() {
+                Ok(zone) => zone,
+                Err(_) => resolver
+                    .resolve(name)
+                    .and_then(|resolved| match resolved {
+                        calcard::common::timezone::Tz::Tz(zone)
+                            if !zone.name().starts_with("Etc/") =>
+                        {
+                            Some(zone)
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| IngestError::UnknownTimeZone(name.clone()))?,
+            }),
             _ => return Err(IngestError::InvalidDateTime),
         },
         None => None,
