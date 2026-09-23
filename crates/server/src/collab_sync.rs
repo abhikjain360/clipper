@@ -1,4 +1,4 @@
-//! Live collaborative document sync (Phase 3a).
+//! Live collaborative document sync.
 //!
 //! Collab docs are the one server-visible object kind: their content is a shared
 //! Y-CRDT document that the server relays between connected clients and persists

@@ -18,6 +18,97 @@ body {
         sans-serif;
 }
 
+.event-card {
+    cursor: pointer;
+}
+.event-card:hover {
+    border-color: #526171 !important;
+}
+.event-card-title {
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    padding: 0;
+    text-align: left;
+    cursor: pointer;
+}
+.event-card-title:focus-visible {
+    outline: 2px solid #8bbcff;
+    outline-offset: 4px;
+}
+.calendar-now {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: #ff625e;
+    z-index: 5;
+    pointer-events: none;
+}
+.calendar-now::before {
+    content: "";
+    position: absolute;
+    left: -4px;
+    top: -3px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ff625e;
+}
+.month-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    min-width: 700px;
+}
+.month-heading {
+    padding: 8px;
+    text-align: center;
+    color: #8b949e;
+}
+.month-cell {
+    min-width: 0;
+    min-height: 120px;
+    padding: 6px;
+    border: 1px solid #252b31;
+}
+.month-cell[data-outside="true"] {
+    background: #101214;
+}
+.month-date,
+.month-event,
+.month-actual {
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+}
+.month-date {
+    padding: 4px 8px;
+    background: transparent;
+    border-radius: 4px;
+}
+.month-date[aria-current="date"] {
+    background: #245c92;
+}
+.month-event {
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border-radius: 3px;
+    margin-top: 3px;
+    padding: 4px;
+    font-size: 12px;
+}
+.month-actual {
+    background: transparent;
+    color: #7bd88f;
+    font-size: 12px;
+    margin-top: 6px;
+}
+
 button,
 input,
 textarea,
@@ -27,4 +118,226 @@ select {
 
 * {
     box-sizing: border-box;
+}
+
+.schedule-workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 16px var(--sidebar-width, 360px);
+    gap: 0;
+    align-items: start;
+}
+
+.schedule-divider {
+    align-self: stretch;
+    min-height: 120px;
+    cursor: col-resize;
+    touch-action: none;
+    position: relative;
+}
+.schedule-divider::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 7px;
+    width: 2px;
+    background: #303940;
+    border-radius: 2px;
+}
+.schedule-divider:hover::after,
+.schedule-divider:focus-visible::after,
+.is-resizing .schedule-divider::after {
+    background: #8bbcff;
+}
+.schedule-divider:focus-visible {
+    outline: 1px solid #8bbcff;
+    outline-offset: -2px;
+}
+.is-resizing {
+    user-select: none;
+    cursor: col-resize;
+}
+.schedule-workspace > *,
+.schedule-sidebar > * {
+    min-width: 0;
+}
+
+.schedule-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 1100px) {
+    .schedule-workspace {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 12px;
+    }
+    .schedule-divider {
+        display: none;
+    }
+}
+
+.app-shell {
+    min-height: 100dvh;
+    padding-left: 68px;
+}
+.app-shell.nav-expanded {
+    padding-left: 220px;
+}
+.desktop-navigation {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 68px;
+    padding: 10px 8px;
+    background: #171a1d;
+    border-right: 1px solid #303940;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    z-index: 20;
+    overflow-y: auto;
+}
+.nav-expanded .desktop-navigation {
+    width: 220px;
+}
+.nav-destinations,
+.nav-bottom {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.nav-bottom {
+    margin-top: auto;
+    padding-top: 24px;
+}
+.nav-brand {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 12px 0 4px;
+    font-size: 20px;
+}
+.app-main {
+    min-width: 0;
+}
+.mobile-nav-toggle {
+    display: none;
+}
+.mobile-nav-dialog {
+    padding: 0;
+    border: 0;
+    margin: 0;
+    height: 100dvh;
+    max-height: 100dvh;
+    width: min(280px, 85vw);
+    max-width: 85vw;
+    background: #171a1d;
+    color: #f2f5f7;
+}
+.mobile-nav-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.6);
+}
+.mobile-navigation {
+    min-height: 100%;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+@media (max-width: 700px) {
+    .app-shell,
+    .app-shell.nav-expanded {
+        padding-left: 0;
+    }
+    .desktop-navigation {
+        display: none;
+    }
+    .app-main {
+        padding-top: 48px;
+    }
+    .mobile-nav-toggle {
+        display: flex;
+        position: absolute;
+        top: 6px;
+        left: 12px;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 36px;
+        border: 1px solid #303940;
+        border-radius: 6px;
+        background: #171a1d;
+        color: #f2f5f7;
+    }
+}
+.mobile-nav-dialog:not([open]) {
+    display: none;
+}
+.app-shell:not(.nav-expanded) .desktop-navigation button {
+    padding-left: 0;
+    padding-right: 0;
+}
+.desktop-navigation button svg {
+    flex-shrink: 0;
+}
+
+.library-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+    gap: 16px;
+    padding-bottom: 16px;
+    align-items: stretch;
+}
+.library-grid .library-card {
+    min-width: 0;
+    min-height: 160px;
+}
+.library-grid .library-card > div {
+    flex-direction: column;
+    align-items: stretch;
+    height: 100%;
+}
+.library-grid .library-card > div > :first-child {
+    flex: 1;
+    min-width: 0;
+}
+.library-grid .library-card > div > :last-child:not(:first-child) {
+    align-self: flex-end;
+    flex-shrink: 0;
+}
+.library-grid .library-card * {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.library-grid .library-card svg {
+    flex-shrink: 0;
+}
+.library-grid .library-card:hover {
+    border-color: #44515c !important;
+}
+
+.nav-collapse-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    align-self: flex-start;
+    width: 44px;
+    height: 40px;
+    flex-shrink: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #9aa4ad;
+    cursor: pointer;
+}
+.nav-collapse-toggle:hover {
+    color: #f2f5f7;
+    background: #252b31;
+}
+.nav-collapse-toggle:focus-visible {
+    outline: 2px solid #8bbcff;
 }

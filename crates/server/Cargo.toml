@@ -21,6 +21,7 @@ futures-util.workspace = true
 garde.workspace = true
 governor = "0.10.4"
 ipnet = { version = "2.12.0", features = ["serde"] }
+libc.workspace = true
 postcard.workspace = true
 rand.workspace = true
 rpassword = "7.5.4"

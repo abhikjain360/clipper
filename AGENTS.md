@@ -1,5 +1,16 @@
 # Agent Notes
 
+- Always use built in harness commands for reading and writing instead of bash/python, whenever possible.
+- **Do not talk in prose.** Talk in simple English, your explanations should follow linearly/serially, or at least like a waterfall, not requiring cyclic back-and-forth of reading paragraphs or sentences to understand. No mannered prose. If there's a literal phrase available, please use it. The same applies for comments.
+
+## Scheduler status
+
+- For outstanding scheduler work and undecided behavior, start with
+  `docs/scheduler-backlog.md`. Keep it updated when scheduler work lands or a
+  product decision changes. `docs/scheduler-review.md` holds QA evidence and
+  `docs/schedule-plan.md` holds the detailed design/history.
+  `docs/calendar-imports.md` specifies import snapshots, replacement and deletion.
+
 ## Environment
 
 - Use the project environment from the checked-in `.envrc`. The shell hooks
@@ -151,8 +162,10 @@
 - Collab docs are the one server-visible object kind, and their metadata follows
   from that: `collab_docs.title` is a plaintext column so the doc list can render
   titles without a Y-sync WebSocket per row, and `share_url` is built server-side
-  from `server.public_web_url`. Renames emit an `event_log` `updated` event —
-  collab is the only kind that admits one. Collab objects are excluded from
+  from `server.public_web_url`. Renames emit an `event_log` `updated` event;
+  encrypted objects also emit `updated` when a visible revision replaces the
+  head. Their revisions are immutable, signed, and parent-linked; deletion
+  appends a tombstone, while HTTP DELETE is irreversible purge. Collab objects are excluded from
   `GET /api/objects`, so `GET /api/collab-docs` is their only reconciliation
   source; the client snapshots it alongside files and clipboard.
 - Auth is multi-user: access keys are one-time registration invites stored as

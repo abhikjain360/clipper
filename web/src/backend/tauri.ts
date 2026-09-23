@@ -1,10 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+    ActualView,
     AppState,
     ClipboardPayload,
     ClipperBackend,
     CollabItem,
     DeviceInfo,
+    IngestReport,
+    OccurrenceView,
+    ScheduleItem,
 } from "@clipper/shared";
 
 type RawClipboardPayload = {
@@ -44,6 +48,22 @@ export function tauriBackend(): ClipperBackend {
         downloadFileToDialog: (fileId, defaultFilename) =>
             invoke<boolean>("download_file_to_dialog", { fileId, defaultFilename }),
         deleteFile: (fileId) => invoke<void>("delete_file", { fileId }),
+        startActual: (planContext) =>
+            invoke<string>("start_actual", {
+                planContext: planContext ?? null,
+            }),
+        stopActual: (objectId) => invoke<string>("stop_actual", { objectId }),
+        actualsBetween: (from, to) => invoke<ActualView[]>("actuals_between", { from, to }),
+        addCalendarSource: (name, url) => invoke<string>("add_calendar_source", { name, url }),
+        syncCalendarSource: (objectId) =>
+            invoke<IngestReport>("sync_calendar_source", { objectId }),
+        createScheduleItem: (item: ScheduleItem) =>
+            invoke<string>("create_schedule_item", { item }),
+        updateScheduleItem: (objectId, item, expectedRevision) =>
+            invoke<string>("update_schedule_item", { objectId, item, expectedRevision }),
+        deleteScheduleObject: (objectId) => invoke<void>("delete_schedule_object", { objectId }),
+        expandSchedule: (from, to, observerZone) =>
+            invoke<OccurrenceView[]>("expand_schedule", { from, to, observerZone }),
         createCollabDoc: () => invoke<CollabItem>("create_collab_doc"),
         deleteCollabDoc: (objectId) => invoke<void>("delete_collab_doc", { objectId }),
         renameCollabDoc: (objectId, title) =>

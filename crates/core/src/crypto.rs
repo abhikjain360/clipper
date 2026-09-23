@@ -8,8 +8,8 @@ pub use clipper_api_types::{
     ARGON2_MIN_P_COST, ARGON2_MIN_T_COST, Argon2Params, DEVICE_LOGIN_PROOF_CHALLENGE_BYTES,
     DEVICE_LOGIN_PROOF_SIGNATURE_BYTES, DEVICE_LOGIN_PROOF_VERSION,
     DEVICE_SIGNING_PUBLIC_KEY_BYTES, DEVICE_SIGNING_SECRET_KEY_BYTES, DeviceLoginProofBodyV1,
-    OBJECT_ENVELOPE_SIGNATURE_BYTES, ObjectEnvelopeBodyV1, ObjectEnvelopeOperation,
-    ObjectEnvelopeV1, ObjectPayloadId,
+    OBJECT_ENVELOPE_SIGNATURE_BYTES, OBJECT_ENVELOPE_VERSION, ObjectEnvelope, ObjectEnvelopeBody,
+    ObjectEnvelopeOperation, ObjectEnvelopePayload, ObjectPayloadId,
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
@@ -33,12 +33,47 @@ const ACCESS_KEY_HASH_PARAMS_DEFAULT: Argon2Params = Argon2Params {
     p_cost: 1,
 };
 
+/// OPAQUE key-stretching cost, in kibibytes of memory.
+pub const OPAQUE_KSF_M_COST_KIB: u32 = 19 * 1024;
+/// OPAQUE key-stretching cost, in iterations.
+pub const OPAQUE_KSF_T_COST: u32 = 2;
+/// OPAQUE key-stretching degree of parallelism.
+pub const OPAQUE_KSF_P_COST: u32 = 1;
+
 struct ClipperOpaqueCipherSuite;
 
 impl opaque_ke::CipherSuite for ClipperOpaqueCipherSuite {
     type OprfCs = opaque_ke::Ristretto255;
     type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, sha2::Sha512>;
     type Ksf = opaque_ke::argon2::Argon2<'static>;
+}
+
+/// Argon2id parameters for the OPAQUE key stretching function.
+///
+/// These are the `argon2` crate's current defaults, written out so they are
+/// pinned rather than inherited. The cost feeds `rwd`, so a dependency bump
+/// that moved the default would silently change every derived key and break
+/// logins. Changing these values requires re-registration.
+fn opaque_ksf_params() -> Result<opaque_ke::argon2::Params, CryptoError> {
+    // The output length stays unset. The KSF hashes the OPRF output, which is
+    // 64 bytes under SHA-512; a pinned 32-byte length would reject it.
+    opaque_ke::argon2::Params::new(
+        OPAQUE_KSF_M_COST_KIB,
+        OPAQUE_KSF_T_COST,
+        OPAQUE_KSF_P_COST,
+        None,
+    )
+    .map_err(|e| CryptoError::Kdf(e.to_string()))
+}
+
+/// Build the OPAQUE key stretching function. Registration and login must pass
+/// the same one, or their `rwd` values differ.
+fn opaque_ksf() -> Result<opaque_ke::argon2::Argon2<'static>, CryptoError> {
+    Ok(opaque_ke::argon2::Argon2::new(
+        opaque_ke::argon2::Algorithm::Argon2id,
+        opaque_ke::argon2::Version::V0x13,
+        opaque_ksf_params()?,
+    ))
 }
 
 pub struct OpaqueRegistrationFinish {
@@ -107,8 +142,21 @@ pub fn device_signing_public_key(
 }
 
 /// Canonical bytes signed by device keys for object provenance.
-pub fn object_envelope_body_bytes(body: &ObjectEnvelopeBodyV1) -> Result<Vec<u8>, CryptoError> {
+pub fn object_envelope_body_bytes(body: &ObjectEnvelopeBody) -> Result<Vec<u8>, CryptoError> {
     postcard::to_allocvec(body).map_err(|e| CryptoError::Signature(format!("postcard: {e}")))
+}
+
+/// SHA-256 of a revision's canonical body bytes, which its child carries as
+/// `parent_hash`.
+///
+/// Taken over the body, not the signed envelope. The body is the canonical
+/// form both the signature and the AAD are computed over, and Ed25519 is
+/// deterministic, so hashing the signature would add a second representation
+/// of the same fact.
+pub fn object_envelope_parent_hash(
+    parent: &ObjectEnvelopeBody,
+) -> Result<[u8; SHA256_BYTES], CryptoError> {
+    Ok(sha256(&object_envelope_body_bytes(parent)?))
 }
 
 /// Canonical bytes signed by device keys for login proof-of-possession.
@@ -118,14 +166,27 @@ pub fn device_login_proof_body_bytes(
     postcard::to_allocvec(body).map_err(|e| CryptoError::Signature(format!("postcard: {e}")))
 }
 
+/// Prefix the canonical body bytes with their message-type domain.
+///
+/// One device key signs both object envelopes and login proofs. The domain
+/// makes the two signed messages disjoint, so a signature over one message
+/// type can never be presented as a signature over the other.
+fn domain_separated(domain: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(domain.len() + body.len());
+    message.extend_from_slice(domain);
+    message.extend_from_slice(body);
+    message
+}
+
 /// Sign a versioned object envelope body with the source device key.
 pub fn sign_object_envelope_body(
     secret_key: &[u8; DEVICE_SIGNING_SECRET_KEY_BYTES],
-    body: &ObjectEnvelopeBodyV1,
+    body: &ObjectEnvelopeBody,
 ) -> Result<Vec<u8>, CryptoError> {
     let signing_key = SigningKey::from_bytes(secret_key);
     let body = object_envelope_body_bytes(body)?;
-    Ok(signing_key.sign(&body).to_bytes().to_vec())
+    let message = domain_separated(SIGN_DOMAIN_OBJECT_ENVELOPE_V1, &body);
+    Ok(signing_key.sign(&message).to_bytes().to_vec())
 }
 
 /// Sign a login proof body with the local device key.
@@ -135,16 +196,23 @@ pub fn sign_device_login_proof_body(
 ) -> Result<Vec<u8>, CryptoError> {
     let signing_key = SigningKey::from_bytes(secret_key);
     let body = device_login_proof_body_bytes(body)?;
-    Ok(signing_key.sign(&body).to_bytes().to_vec())
+    let message = domain_separated(SIGN_DOMAIN_DEVICE_LOGIN_PROOF_V1, &body);
+    Ok(signing_key.sign(&message).to_bytes().to_vec())
 }
 
 /// Verify the source device signature over an object envelope.
 pub fn verify_object_envelope_signature(
     public_key: &[u8],
-    envelope: &ObjectEnvelopeV1,
+    envelope: &ObjectEnvelope,
 ) -> Result<(), CryptoError> {
     let body = object_envelope_body_bytes(&envelope.body)?;
-    verify_device_signature(public_key, &body, &envelope.signature, "object signature")
+    let message = domain_separated(SIGN_DOMAIN_OBJECT_ENVELOPE_V1, &body);
+    verify_device_signature(
+        public_key,
+        &message,
+        &envelope.signature,
+        "object signature",
+    )
 }
 
 /// Verify a device login proof signature.
@@ -154,7 +222,8 @@ pub fn verify_device_login_proof_signature(
     signature: &[u8],
 ) -> Result<(), CryptoError> {
     let body = device_login_proof_body_bytes(body)?;
-    verify_device_signature(public_key, &body, signature, "device login proof")
+    let message = domain_separated(SIGN_DOMAIN_DEVICE_LOGIN_PROOF_V1, &body);
+    verify_device_signature(public_key, &message, signature, "device login proof")
 }
 
 fn verify_device_signature(
@@ -178,45 +247,102 @@ fn verify_device_signature(
 }
 
 /// Canonical AAD for object metadata encryption.
-pub fn object_meta_aad_v1(body: &ObjectEnvelopeBodyV1) -> Result<Vec<u8>, CryptoError> {
-    object_aad_v1(body, None)
+pub fn object_meta_aad(body: &ObjectEnvelopeBody) -> Result<Vec<u8>, CryptoError> {
+    object_aad(body, None)
 }
 
 /// Canonical AAD for an object payload encryption.
-pub fn object_payload_aad_v1(
-    body: &ObjectEnvelopeBodyV1,
+pub fn object_payload_aad(
+    body: &ObjectEnvelopeBody,
     payload_id: ObjectPayloadId,
 ) -> Result<Vec<u8>, CryptoError> {
-    object_aad_v1(body, Some(payload_id))
+    object_aad(body, Some(payload_id))
 }
 
-fn object_aad_v1(
-    body: &ObjectEnvelopeBodyV1,
+/// Project an envelope body onto the bytes that authenticate its ciphertexts.
+///
+/// The body is destructured exhaustively on purpose. Leaving a field out of
+/// this projection is not a compile error anywhere else, and it is not a
+/// decryption error either: the ciphertext still decrypts and the signature
+/// still verifies. The only symptom is that a ciphertext becomes replayable
+/// into any context differing by exactly the missing field. Adding a field to
+/// `ObjectEnvelopeBody` must therefore break this line, so that binding it is
+/// a decision rather than an omission. `mod object_aad` in the tests below is
+/// the other half of that guard, asserting field by field which ones made it
+/// in.
+fn object_aad(
+    body: &ObjectEnvelopeBody,
     payload_id: Option<ObjectPayloadId>,
 ) -> Result<Vec<u8>, CryptoError> {
-    let aad = ObjectAadV1 {
+    let ObjectEnvelopeBody {
+        object_id,
+        object_type,
+        envelope_version,
+        revision,
+        parent_hash,
+        source_device_id,
+        created_at,
+        operation,
+        payloads,
+        // Unbound, deliberately. A nonce is an AEAD input in its own right and
+        // is already covered by the tag, so binding it to the AAD of the very
+        // ciphertext it produced adds nothing.
+        meta_nonce: _,
+        // Unbound of necessity: this is a hash *of* the ciphertext that this
+        // AAD is needed to produce, so binding it would be circular. The
+        // signature over the body covers it instead.
+        sha256_meta_ciphertext: _,
+    } = body;
+
+    let aad = ObjectAad {
         domain: match payload_id {
             Some(_) => "clipper:object-payload-aad:v1",
             None => "clipper:object-meta-aad:v1",
         },
-        object_id: body.object_id,
-        object_type: body.object_type,
-        object_version: body.object_version,
-        source_device_id: body.source_device_id,
-        created_at: body.created_at.as_str(),
-        operation: body.operation,
-        payload_ids: body.payloads.iter().map(|payload| payload.id).collect(),
+        object_id: *object_id,
+        object_type: *object_type,
+        envelope_version: *envelope_version,
+        // Bound so a ciphertext cannot be replayed at a different point in the
+        // chain: without this, revision 3's sealed meta would open as revision
+        // 9's, which is exactly the rollback that revision authentication must detect.
+        revision: *revision,
+        parent_hash: *parent_hash,
+        source_device_id: *source_device_id,
+        created_at: created_at.as_str(),
+        operation: *operation,
+        // The whole payload *set* is bound, not just the one being encrypted,
+        // so a payload cannot be added to or dropped from a signed envelope
+        // without invalidating every ciphertext in it.
+        payload_ids: payloads
+            .iter()
+            .map(|payload| {
+                // Same rule as above, one level down.
+                let ObjectEnvelopePayload {
+                    id,
+                    // Unbound for the reasons given above: a nonce adds
+                    // nothing, and a digest of the ciphertext is circular.
+                    nonce: _,
+                    sha256_ciphertext: _,
+                    // Unbound: a lie about the size cannot survive the tag over
+                    // the actual bytes, and the body signature covers it.
+                    ciphertext_size: _,
+                } = payload;
+                *id
+            })
+            .collect(),
         payload_id,
     };
     postcard::to_allocvec(&aad).map_err(|e| CryptoError::Encrypt(format!("aad: {e}")))
 }
 
 #[derive(serde::Serialize)]
-struct ObjectAadV1<'a> {
+struct ObjectAad<'a> {
     domain: &'static str,
     object_id: clipper_api_types::ObjectId,
     object_type: clipper_api_types::ObjectKind,
-    object_version: u64,
+    envelope_version: u64,
+    revision: u64,
+    parent_hash: Option<[u8; SHA256_BYTES]>,
     source_device_id: clipper_api_types::DeviceId,
     created_at: &'a str,
     operation: ObjectEnvelopeOperation,
@@ -349,7 +475,7 @@ pub fn opaque_register(
 /// Sample a fresh `opaque_server_setup = oprf_seed ‖ sk_S ‖ fake_sk` for one
 /// user and return it serialized. See `docs/opaque.md`.
 pub fn opaque_new_server_setup() -> Vec<u8> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = opaque_rand::rngs::OsRng;
     opaque_ke::ServerSetup::<ClipperOpaqueCipherSuite>::new(&mut rng)
         .serialize()
         .to_vec()
@@ -361,16 +487,23 @@ pub fn opaque_new_server_setup() -> Vec<u8> {
 /// Picks blind `r ← Z_q`, computes `M = r · H(pw)`, returns
 /// `(RegistrationRequest = M, state_C)`. `state_C` carries `(r, pw, ...)`
 /// and must be held until `opaque_client_register_finish`.
+///
+/// The serialized state is secret. It holds both `r` and `M`, so anyone who
+/// reads it recovers `H(pw) = r⁻¹ · M` and can run an offline dictionary
+/// attack with no Argon2 cost per guess. It is returned in `Zeroizing` so the
+/// copy is wiped when the caller drops it.
 /// See `docs/opaque.md`.
-pub fn opaque_client_register_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+pub fn opaque_client_register_start(
+    passphrase: &[u8],
+) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CryptoError> {
+    let mut rng = opaque_rand::rngs::OsRng;
     let start =
         opaque_ke::ClientRegistration::<ClipperOpaqueCipherSuite>::start(&mut rng, passphrase)
             .map_err(opaque_error)?;
 
     Ok((
         start.message.serialize().to_vec(),
-        start.state.serialize().to_vec(),
+        Zeroizing::new(start.state.serialize().to_vec()),
     ))
 }
 
@@ -387,7 +520,7 @@ pub fn opaque_client_register_finish(
     passphrase: &[u8],
     registration_response: &[u8],
 ) -> Result<OpaqueRegistrationFinish, CryptoError> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = opaque_rand::rngs::OsRng;
     let client_registration =
         opaque_ke::ClientRegistration::<ClipperOpaqueCipherSuite>::deserialize(client_state)
             .map_err(opaque_error)?;
@@ -395,12 +528,16 @@ pub fn opaque_client_register_finish(
         registration_response,
     )
     .map_err(opaque_error)?;
+    let ksf = opaque_ksf()?;
     let finish = client_registration
         .finish(
             &mut rng,
             passphrase,
             response,
-            opaque_ke::ClientRegistrationFinishParameters::default(),
+            opaque_ke::ClientRegistrationFinishParameters {
+                ksf: Some(&ksf),
+                ..Default::default()
+            },
         )
         .map_err(opaque_error)?;
 
@@ -461,15 +598,22 @@ pub fn opaque_server_register_finish(registration_upload: &[u8]) -> Result<Vec<u
 /// `nonce_C ← random`; returns
 /// `CredentialRequest = M ‖ ke1` where `M = r · H(pw)` and
 /// `ke1 = nonce_C ‖ X_C`, plus `state_C = (r, pw, x_C, nonce_C, ke1)`.
+///
+/// The serialized state is secret, for the same reason as in
+/// `opaque_client_register_start`: it holds `r` and `M`, which together give
+/// `H(pw)` and an Argon2-free offline dictionary oracle. It is returned in
+/// `Zeroizing` so the copy is wiped when the caller drops it.
 /// See `docs/opaque.md`.
-pub fn opaque_client_login_start(passphrase: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+pub fn opaque_client_login_start(
+    passphrase: &[u8],
+) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), CryptoError> {
+    let mut rng = opaque_rand::rngs::OsRng;
     let start = opaque_ke::ClientLogin::<ClipperOpaqueCipherSuite>::start(&mut rng, passphrase)
         .map_err(opaque_error)?;
 
     Ok((
         start.message.serialize().to_vec(),
-        start.state.serialize().to_vec(),
+        Zeroizing::new(start.state.serialize().to_vec()),
     ))
 }
 
@@ -492,19 +636,23 @@ pub fn opaque_client_login_finish(
     passphrase: &[u8],
     credential_response: &[u8],
 ) -> Result<OpaqueLoginFinish, CryptoError> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = opaque_rand::rngs::OsRng;
     let client_login =
         opaque_ke::ClientLogin::<ClipperOpaqueCipherSuite>::deserialize(client_state)
             .map_err(opaque_error)?;
     let response =
         opaque_ke::CredentialResponse::<ClipperOpaqueCipherSuite>::deserialize(credential_response)
             .map_err(opaque_error)?;
+    let ksf = opaque_ksf()?;
     let finish = client_login
         .finish(
             &mut rng,
             passphrase,
             response,
-            opaque_ke::ClientLoginFinishParameters::default(),
+            opaque_ke::ClientLoginFinishParameters {
+                ksf: Some(&ksf),
+                ..Default::default()
+            },
         )
         .map_err(opaque_error)?;
 
@@ -539,7 +687,7 @@ pub fn opaque_server_login_start(
     credential_request: &[u8],
     credential_identifier: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-    let mut rng = opaque_ke::rand::rngs::OsRng;
+    let mut rng = opaque_rand::rngs::OsRng;
     let server_setup =
         opaque_ke::ServerSetup::<ClipperOpaqueCipherSuite>::deserialize(server_setup)
             .map_err(opaque_error)?;
@@ -668,6 +816,15 @@ pub enum CryptoError {
     #[error("OPAQUE error: {0}")]
     Opaque(String),
 }
+
+// ── Device signature domains ──
+//
+// One Ed25519 device key signs two message types. Each signed message is the
+// domain string followed by the canonical body bytes, so the two sets of
+// signed messages cannot overlap. The strings differ from their first
+// distinguishing byte, so no prefix of one is a prefix of the other.
+pub const SIGN_DOMAIN_OBJECT_ENVELOPE_V1: &[u8] = b"clipper:object-envelope:v1";
+pub const SIGN_DOMAIN_DEVICE_LOGIN_PROOF_V1: &[u8] = b"clipper:device-login-proof:v1";
 
 // ── Associated data constants ──
 pub const AAD_CLIPBOARD_V1: &[u8] = b"clipper:clipboard:v1";
@@ -865,6 +1022,24 @@ mod tests {
         assert_ne!(&*key1, &*key2);
     }
 
+    /// The OPAQUE key stretching cost is part of the credential. Registration
+    /// and login must use the same values, and changing them invalidates every
+    /// stored password file, so they are asserted rather than inherited from a
+    /// dependency default.
+    #[test]
+    fn test_opaque_ksf_parameters_are_pinned() {
+        assert_eq!(OPAQUE_KSF_M_COST_KIB, 19 * 1024);
+        assert_eq!(OPAQUE_KSF_T_COST, 2);
+        assert_eq!(OPAQUE_KSF_P_COST, 1);
+
+        let params = opaque_ksf_params().expect("ksf params");
+        assert_eq!(params.m_cost(), OPAQUE_KSF_M_COST_KIB);
+        assert_eq!(params.t_cost(), OPAQUE_KSF_T_COST);
+        assert_eq!(params.p_cost(), OPAQUE_KSF_P_COST);
+        // The KSF hashes the 64-byte OPRF output, so no output length is set.
+        assert_eq!(params.output_len(), None);
+    }
+
     const TEST_CREDENTIAL_IDENTIFIER: &[u8] = b"clipper:test:user";
 
     #[test]
@@ -939,5 +1114,426 @@ mod tests {
         .unwrap();
 
         assert!(opaque_client_login_finish(&client_state, b"wrong password", &response).is_err());
+    }
+}
+
+/// Guards for the envelope AAD projection.
+///
+/// `object_aad` decides which parts of an envelope body authenticate its
+/// ciphertexts. That decision has no other enforcement: a field left out still
+/// encrypts, still decrypts, and still verifies, and the only consequence is
+/// that a ciphertext can be lifted into a context differing by exactly the
+/// missing field. Nothing turns red.
+///
+/// So it is made to turn red here. Two tables below name every field and which
+/// side of the line it falls on, and the tests exercise both directions —
+/// bound fields must break decryption, unbound fields must leave the AAD
+/// byte-identical. Between them and the exhaustive destructure in
+/// `object_aad`, adding a field to the envelope cannot silently skip the
+/// question.
+#[cfg(test)]
+mod object_aad {
+    use std::str::FromStr;
+
+    use clipper_api_types::{DeviceId, ObjectId, ObjectKind};
+
+    use super::*;
+
+    const KEY: [u8; 32] = [7u8; 32];
+
+    fn uuid_str(tag: u64) -> String {
+        format!("00000000-0000-4000-8000-{tag:012x}")
+    }
+
+    fn payload(tag: u64) -> ObjectEnvelopePayload {
+        ObjectEnvelopePayload {
+            id: ObjectPayloadId::from_str(&uuid_str(tag)).expect("payload id"),
+            nonce: vec![tag as u8; XCHACHA20_NONCE_BYTES],
+            ciphertext_size: 64,
+            sha256_ciphertext: vec![tag as u8; SHA256_BYTES],
+        }
+    }
+
+    /// Written as a full struct literal, without `..`, for the same reason
+    /// `object_aad` destructures: a new field on the body has to be given a
+    /// value here, which lands whoever added it in this file, in front of the
+    /// two tables below.
+    fn body() -> ObjectEnvelopeBody {
+        ObjectEnvelopeBody {
+            object_id: ObjectId::from_str(&uuid_str(1)).expect("object id"),
+            object_type: ObjectKind::Schedule,
+            envelope_version: OBJECT_ENVELOPE_VERSION,
+            revision: 4,
+            parent_hash: Some([5; SHA256_BYTES]),
+            source_device_id: DeviceId::from_str(&uuid_str(2)).expect("device id"),
+            created_at: "2026-09-08T10:00:00Z".to_string(),
+            operation: ObjectEnvelopeOperation::Revise,
+            meta_nonce: vec![3; XCHACHA20_NONCE_BYTES],
+            sha256_meta_ciphertext: vec![4; SHA256_BYTES],
+            payloads: vec![payload(0x10), payload(0x11)],
+        }
+    }
+
+    type Mutation = (&'static str, fn(&mut ObjectEnvelopeBody));
+
+    /// Fields the AAD must bind, each with a change to it. A ciphertext sealed
+    /// under the original body must not open under any of these.
+    fn bound_fields() -> Vec<Mutation> {
+        vec![
+            ("object_id", |body| {
+                body.object_id = ObjectId::from_str(&uuid_str(0xdead)).expect("object id");
+            }),
+            ("object_type", |body| body.object_type = ObjectKind::File),
+            ("envelope_version", |body| body.envelope_version += 1),
+            ("source_device_id", |body| {
+                body.source_device_id = DeviceId::from_str(&uuid_str(0xbeef)).expect("device id");
+            }),
+            ("created_at", |body| {
+                body.created_at = "2026-09-08T10:00:01Z".to_string();
+            }),
+            ("revision", |body| body.revision += 1),
+            ("parent_hash", |body| {
+                body.parent_hash = Some([0xdd; SHA256_BYTES]);
+            }),
+            ("parent_hash presence", |body| {
+                body.revision = 1;
+                body.parent_hash = None;
+                body.operation = ObjectEnvelopeOperation::Create;
+            }),
+            ("operation", |body| {
+                body.operation = ObjectEnvelopeOperation::Delete;
+            }),
+            ("payloads[..].id", |body| {
+                body.payloads[0].id =
+                    ObjectPayloadId::from_str(&uuid_str(0xfeed)).expect("payload id");
+            }),
+            ("payloads.len()", |body| body.payloads.push(payload(0x12))),
+        ]
+    }
+
+    /// Fields deliberately left out of the projection; the reasoning is on
+    /// `object_aad`. Changing one must leave the AAD byte-identical. A
+    /// failure here means someone bound a field — possibly correctly, but it
+    /// should be a decision, and the comment explaining it belongs next to the
+    /// destructure.
+    fn unbound_fields() -> Vec<Mutation> {
+        vec![
+            ("meta_nonce", |body| {
+                body.meta_nonce = vec![0xaa; XCHACHA20_NONCE_BYTES];
+            }),
+            ("sha256_meta_ciphertext", |body| {
+                body.sha256_meta_ciphertext = vec![0xaa; SHA256_BYTES];
+            }),
+            ("payloads[..].nonce", |body| {
+                body.payloads[0].nonce = vec![0xaa; XCHACHA20_NONCE_BYTES];
+            }),
+            ("payloads[..].ciphertext_size", |body| {
+                body.payloads[0].ciphertext_size += 1;
+            }),
+            ("payloads[..].sha256_ciphertext", |body| {
+                body.payloads[0].sha256_ciphertext = vec![0xaa; SHA256_BYTES];
+            }),
+        ]
+    }
+
+    #[test]
+    fn meta_ciphertext_will_not_open_under_a_changed_bound_field() {
+        let aad = object_meta_aad(&body()).expect("meta aad");
+        let (nonce, ciphertext) = encrypt(&KEY, b"encrypted meta", &aad).expect("encrypt");
+
+        for (field, mutate) in bound_fields() {
+            let mut altered = body();
+            mutate(&mut altered);
+            let altered_aad = object_meta_aad(&altered).expect("meta aad");
+
+            assert_ne!(aad, altered_aad, "{field} is missing from the meta AAD");
+            assert!(
+                decrypt(&KEY, &nonce, &ciphertext, &altered_aad).is_err(),
+                "meta ciphertext opened after {field} changed, so it is replayable across it",
+            );
+        }
+    }
+
+    #[test]
+    fn payload_ciphertext_will_not_open_under_a_changed_bound_field() {
+        let target = body().payloads[0].id;
+        let aad = object_payload_aad(&body(), target).expect("payload aad");
+        let (nonce, ciphertext) = encrypt(&KEY, b"encrypted payload", &aad).expect("encrypt");
+
+        for (field, mutate) in bound_fields() {
+            let mut altered = body();
+            mutate(&mut altered);
+            // Mutating the id under test moves the target too; the point is
+            // that the surrounding envelope changed, so re-derive against the
+            // payload the altered body actually has in that slot.
+            let altered_target = altered.payloads[0].id;
+            let altered_aad = object_payload_aad(&altered, altered_target).expect("payload aad");
+
+            assert_ne!(aad, altered_aad, "{field} is missing from the payload AAD");
+            assert!(
+                decrypt(&KEY, &nonce, &ciphertext, &altered_aad).is_err(),
+                "payload ciphertext opened after {field} changed, so it is replayable across it",
+            );
+        }
+    }
+
+    #[test]
+    fn unbound_fields_leave_the_aad_byte_identical() {
+        let target = body().payloads[0].id;
+        let meta = object_meta_aad(&body()).expect("meta aad");
+        let payload = object_payload_aad(&body(), target).expect("payload aad");
+
+        for (field, mutate) in unbound_fields() {
+            let mut altered = body();
+            mutate(&mut altered);
+
+            assert_eq!(
+                meta,
+                object_meta_aad(&altered).expect("meta aad"),
+                "{field} is now bound in the meta AAD; see the destructure in object_aad",
+            );
+            assert_eq!(
+                payload,
+                object_payload_aad(&altered, target).expect("payload aad"),
+                "{field} is now bound in the payload AAD; see the destructure in object_aad",
+            );
+        }
+    }
+
+    #[test]
+    fn the_body_signature_covers_what_the_aad_omits() {
+        // The two mechanisms split the work: the AAD binds a ciphertext to its
+        // context, the signature covers the whole body. An unbound field is
+        // not an unprotected one, and this is what says so.
+        let secret = [9u8; DEVICE_SIGNING_SECRET_KEY_BYTES];
+        let public = device_signing_public_key(&secret);
+        let signature = sign_object_envelope_body(&secret, &body()).expect("sign");
+
+        verify_object_envelope_signature(
+            &public,
+            &ObjectEnvelope {
+                body: body(),
+                signature: signature.clone(),
+            },
+        )
+        .expect("the unmodified body verifies");
+
+        for (field, mutate) in unbound_fields() {
+            let mut altered = body();
+            mutate(&mut altered);
+            assert!(
+                verify_object_envelope_signature(
+                    &public,
+                    &ObjectEnvelope {
+                        body: altered,
+                        signature: signature.clone(),
+                    },
+                )
+                .is_err(),
+                "{field} is neither bound in the AAD nor covered by the signature",
+            );
+        }
+    }
+
+    #[test]
+    fn meta_and_payload_aads_are_domain_separated() {
+        let body = body();
+        let meta = object_meta_aad(&body).expect("meta aad");
+        let payload = object_payload_aad(&body, body.payloads[0].id).expect("payload aad");
+        assert_ne!(meta, payload);
+
+        let (nonce, ciphertext) = encrypt(&KEY, b"encrypted meta", &meta).expect("encrypt");
+        assert!(
+            decrypt(&KEY, &nonce, &ciphertext, &payload).is_err(),
+            "encrypted meta opened as a payload",
+        );
+    }
+
+    #[test]
+    fn a_payload_ciphertext_cannot_be_moved_to_a_sibling() {
+        let body = body();
+        let first = object_payload_aad(&body, body.payloads[0].id).expect("payload aad");
+        let second = object_payload_aad(&body, body.payloads[1].id).expect("payload aad");
+
+        let (nonce, ciphertext) = encrypt(&KEY, b"payload one", &first).expect("encrypt");
+        assert!(
+            decrypt(&KEY, &nonce, &ciphertext, &second).is_err(),
+            "one payload's ciphertext opened in another payload's slot",
+        );
+    }
+
+    /// Every `operation` variant must be reachable from a bound-field mutation,
+    /// or a new one could be added without anyone checking it is bound. The
+    /// match is the trigger: a fourth variant fails to compile here.
+    #[test]
+    fn every_operation_variant_is_covered_by_a_mutation() {
+        let covered: Vec<ObjectEnvelopeOperation> = std::iter::once(body().operation)
+            .chain(bound_fields().into_iter().map(|(_, mutate)| {
+                let mut altered = body();
+                mutate(&mut altered);
+                altered.operation
+            }))
+            .collect();
+
+        for variant in [
+            ObjectEnvelopeOperation::Create,
+            ObjectEnvelopeOperation::Revise,
+            ObjectEnvelopeOperation::Delete,
+        ] {
+            match variant {
+                ObjectEnvelopeOperation::Create
+                | ObjectEnvelopeOperation::Revise
+                | ObjectEnvelopeOperation::Delete => {}
+            }
+            assert!(
+                covered.contains(&variant),
+                "no bound-field mutation produces {variant:?}, so it is never checked",
+            );
+        }
+    }
+
+    /// The chain hash has one definition, and it has to be the canonical body
+    /// bytes — the same form the signature covers. A parent that differs in any
+    /// field must hash differently, or a swapped parent would go unnoticed.
+    #[test]
+    fn parent_hash_changes_with_every_field_of_the_parent() {
+        let baseline = object_envelope_parent_hash(&body()).expect("parent hash");
+
+        for (field, mutate) in bound_fields().into_iter().chain(unbound_fields()) {
+            let mut altered = body();
+            mutate(&mut altered);
+            assert_ne!(
+                baseline,
+                object_envelope_parent_hash(&altered).expect("parent hash"),
+                "a parent differing in {field} hashes the same, so it can be swapped in",
+            );
+        }
+    }
+}
+
+/// Guards for device signature domain separation.
+///
+/// One device key signs object envelopes and login proofs. Signing raw
+/// canonical bytes would leave the two message spaces adjacent; the domain
+/// prefix keeps them disjoint. These tests hold that line: a signature made
+/// under the wrong domain, or under no domain at all, must not verify.
+#[cfg(test)]
+mod signature_domains {
+    use std::str::FromStr;
+
+    use clipper_api_types::{DeviceId, ObjectId, ObjectKind};
+
+    use super::*;
+
+    const SECRET: [u8; DEVICE_SIGNING_SECRET_KEY_BYTES] = [9; DEVICE_SIGNING_SECRET_KEY_BYTES];
+
+    fn uuid_str(tag: u64) -> String {
+        format!("00000000-0000-4000-8000-{tag:012x}")
+    }
+
+    fn envelope_body() -> ObjectEnvelopeBody {
+        ObjectEnvelopeBody {
+            object_id: ObjectId::from_str(&uuid_str(1)).expect("object id"),
+            object_type: ObjectKind::Clipboard,
+            envelope_version: OBJECT_ENVELOPE_VERSION,
+            revision: 1,
+            parent_hash: None,
+            source_device_id: DeviceId::from_str(&uuid_str(2)).expect("device id"),
+            created_at: "2026-09-08T10:00:00Z".to_string(),
+            operation: ObjectEnvelopeOperation::Create,
+            meta_nonce: vec![3; XCHACHA20_NONCE_BYTES],
+            sha256_meta_ciphertext: vec![4; SHA256_BYTES],
+            payloads: Vec::new(),
+        }
+    }
+
+    fn proof_body() -> DeviceLoginProofBodyV1 {
+        DeviceLoginProofBodyV1 {
+            version: DEVICE_LOGIN_PROOF_VERSION,
+            challenge_id: "challenge".to_string(),
+            challenge: vec![5; DEVICE_LOGIN_PROOF_CHALLENGE_BYTES],
+            username: "user".to_string(),
+            device_id: DeviceId::from_str(&uuid_str(2)).expect("device id"),
+            device_signing_public_key: device_signing_public_key(&SECRET).to_vec(),
+        }
+    }
+
+    /// Sign arbitrary bytes with the test device key, bypassing the helpers.
+    fn sign_raw(message: &[u8]) -> Vec<u8> {
+        SigningKey::from_bytes(&SECRET)
+            .sign(message)
+            .to_bytes()
+            .to_vec()
+    }
+
+    #[test]
+    fn an_envelope_signature_needs_the_envelope_domain() {
+        let public = device_signing_public_key(&SECRET);
+        let body = envelope_body();
+        let canon = object_envelope_body_bytes(&body).expect("canonical body");
+
+        let verify = |signature: Vec<u8>| {
+            verify_object_envelope_signature(
+                &public,
+                &ObjectEnvelope {
+                    body: body.clone(),
+                    signature,
+                },
+            )
+        };
+
+        verify(sign_object_envelope_body(&SECRET, &body).expect("sign")).expect("own domain");
+        assert!(
+            verify(sign_raw(&domain_separated(
+                SIGN_DOMAIN_DEVICE_LOGIN_PROOF_V1,
+                &canon
+            )))
+            .is_err(),
+            "the login-proof domain verified as an envelope",
+        );
+        assert!(
+            verify(sign_raw(&canon)).is_err(),
+            "undomained canonical bytes verified as an envelope",
+        );
+    }
+
+    #[test]
+    fn a_login_proof_signature_needs_the_login_proof_domain() {
+        let public = device_signing_public_key(&SECRET);
+        let body = proof_body();
+        let canon = device_login_proof_body_bytes(&body).expect("canonical body");
+
+        verify_device_login_proof_signature(
+            &public,
+            &body,
+            &sign_device_login_proof_body(&SECRET, &body).expect("sign"),
+        )
+        .expect("own domain");
+        assert!(
+            verify_device_login_proof_signature(
+                &public,
+                &body,
+                &sign_raw(&domain_separated(SIGN_DOMAIN_OBJECT_ENVELOPE_V1, &canon)),
+            )
+            .is_err(),
+            "the envelope domain verified as a login proof",
+        );
+        assert!(
+            verify_device_login_proof_signature(&public, &body, &sign_raw(&canon)).is_err(),
+            "undomained canonical bytes verified as a login proof",
+        );
+    }
+
+    /// The signed bytes are the domain followed by the canonical body, and the
+    /// canonical body itself is unchanged — the parent hash is taken over it.
+    #[test]
+    fn the_domain_is_a_prefix_of_the_canonical_body() {
+        let canon = object_envelope_body_bytes(&envelope_body()).expect("canonical body");
+        let message = domain_separated(SIGN_DOMAIN_OBJECT_ENVELOPE_V1, &canon);
+
+        assert!(message.starts_with(SIGN_DOMAIN_OBJECT_ENVELOPE_V1));
+        assert_eq!(&message[SIGN_DOMAIN_OBJECT_ENVELOPE_V1.len()..], &canon[..]);
+        assert!(!SIGN_DOMAIN_OBJECT_ENVELOPE_V1.starts_with(SIGN_DOMAIN_DEVICE_LOGIN_PROOF_V1));
+        assert!(!SIGN_DOMAIN_DEVICE_LOGIN_PROOF_V1.starts_with(SIGN_DOMAIN_OBJECT_ENVELOPE_V1));
     }
 }

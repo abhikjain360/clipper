@@ -10,7 +10,9 @@ argon2.workspace = true
 chacha20poly1305 = "0.10.1"
 ed25519-dalek.workspace = true
 hkdf = "0.12.4"
-opaque-ke = { version = "4.1.0-pre.2", features = ["argon2", "std"] }
+opaque-ke = { version = "4.0.1", features = ["argon2", "std"] }
+# opaque-ke 4.0.1 re-exports rand 0.8 without enabling its OS RNG feature.
+opaque-rand = { package = "rand", version = "0.8.5", features = ["getrandom"] }
 postcard.workspace = true
 rand.workspace = true
 serde.workspace = true

@@ -572,6 +572,11 @@ considerably deeper on crypto, sync integrity, and the post-June-27 code.
 
 ### R1 — [Medium] Android persists the OPAQUE passphrase (E2E root) for biometric resume; the v2 resume material was never wired to mobile
 
+> Resolved during the September 2026 scheduler review: UniFFI and the mobile
+> adapter now expose resume/session material; biometric SecureStore retains
+> token and derived keys instead of the passphrase. Legacy credential slots are
+> deleted. The original finding below is retained as audit history.
+
 - **Files:** `mobile/src/backend.ts:116-135,155-177` · `mobile/src/App.tsx:98,191` ·
   `crates/client/src/engine.rs:308-346,355-369` · `packages/mobile-bridge/src/adapter.ts:96-102` ·
   `crates/mobile-uniffi/src/lib.rs` (no resume export)
@@ -765,6 +770,11 @@ considerably deeper on crypto, sync integrity, and the post-June-27 code.
   best-effort.
 
 ### R8 — [Medium] `std::time::Instant::now()` panics on wasm32-unknown-unknown, killing clipboard copy in the browser client
+
+> Resolved during the September 2026 scheduler review: suppression uses
+> `web_time::Instant`. A Chrome run with the actual wasm backend successfully
+> sent and retrieved clipboard content repeatedly without a trap or stalled
+> subsequent operations. The original finding below is retained as audit history.
 
 - **Files:** `crates/client/src/engine.rs:758-761,792-795` (`Instant::now()`),
   `:570` (`elapsed()`), `:81` (field) · `crates/web-wasm/src/lib.rs:304-313` ·

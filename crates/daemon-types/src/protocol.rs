@@ -83,6 +83,20 @@ pub enum DaemonCommand {
     DeleteCollabDoc(DeleteCollabDocParams),
     RenameCollabDoc(RenameCollabDocParams),
     GetCollabDocMeta(GetCollabDocMetaParams),
+    /// Create a schedule series.
+    ///
+    /// Carries the domain type rather than a flattened draft: a recurrence rule
+    /// does not survive being reduced to strings, and one representation cannot
+    /// drift from another.
+    CreateScheduleItem(CreateScheduleItemParams),
+    UpdateScheduleItem(UpdateScheduleItemParams),
+    DeleteScheduleObject(DeleteScheduleObjectParams),
+    ExpandSchedule(ExpandScheduleParams),
+    AddCalendarSource(AddCalendarSourceParams),
+    SyncCalendarSource(SyncCalendarSourceParams),
+    StartActual(StartActualParams),
+    StopActual(StopActualParams),
+    ActualsBetween(ActualsBetweenParams),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +210,72 @@ pub struct RenameCollabDocParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateScheduleItemParams {
+    pub item: clipper_schedule::ScheduleItem,
+}
+
+/// Replace a series with an edited version.
+///
+/// `object_id` names the object being replaced; `item.id` must be the same
+/// series id it already had, so overrides and logged time are not orphaned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateScheduleItemParams {
+    pub object_id: String,
+    pub expected_revision: u64,
+    pub item: clipper_schedule::ScheduleItem,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteScheduleObjectParams {
+    pub object_id: String,
+}
+
+/// Ask for every occurrence in a window.
+///
+/// The window is the caller's, not a fixed horizon: a week grid and an alarm
+/// scheduler want very different spans.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpandScheduleParams {
+    /// RFC 3339 instant, inclusive.
+    pub from: String,
+    /// RFC 3339 instant, exclusive.
+    pub to: String,
+    /// IANA zone the caller is in. Resolves floating and all-day spans, which
+    /// carry no zone of their own.
+    pub observer_zone: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddCalendarSourceParams {
+    pub name: String,
+    /// The feed URL. For an iCalendar source this *is* the credential, which is
+    /// why the object holding it is encrypted like everything else.
+    pub url: String,
+}
+
+/// Start the timer. An absent plan context means unplanned work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartActualParams {
+    pub plan_context: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StopActualParams {
+    pub object_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActualsBetweenParams {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncCalendarSourceParams {
+    pub object_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetCollabDocMetaParams {
     pub object_id: String,
 }
@@ -268,7 +348,7 @@ pub enum DaemonLine {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum DaemonEvent {
     AuthChallenge { auth_challenge: AuthChallenge },
-    StateChanged { state: AppState },
+    StateChanged { state: Box<AppState> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,7 +365,9 @@ impl DaemonEvent {
     }
 
     pub fn state_changed(state: AppState) -> Self {
-        Self::StateChanged { state }
+        Self::StateChanged {
+            state: Box::new(state),
+        }
     }
 }
 

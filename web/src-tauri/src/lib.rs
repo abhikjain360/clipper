@@ -2,25 +2,39 @@ mod daemon_client;
 mod daemon_spawn;
 mod ipc_secret;
 
-use std::{path::PathBuf, sync::OnceLock};
-
-use clipper_app_types::{AppState, CollabItem, DeviceInfo};
-use clipper_daemon_types::{
-    ClipboardPayloadParams, ClipboardPayloadResult, DaemonCommand, DeleteCollabDocParams,
-    DeleteFileParams, DeviceListResult, DownloadFileParams, GetCollabDocMetaParams, LoginParams,
-    RegisterParams, RegisterResult, RemoveDeviceParams, RenameCollabDocParams,
-    SendClipboardPayloadParams, UploadFileParams, UploadFileResult,
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
 };
+
+use clipper_app_types::{
+    ActualView, AppState, CollabItem, DeviceInfo, IngestReport, OccurrenceView,
+};
+use clipper_daemon_types::{
+    ActualsBetweenParams, AddCalendarSourceParams, ClipboardPayloadParams, ClipboardPayloadResult,
+    CreateScheduleItemParams, DaemonCommand, DeleteCollabDocParams, DeleteFileParams,
+    DeleteScheduleObjectParams, DeviceListResult, DownloadFileParams, ExpandScheduleParams,
+    GetCollabDocMetaParams, LoginParams, RegisterParams, RegisterResult, RemoveDeviceParams,
+    RenameCollabDocParams, SendClipboardPayloadParams, StartActualParams, StopActualParams,
+    SyncCalendarSourceParams, UpdateScheduleItemParams, UploadFileParams, UploadFileResult,
+};
+use clipper_schedule::ScheduleItem;
 use daemon_client::{DaemonClient, DaemonClientError};
+use rand::RngExt;
 use serde::{Deserialize, Serialize, Serializer};
 use tauri::{Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
+use tokio::io::AsyncWriteExt;
 use tracing_subscriber::EnvFilter;
 use zeroize::Zeroizing;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
+#[cfg_attr(not(unix), allow(dead_code))]
+const PRIVATE_DIR_MODE: u32 = 0o700;
+#[cfg(unix)]
+const PRIVATE_FILE_MODE: u32 = 0o600;
 
 struct DesktopBackend {
     daemon: DaemonClient,
@@ -131,6 +145,15 @@ pub fn run() {
             delete_file,
             create_collab_doc,
             delete_collab_doc,
+            create_schedule_item,
+            update_schedule_item,
+            delete_schedule_object,
+            expand_schedule,
+            start_actual,
+            stop_actual,
+            actuals_between,
+            add_calendar_source,
+            sync_calendar_source,
             rename_collab_doc,
             get_collab_doc_meta,
             list_devices,
@@ -356,17 +379,19 @@ async fn upload_file_bytes(
     _mime_type: String,
     bytes: Vec<u8>,
 ) -> CommandResult<String> {
-    let tmp = temp_path(&format!("upload-{filename}"));
-    tokio::fs::write(&tmp, &bytes)
-        .await
-        .map_err(|e| CommandError::Client(format!("temp write: {e}")))?;
-    let result = backend
-        .daemon
-        .send_result::<UploadFileResult>(DaemonCommand::UploadFile(UploadFileParams {
-            file_path: tmp.to_string_lossy().into_owned(),
-        }))
-        .await;
-    tokio::fs::remove_file(&tmp).await.ok();
+    let upload_dir = create_private_upload_dir()?;
+    let result = async {
+        let tmp = write_private_upload_file(&upload_dir, &filename, &bytes).await?;
+        backend
+            .daemon
+            .send_result::<UploadFileResult>(DaemonCommand::UploadFile(UploadFileParams {
+                file_path: tmp.to_string_lossy().into_owned(),
+            }))
+            .await
+            .map_err(CommandError::from)
+    }
+    .await;
+    tokio::fs::remove_dir_all(&upload_dir).await.ok();
     Ok(result?.file_id)
 }
 
@@ -403,7 +428,8 @@ async fn download_file_bytes(
     backend: State<'_, DesktopBackend>,
     file_id: String,
 ) -> CommandResult<Vec<u8>> {
-    let tmp = temp_path(&format!("download-{file_id}"));
+    // Reserve a 0600 path first so the daemon's write keeps a private mode.
+    let tmp = create_private_temp_file("download", &file_id).await?;
     let result = backend
         .daemon
         .send_ok(DaemonCommand::DownloadFile(DownloadFileParams {
@@ -415,9 +441,13 @@ async fn download_file_bytes(
         tokio::fs::remove_file(&tmp).await.ok();
         return Err(err.into());
     }
-    let bytes = tokio::fs::read(&tmp)
-        .await
-        .map_err(|e| CommandError::Client(format!("temp read: {e}")))?;
+    let bytes = match tokio::fs::read(&tmp).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tokio::fs::remove_file(&tmp).await.ok();
+            return Err(CommandError::Client(format!("temp read: {e}")));
+        }
+    };
     tokio::fs::remove_file(&tmp).await.ok();
     Ok(bytes)
 }
@@ -429,6 +459,142 @@ async fn delete_file(backend: State<'_, DesktopBackend>, file_id: String) -> Com
         .send_ok(DaemonCommand::DeleteFile(DeleteFileParams { file_id }))
         .await?;
     Ok(())
+}
+
+/// Create a schedule series.
+///
+/// The item arrives as the domain type rather than as flattened fields: a
+/// recurrence rule does not survive being reduced to strings, and serde keeps
+/// the TypeScript shape honest.
+#[tauri::command]
+async fn create_schedule_item(
+    backend: State<'_, DesktopBackend>,
+    item: ScheduleItem,
+) -> CommandResult<String> {
+    Ok(backend
+        .daemon
+        .send_result::<String>(DaemonCommand::CreateScheduleItem(
+            CreateScheduleItemParams { item },
+        ))
+        .await?)
+}
+
+#[tauri::command]
+async fn update_schedule_item(
+    backend: State<'_, DesktopBackend>,
+    object_id: String,
+    item: ScheduleItem,
+    expected_revision: u64,
+) -> CommandResult<String> {
+    Ok(backend
+        .daemon
+        .send_result::<String>(DaemonCommand::UpdateScheduleItem(
+            UpdateScheduleItemParams {
+                object_id,
+                item,
+                expected_revision,
+            },
+        ))
+        .await?)
+}
+
+#[tauri::command]
+async fn delete_schedule_object(
+    backend: State<'_, DesktopBackend>,
+    object_id: String,
+) -> CommandResult<()> {
+    backend
+        .daemon
+        .send_ok(DaemonCommand::DeleteScheduleObject(
+            DeleteScheduleObjectParams { object_id },
+        ))
+        .await?;
+    Ok(())
+}
+
+/// Expand every series into the occurrences falling in `[from, to)`.
+#[tauri::command]
+async fn expand_schedule(
+    backend: State<'_, DesktopBackend>,
+    from: String,
+    to: String,
+    observer_zone: String,
+) -> CommandResult<Vec<OccurrenceView>> {
+    Ok(backend
+        .daemon
+        .send_result::<Vec<OccurrenceView>>(DaemonCommand::ExpandSchedule(ExpandScheduleParams {
+            from,
+            to,
+            observer_zone,
+        }))
+        .await?)
+}
+
+#[tauri::command]
+async fn start_actual(
+    backend: State<'_, DesktopBackend>,
+    plan_context: Option<String>,
+) -> CommandResult<String> {
+    Ok(backend
+        .daemon
+        .send_result::<String>(DaemonCommand::StartActual(StartActualParams {
+            plan_context,
+        }))
+        .await?)
+}
+
+#[tauri::command]
+async fn stop_actual(
+    backend: State<'_, DesktopBackend>,
+    object_id: String,
+) -> CommandResult<String> {
+    Ok(backend
+        .daemon
+        .send_result::<String>(DaemonCommand::StopActual(StopActualParams { object_id }))
+        .await?)
+}
+
+#[tauri::command]
+async fn actuals_between(
+    backend: State<'_, DesktopBackend>,
+    from: String,
+    to: String,
+) -> CommandResult<Vec<ActualView>> {
+    Ok(backend
+        .daemon
+        .send_result::<Vec<ActualView>>(DaemonCommand::ActualsBetween(ActualsBetweenParams {
+            from,
+            to,
+        }))
+        .await?)
+}
+
+#[tauri::command]
+async fn add_calendar_source(
+    backend: State<'_, DesktopBackend>,
+    name: String,
+    url: String,
+) -> CommandResult<String> {
+    Ok(backend
+        .daemon
+        .send_result::<String>(DaemonCommand::AddCalendarSource(AddCalendarSourceParams {
+            name,
+            url,
+        }))
+        .await?)
+}
+
+#[tauri::command]
+async fn sync_calendar_source(
+    backend: State<'_, DesktopBackend>,
+    object_id: String,
+) -> CommandResult<IngestReport> {
+    Ok(backend
+        .daemon
+        .send_result::<IngestReport>(DaemonCommand::SyncCalendarSource(
+            SyncCalendarSourceParams { object_id },
+        ))
+        .await?)
 }
 
 #[tauri::command]
@@ -543,20 +709,247 @@ fn safe_dialog_filename(filename: &str) -> String {
     }
 }
 
-fn temp_path(suffix: &str) -> PathBuf {
-    let safe: String = suffix
+fn safe_upload_filename(filename: &str) -> String {
+    let cleaned = safe_dialog_filename(filename);
+    let cleaned = cleaned.trim_start_matches('.');
+    if cleaned.is_empty() {
+        "clipper-upload".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+fn staging_dir() -> PathBuf {
+    dirs::cache_dir()
+        .or_else(dirs::data_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Clipper")
+        .join("staging")
+}
+
+fn ensure_private_staging_dir() -> Result<PathBuf, CommandError> {
+    let dir = staging_dir();
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CommandError::Client(format!("staging dir: {e}")))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        match std::fs::DirBuilder::new()
+            .mode(PRIVATE_DIR_MODE)
+            .create(&dir)
+        {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(CommandError::Client(format!("staging dir: {e}"))),
+        }
+        let meta = std::fs::symlink_metadata(&dir)
+            .map_err(|e| CommandError::Client(format!("staging dir: {e}")))?;
+        if !meta.is_dir() {
+            return Err(CommandError::Client(
+                "staging path is not a directory".into(),
+            ));
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))
+            .map_err(|e| CommandError::Client(format!("staging dir: {e}")))?;
+    }
+    #[cfg(not(unix))]
+    {
+        match std::fs::DirBuilder::new().create(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(CommandError::Client(format!("staging dir: {e}"))),
+        }
+        let meta = std::fs::metadata(&dir)
+            .map_err(|e| CommandError::Client(format!("staging dir: {e}")))?;
+        if !meta.is_dir() {
+            return Err(CommandError::Client(
+                "staging path is not a directory".into(),
+            ));
+        }
+    }
+    Ok(dir)
+}
+
+fn create_private_upload_dir() -> Result<PathBuf, CommandError> {
+    let dir = ensure_private_staging_dir()?;
+    for _ in 0..10 {
+        let upload_dir = dir.join(format!("clipper-upload-{}", random_hex_suffix()));
+        #[cfg(unix)]
+        let created = {
+            use std::os::unix::fs::DirBuilderExt;
+
+            std::fs::DirBuilder::new()
+                .mode(PRIVATE_DIR_MODE)
+                .create(&upload_dir)
+        };
+        #[cfg(not(unix))]
+        let created = std::fs::DirBuilder::new().create(&upload_dir);
+        match created {
+            Ok(()) => return Ok(upload_dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(CommandError::Client(format!("temp dir: {e}"))),
+        }
+    }
+    Err(CommandError::Client("temp dir: too many collisions".into()))
+}
+
+fn upload_staging_path(upload_dir: &Path, filename: &str) -> PathBuf {
+    upload_dir.join(safe_upload_filename(filename))
+}
+
+async fn write_private_upload_file(
+    upload_dir: &Path,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, CommandError> {
+    let path = upload_staging_path(upload_dir, filename);
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(PRIVATE_FILE_MODE);
+    let mut file = options
+        .open(&path)
+        .await
+        .map_err(|e| CommandError::Client(format!("temp create: {e}")))?;
+    file.write_all(bytes)
+        .await
+        .map_err(|e| CommandError::Client(format!("temp write: {e}")))?;
+    // `write_all` on a tokio file returns once the bytes are queued for the
+    // blocking pool, and dropping the handle does not wait for that write.
+    // The daemon opens this path as soon as it is returned, so wait here.
+    file.flush()
+        .await
+        .map_err(|e| CommandError::Client(format!("temp write: {e}")))?;
+    Ok(path)
+}
+
+fn sanitize_temp_prefix(value: &str) -> String {
+    let safe: String = value
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '.' {
+            if c.is_ascii_alphanumeric() || c == '-' {
                 c
             } else {
                 '_'
             }
         })
         .collect();
-    std::env::temp_dir().join(format!("clipper-{}-{}", std::process::id(), safe))
+    let short: String = safe.chars().take(20).collect();
+    if short.is_empty() {
+        "file".to_string()
+    } else {
+        short
+    }
+}
+
+fn random_hex_suffix() -> String {
+    let mut bytes = [0u8; 8];
+    rand::rng().fill(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+async fn create_private_temp_file(kind: &str, hint: &str) -> Result<PathBuf, CommandError> {
+    let dir = ensure_private_staging_dir()?;
+    let prefix = sanitize_temp_prefix(hint);
+    for _ in 0..10 {
+        let name = format!(
+            "clipper-{}-{}-{}-{}",
+            kind,
+            prefix,
+            std::process::id(),
+            random_hex_suffix()
+        );
+        let path = dir.join(name);
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(PRIVATE_FILE_MODE);
+        match options.open(&path).await {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(CommandError::Client(format!("temp create: {e}"))),
+        }
+    }
+    Err(CommandError::Client(
+        "temp create: too many collisions".into(),
+    ))
 }
 
 fn non_empty_string(s: String) -> Option<String> {
     if s.trim().is_empty() { None } else { Some(s) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_staging_path_keeps_the_user_filename() {
+        let upload_dir = Path::new("/private/staging/clipper-upload-random");
+
+        assert_eq!(
+            upload_staging_path(upload_dir, "report.pdf"),
+            upload_dir.join("report.pdf")
+        );
+    }
+
+    #[test]
+    fn upload_staging_path_sanitizes_traversal_filename() {
+        let upload_dir = Path::new("/private/staging/clipper-upload-random");
+        let path = upload_staging_path(upload_dir, "../../evil.pdf");
+
+        assert_eq!(path, upload_dir.join("_.._evil.pdf"));
+        assert_eq!(path.parent(), Some(upload_dir));
+    }
+
+    /// The staging write must not return while its bytes are still queued
+    /// on tokio's blocking pool: the daemon reads the file right after.
+    ///
+    /// One blocking thread runs pool tasks in order. The first poll queues
+    /// the open; a blocker queued behind it then holds the thread, so the
+    /// write queued after that cannot run until the blocker is released.
+    #[test]
+    fn staging_write_returns_only_after_its_bytes_are_on_disk() {
+        use std::{future::Future, task::Poll, time::Duration};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let upload_dir = std::env::temp_dir().join(format!("clipper-test-{}", random_hex_suffix()));
+        std::fs::create_dir(&upload_dir).unwrap();
+
+        runtime.block_on(async {
+            let write = write_private_upload_file(&upload_dir, "report.pdf", b"uploaded bytes");
+            tokio::pin!(write);
+            let ready =
+                std::future::poll_fn(|cx| Poll::Ready(write.as_mut().poll(cx).is_ready())).await;
+            assert!(!ready, "the open must go through the blocking pool");
+
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            started_rx.await.unwrap();
+
+            let early = tokio::time::timeout(Duration::from_millis(100), &mut write).await;
+            assert!(
+                early.is_err(),
+                "returned while the write was still queued: {early:?}"
+            );
+
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            let path = write.await.unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"uploaded bytes");
+        });
+
+        std::fs::remove_dir_all(&upload_dir).unwrap();
+    }
 }

@@ -31,7 +31,6 @@ a single user's planner carrying rich per-block metadata.
 
 ---
 
-
 ## 1. RFC 5545 instance overrides, and Google Calendar's model of the same
 
 ### 1.1 RECURRENCE-ID (RFC 5545 §3.8.4.4)
@@ -59,7 +58,7 @@ Source: https://www.rfc-editor.org/rfc/rfc5545.txt (§3.8.4.4)
 
 ### 1.2 Master VEVENT vs override VEVENTs
 
-The model is: a **master** VEVENT carries `UID:x`, an `RRULE`, and `DTSTART`. Each **override** is a separate VEVENT (in the same iCalendar object) with the **same `UID:x`**, a `RECURRENCE-ID` equal to the *original* instance start it replaces, a new `DTSTART`/`DTEND`, and optionally its own `SEQUENCE`. The override's RECURRENCE-ID stays pinned to the original occurrence time even when the instance is moved — that is what binds the override to its slot in the series.
+The model is: a **master** VEVENT carries `UID:x`, an `RRULE`, and `DTSTART`. Each **override** is a separate VEVENT (in the same iCalendar object) with the **same `UID:x`**, a `RECURRENCE-ID` equal to the _original_ instance start it replaces, a new `DTSTART`/`DTEND`, and optionally its own `SEQUENCE`. The override's RECURRENCE-ID stays pinned to the original occurrence time even when the instance is moved — that is what binds the override to its slot in the series.
 
 In practice:
 
@@ -136,6 +135,7 @@ The recurring-events guide (https://developers.google.com/calendar/api/guides/re
 > If the singleEvents parameter is set to true, all individual instances appear in the result, but underlying recurring events don't. ... Individual instances are similar to single events. Unlike their parent recurring events, instances don't have the recurrence field set.
 >
 > The following event fields are specific to instances:
+>
 > - recurringEventId — the ID of the parent recurring event this instance belongs to
 > - originalStartTime — the time this instance starts according to the recurrence data in the parent recurring event. This can be different from the actual start time if the instance was rescheduled. It uniquely identifies the instance within the recurring event series even if the instance was moved.
 
@@ -193,16 +193,16 @@ The RFC 5545 / Google model converges on: one master entity carrying the rule; p
 
 ### 2.1 Summary table
 
-| Product | Planned entity | Actual entity | Relationship | Key actual-record fields |
-|---|---|---|---|---|
-| **Toggl Track** (classic) | None (only `estimated_seconds` on projects/tasks) | `Time Entry` | **Actual-only / separate entity** — time entries are the core object | `start`, `stop`, `duration` (seconds; negative while running), `description`, `project_id`, `task_id`, `tags`, `billable`, `created_with`, `duronly` |
-| **Toggl 2.0** | Calendar "time block" / scheduled task block | `Time Entry` | **Separate entity, action-linked** — marking a scheduled block Done auto-creates a time entry | same Toggl time-entry fields |
-| **Clockify** | `Scheduled Assignment` (Schedule feature) | `Time Entry` | **Separate entities** — reports compare "assigned vs actual working hours" | `id`, `description`, `start`, `end`, `timeInterval {start, end, duration}`, `projectId`, `taskId`, `tagIds`, `billable`, `customFields` |
-| **Sunsama** | Task + `planned time` field + calendar working session | `actual time` field on the same task | **Mutation of the planned entity** — actual can even fall back to planned | `planned time`, `actual time` (task properties) |
-| **Motion** | Task with `Duration` (planned) | `Completed At` field on the same task | **Mutation of the planned entity** | `Duration` (planned), `Completed At` (actual), `Status` |
-| **Google Calendar Goals** (deprecated Nov 2022) | Goal event (auto-scheduled) | None distinct | **Mutation of the planned event** — defer/complete only, no actual-duration record | N/A |
-| **Timing** | None | `Time Entry` + automatic app-usage records | **Actuals-only** | `start_date`, `end_date`, `duration`, `project`, `title`, `notes`, `is_running`, `billing_status` |
-| **RescueTime** | None | Analytic activity rows | **Actuals-only** | `timestamp`, `duration`, `activity`, `category`, `productivity`, `document`, `source` (row headers inferred from integration code) |
+| Product                                         | Planned entity                                         | Actual entity                              | Relationship                                                                                  | Key actual-record fields                                                                                                                             |
+| ----------------------------------------------- | ------------------------------------------------------ | ------------------------------------------ | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Toggl Track** (classic)                       | None (only `estimated_seconds` on projects/tasks)      | `Time Entry`                               | **Actual-only / separate entity** — time entries are the core object                          | `start`, `stop`, `duration` (seconds; negative while running), `description`, `project_id`, `task_id`, `tags`, `billable`, `created_with`, `duronly` |
+| **Toggl 2.0**                                   | Calendar "time block" / scheduled task block           | `Time Entry`                               | **Separate entity, action-linked** — marking a scheduled block Done auto-creates a time entry | same Toggl time-entry fields                                                                                                                         |
+| **Clockify**                                    | `Scheduled Assignment` (Schedule feature)              | `Time Entry`                               | **Separate entities** — reports compare "assigned vs actual working hours"                    | `id`, `description`, `start`, `end`, `timeInterval {start, end, duration}`, `projectId`, `taskId`, `tagIds`, `billable`, `customFields`              |
+| **Sunsama**                                     | Task + `planned time` field + calendar working session | `actual time` field on the same task       | **Mutation of the planned entity** — actual can even fall back to planned                     | `planned time`, `actual time` (task properties)                                                                                                      |
+| **Motion**                                      | Task with `Duration` (planned)                         | `Completed At` field on the same task      | **Mutation of the planned entity**                                                            | `Duration` (planned), `Completed At` (actual), `Status`                                                                                              |
+| **Google Calendar Goals** (deprecated Nov 2022) | Goal event (auto-scheduled)                            | None distinct                              | **Mutation of the planned event** — defer/complete only, no actual-duration record            | N/A                                                                                                                                                  |
+| **Timing**                                      | None                                                   | `Time Entry` + automatic app-usage records | **Actuals-only**                                                                              | `start_date`, `end_date`, `duration`, `project`, `title`, `notes`, `is_running`, `billing_status`                                                    |
+| **RescueTime**                                  | None                                                   | Analytic activity rows                     | **Actuals-only**                                                                              | `timestamp`, `duration`, `activity`, `category`, `productivity`, `document`, `source` (row headers inferred from integration code)                   |
 
 ### 2.2 Toggl Track
 
@@ -227,7 +227,8 @@ The RFC 5545 / Google model converges on: one master entity carrying the rule; p
 }
 ```
 
-  plus `timeInterval: { start, end, duration }`, `taskId`, `customFields` in other endpoints.
+plus `timeInterval: { start, end, duration }`, `taskId`, `customFields` in other endpoints.
+
 - The **Scheduling** feature (Pro/Enterprise) is a separate entity: "Fill out the required fields in the Create assignment window: Task, Period, Hours per day, Start time (optional), Billable/Non-billable, Note (optional), Repeat (None, Weekly, Every 2 weeks, Monthly, etc.)" (https://clockify.me/help/projects/manage-scheduled-team-assignments). The Entity Changes API exposes `SCHEDULED_ASSIGNMENT` as a distinct document type from `TIME_ENTRY`. The Assignments report exists "to compare assigned vs actual working hours."
 
 ### 2.4 Sunsama
@@ -277,7 +278,7 @@ Mutation (an `actual_time` field on the plan) is only acceptable for strictly no
 ### URLs opened (section 2)
 
 - https://developers.track.toggl.com/docs/
-- https://developers.track.toggl.com/docs/api/time_entries *(fetch failed — JS-rendered or moved)*
+- https://developers.track.toggl.com/docs/api/time_entries _(fetch failed — JS-rendered or moved)_
 - https://github.com/toggl/toggl_api_docs/blob/master/chapters/time_entries.md
 - https://engineering.toggl.com/docs/track/api/me/
 - https://community.toggl.com/t/toggl-2-0-onboarding-guide-for-toggl-plan-owners/3187
@@ -285,7 +286,7 @@ Mutation (an `actual_time` field on the plan) is only acceptable for strictly no
 - https://docs.clockify.me/
 - https://clockify.me/developers-api
 - https://clockify.me/help/projects/manage-scheduled-team-assignments
-- https://lobehub.com/tr/skills/openclaw-skills-clockify *(cross-reference for Clockify time-entry schema)*
+- https://lobehub.com/tr/skills/openclaw-skills-clockify _(cross-reference for Clockify time-entry schema)_
 - https://help.sunsama.com/
 - https://help.sunsama.com/docs/usage-guides/tasks/planned-and-actual-times/
 - https://help.sunsama.com/docs/usage-guides/timeboxing/timeboxing-concepts-and-principles/
@@ -298,7 +299,7 @@ Mutation (an `actual_time` field on the plan) is only acceptable for strictly no
 - https://timingapp.com/help/time-entries
 - https://www.rescuetime.com/rtx/developers
 - https://help.rescuetime.com/article/465-analytic-data-api-what-you-can-access
-- https://github.com/mlindgren/aw-rescuetime-import *(cross-reference for RescueTime row headers)*
+- https://github.com/mlindgren/aw-rescuetime-import _(cross-reference for RescueTime row headers)_
 
 ---
 
@@ -322,13 +323,13 @@ Mutation (an `actual_time` field on the plan) is only acceptable for strictly no
 
 ### 3.2 Edge cases across products
 
-| Edge case | Toggl Track | Clockify | Harvest |
-|---|---|---|---|
-| **Timer left running overnight** | Idle detection prompts; desktop can auto-stop on sleep/shutdown. No hard max duration documented. | Auto-stop on sleep/lock available; idle detection; **email alert at 8 h** ("Long-running timer"). | Idle detection (default 10 min alert); timers auto-stop when a timesheet lock takes effect. |
-| **Timer started with no plan** | Allowed: `project_id`, `task_id`, `description` all optional. | Allowed: `projectId`, `taskId`, `description` optional. | **Not allowed**: `project_id` and `task_id` required. |
-| **Plan completed with no timer** | Manual entry (start/stop or duration) added later. | Manual "Add & edit time". | Manual entries via duration or start/end. |
-| **Pause vs resume** | No true pause. "Discard and continue" stops the old entry and starts a new one. | No true pause button; "continue" creates a new timer with the same details. Break mode starts a separate break entry. | Restart endpoint creates a new running entry. |
-| **Editing a past entry** | `PUT` accepts `start`/`stop`. | `PUT` accepts `start`/`end`. | `PATCH` accepts `started_time`, `ended_time`, `hours`. |
+| Edge case                        | Toggl Track                                                                                       | Clockify                                                                                                              | Harvest                                                                                     |
+| -------------------------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| **Timer left running overnight** | Idle detection prompts; desktop can auto-stop on sleep/shutdown. No hard max duration documented. | Auto-stop on sleep/lock available; idle detection; **email alert at 8 h** ("Long-running timer").                     | Idle detection (default 10 min alert); timers auto-stop when a timesheet lock takes effect. |
+| **Timer started with no plan**   | Allowed: `project_id`, `task_id`, `description` all optional.                                     | Allowed: `projectId`, `taskId`, `description` optional.                                                               | **Not allowed**: `project_id` and `task_id` required.                                       |
+| **Plan completed with no timer** | Manual entry (start/stop or duration) added later.                                                | Manual "Add & edit time".                                                                                             | Manual entries via duration or start/end.                                                   |
+| **Pause vs resume**              | No true pause. "Discard and continue" stops the old entry and starts a new one.                   | No true pause button; "continue" creates a new timer with the same details. Break mode starts a separate break entry. | Restart endpoint creates a new running entry.                                               |
+| **Editing a past entry**         | `PUT` accepts `start`/`stop`.                                                                     | `PUT` accepts `start`/`end`.                                                                                          | `PATCH` accepts `started_time`, `ended_time`, `hours`.                                      |
 
 Idle-detection option sets are remarkably consistent. Toggl desktop (https://support.toggl.com/toggl-track-desktop-app-for-macos):
 
@@ -383,7 +384,7 @@ None of the major products implement a true "pause" state — pause is always re
 
 ### URLs opened (section 3)
 
-- https://developers.track.toggl.com/docs/api/time_entries *(failed to render)*
+- https://developers.track.toggl.com/docs/api/time_entries _(failed to render)_
 - https://engineering.toggl.com/docs/track/api/time_entries/
 - https://support.toggl.com/en-us/article/how-to-get-everyone-to-track-time-1riia9a/
 - https://support.toggl.com/toggl-track-desktop-app-for-macos
@@ -402,7 +403,7 @@ None of the major products implement a true "pause" state — pause is always re
 - https://api.clockify.me/api/v1
 - https://help.getharvest.com/api-v2/timesheets-api/timesheets/time-entries/
 - https://support.getharvest.com/hc/en-us/articles/360048685231-How-does-the-idle-timer-work-for-the-Mac-and-Windows-apps
-- https://support.getharvest.com/hc/en-us/articles/47201092522509-Stopping-a-stuck-or-runaway-timer *(HTTP 403)*
+- https://support.getharvest.com/hc/en-us/articles/47201092522509-Stopping-a-stuck-or-runaway-timer _(HTTP 403)_
 - https://support.getharvest.com/hc/en-us/articles/360048687491-Unlocking-time-and-expenses
 
 ---
@@ -415,15 +416,15 @@ Latest on docs.rs is **0.14.0** (released 2025-04-20): "A performant rust implem
 
 ### 4.2 API shape
 
-| Type | Purpose |
-|------|---------|
-| `RRuleSet` | Validated container for `DTSTART` + `RRULE`s + `EXRULE`s + `RDATE`s + `EXDATE`s; the main entry point |
-| `RRule<Stage>` | One RFC 5545 rule; `Stage` is `Unvalidated` or `Validated` |
-| `RRuleSetIter` / `RRuleIter` | Iterators over a set or single rule |
-| `Frequency` | `Yearly, Monthly, Weekly, Daily, Hourly, Minutely, Secondly` |
-| `Tz` | Wrapper enum: `Local(Local)` or `Tz(chrono_tz::Tz)` |
-| `RRuleResult` | `{ dates: Vec<DateTime<Tz>>, limited: bool }` |
-| `RRuleError` | `ParserError(ParseError)`, `ValidationError(ValidationError)`, `IterError(String)` |
+| Type                         | Purpose                                                                                               |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `RRuleSet`                   | Validated container for `DTSTART` + `RRULE`s + `EXRULE`s + `RDATE`s + `EXDATE`s; the main entry point |
+| `RRule<Stage>`               | One RFC 5545 rule; `Stage` is `Unvalidated` or `Validated`                                            |
+| `RRuleSetIter` / `RRuleIter` | Iterators over a set or single rule                                                                   |
+| `Frequency`                  | `Yearly, Monthly, Weekly, Daily, Hourly, Minutely, Secondly`                                          |
+| `Tz`                         | Wrapper enum: `Local(Local)` or `Tz(chrono_tz::Tz)`                                                   |
+| `RRuleResult`                | `{ dates: Vec<DateTime<Tz>>, limited: bool }`                                                         |
+| `RRuleError`                 | `ParserError(ParseError)`, `ValidationError(ValidationError)`, `IterError(String)`                    |
 
 Construction is by `FromStr` on RFC content lines or a fluent builder:
 
@@ -478,13 +479,13 @@ Yes, first-class: "`RRuleSet` allows for a combination for `RRule`s and some oth
 
 ### 4.7 Alternatives
 
-| Crate | Recurrence expansion? | Notes |
-|---|---|---|
+| Crate                         | Recurrence expansion?                                                                                                                | Notes                                                                                                                                |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
 | **`calcard`** (Stalwart Labs) | **Yes** — "Recurrence rules expansion: Accurately computes and enumerates repeating events based on iCalendar and JSCalendar RRULEs" | Actively maintained (v0.3.13 released 13 days before check), iCalendar/JSCalendar/vCard/JSContact. **The most serious alternative.** |
-| `icalendar` | No native engine; re-exports/uses `rrule` | Higher-level wrapper, not an alternative engine |
-| `ical` (Peltoche/ical-rs) | No | Parser-only, ~1.48M downloads |
-| `libical-sys` | Yes (via C libical FFI) | 4 GitHub stars, stale, pulls in a C dependency |
-| `rrule-rust` | Yes (same engine, NAPI for Node) | Not a Rust crate, not wasm |
+| `icalendar`                   | No native engine; re-exports/uses `rrule`                                                                                            | Higher-level wrapper, not an alternative engine                                                                                      |
+| `ical` (Peltoche/ical-rs)     | No                                                                                                                                   | Parser-only, ~1.48M downloads                                                                                                        |
+| `libical-sys`                 | Yes (via C libical FFI)                                                                                                              | 4 GitHub stars, stale, pulls in a C dependency                                                                                       |
+| `rrule-rust`                  | Yes (same engine, NAPI for Node)                                                                                                     | Not a Rust crate, not wasm                                                                                                           |
 
 No other prominent pure-Rust RFC 5545 expansion crate exists (searches for `recurring`, `chrono-recurrence`, etc. returned nothing).
 
@@ -575,14 +576,14 @@ OpenSlots supplies the complementary storage argument (bitmask = n bits vs O(n) 
 
 For a personal time-blocking system with dense 5/10-minute blocks that syncs across devices with cheap edits: **use the fixed grid/slot (bitmap) model as the internal source of truth, and intervals only at the interoperability boundary.**
 
-| Concern | Grid/slot (bitmap) | Interval (start+duration) |
-|---|---|---|
-| Merge/union/intersect | Bitwise OR/AND/NOT — deterministic, O(n/word) | Sort/sweep/interval-tree; harder to make deterministic across replicas |
-| Sync / cheap edits | Each slot an independent bit; per-bit LWW or OR-set merges concurrent edits naturally; a whole day is one fixed-size payload | Concurrent edits to start/end of the same event are structural conflicts needing semantic resolution |
-| Edit cost | Flip the bits covering the edited range | Cheap per row, but occupied/free overlays need recomputation |
-| Dense 5-min data | Compact: one day = 288 bits at 5-min; Roaring-style compression shrinks further | Compact only when sparse; dense blocks mean many rows |
-| Recurrence | Expand rules into daily bitmaps on read; keep the rule as the stored form | Native RRULE + exceptions |
-| Interop | Must rasterize to/from DTSTART/DTEND | Native to every calendar API |
+| Concern               | Grid/slot (bitmap)                                                                                                           | Interval (start+duration)                                                                            |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Merge/union/intersect | Bitwise OR/AND/NOT — deterministic, O(n/word)                                                                                | Sort/sweep/interval-tree; harder to make deterministic across replicas                               |
+| Sync / cheap edits    | Each slot an independent bit; per-bit LWW or OR-set merges concurrent edits naturally; a whole day is one fixed-size payload | Concurrent edits to start/end of the same event are structural conflicts needing semantic resolution |
+| Edit cost             | Flip the bits covering the edited range                                                                                      | Cheap per row, but occupied/free overlays need recomputation                                         |
+| Dense 5-min data      | Compact: one day = 288 bits at 5-min; Roaring-style compression shrinks further                                              | Compact only when sparse; dense blocks mean many rows                                                |
+| Recurrence            | Expand rules into daily bitmaps on read; keep the rule as the stored form                                                    | Native RRULE + exceptions                                                                            |
+| Interop               | Must rasterize to/from DTSTART/DTEND                                                                                         | Native to every calendar API                                                                         |
 
 Concretely: (1) store your own blocks as per-day bitmaps at a chosen resolution, with metadata attached to contiguous runs of set bits (or keep block entities with slot-aligned start/duration — either way, the grid makes overlap arithmetic trivial); (2) sync at slot granularity (per-bit LWW is enough for single-user multi-device); (3) rasterize imported Google/Zoho events onto the same grid for display and conflict detection, but keep their native interval form for round-trip fidelity; (4) store recurrence as rules (per section 1's series/exception model) and expand to the grid on read.
 

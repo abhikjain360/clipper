@@ -25,7 +25,7 @@ guarantees.
 
 - **Everything in your native alarm app is portable into the RN app.** You can add your exact Kotlin `BroadcastReceiver`s, the `mediaPlayback` foreground service, the full-screen ring `Activity`, and every manifest entry. Nothing about Expo prebuild or the New Architecture blocks this. The cleanest path: copy your Kotlin into the checked-in `android/` tree (or a local Expo module) and edit the checked-in `AndroidManifest.xml` directly — with one big caveat about `expo prebuild` (§1).
 - **Keep the ring screen native.** Do not reimplement it in React Native. A cold RN launch takes hundreds of milliseconds to several seconds before any React UI can paint, and a JS-bundle/OTA failure means the user cannot dismiss a ringing alarm (§2).
-- **Direct Boot is fully achievable in the RN app**, and your six `directBootAware` components can be ported 1:1. The JS bundle *can* load pre-unlock in release builds (it lives in APK assets on device-encrypted storage), but you should not need JS pre-unlock — the alarm machinery should stay native. The critical rule: **anything your receivers must read before first unlock must live in device-protected storage**, via `createDeviceProtectedStorageContext()` / `moveDatabaseFrom()` / `moveSharedPreferencesFrom()` (§3).
+- **Direct Boot is fully achievable in the RN app**, and your six `directBootAware` components can be ported 1:1. The JS bundle _can_ load pre-unlock in release builds (it lives in APK assets on device-encrypted storage), but you should not need JS pre-unlock — the alarm machinery should stay native. The critical rule: **anything your receivers must read before first unlock must live in device-protected storage**, via `createDeviceProtectedStorageContext()` / `moveDatabaseFrom()` / `moveSharedPreferencesFrom()` (§3).
 - **One correction to a common assumption:** `setAlarmClock` **does** require an exact-alarm permission on Android 12+ (target SDK 31+). A genuine alarm-clock app should declare **`USE_EXACT_ALARM`** (auto-granted at install, not user-revocable, Play-reviewed). `setAlarmClock` remains exempt from Doze (§4).
 - **Your `mediaPlayback` FGS started from the exact-alarm receiver is legal on Android 14/15/16** — exact alarms are explicitly exempt from background-FGS-start restrictions, and `mediaPlayback` has no while-in-use permission requirement. The one landmine: on Android 15+, if the alarm fires within the post-`BOOT_COMPLETED` attribution window, a `mediaPlayback` FGS start is rejected. Test reboot-immediately-before-alarm scenarios (§5).
 
@@ -50,12 +50,12 @@ A local module's Android source set is a normal Gradle Android library — you c
 
 Two distinct stages:
 
-1. **Prebuild stage (Expo).** `npx expo prebuild` generates `android/app/src/main/AndroidManifest.xml` from the Expo template, then config plugins rewrite it as XML transforms (this is *not* Android's manifest merger). The supported mechanism is `withAndroidManifest`
-(https://docs.expo.dev/modules/config-plugin-and-native-module-tutorial/). Expo's own `expo-audio` plugin is a real example of injecting a media-playback foreground service via config (`enableBackgroundPlayback` adds "a media playback foreground service" on Android)
-(https://docs.expo.dev/versions/latest/sdk/audio/).
+1. **Prebuild stage (Expo).** `npx expo prebuild` generates `android/app/src/main/AndroidManifest.xml` from the Expo template, then config plugins rewrite it as XML transforms (this is _not_ Android's manifest merger). The supported mechanism is `withAndroidManifest`
+   (https://docs.expo.dev/modules/config-plugin-and-native-module-tutorial/). Expo's own `expo-audio` plugin is a real example of injecting a media-playback foreground service via config (`enableBackgroundPlayback` adds "a media playback foreground service" on Android)
+   (https://docs.expo.dev/versions/latest/sdk/audio/).
 
 2. **Build stage (Gradle).** Android's manifest merger then combines the main manifest with build-variant and library manifests by priority (build variant > app main > libraries), resolving conflicts with `tools:replace` / `tools:remove` / `tools:node`
-(https://developer.android.com/build/manage-manifests). Your `<service android:foregroundServiceType="mediaPlayback">`, `<receiver android:directBootAware="true">`, `<activity android:showWhenLocked="true" android:turnScreenOn="true">`, and `<uses-permission>` entries all survive this stage normally.
+   (https://developer.android.com/build/manage-manifests). Your `<service android:foregroundServiceType="mediaPlayback">`, `<receiver android:directBootAware="true">`, `<activity android:showWhenLocked="true" android:turnScreenOn="true">`, and `<uses-permission>` entries all survive this stage normally.
 
 ### Is direct editing of the checked-in `AndroidManifest.xml` viable?
 
@@ -63,7 +63,7 @@ Two distinct stages:
 
 - "If you modify the generated directories manually then you risk losing your changes the next time you run `npx expo prebuild --clean`."
 - "For existing React Native projects, where the native projects are managed manually, do not use `npx expo prebuild`, as that may overwrite any manual customizations."
-(https://docs.expo.dev/workflow/continuous-native-generation/)
+  (https://docs.expo.dev/workflow/continuous-native-generation/)
 
 **SDK 57 gotcha (important):** `expo prebuild` **now clears and regenerates `android/` and `ios/` by default**; you must pass `--no-clean` to apply changes onto existing folders
 (https://expo.dev/changelog/sdk-57). So in SDK 57 an accidental bare `npx expo prebuild` (or one run by a teammate/CI script) wipes your Kotlin and manifest edits. Mitigations:
@@ -71,7 +71,7 @@ Two distinct stages:
 - Keep `android/` checked in and never run prebuild (treat as bare workflow). EAS Build respects this: "For a project that has android and ios directories, EAS Build will not run Prebuild to avoid overwriting any changes."
 - Or move all customizations into config plugins (recommended if you want CNG to remain the source of truth).
 - Middle ground: `patch-project`, which "generates and applies patches to preserve native changes after running `npx expo prebuild`" — but patches can break on SDK upgrades when templates change
-(https://docs.expo.dev/config-plugins/patch-project/).
+  (https://docs.expo.dev/config-plugins/patch-project/).
 
 Given you already have a complete, working native manifest with six `directBootAware` components, **direct editing of the checked-in manifest + never regenerating is the lowest-risk option**.
 
@@ -98,12 +98,12 @@ A killed-process RN launch must: init the native process → load Hermes → rea
 (https://expo.dev/guides/react-native-startup-metrics-explained). Hermes exists precisely to shorten this ("precompiled bytecode … saves the interpreter from having to perform this expensive step during app startup")
 (https://reactnative.dev/blog/2022/07/08/hermes-as-the-default), but published numbers are still in the seconds range for real apps:
 
-- Theodo (production app, low-end Android): 12.9 s → 3.9 s cold start *after* adopting Hermes
-(https://apps.theodo.com/en/radar-2023/react-native).
+- Theodo (production app, low-end Android): 12.9 s → 3.9 s cold start _after_ adopting Hermes
+  (https://apps.theodo.com/en/radar-2023/react-native).
 - RapidNative 2026 playbook: 3.8 s cold start on a mid-tier Pixel-6a-class device
-(https://www.rapidnative.com/blogs/react-native-performance-optimization-2026-playbook).
+  (https://www.rapidnative.com/blogs/react-native-performance-optimization-2026-playbook).
 - RN 0.82 / Hermes V1 improved bundle load only a few percent on low-end Android
-(https://reactnative.dev/blog/2025/10/08/react-native-0.82).
+  (https://reactnative.dev/blog/2025/10/08/react-native-0.82).
 
 A native Activity paints its first frame in tens of milliseconds. For an alarm that must be visible and dismissible on the first ring, a multi-second blank/splash window is disqualifying on its own.
 
@@ -113,38 +113,38 @@ Bundle-load failure is a well-documented failure mode — white screen, crash, o
 
 - Classic release-build failure: "Unable to load script … bundle `index.android.bundle` … packaged correctly for release."
 - OTA (CodePush) failure: "Failed to load bundle … main.jsbundle"
-(https://github.com/Microsoft/react-native-code-push/issues/1197).
+  (https://github.com/Microsoft/react-native-code-push/issues/1197).
 - `expo-updates` error recovery is explicitly "not a full safety net … in many cases, users will still see a crash," and fatal errors thrown >10 s after first render are not caught at all
-(https://docs.expo.dev/eas-update/error-recovery/).
+  (https://docs.expo.dev/eas-update/error-recovery/).
 - Real Expo SDK 54 report: blank screen with an empty Android Activity that also blocked live updates
-(https://github.com/expo/expo/issues/41543); `Updates.reloadAsync()` freeze requiring a `ReactRootView` detach/reattach patch
-(https://andrei-calazans.com/posts/expo-updates-stuck-on-android-when-force-update/).
+  (https://github.com/expo/expo/issues/41543); `Updates.reloadAsync()` freeze requiring a `ReactRootView` detach/reattach patch
+  (https://andrei-calazans.com/posts/expo-updates-stuck-on-android-when-force-update/).
 
 If the bundle fails at alarm time, the user has no dismiss button while audio blares. A native ring screen has no such dependency.
 
 ### (c) Launching from a BroadcastReceiver while dozing/locked
 
 - Since Android 10, "the platform has placed restrictions on when apps can start activities from the background"
-(https://developer.android.com/guide/components/activities/background-starts). Directly calling `startActivity()` from an alarm receiver is unreliable. The platform-sanctioned path is a high-priority notification with a **full-screen intent**, which requires `USE_FULL_SCREEN_INTENT` (normal permission, auto-granted)
-(https://developer.android.com/about/versions/10/behavior-changes-10#background-activity-starts).
+  (https://developer.android.com/guide/components/activities/background-starts). Directly calling `startActivity()` from an alarm receiver is unreliable. The platform-sanctioned path is a high-priority notification with a **full-screen intent**, which requires `USE_FULL_SCREEN_INTENT` (normal permission, auto-granted)
+  (https://developer.android.com/about/versions/10/behavior-changes-10#background-activity-starts).
 - Android 14 narrowed this: default FSI grant is "limited to those that provide **calling and alarms only**. The Google Play Store revokes default `USE_FULL_SCREEN_INTENT` permissions for any apps that don't fit this profile," and apps get `NotificationManager.canUseFullScreenIntent()` + `ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT` to check/request
-(https://developer.android.com/about/versions/14/behavior-changes-14). A genuine alarm app qualifies — but note this policy now applies to the *merged* RN app as a whole.
+  (https://developer.android.com/about/versions/14/behavior-changes-14). A genuine alarm app qualifies — but note this policy now applies to the _merged_ RN app as a whole.
 - The FSI window **can** appear over the lock screen before unlock (a Notifee user reported it bypassing the lockscreen entirely: https://github.com/invertase/notifee/issues/501). But "window appears" ≠ "React UI rendered" — with a cold process the user stares at a window background/splash/blank screen while Hermes boots. OEM behavior is additionally hostile: full-screen notifications degrade to an icon on Samsung One UI always-on display
-(https://github.com/invertase/notifee/issues/584), and foreground-notification misconfiguration silently drops the FSI
-(https://github.com/invertase/notifee/issues/317).
+  (https://github.com/invertase/notifee/issues/584), and foreground-notification misconfiguration silently drops the FSI
+  (https://github.com/invertase/notifee/issues/317).
 
 ### (d) Real-world attempts
 
 - `baekgol/react-native-alarm-manager`: bare-workflow RN alarm lib requiring manifest edits, `MainActivity` overrides, bundled raw sounds — i.e., the ring path is native anyway
-(https://github.com/baekgol/react-native-alarm-manager).
+  (https://github.com/baekgol/react-native-alarm-manager).
 - `joaoGabriel55/react-native-alarmageddon`: documents needing `SCHEDULE_EXACT_ALARM`, warns "Some device manufacturers (Samsung, Xiaomi, Huawei, etc.) may kill background processes," and is explicitly "not compatible with Expo Go"
-(https://github.com/joaoGabriel55/react-native-alarmageddon).
-- `Alperengozum/expo-alarm` only wraps the *system* clock app's `ACTION_SET_ALARM` — you don't own the ring UI at all
-(https://github.com/Alperengozum/expo-alarm).
+  (https://github.com/joaoGabriel55/react-native-alarmageddon).
+- `Alperengozum/expo-alarm` only wraps the _system_ clock app's `ACTION_SET_ALARM` — you don't own the ring UI at all
+  (https://github.com/Alperengozum/expo-alarm).
 - Community consensus (Stack Overflow "Should I build an alarm app in React Native or natively"): native for the alarm path
-(https://stackoverflow.com/questions/73909084/should-i-build-an-alarm-app-in-react-native-or-build-it-natively-for-ios-and-and).
+  (https://stackoverflow.com/questions/73909084/should-i-build-an-alarm-app-in-react-native-or-build-it-natively-for-ios-and-and).
 
-**Bottom line:** everyone who ships a serious alarm app ends up implementing the ring screen natively, even inside RN apps. You already *have* that native implementation — port it unchanged. Use RN for the alarm list, editing, and settings screens, where a 1–3 s cold start is acceptable.
+**Bottom line:** everyone who ships a serious alarm app ends up implementing the ring screen natively, even inside RN apps. You already _have_ that native implementation — port it unchanged. Use RN for the alarm list, editing, and settings screens, where a 1–3 s cold start is acceptable.
 
 **Not verified from primary sources:** Meta publishes no official cold-start millisecond numbers for killed-process RN launches (the figures above are community/consulting benchmarks). The exact Play Console `USE_FULL_SCREEN_INTENT` declaration-form text was not retrievable; the Android 14 behavior-changes page paraphrases the policy.
 
@@ -163,11 +163,11 @@ On file-based-encryption devices (Android 7+), after power-on but **before the u
 
 Broadcast order and storage availability:
 
-| Broadcast | When | Storage available | Requirement |
-|---|---|---|---|
-| `ACTION_LOCKED_BOOT_COMPLETED` | User still locked | DE only | Receiver must be `directBootAware="true"` |
-| `ACTION_USER_UNLOCKED` | User unlocks | CE becomes available | — |
-| `ACTION_BOOT_COMPLETED` | After unlock/boot finished | DE + CE | `RECEIVE_BOOT_COMPLETED` permission |
+| Broadcast                      | When                       | Storage available    | Requirement                               |
+| ------------------------------ | -------------------------- | -------------------- | ----------------------------------------- |
+| `ACTION_LOCKED_BOOT_COMPLETED` | User still locked          | DE only              | Receiver must be `directBootAware="true"` |
+| `ACTION_USER_UNLOCKED`         | User unlocks               | CE becomes available | —                                         |
+| `ACTION_BOOT_COMPLETED`        | After unlock/boot finished | DE + CE              | `RECEIVE_BOOT_COMPLETED` permission       |
 
 AOSP `Intent.java`: "Upon receipt of this broadcast, the user is still locked and only device-protected storage can be accessed safely … To receive this broadcast, your receiver component must be marked as being `ComponentInfo.directBootAware`."
 
@@ -175,11 +175,11 @@ AOSP `Intent.java`: "Upon receipt of this broadcast, the user is still locked an
 
 Per https://developer.android.com/privacy-and-security/direct-boot: "To mark your component as encryption aware, set the `android:directBootAware` attribute to true … Encryption aware components can register to receive an `ACTION_LOCKED_BOOT_COMPLETED` broadcast … such as triggering a scheduled alarm."
 
-**It guarantees only this: the component may run pre-unlock and may access DE storage.** It does *not* relocate anything; the default `Context` still points at CE storage, which remains inaccessible. If the component touches default SharedPreferences, default Room/SQLite, or `filesDir` pre-unlock, it fails.
+**It guarantees only this: the component may run pre-unlock and may access DE storage.** It does _not_ relocate anything; the default `Context` still points at CE storage, which remains inaccessible. If the component touches default SharedPreferences, default Room/SQLite, or `filesDir` pre-unlock, it fails.
 
 ### (a) Can a React Native JS bundle load in direct boot mode?
 
-**Yes, in a standard release build** — and the reason is specific. The release JS bundle (`index.android.bundle`) is packaged in the APK under `assets/` and loaded via `context.getAssets()` (`JSBundleLoader.createAssetLoader`, used by default in `ReactInstanceManagerBuilder` — RN source links below). The APK itself sits under `/data/app/`, which is on device-encrypted storage and readable pre-unlock. So a `directBootAware` activity *could* boot Hermes and load the bundle before first unlock.
+**Yes, in a standard release build** — and the reason is specific. The release JS bundle (`index.android.bundle`) is packaged in the APK under `assets/` and loaded via `context.getAssets()` (`JSBundleLoader.createAssetLoader`, used by default in `ReactInstanceManagerBuilder` — RN source links below). The APK itself sits under `/data/app/`, which is on device-encrypted storage and readable pre-unlock. So a `directBootAware` activity _could_ boot Hermes and load the bundle before first unlock.
 
 **But you should not rely on this, and mostly don't need to:**
 
@@ -239,12 +239,12 @@ There is **no primary-source sentence stating this explicitly** — flagged as i
 
 From https://developer.android.com/develop/background-work/services/alarms/schedule and the Android 14 changes page:
 
-| | `USE_EXACT_ALARM` | `SCHEDULE_EXACT_ALARM` |
-|---|---|---|
-| Grant | Automatic at install | **Denied by default** on Android 14+ for fresh installs targeting API 33+ |
-| User-revocable | No | Yes (user and system; revocation **deletes** all scheduled exact alarms) |
-| Play policy | Restricted — review required; acceptable use cases are alarm/timer apps and calendar apps with event notifications | Treated as the general fallback; no equivalent Play restriction section found |
-| Runtime flow | None needed | `canScheduleExactAlarms()` → if false, `ACTION_REQUEST_SCHEDULE_EXACT_ALARM` → listen for `ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED` |
+|                | `USE_EXACT_ALARM`                                                                                                  | `SCHEDULE_EXACT_ALARM`                                                                                                                           |
+| -------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Grant          | Automatic at install                                                                                               | **Denied by default** on Android 14+ for fresh installs targeting API 33+                                                                        |
+| User-revocable | No                                                                                                                 | Yes (user and system; revocation **deletes** all scheduled exact alarms)                                                                         |
+| Play policy    | Restricted — review required; acceptable use cases are alarm/timer apps and calendar apps with event notifications | Treated as the general fallback; no equivalent Play restriction section found                                                                    |
+| Runtime flow   | None needed                                                                                                        | `canScheduleExactAlarms()` → if false, `ACTION_REQUEST_SCHEDULE_EXACT_ALARM` → listen for `ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED` |
 
 Play policy (support.google.com answer 13161072): "`USE_EXACT_ALARM` … is a highly restricted permission used only for apps whose core, user-facing functionality genuinely requires precise timing, like dedicated alarm, timer, or calendar applications … Apps that request this restricted permission are subject to review." Acceptable use cases listed: alarm/timer apps, calendar apps.
 
@@ -327,6 +327,7 @@ Crucially, the restriction follows **attribution, not the immediate caller**. A 
 ## All URLs actually opened during this research
 
 **developer.android.com**
+
 - https://developer.android.com/privacy-and-security/direct-boot
 - https://developer.android.com/training/articles/direct-boot
 - https://developer.android.com/reference/android/app/AlarmManager
@@ -356,6 +357,7 @@ Crucially, the restriction follows **attribution, not the immediate caller**. A 
 - https://developer.android.com/topic/performance/power/power-details
 
 **AOSP source (android.googlesource.com)**
+
 - https://android.googlesource.com/platform/frameworks/base/+/master/core/java/android/content/Intent.java?format=TEXT
 - https://android.googlesource.com/platform/frameworks/base/+/master/core/java/android/os/Environment.java?format=TEXT
 - https://android.googlesource.com/platform/frameworks/base/+/master/core/java/android/app/ContextImpl.java?format=TEXT
@@ -368,6 +370,7 @@ Crucially, the restriction follows **attribution, not the immediate caller**. A 
 - https://android.googlesource.com/platform/packages/apps/DeskClock/+/master/src/com/android/deskclock/data/DataModel.kt?format=TEXT
 
 **reactnative.dev**
+
 - https://reactnative.dev/docs/the-new-architecture/landing-page
 - https://reactnative.dev/blog/2024/10/23/the-new-architecture-is-here
 - https://reactnative.dev/blog/2025/01/21/version-0.77
@@ -377,6 +380,7 @@ Crucially, the restriction follows **attribution, not the immediate caller**. A 
 - https://reactnative.dev/docs/turbo-native-modules-introduction
 
 **docs.expo.dev / expo.dev**
+
 - https://docs.expo.dev/workflow/continuous-native-generation/
 - https://docs.expo.dev/workflow/customizing/
 - https://docs.expo.dev/modules/config-plugin-and-native-module-tutorial/
@@ -395,6 +399,7 @@ Crucially, the restriction follows **attribution, not the immediate caller**. A 
 - https://expo.dev/guides/react-native-startup-metrics-explained
 
 **GitHub (issues, repos, source)**
+
 - https://github.com/expo/expo/issues/42754
 - https://github.com/expo/expo/issues/41543
 - https://github.com/expo/expo/issues/14930
@@ -419,12 +424,14 @@ Crucially, the restriction follows **attribution, not the immediate caller**. A 
 - https://raw.githubusercontent.com/yuriykulikov/AlarmClock/develop/app/src/main/AndroidManifest.xml
 
 **Google blogs / Play policy**
+
 - https://android-developers.googleblog.com/2016/04/developing-for-direct-boot.html
 - https://android-developers.googleblog.com/2025/06/android-16-is-here.html
 - https://android-developers.googleblog.com/2025/05/16-things-to-know-for-android-developers-google-io-2025.html
 - https://support.google.com/googleplay/android-developer/answer/13161072
 
 **Third-party / community**
+
 - https://notifee.app/react-native/docs/android/behaviour/
 - https://notifee.app/react-native/reference/notificationfullscreenaction/
 - https://www.callstack.com/blog/optimize-android-app-startup-time-with-hermes
@@ -438,7 +445,7 @@ Crucially, the restriction follows **attribution, not the immediate caller**. A 
 - https://andrei-calazans.com/posts/expo-updates-stuck-on-android-when-force-update/
 - https://www.volcengine.com/article/2543102
 
-*(Attempted URLs that returned 404 — e.g. developer.android.com/about/versions/16/changes/foreground-service-types — are omitted.)*
+_(Attempted URLs that returned 404 — e.g. developer.android.com/about/versions/16/changes/foreground-service-types — are omitted.)_
 
 ---
 

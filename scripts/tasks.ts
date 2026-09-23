@@ -190,6 +190,10 @@ async function runWebCheck(
     cwd: repoRoot,
     env: suppressNodeWarnings(env),
   });
+  await runCommand(pnpm, ["--dir", "web", "run", "test"], {
+    cwd: repoRoot,
+    env: suppressNodeWarnings(env),
+  });
 }
 
 async function runMobileCheck(
@@ -202,6 +206,7 @@ async function runMobileCheck(
 
   const env = useStableToolchain(initialEnv);
   const pnpm = await runPnpmInstall(repoRoot, env);
+  await generateMobileBindings(repoRoot, env);
   for (const packageDir of ["packages/mobile-bridge", "mobile"]) {
     await runCommand(pnpm, ["--dir", packageDir, "run", "lint"], {
       cwd: repoRoot,
@@ -211,6 +216,91 @@ async function runMobileCheck(
       cwd: repoRoot,
       env: suppressNodeWarnings(env),
     });
+  }
+}
+
+async function generateMobileBindings(repoRoot: string, env: Env): Promise<void> {
+  const libraryName =
+    Deno.build.os === "darwin"
+      ? "libclipper_mobile_uniffi.dylib"
+      : Deno.build.os === "linux"
+        ? "libclipper_mobile_uniffi.so"
+        : undefined;
+  if (libraryName === undefined) {
+    throw new Error(`mobile UniFFI generation is unsupported on ${Deno.build.os}`);
+  }
+
+  await runCommand(await command("cargo", env), ["build", "-p", "clipper-mobile-uniffi", "--lib"], {
+    cwd: repoRoot,
+    env,
+  });
+
+  const bridgeDir = joinPath(repoRoot, "packages/mobile-bridge");
+  const ubrn = await command(joinPath(bridgeDir, "node_modules/.bin/ubrn"), env);
+  const library = joinPath(repoRoot, "target/debug", libraryName);
+  await runCommand(
+    ubrn,
+    [
+      "generate",
+      "jsi",
+      "bindings",
+      "--library",
+      "--no-format",
+      "--ts-dir",
+      "packages/mobile-bridge/src/generated",
+      "--cpp-dir",
+      "packages/mobile-bridge/cpp/generated",
+      library,
+    ],
+    // ubrn invokes `cargo metadata --manifest-path Cargo.toml` while extracting
+    // a library, so this command must run at the Rust workspace root.
+    { cwd: repoRoot, env: suppressNodeWarnings(env) },
+  );
+
+  // The TurboModule generator always writes Android/iOS scaffolding beside the
+  // package. Run it in a throwaway package and copy back only the two TypeScript
+  // entrypoints needed by lint and type checking.
+  const tempDir = joinPath(repoRoot, "target/mobile-uniffi-turbo");
+  const remove = await command("rm", env);
+  const copy = await command("cp", env);
+  await runCommand(remove, ["-rf", tempDir], { cwd: repoRoot, env });
+  await runCommand(await command("mkdir", env), ["-p", tempDir], { cwd: repoRoot, env });
+  try {
+    await runCommand(
+      copy,
+      [joinPath(bridgeDir, "package.json"), joinPath(tempDir, "package.json")],
+      {
+        cwd: repoRoot,
+        env,
+      },
+    );
+    const configPath = joinPath(tempDir, "ubrn.config.yaml");
+    await runCommand(copy, [joinPath(bridgeDir, "ubrn.config.yaml"), configPath], {
+      cwd: repoRoot,
+      env,
+    });
+    await runCommand(
+      ubrn,
+      [
+        "generate",
+        "jsi",
+        "turbo-module",
+        "--config",
+        configPath,
+        "clipper_app_types",
+        "clipper_mobile_uniffi",
+      ],
+      { cwd: tempDir, env: suppressNodeWarnings(env) },
+    );
+    for (const filename of ["index.ts", "NativeMobileBridge.ts"]) {
+      await runCommand(
+        copy,
+        [joinPath(tempDir, "src", filename), joinPath(bridgeDir, "src", filename)],
+        { cwd: repoRoot, env },
+      );
+    }
+  } finally {
+    await runCommand(remove, ["-rf", tempDir], { cwd: repoRoot, env });
   }
 }
 

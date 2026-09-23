@@ -2,6 +2,7 @@ pub mod api_client;
 mod clipboard_privacy;
 pub mod engine;
 mod local_store;
+pub mod schedule;
 
 #[cfg(target_os = "macos")]
 #[path = "clipboard_watcher_macos.rs"]

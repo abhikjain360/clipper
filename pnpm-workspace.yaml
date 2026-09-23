@@ -2,7 +2,16 @@ packages:
   - mobile
   - packages/*
   - web
+packageExtensions:
+  # Tamagui's extractor imports the TypeScript JS compiler API at runtime,
+  # but declares it only as a dev dependency. TypeScript 7 does not expose
+  # that API; give the extractor the same compatible line it develops against.
+  # Upgrade/removal criteria: docs/tamagui-maintenance.md.
+  "@tamagui/static@2.7.7":
+    dependencies:
+      typescript: ~5.9.2
 overrides:
+  js-yaml: 4.3.2
   uuid: 11.1.1
   esbuild: 0.28.1
   esbuild-wasm: 0.28.1
