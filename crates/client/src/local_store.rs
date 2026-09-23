@@ -1570,12 +1570,13 @@ impl LocalStore {
         let Some(anchor) = revision_anchor_for_record(&record)? else {
             return Ok(false);
         };
-        let first_acceptable = match anchor.kind {
-            StoredRevisionAnchorKind::Absent => anchor.head.revision,
-            StoredRevisionAnchorKind::Tombstone => anchor.head.revision.saturating_add(1),
+        let newer_than = match anchor.kind {
+            StoredRevisionAnchorKind::Absent | StoredRevisionAnchorKind::Tombstone => {
+                anchor.head.revision
+            }
             StoredRevisionAnchorKind::ObservedDelete => anchor.head.revision.saturating_add(2),
         };
-        Ok(revision < first_acceptable)
+        Ok(revision < newer_than)
     }
 
     /// Check a served revision against the durable anchor before the caller
@@ -4081,6 +4082,30 @@ mod tests {
             )
             .await
             .expect("the refetched head is the one the anchor already accepted");
+    }
+
+    #[tokio::test]
+    async fn a_tombstone_at_the_same_revision_is_a_conflict_not_a_newer_revision() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("profile-a".into());
+        let object_id = "cccccccc-7777-4777-8777-777777777777";
+        store
+            .apply_local_tombstone(
+                ObjectKind::Schedule,
+                object_id,
+                30,
+                LocalHead {
+                    revision: 3,
+                    parent_hash: [7; crypto::SHA256_BYTES],
+                },
+                10,
+            )
+            .await
+            .expect("tombstone");
+
+        assert!(store.holds_newer_than(object_id, 2).await.expect("read"));
+        assert!(!store.holds_newer_than(object_id, 3).await.expect("read"));
     }
 
     /// The anchors are not in the cache, so throwing the cache away cannot

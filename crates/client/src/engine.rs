@@ -2284,12 +2284,6 @@ impl SyncEngine {
                 .await?;
             validate_snapshot_page(&page, after, stream_start_seq)?;
             for item in page.items {
-                if self.holds_listed_head(&item).await {
-                    self.local_store
-                        .mark_snapshot_seen(&item.id.to_string(), generation)
-                        .await?;
-                    continue;
-                }
                 match self
                     .decrypt_schedule_object_item(api, &item, &encryption_key)
                     .await
@@ -2895,15 +2889,6 @@ impl SyncEngine {
             "Kept the revision this device holds: {reason}",
         );
         Ok(())
-    }
-
-    async fn holds_listed_head(&self, item: &ObjectListItem) -> bool {
-        let Ok(Some(head)) = self.local_store.local_head(&item.id.to_string()).await else {
-            return false;
-        };
-        head.revision == item.revision
-            && crypto::object_envelope_parent_hash(&item.envelope.body)
-                .is_ok_and(|hash| hash == head.parent_hash)
     }
 
     async fn persist_file_snapshot_item(
