@@ -170,6 +170,15 @@ function isStoredSession(value: unknown): value is StoredSession {
   );
 }
 
+export function isResumeRejected(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "SESSION_RESUME_REJECTED"
+  );
+}
+
 // A fresh process prompts once. Cancellation falls back to manual login; it
 // never replays OPAQUE with a stored passphrase or registers another device.
 export async function resumeSession(): Promise<boolean> {
@@ -204,12 +213,7 @@ export async function resumeSession(): Promise<boolean> {
       saved.serverUrl,
     );
   } catch (error) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === "SESSION_RESUME_REJECTED"
-    ) {
+    if (isResumeRejected(error)) {
       await clearCredentials();
     }
     throw error;
