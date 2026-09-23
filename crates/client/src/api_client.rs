@@ -578,7 +578,7 @@ impl ApiClient {
         data: Vec<u8>,
     ) -> Result<OkResponse, ClientError> {
         let url = self.api_url(&["objects", object_id, "payloads", payload_id])?;
-        let resp = with_transfer_deadline(self.http.put(url))
+        let resp = with_transfer_deadline(self.http.put(url), data.len())
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -695,7 +695,7 @@ impl ApiClient {
             "payloads",
             payload_id,
         ])?;
-        let resp = with_transfer_deadline(self.http.get(url))
+        let resp = with_transfer_deadline(self.http.get(url), expected_ciphertext_size)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -720,7 +720,7 @@ impl ApiClient {
     ) -> Result<Vec<u8>, ClientError> {
         let expected_ciphertext_size = expected_body_size(expected_ciphertext_size)?;
         let url = self.api_url(&["objects", object_id, "payloads", payload_id])?;
-        let resp = with_transfer_deadline(self.http.get(url))
+        let resp = with_transfer_deadline(self.http.get(url), expected_ciphertext_size)
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
@@ -869,15 +869,10 @@ pub(crate) fn default_tls_config() -> rustls::ClientConfig {
     config
 }
 
-/// Native builds get explicit transport limits: a hostile or wedged server
-/// must not be able to hold a request open forever, and redirects are
-/// disabled so API requests only ever go to the configured host. The wasm
-/// builder does not expose these knobs; the browser enforces its own
-/// fetch/redirect policy there.
-#[cfg(not(target_family = "wasm"))]
 /// Deadline for the small calls: auth, metadata, listings. Payload transfers
 /// are left out — they are large by nature and keep the per-chunk read timeout
 /// instead, so a slow link does not cancel a download that is making progress.
+#[cfg(not(target_family = "wasm"))]
 const METADATA_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The browser client cannot be given connect or read timeouts, so every
@@ -885,6 +880,9 @@ const METADATA_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// completes and the caller waits forever.
 #[cfg(target_family = "wasm")]
 const BROWSER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[cfg(target_family = "wasm")]
+const BROWSER_TRANSFER_MIN_BYTES_PER_SECOND: u64 = 64 * 1024;
 
 fn with_deadline(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     #[cfg(not(target_family = "wasm"))]
@@ -899,18 +897,29 @@ fn with_deadline(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
 
 /// Payload transfers are large by nature. Native bounds them with the
 /// per-chunk read timeout, which does not cancel a download that is still
-/// making progress; the browser has no such option and takes the deadline.
-fn with_transfer_deadline(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+/// making progress. The browser has no such option, so its deadline grows
+/// with the bytes moved: the request deadline plus one second per 64 KiB.
+fn with_transfer_deadline(
+    request: reqwest::RequestBuilder,
+    transfer_bytes: usize,
+) -> reqwest::RequestBuilder {
     #[cfg(not(target_family = "wasm"))]
     {
+        let _ = transfer_bytes;
         request
     }
     #[cfg(target_family = "wasm")]
     {
-        request.timeout(BROWSER_REQUEST_TIMEOUT)
+        let transfer_seconds = transfer_bytes as u64 / BROWSER_TRANSFER_MIN_BYTES_PER_SECOND;
+        request.timeout(BROWSER_REQUEST_TIMEOUT + std::time::Duration::from_secs(transfer_seconds))
     }
 }
 
+/// Native builds get explicit transport limits: a hostile or wedged server
+/// must not be able to hold a request open forever, and redirects are
+/// disabled so API requests only ever go to the configured host. The wasm
+/// builder does not expose these knobs; the browser enforces its own
+/// fetch/redirect policy there.
 #[cfg(not(target_family = "wasm"))]
 fn build_http_client() -> Result<Client, ClientError> {
     crate::ensure_crypto_provider();
