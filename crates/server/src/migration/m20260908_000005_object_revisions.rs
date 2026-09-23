@@ -46,6 +46,8 @@ impl MigrationTrait for Migration {
             .await?;
         db.execute_unprepared("DROP TABLE IF EXISTS objects")
             .await?;
+        db.execute_unprepared("UPDATE users SET storage_bytes = 0, object_count = 0")
+            .await?;
 
         db.execute_unprepared(
             "CREATE TABLE objects (
