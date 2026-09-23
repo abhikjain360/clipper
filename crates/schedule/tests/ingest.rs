@@ -418,6 +418,17 @@ END:VCALENDAR\r\n";
 }
 
 #[test]
+fn a_zone_known_only_by_its_utc_offset_is_refused() {
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:offset@example.com\r\n\
+DTSTART;TZID=\"(UTC+05:30) Chennai, Kolkata, Mumbai, New Delhi\":20260914T100000\r\n\
+DTEND;TZID=\"(UTC+05:30) Chennai, Kolkata, Mumbai, New Delhi\":20260914T110000\r\n\
+END:VEVENT\r\nEND:VCALENDAR\r\n";
+    let outcome = parse_ics(feed, SourceId(uuid_fixture()), import_fixture()).expect("parse");
+    assert!(outcome.events.is_empty());
+    assert_eq!(outcome.skipped.len(), 1);
+}
+
+#[test]
 fn a_leading_utf8_bom_does_not_break_calendar_parsing() {
     let feed = "\u{feff}BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//Feed//EN\r\n\
 BEGIN:VEVENT\r\nUID:bom@example.com\r\nDTSTART:20260914T100000Z\r\n\
@@ -737,6 +748,9 @@ fn escaped_rrule_syntax_cannot_hide_wide_intervals() {
         "RRULE:FREQ=WEEKLY;INTER\\VAL=65536",
         "RRUL\\E:FREQ=WEEKLY;INTERVAL=65537",
         "RRULE;X-P=\"a\\\"b\":FREQ=WEEKLY;INTERVAL=65536",
+        "\"RRULE\":FREQ=WEEKLY;INTERVAL=65537",
+        "RRUL\\\tE:FREQ=WEEKLY;INTERVAL=65537",
+        "RRULE;X-P=\"a\\\t\"b\":FREQ=WEEKLY;INTERVAL=65537",
     ] {
         let feed = format!(
             "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:escaped@example.com\r\nDTSTART:20260901T090000Z\r\nDTEND:20260901T100000Z\r\n{line}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
