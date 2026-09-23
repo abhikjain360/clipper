@@ -142,7 +142,8 @@ pub async fn handle_connection(
             }
         } => {}
         _ = async {
-            while let Some(event_line) = broadcast_rx.recv().await {
+            while broadcast_rx.changed().await.is_ok() {
+                let event_line = broadcast_rx.borrow_and_update().clone();
                 let mut w = writer_for_broadcast.lock().await;
                 let line = format!("{}\n", event_line);
                 if w.write_all(line.as_bytes()).await.is_err() {
