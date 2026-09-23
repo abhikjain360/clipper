@@ -156,7 +156,7 @@ pub fn item_view(
         id: object_id.to_string(),
         revision,
         title: item.title.clone(),
-        recurrence: item.recurrence.summary(),
+        recurrence: item.recurrence_summary(),
         time_summary: item.time_summary(),
         all_day: matches!(item.span, ScheduleSpan::AllDay { .. }),
         has_alarm: item.alarm.is_some(),

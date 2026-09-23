@@ -4,6 +4,7 @@
 //! a cadence identically.
 
 use chrono::{Month, Weekday};
+use chrono_tz::Tz;
 
 use crate::{
     item::ScheduleItem,
@@ -16,10 +17,10 @@ use crate::{
 
 impl Recurrence {
     /// A short description of the cadence, e.g. `"Every weekday"`.
-    pub fn summary(&self) -> String {
+    fn summary(&self, zone: Tz) -> String {
         match self {
             Self::Once => "Once".to_string(),
-            Self::Every(cadence) => cadence.summary(),
+            Self::Every(cadence) => cadence.summary(zone),
             // An imported rule is not modelled here, so there is nothing to
             // phrase. A wrong summary would be worse than a vague one.
             Self::Imported { .. } => "Repeats (from calendar)".to_string(),
@@ -28,7 +29,7 @@ impl Recurrence {
 }
 
 impl Cadence {
-    pub fn summary(&self) -> String {
+    fn summary(&self, zone: Tz) -> String {
         let every = match self.interval.get() {
             1 => match &self.frequency {
                 Frequency::Daily => "Every day".to_string(),
@@ -53,7 +54,10 @@ impl Cadence {
             RecurrenceEnd::Never => every,
             RecurrenceEnd::After(count) => format!("{every}, {count} times"),
             RecurrenceEnd::On(until) => {
-                format!("{every}, until {}", until.format("%-d %b %Y"))
+                format!(
+                    "{every}, until {}",
+                    until.with_timezone(&zone).format("%-d %b %Y")
+                )
             }
         }
     }
@@ -91,6 +95,17 @@ impl NthWeekday {
 }
 
 impl ScheduleItem {
+    pub fn recurrence_summary(&self) -> String {
+        let zone = match &self.span {
+            ScheduleSpan::Timed {
+                start: TimedStart::Zoned { zone, .. },
+                ..
+            } => *zone,
+            ScheduleSpan::Timed { .. } | ScheduleSpan::AllDay { .. } => Tz::UTC,
+        };
+        self.recurrence.summary(zone)
+    }
+
     /// A short description of when this happens, e.g. `"07:00 (floating)"`.
     pub fn time_summary(&self) -> String {
         match &self.span {
@@ -196,14 +211,44 @@ mod tests {
                 Weekday::Thu,
                 Weekday::Fri
             ])
-            .summary(),
+            .summary(Tz::UTC),
             "Every weekday"
         );
-        assert_eq!(weekly(&[Weekday::Tue]).summary(), "Every week on Tue");
         assert_eq!(
-            weekly(&[Weekday::Mon, Weekday::Wed, Weekday::Fri]).summary(),
+            weekly(&[Weekday::Tue]).summary(Tz::UTC),
+            "Every week on Tue"
+        );
+        assert_eq!(
+            weekly(&[Weekday::Mon, Weekday::Wed, Weekday::Fri]).summary(Tz::UTC),
             "Every week on Mon, Wed and Fri"
         );
+    }
+
+    #[test]
+    fn a_zoned_series_ends_on_its_own_local_date() {
+        let item = ScheduleItem {
+            id: crate::item::ScheduleItemId::new(),
+            title: "Standup".to_string(),
+            span: ScheduleSpan::Timed {
+                start: TimedStart::Zoned {
+                    local: chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
+                        .and_then(|date| date.and_hms_opt(9, 0, 0))
+                        .expect("valid"),
+                    zone: Tz::America__Los_Angeles,
+                },
+                duration: crate::time::BlockDuration::from_minutes(15).expect("non-zero"),
+            },
+            recurrence: Recurrence::Every(
+                Cadence::each(Frequency::Daily).ending(RecurrenceEnd::On(
+                    Utc.with_ymd_and_hms(2024, 1, 10, 7, 59, 59)
+                        .single()
+                        .expect("unambiguous"),
+                )),
+            ),
+            reference: None,
+            alarm: None,
+        };
+        assert_eq!(item.recurrence_summary(), "Every day, until 9 Jan 2024");
     }
 
     #[test]
@@ -217,12 +262,12 @@ mod tests {
             )
             .expect("non-zero"),
         );
-        assert_eq!(fortnightly.summary(), "Every 2 weeks on Tue");
+        assert_eq!(fortnightly.summary(Tz::UTC), "Every 2 weeks on Tue");
 
         let three_times = Recurrence::Every(
             Cadence::each(Frequency::Daily).ending(RecurrenceEnd::after(3).expect("non-zero")),
         );
-        assert_eq!(three_times.summary(), "Every day, 3 times");
+        assert_eq!(three_times.summary(Tz::UTC), "Every day, 3 times");
 
         let until = Recurrence::Every(
             Cadence::each(Frequency::Daily).ending(RecurrenceEnd::On(
@@ -231,7 +276,7 @@ mod tests {
                     .expect("unambiguous"),
             )),
         );
-        assert_eq!(until.summary(), "Every day, until 12 Jun 2026");
+        assert_eq!(until.summary(Tz::UTC), "Every day, until 12 Jun 2026");
     }
 
     #[test]
@@ -241,24 +286,27 @@ mod tests {
                 nth: NthWeekday::from_start(2).expect("in range"),
                 weekday: Weekday::Tue,
             })));
-        assert_eq!(second_tuesday.summary(), "Every month on the 2nd Tue");
+        assert_eq!(
+            second_tuesday.summary(Tz::UTC),
+            "Every month on the 2nd Tue"
+        );
 
         let last_friday =
             Recurrence::Every(Cadence::each(Frequency::Monthly(MonthlyRule::OnWeekday {
                 nth: NthWeekday::last(),
                 weekday: Weekday::Fri,
             })));
-        assert_eq!(last_friday.summary(), "Every month on the last Fri");
+        assert_eq!(last_friday.summary(Tz::UTC), "Every month on the last Fri");
 
         let last_day = Recurrence::Every(Cadence::each(Frequency::Monthly(MonthlyRule::OnDay(
             MonthDay::from_end(1).expect("in range"),
         ))));
-        assert_eq!(last_day.summary(), "Every month on the last day");
+        assert_eq!(last_day.summary(Tz::UTC), "Every month on the last day");
 
         let twenty_first = Recurrence::Every(Cadence::each(Frequency::Monthly(
             MonthlyRule::OnDay(MonthDay::from_start(21).expect("in range")),
         )));
-        assert_eq!(twenty_first.summary(), "Every month on the 21st");
+        assert_eq!(twenty_first.summary(Tz::UTC), "Every month on the 21st");
     }
 
     #[test]
