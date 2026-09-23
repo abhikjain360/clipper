@@ -86,10 +86,15 @@ impl ValidatedRrule {
         // One probe, in the shape expansion actually uses: a UTC wall-clock
         // DTSTART and an UNTIL rewritten to match it. Probing another shape
         // would accept rules that then fail on every expansion.
-        let probe = format!(
-            "DTSTART:20200101T000000Z\nRRULE:{}",
-            until_wall_clock(&trimmed, Tz::UTC).0
-        );
+        let probe_rule = until_wall_clock(&trimmed, Tz::UTC).0;
+        let probe_start = probe_rule
+            .split(';')
+            .find_map(|part| {
+                let (key, value) = part.split_once('=')?;
+                key.eq_ignore_ascii_case("UNTIL").then_some(value)
+            })
+            .unwrap_or("20200101T000000Z");
+        let probe = format!("DTSTART:{probe_start}\nRRULE:{probe_rule}");
         rrule::RRuleSet::from_str(&probe)
             .map_err(|error| RecurrenceError::UnparseableRule(error.to_string()))?;
         Ok(Self(trimmed))
@@ -169,6 +174,7 @@ pub(crate) fn until_scan_bound(instant: DateTime<Utc>, zone: Tz) -> NaiveDateTim
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "CadenceMirror")]
 pub struct Cadence {
     pub frequency: Frequency,
     /// Every `interval` days/weeks/months/years. One means every one.
@@ -179,6 +185,9 @@ pub struct Cadence {
 impl Cadence {
     /// A cadence repeating every `interval` periods, forever.
     pub fn every(frequency: Frequency, interval: u32) -> Result<Self, RecurrenceError> {
+        if interval > u32::from(u16::MAX) {
+            return Err(RecurrenceError::IntervalOutOfRange(interval));
+        }
         Ok(Self {
             frequency,
             interval: NonZeroU32::new(interval).ok_or(RecurrenceError::ZeroInterval)?,
@@ -198,6 +207,21 @@ impl Cadence {
     pub fn ending(mut self, end: RecurrenceEnd) -> Self {
         self.end = end;
         self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct CadenceMirror {
+    frequency: Frequency,
+    interval: u32,
+    end: RecurrenceEnd,
+}
+
+impl TryFrom<CadenceMirror> for Cadence {
+    type Error = RecurrenceError;
+
+    fn try_from(mirror: CadenceMirror) -> Result<Self, Self::Error> {
+        Ok(Self::every(mirror.frequency, mirror.interval)?.ending(mirror.end))
     }
 }
 
@@ -543,6 +567,8 @@ pub enum RecurrenceError {
     UnparseableRule(String),
     #[error("a repeat interval must be at least 1")]
     ZeroInterval,
+    #[error("a repeat interval must fit in an RFC 5545 interval ({0} is too large)")]
+    IntervalOutOfRange(u32),
     #[error("a repeat count must be at least 1")]
     ZeroCount,
     #[error("day of month {0} is out of range (expected 1..=31)")]

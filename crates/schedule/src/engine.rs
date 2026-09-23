@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
 };
 
-use chrono::{DateTime, Days, TimeDelta, TimeZone, Utc, Weekday};
+use chrono::{DateTime, Days, NaiveDateTime, TimeDelta, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use clipper_api_types::ObjectId;
 
@@ -209,6 +209,10 @@ impl RruleEngine {
                 zone,
             ),
         };
+
+        if rule_until_before_start(&rule_line, item.span.local_start()) {
+            return Ok(Vec::new());
+        }
 
         // Give `rrule` a UTC wall-clock DTSTART. It then does pure calendar
         // arithmetic and never resolves a local time itself, so a series whose
@@ -548,6 +552,17 @@ fn rrule_line(cadence: &Cadence, zone: Tz) -> (String, Option<DateTime<Utc>>) {
         }
     }
     (parts.join(";"), cutoff)
+}
+
+fn rule_until_before_start(rule: &str, start: NaiveDateTime) -> bool {
+    rule.split(';')
+        .find_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            key.eq_ignore_ascii_case("UNTIL")
+                .then(|| NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ").ok())
+                .flatten()
+        })
+        .is_some_and(|until| until < start)
 }
 
 fn ical_weekday(day: Weekday) -> &'static str {

@@ -140,11 +140,7 @@ fn cadence(rule: &str, local_start: NaiveDateTime) -> Option<Cadence> {
         }
         _ => return None,
     };
-    Some(Cadence {
-        frequency,
-        interval,
-        end,
-    })
+    Some(Cadence::every(frequency, interval.get()).ok()?.ending(end))
 }
 
 fn has_any(fields: &BTreeMap<String, String>, keys: &[&str]) -> bool {

@@ -7,9 +7,9 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use clipper_schedule::{
-    BlockDuration, Cadence, Expansion, Frequency, ImportedRuleResolver, Recurrence, RecurrenceEnd,
-    RecurrenceEngine, RecurrenceId, RruleEngine, ScheduleItem, ScheduleItemId, ScheduleSpan,
-    TimeRange, TimedStart,
+    BlockDuration, Cadence, Expansion, Frequency, ImportedRuleResolver, OccurrenceOverrideData,
+    OverrideChange, OverrideId, Recurrence, RecurrenceEnd, RecurrenceEngine, RecurrenceId,
+    RruleEngine, ScheduleItem, ScheduleItemId, ScheduleSpan, TimeRange, TimedStart,
 };
 
 fn local(text: &str) -> NaiveDateTime {
@@ -157,6 +157,33 @@ fn date_until_includes_the_whole_last_day() {
         starts,
         vec![utc(2026, 3, 28, 1, 30), utc(2026, 3, 29, 1, 30)]
     );
+}
+
+#[test]
+fn until_before_start_is_empty_but_added_override_remains() {
+    let item = cadence_item("20240310T100000", RecurrenceEnd::On(utc(2024, 3, 1, 0, 0)));
+    let moved = ScheduleSpan::Timed {
+        start: TimedStart::Zoned {
+            local: local("20240315T100000"),
+            zone: Tz::Europe__Berlin,
+        },
+        duration: BlockDuration::from_minutes(30).expect("non-zero"),
+    };
+    let overrides = [OccurrenceOverrideData {
+        id: OverrideId::new(),
+        item: item.id,
+        recurrence_id: RecurrenceId::Instant(utc(2024, 3, 3, 9, 0)),
+        change: OverrideChange::Rescheduled(moved),
+    }];
+    let expansion = Expansion {
+        window: TimeRange::new(utc(2024, 3, 1, 0, 0), utc(2024, 4, 1, 0, 0)).unwrap(),
+        observer: Tz::Europe__Berlin,
+    };
+    let occurrences = RruleEngine::new()
+        .occurrences(&item, &overrides, &expansion)
+        .expect("a rule ending before its start is empty");
+    assert_eq!(occurrences.len(), 1);
+    assert_eq!(occurrences[0].span.start(), utc(2024, 3, 15, 9, 0));
 }
 
 fn local_midnight_window(zone: Tz, from: (i32, u32, u32), to: (i32, u32, u32)) -> TimeRange {

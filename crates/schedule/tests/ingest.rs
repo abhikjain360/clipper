@@ -364,6 +364,70 @@ END:VEVENT\r\nEND:VCALENDAR\r\n";
 }
 
 #[test]
+fn old_until_values_are_validated_against_their_own_dates() {
+    for event in [
+        "BEGIN:VEVENT\r\nUID:old-weekly\r\nDTSTART;TZID=Europe/Berlin:20150105T100000\r\nDTEND;TZID=Europe/Berlin:20150105T103000\r\nRRULE:FREQ=WEEKLY;UNTIL=20150301T000000Z\r\nEND:VEVENT\r\n",
+        "BEGIN:VEVENT\r\nUID:old-yearly\r\nDTSTART;VALUE=DATE:20100610\r\nDTEND;VALUE=DATE:20100611\r\nRRULE:FREQ=YEARLY;UNTIL=20180610\r\nEND:VEVENT\r\n",
+    ] {
+        let feed = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//Feed//EN\r\n{event}END:VCALENDAR\r\n"
+        );
+        let outcome = parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()).expect("parse");
+        assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+    }
+}
+
+#[test]
+fn windows_zone_names_resolve_for_recurrence_overrides() {
+    let feed = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VTIMEZONE\r\n\
+TZID:W. Europe Standard Time\r\n\
+BEGIN:STANDARD\r\n\
+DTSTART:16010101T030000\r\n\
+TZOFFSETFROM:+0200\r\n\
+TZOFFSETTO:+0100\r\n\
+RRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=10\r\n\
+END:STANDARD\r\n\
+BEGIN:DAYLIGHT\r\n\
+DTSTART:16010101T020000\r\n\
+TZOFFSETFROM:+0100\r\n\
+TZOFFSETTO:+0200\r\n\
+RRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=3\r\n\
+END:DAYLIGHT\r\n\
+END:VTIMEZONE\r\n\
+BEGIN:VEVENT\r\n\
+UID:outlook@example.com\r\n\
+DTSTART;TZID=W. Europe Standard Time:20260914T100000\r\n\
+DTEND;TZID=W. Europe Standard Time:20260914T103000\r\n\
+RRULE:FREQ=WEEKLY;UNTIL=20261231T090000Z;BYDAY=MO;WKST=MO\r\n\
+RDATE;TZID=W. Europe Standard Time:20261005T100000\r\n\
+EXDATE;TZID=W. Europe Standard Time:20260921T100000\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:outlook@example.com\r\n\
+RECURRENCE-ID;TZID=W. Europe Standard Time:20260928T100000\r\n\
+DTSTART;TZID=W. Europe Standard Time:20260928T110000\r\n\
+DTEND;TZID=W. Europe Standard Time:20260928T113000\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+    let outcome = parse_ics(feed, SourceId(uuid_fixture()), import_fixture()).expect("parse");
+    assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+    assert_eq!(outcome.events.len(), 1);
+    assert_eq!(outcome.events[0].overrides.len(), 3);
+}
+
+#[test]
+fn a_leading_utf8_bom_does_not_break_calendar_parsing() {
+    let feed = "\u{feff}BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//Feed//EN\r\n\
+BEGIN:VEVENT\r\nUID:bom@example.com\r\nDTSTART:20260914T100000Z\r\n\
+DTEND:20260914T103000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let outcome = parse_ics(feed, SourceId(uuid_fixture()), import_fixture()).expect("parse");
+    assert_eq!(outcome.events.len(), 1);
+    assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+}
+
+#[test]
 fn durations_use_instants_across_zones_and_dst() {
     let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
 UID:mixed@example.com\r\nDTSTART;TZID=America/New_York:20260115T090000\r\n\
@@ -665,6 +729,23 @@ fn rewritten_interval_and_count_rules_are_rejected() {
 fn overflowing_interval_and_count_rules_are_rejected() {
     assert_malformed_rrule("FREQ=DAILY;INTERVAL=65536", "INTERVAL");
     assert_malformed_rrule("FREQ=DAILY;COUNT=4294967296", "COUNT");
+}
+
+#[test]
+fn escaped_rrule_syntax_cannot_hide_wide_intervals() {
+    for line in [
+        "RRULE:FREQ=WEEKLY;INTER\\VAL=65536",
+        "RRUL\\E:FREQ=WEEKLY;INTERVAL=65537",
+        "RRULE;X-P=\"a\\\"b\":FREQ=WEEKLY;INTERVAL=65536",
+    ] {
+        let feed = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:escaped@example.com\r\nDTSTART:20260901T090000Z\r\nDTEND:20260901T100000Z\r\n{line}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        assert!(
+            parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()).is_err(),
+            "{line}"
+        );
+    }
 }
 
 #[test]
