@@ -56,6 +56,7 @@ import { clipperBackend, formatBackendError, isTauriRuntime } from "./backend";
 import { layoutDay, overlapsDay, spanMinutes } from "./schedule-layout";
 import {
     buildRecurrence,
+    isDerivedMonthlyRule,
     repeatChoiceOf,
     repeatLabel,
     weekdaysOf,
@@ -177,15 +178,39 @@ export function SchedulePanel({
         }
     }, [weekStart, weekEnd, onError]);
 
-    // Re-expand whenever the window moves or the series set changes. `items`
-    // catches the second case: a create or delete republishes state, which
-    // re-renders this panel with a new array.
+    const itemsKey = items.map((item) => `${item.id}:${item.definition_json}`).join("|");
+    const sourcesKey = sources
+        .map((source) =>
+            JSON.stringify([
+                source.id,
+                source.name,
+                source.protocol,
+                source.location,
+                source.enabled,
+                source.event_count,
+                source.raw_import_file_id,
+                source.raw_import_available,
+            ]),
+        )
+        .join("|");
+    const runningKey = running
+        ? JSON.stringify([
+              running.id,
+              running.item_id,
+              running.title,
+              running.start,
+              running.end,
+              running.running,
+          ])
+        : "";
+
+    // Re-expand when the window or relevant schedule, source, or timer content changes.
     useEffect(() => {
         void loadWeek();
         return () => {
             loadGeneration.current += 1;
         };
-    }, [loadWeek, items, sources, running]);
+    }, [loadWeek, itemsKey, sourcesKey, runningKey]);
 
     return (
         <YStack gap="$3">
@@ -1185,6 +1210,7 @@ function SeriesList({
     const [sorting, setSorting] = useState(false);
     const [sortError, setSortError] = useState<string | null>(null);
     const [now, setNow] = useState(Date.now);
+    const itemsKey = items.map((item) => `${item.id}:${item.definition_json}`).join("|");
 
     useEffect(() => {
         if (order !== "next") return;
@@ -1227,7 +1253,7 @@ function SeriesList({
         return () => {
             cancelled = true;
         };
-    }, [order, items, now]);
+    }, [order, itemsKey, now]);
 
     const starts = useMemo(() => {
         const seriesStarts = nextStarts(upcoming, now);
@@ -1474,6 +1500,21 @@ function ScheduleComposer({
             return;
         }
 
+        const originalStartDate = original.current
+            ? original.current.span.kind === "all_day"
+                ? original.current.span.start
+                : original.current.span.start.kind === "floating"
+                  ? original.current.span.start.at.slice(0, 10)
+                  : original.current.span.start.at.local.slice(0, 10)
+            : null;
+        const moveMonthlyRule =
+            original.current !== null &&
+            originalStartDate !== null &&
+            repeat === "monthly" &&
+            date !== originalStartDate &&
+            !recurrenceChanged &&
+            isDerivedMonthlyRule(original.current.recurrence, originalStartDate);
+
         setBusy(true);
         try {
             const item: ScheduleItem = {
@@ -1494,10 +1535,11 @@ function ScheduleComposer({
                                       },
                                 duration: snapMinutes(minutes),
                             },
-                recurrence:
-                    original.current && !recurrenceChanged
-                        ? original.current.recurrence
-                        : buildRecurrence(repeat, days, date, original.current?.recurrence ?? null),
+                recurrence: moveMonthlyRule
+                    ? buildRecurrence("monthly", days, date, original.current?.recurrence ?? null)
+                    : original.current && !recurrenceChanged
+                      ? original.current.recurrence
+                      : buildRecurrence(repeat, days, date, original.current?.recurrence ?? null),
                 reference: original.current?.reference ?? null,
                 alarm: alarm
                     ? { minutes_before: Math.max(0, Number.parseInt(alarmLead, 10) || 0) }
