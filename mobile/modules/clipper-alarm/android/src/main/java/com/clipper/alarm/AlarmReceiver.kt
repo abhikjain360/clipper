@@ -46,7 +46,7 @@ class AlarmReceiver : BroadcastReceiver() {
         Log.i(TAG, "Alarm $index fired: $label")
         RingService.start(appContext, label, itemId, occurrenceKey)
 
-        // Roll the horizon forward. Re-arming reads only the device-protected
+        // Move the alarm window forward. Re-arming reads only the device-protected
         // mirror, so it works before unlock, when the schedule itself is still
         // sealed.
         runCatching { AlarmScheduler(appContext).armFromMirror() }
