@@ -39,6 +39,7 @@ pub const TOMBSTONE_META_PLAINTEXT: &[u8] = br#"{"tombstone":true}"#;
 /// exactly one; the cap bounds the batched insert a single init request can
 /// force under the server's write lock.
 pub const MAX_OBJECT_PAYLOAD_ENTRIES: usize = 16;
+pub const MAX_OBJECT_CREATED_AT_BYTES: usize = 64;
 
 // OWASP's practical Argon2id floor is 19 MiB, 2 iterations, 1 lane. The
 // ceilings keep server-side configurable hashing from becoming an OOM footgun.
@@ -451,7 +452,7 @@ pub struct ObjectEnvelopeBody {
     pub parent_hash: Option<[u8; SHA256_BYTES]>,
     #[garde(skip)]
     pub source_device_id: DeviceId,
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = MAX_OBJECT_CREATED_AT_BYTES))]
     pub created_at: String,
     #[garde(skip)]
     pub operation: ObjectEnvelopeOperation,
@@ -1157,6 +1158,13 @@ mod tests {
             )
             .validate()
             .expect("a chained tombstone, which carries no payloads");
+        }
+
+        #[test]
+        fn an_envelope_with_an_oversized_created_at_is_refused() {
+            let mut envelope = body(1, None, ObjectEnvelopeOperation::Create, vec![payload()]);
+            envelope.created_at = format!("2026-09-08T10:00:00.{}Z", "0".repeat(1_000));
+            assert!(envelope.validate().is_err());
         }
 
         #[test]
