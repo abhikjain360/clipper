@@ -64,6 +64,7 @@ import {
   clearCredentials,
   devDefaultServerUrl,
   formatBackendError,
+  isResumeRejected,
   pickUploadFile,
   readClipboardText,
   resumeSession,
@@ -93,6 +94,15 @@ const MONOSPACE_FONT = Platform.select({
  * moves the alarm window forward from the device-protected mirror.
  */
 const ALARM_WINDOW_HOURS = 24 * 7;
+
+function clearAlarms() {
+  try {
+    cancelAllAlarms();
+  } catch {}
+  try {
+    dismissAlarm();
+  } catch {}
+}
 
 /** The device's IANA zone, which resolves floating alarms. */
 function deviceTimeZone(): string {
@@ -141,9 +151,10 @@ function ClipperApp() {
       try {
         await backend.connect();
         await resumeSession();
-      } catch {
+      } catch (caught) {
         // Nothing stored, biometric cancelled, or auto-login failed — fall
         // through to the manual login screen.
+        if (isResumeRejected(caught)) clearAlarms();
       } finally {
         if (!cancelled) setResuming(false);
       }
@@ -209,12 +220,7 @@ function ClipperApp() {
     if (!wasAuthenticated || sessionKey !== null) return;
 
     lastPushedPlan.current = null;
-    try {
-      cancelAllAlarms();
-    } catch {}
-    try {
-      dismissAlarm();
-    } catch {}
+    clearAlarms();
   }, [sessionKey]);
 
   useEffect(() => {
