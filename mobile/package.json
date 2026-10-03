@@ -43,7 +43,14 @@
     "babel-preset-expo": "57.0.14",
     "oxfmt": "0.64.0",
     "oxlint": "1.79.0",
-    "typescript": "~6.0.3"
+    "typescript": "~7.0.2"
   },
-  "packageManager": "pnpm@11.28.2"
+  "packageManager": "pnpm@11.28.2",
+  "expo": {
+    "install": {
+      "exclude": [
+        "typescript"
+      ]
+    }
+  }
 }
