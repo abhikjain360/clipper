@@ -12,7 +12,7 @@ const require = createRequire(import.meta.url);
 // bypassing the vite plugin's react-native alias — the build then ships two
 // React instances and crashes at render ("Cannot read properties of null
 // (reading 'useContext')"). Pin both specifiers to this app's own
-// react-native-web copy, whose peer context matches our react 19.2.8.
+// react-native-web copy, whose peer context matches our react 19.3.0.
 const reactNativeWebDir = path.dirname(require.resolve("react-native-web/package.json"));
 
 // frame-ancestors is header-only; the rest of the policy remains in index.html.
@@ -29,6 +29,7 @@ export default defineConfig({
         "import.meta.env.VITE_SERVER_URL": JSON.stringify(process.env.VITE_SERVER_URL ?? null),
     },
     resolve: {
+        dedupe: ["react", "react-dom"],
         alias: [
             { find: /^react-native$/, replacement: reactNativeWebDir },
             { find: /^react-native-web$/, replacement: reactNativeWebDir },

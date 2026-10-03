@@ -1562,6 +1562,25 @@ Each entry has:
 - **Decision:** raise those two crates' compilation recursion limits to
   256. The unused-dependency scan then passed without these warnings.
 
+### 129. Updated web dependencies resolve a second React through peer contexts
+
+- **Status:** fixed by the npm web dependency upgrade
+- **Severity:** high; the web app can fail to render.
+- **Where:** `web/vite.config.ts`.
+- **What happened:** the React 19.3 dependency graph included the mobile
+  React 19.2.3 in the production bundle despite the React Native Web aliases.
+- **Decision:** deduplicate React and React DOM at the web app root. The
+  production output contains one rendered React core module.
+
+### 130. The shared package does not declare its AbortSignal types
+
+- **Status:** fixed by the npm web dependency upgrade
+- **Severity:** low; the shared package type check fails.
+- **Where:** `packages/shared/tsconfig.json`.
+- **What happened:** the backend contract uses `AbortSignal`, but the package
+  declares only the ECMAScript library.
+- **Decision:** include the DOM library, as the web and mobile consumers do.
+
 ## Docs
 
 ### 29. Doc claims the code did not satisfy

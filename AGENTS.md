@@ -121,7 +121,8 @@
   mobile-context variant (react 19.2.3), shipping two React copies and crashing
   render with "Cannot read properties of null (reading 'useContext')". Do not
   remove the dep or the aliases while web and mobile pin different react
-  versions.
+  versions. Vite's `resolve.dedupe` also keeps nested Tamagui peer contexts
+  on the web app's React and React DOM.
 - Use the configured logger (`tracing` in Rust code) for diagnostics instead of
   direct `println!`, `eprintln!`, or `dbg!` calls.
 - The Tauri CSP's `connect-src` must keep `ws:` and `wss:`
