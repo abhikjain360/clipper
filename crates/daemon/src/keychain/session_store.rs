@@ -1,4 +1,10 @@
-use super::{CredentialStore, Credentials, KeychainError, KeychainResult};
+use super::{Credentials, KeychainError, KeychainResult, SessionLocation, StoredProfile};
+
+pub(super) trait KeychainStore {
+    fn load(&self) -> KeychainResult<Option<Credentials>>;
+    fn store(&self, credentials: &Credentials) -> KeychainResult<()>;
+    fn clear(&self) -> KeychainResult<()>;
+}
 
 const MISSING_ENTITLEMENT: i32 = -34018;
 const UNSIGNED_CODE: i32 = -67062;
@@ -20,11 +26,11 @@ fn allows_login_keychain(error: &KeychainError) -> bool {
     )
 }
 
-pub fn store(
-    protected: &dyn CredentialStore,
-    login: &dyn CredentialStore,
+pub(super) fn store(
+    protected: &dyn KeychainStore,
+    login: &dyn KeychainStore,
     credentials: &Credentials,
-) -> KeychainResult<()> {
+) -> KeychainResult<SessionLocation> {
     match protected.store(credentials) {
         Ok(()) => {
             tracing::info!(
@@ -34,7 +40,7 @@ pub fn store(
             if let Err(error) = login.clear() {
                 tracing::warn!(%error, "Failed to remove superseded login-keychain credentials");
             }
-            Ok(())
+            Ok(SessionLocation::Protected)
         }
         Err(error) if allows_login_keychain(&error) => {
             tracing::warn!(%error, "Data protection keychain unavailable for this signing identity; using the login keychain");
@@ -43,44 +49,59 @@ pub fn store(
             if let Err(error) = protected.clear() {
                 tracing::warn!(%error, "Failed to remove superseded data-protection-keychain credentials");
             }
-            Ok(())
+            Ok(SessionLocation::Login)
         }
         Err(error) => Err(error),
     }
 }
 
-pub fn load(
-    protected: &dyn CredentialStore,
-    login: &dyn CredentialStore,
+pub(super) fn load(
+    protected: &dyn KeychainStore,
+    login: &dyn KeychainStore,
+    profile: &StoredProfile,
 ) -> KeychainResult<Option<Credentials>> {
-    let protected_error = match protected.load() {
-        Ok(Some(credentials)) => {
-            tracing::info!(
-                store = "macOS data protection keychain",
-                "Loaded session credentials"
-            );
-            return Ok(Some(credentials));
+    let mut current = None;
+    let mut current_error = None;
+    for (location, store) in [
+        (SessionLocation::Protected, protected),
+        (SessionLocation::Login, login),
+    ] {
+        match store.load() {
+            Ok(Some(credentials)) if credentials.matches(profile, location) => {
+                tracing::info!(store = ?location, "Loaded current session credentials");
+                current = Some(credentials);
+            }
+            Ok(Some(_)) => {
+                tracing::warn!(store = ?location, "Ignoring credentials that do not match the current session record");
+                if let Err(error) = store.clear() {
+                    tracing::warn!(%error, store = ?location, "Failed to delete stale session credentials");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, store = ?location, "Failed to read saved session credentials");
+                if profile
+                    .resume
+                    .as_ref()
+                    .is_some_and(|resume| resume.store == location)
+                {
+                    current_error = Some(error);
+                } else if let Err(error) = store.clear() {
+                    tracing::warn!(%error, store = ?location, "Failed to delete stale session credentials");
+                }
+            }
         }
-        Ok(None) => None,
-        Err(error) if allows_login_keychain(&error) => {
-            tracing::warn!(%error, "Data protection keychain unavailable for this signing identity; checking the login keychain");
-            Some(error)
-        }
-        Err(error) => return Err(error),
-    };
-    match login.load()? {
-        Some(credentials) => {
-            tracing::info!(store = "macOS login keychain", "Loaded session credentials");
-            Ok(Some(credentials))
-        }
-        None => match protected_error {
-            Some(error) => Err(error),
-            None => Ok(None),
-        },
+    }
+    match current_error {
+        Some(error) => Err(error),
+        None => Ok(current),
     }
 }
 
-pub fn clear(protected: &dyn CredentialStore, login: &dyn CredentialStore) -> KeychainResult<()> {
+pub(super) fn clear(
+    protected: &dyn KeychainStore,
+    login: &dyn KeychainStore,
+) -> KeychainResult<()> {
     let protected = protected.clear();
     let login = login.clear();
     match &protected {
@@ -134,11 +155,7 @@ fn platform_error(error: security_framework::base::Error) -> KeychainError {
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-impl CredentialStore for MacKeychain {
-    fn supports_resume(&self) -> bool {
-        true
-    }
-
+impl KeychainStore for MacKeychain {
     fn load(&self) -> KeychainResult<Option<Credentials>> {
         match security_framework::passwords::generic_password(self.options()) {
             Ok(data) => {
@@ -202,11 +219,7 @@ mod tests {
         }
     }
 
-    impl CredentialStore for FakeStore {
-        fn supports_resume(&self) -> bool {
-            true
-        }
-
+    impl KeychainStore for FakeStore {
         fn load(&self) -> KeychainResult<Option<Credentials>> {
             self.calls.lock().unwrap().push("load");
             match self.read_error {
@@ -239,6 +252,7 @@ mod tests {
             username: "alice".into(),
             device_name: "Test Mac".into(),
             server_url: "https://test.example".into(),
+            session_id: Some([1; 16]),
             session: Some(super::super::StoredSession {
                 token: zeroize::Zeroizing::new("saved-token".into()),
                 data_key: zeroize::Zeroizing::new([7; 32]),
@@ -258,11 +272,15 @@ mod tests {
         let protected = FakeStore::default();
         let login = FakeStore::default();
         login.store(&credentials).unwrap();
-        store(&protected, &login, &credentials).unwrap();
-        assert_credentials(load(&protected, &login).unwrap(), &credentials);
+        let location = store(&protected, &login, &credentials).unwrap();
+        assert_eq!(location, SessionLocation::Protected);
+        assert_credentials(
+            load(&protected, &login, &credentials.stored_profile(location)).unwrap(),
+            &credentials,
+        );
         assert!(login.credentials.lock().unwrap().is_none());
         assert_eq!(*protected.calls.lock().unwrap(), ["store", "load"]);
-        assert_eq!(*login.calls.lock().unwrap(), ["store", "clear"]);
+        assert_eq!(*login.calls.lock().unwrap(), ["store", "clear", "load"]);
     }
 
     #[test]
@@ -282,9 +300,16 @@ mod tests {
                 ..Default::default()
             };
             let login = FakeStore::default();
-            store(&protected, &login, &credentials).unwrap();
-            assert_credentials(load(&protected, &login).unwrap(), &credentials);
-            assert_eq!(*protected.calls.lock().unwrap(), ["store", "clear", "load"]);
+            let location = store(&protected, &login, &credentials).unwrap();
+            assert_eq!(location, SessionLocation::Login);
+            assert_credentials(
+                load(&protected, &login, &credentials.stored_profile(location)).unwrap(),
+                &credentials,
+            );
+            assert_eq!(
+                *protected.calls.lock().unwrap(),
+                ["store", "clear", "load", "clear"]
+            );
             assert_eq!(*login.calls.lock().unwrap(), ["store", "load"]);
         }
     }
@@ -295,7 +320,15 @@ mod tests {
         let protected = FakeStore::default();
         let login = FakeStore::default();
         login.store(&credentials).unwrap();
-        assert_credentials(load(&protected, &login).unwrap(), &credentials);
+        assert_credentials(
+            load(
+                &protected,
+                &login,
+                &credentials.stored_profile(SessionLocation::Login),
+            )
+            .unwrap(),
+            &credentials,
+        );
         assert_eq!(*login.calls.lock().unwrap(), ["store", "load"]);
     }
 
@@ -309,8 +342,15 @@ mod tests {
             };
             let login = FakeStore::default();
             assert!(store(&protected, &login, &credentials()).is_err());
-            assert!(load(&protected, &login).is_err());
             assert!(login.calls.lock().unwrap().is_empty());
+            assert!(
+                load(
+                    &protected,
+                    &login,
+                    &credentials().stored_profile(SessionLocation::Protected)
+                )
+                .is_err()
+            );
         }
     }
 
@@ -339,16 +379,11 @@ mod tests {
             ..Default::default()
         };
         let mut login = FakeStore::default();
-        assert!(matches!(
-            load(&protected, &login),
-            Err(KeychainError::Platform {
-                status: MISSING_ENTITLEMENT,
-                ..
-            })
-        ));
+        let profile = credentials().stored_profile(SessionLocation::Login);
+        assert!(load(&protected, &login, &profile).unwrap().is_none());
         login.read_error = Some(-25293);
         assert!(matches!(
-            load(&protected, &login),
+            load(&protected, &login, &profile),
             Err(KeychainError::Platform { status: -25293, .. })
         ));
     }
@@ -383,5 +418,96 @@ mod tests {
             assert_eq!(*protected.calls.lock().unwrap(), ["clear"]);
             assert_eq!(*login.calls.lock().unwrap(), ["clear"]);
         }
+    }
+
+    #[test]
+    fn restart_never_restores_the_old_account_after_a_failed_delete_and_fallback_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut protected = FakeStore::default();
+        let login = FakeStore::default();
+        let alice = credentials();
+        let location = store(&protected, &login, &alice).unwrap();
+        let mut profile = alice.stored_profile(location);
+        super::super::store_profile(directory.path(), &profile).unwrap();
+
+        profile.signed_out = true;
+        profile.resume = None;
+        super::super::store_profile(directory.path(), &profile).unwrap();
+        protected.delete_error = Some(-25293);
+        assert!(clear(&protected, &login).is_err());
+        assert!(load(&protected, &login, &profile).unwrap().is_none());
+
+        let mut bob = credentials();
+        bob.username = "bob".into();
+        bob.server_url = "https://bob.example".into();
+        bob.session_id = Some([2; 16]);
+        protected.write_error = Some(MISSING_ENTITLEMENT);
+        let location = store(&protected, &login, &bob).unwrap();
+        assert_eq!(location, SessionLocation::Login);
+        super::super::store_profile(directory.path(), &bob.stored_profile(location)).unwrap();
+
+        let profile = super::super::load_profile(directory.path())
+            .unwrap()
+            .unwrap();
+        assert_credentials(load(&protected, &login, &profile).unwrap(), &bob);
+        assert_credentials(protected.credentials.lock().unwrap().clone(), &alice);
+        assert!(!profile.signed_out);
+        assert_eq!(profile.profile.username, "bob");
+
+        login.clear().unwrap();
+        assert!(load(&protected, &login, &profile).unwrap().is_none());
+        assert_credentials(protected.credentials.lock().unwrap().clone(), &alice);
+    }
+
+    #[test]
+    fn a_matching_account_with_a_different_session_id_is_removed_instead_of_resumed() {
+        let protected = FakeStore::default();
+        let login = FakeStore::default();
+        let mut current = credentials();
+        protected.store(&current).unwrap();
+        current.session_id = Some([2; 16]);
+        let profile = current.stored_profile(SessionLocation::Protected);
+        assert!(load(&protected, &login, &profile).unwrap().is_none());
+        assert!(protected.credentials.lock().unwrap().is_none());
+        assert_eq!(*protected.calls.lock().unwrap(), ["store", "load", "clear"]);
+    }
+
+    #[test]
+    fn a_session_id_copied_to_another_account_or_server_does_not_match() {
+        for change_server in [false, true] {
+            let protected = FakeStore::default();
+            let login = FakeStore::default();
+            let current = credentials();
+            let mut stale = current.clone();
+            if change_server {
+                stale.server_url = "https://stale.example".into();
+            } else {
+                stale.username = "stale".into();
+            }
+            protected.store(&stale).unwrap();
+            assert!(
+                load(
+                    &protected,
+                    &login,
+                    &current.stored_profile(SessionLocation::Protected)
+                )
+                .unwrap()
+                .is_none()
+            );
+            assert!(protected.credentials.lock().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn credentials_without_a_current_session_record_cannot_resume() {
+        let protected = FakeStore::default();
+        let login = FakeStore::default();
+        let current = credentials();
+        protected.store(&current).unwrap();
+        login.store(&current).unwrap();
+        let profile = StoredProfile::from(current.profile());
+        assert!(load(&protected, &login, &profile).unwrap().is_none());
+        assert!(protected.credentials.lock().unwrap().is_none());
+        assert!(login.credentials.lock().unwrap().is_none());
     }
 }

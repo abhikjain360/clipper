@@ -489,7 +489,9 @@ Each entry has:
   in. It follows login-keychain locking and backup behaviour, without the data
   protection store's explicit this-device-only guarantee. Accept this fallback
   so local ad-hoc builds can resume. Neither case requires user presence for
-  the trusted daemon, which starts unattended. Reads check either store;
+  the trusted daemon, which starts unattended. Reads check both stores but
+  resume only the session ID, store, and account recorded in the non-secret
+  profile;
   logout attempts deletion in both. Logs identify the chosen store. Locked or
   denied keychain access does not trigger a storage downgrade. Linux has no
   session secret store and requires login at each start. The broader IPC
@@ -753,9 +755,54 @@ Each entry has:
 
 ## Bugs
 
-### 155. Desktop resume credentials had unsafe storage and excessive writes
+### 158. A stale keychain copy could restore a different account
 
 - **Status:** fixed in the working tree; not committed.
+- **Severity:** medium. Found in `39a94d2`.
+- **Where:** daemon session store and non-secret profile.
+- **What happened:** protected credentials for account A could survive failed
+  deletion while a newer account B was saved in the login keychain. Startup
+  preferred the protected copy and could restore A.
+- **Fix:** record a random non-secret session ID and chosen store in the profile.
+  Resume only matching session and account metadata. Ignore and try to delete
+  other copies. If no copy matches, keep login prefilled. Fake-store tests cover
+  logout A, failed deletion, fallback login B, and restart.
+
+### 159. A failed cache hydration could hide step timers from the first alarm plan
+
+- **Status:** fixed in the working tree; not committed.
+- **Severity:** low. Found in `39a94d2`.
+- **Where:** client authentication and cached document publication.
+- **What happened:** the state notification preceded loading held recipes. If
+  cache hydration failed, no later publication notified the alarm planner.
+- **Fix:** load held documents before the state notification, including the
+  hydration-error path. Test that a blocked document load sends no notification
+  and that the first resulting plan includes the step timer.
+
+### 160. A transient keychain write failure disabled an otherwise valid saved session
+
+- **Status:** fixed in the working tree; not committed.
+- **Severity:** low. Found in `39a94d2`.
+- **Where:** daemon session confirmation persistence.
+- **What happened:** a locked store or denied prompt at the six-hour write set
+  the signed-out marker even though the previous credential copy remained valid.
+- **Fix:** keep the previous copy and current-session record, log the failed
+  write, and retry later. Only logout or server rejection sets signed-out.
+  Tests cover retry and offline resume after a failed confirmation write.
+
+### 161. The clipboard QA option rejected numeric environment values
+
+- **Status:** fixed in the working tree; not committed.
+- **Severity:** low. Found in `39a94d2`.
+- **Where:** daemon option parsing and `AGENTS.md`.
+- **What happened:** `CLIPPER_DISABLE_CLIPBOARD_WATCHING=1` failed parsing.
+- **Fix:** accept `1`/`0`, `true`/`false`, and `yes`/`no`, case-insensitively.
+  Test each form and invalid input through the environment. QA must use an
+  enabled value; update the agent rule.
+
+### 155. Desktop resume credentials had unsafe storage and excessive writes
+
+- **Status:** fixed in `39a94d2`; follow-up fixes are uncommitted.
 - **Severity:** high. On main.
 - **Where:** daemon credential store and session persistence.
 - **What happened:** Linux wrote the token and derived keys to plaintext JSON.
@@ -770,7 +817,7 @@ Each entry has:
 
 ### 156. Failed credential deletion could undo logout after restart
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `39a94d2`; current-session matching is an uncommitted follow-up.
 - **Severity:** high. On main.
 - **Where:** daemon logout and startup.
 - **What happened:** logout reported success even if deleting stored credentials
@@ -781,7 +828,7 @@ Each entry has:
 
 ### 157. A QA daemon captured the owner's clipboard into test accounts
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `39a94d2`; numeric option parsing is an uncommitted follow-up.
 - **Severity:** high. On main.
 - **Where:** daemon options and client clipboard watcher startup.
 - **What happened:** a second daemon signed into a test account automatically
@@ -792,7 +839,7 @@ Each entry has:
 
 ### 154. Desktop loses its session and server URL after the daemon restarts
 
-- **Status:** fixed in `7411747`; follow-up hardening is uncommitted.
+- **Status:** fixed in `7411747`; hardened in `39a94d2`; follow-up fixes are uncommitted.
 - **Severity:** medium. On main.
 - **Where:** daemon credential storage and startup, saved profiles, desktop login form.
 - **What happened:** the daemon stored only profile metadata and waited for a

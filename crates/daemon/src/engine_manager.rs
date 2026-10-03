@@ -81,19 +81,17 @@ impl EngineManager {
                 clipboard_watching,
             );
         }
-        let profile = profile.map(|profile| Credentials::from(profile.profile));
-        let credentials = match credential_store.load() {
-            Ok(credentials) => credentials.or(profile),
+        let remembered = profile
+            .as_ref()
+            .map(|profile| Credentials::from(profile.profile.clone()));
+        let empty_profile = StoredProfile::from(SavedProfile::default());
+        let credentials = match credential_store.load(profile.as_ref().unwrap_or(&empty_profile)) {
+            Ok(credentials) => credentials.or(remembered),
             Err(error) => {
                 tracing::warn!(%error, "Failed to read saved session; showing login with the remembered server URL and username. Ad-hoc macOS code signature changes can deny keychain access");
-                profile
+                remembered
             }
         };
-        if let Some(credentials) = credentials.as_ref()
-            && let Err(error) = keychain::store_profile(&data_dir, &credentials.profile().into())
-        {
-            tracing::warn!(%error, "Failed to store remembered login profile");
-        }
         let session = credentials
             .as_ref()
             .and_then(|credentials| credentials.session.clone());
@@ -124,15 +122,17 @@ impl EngineManager {
             .await;
             if let Err(error) = result {
                 tracing::warn!(%error, "Failed to resume saved session; showing login with the remembered server URL and username");
-                if matches!(
-                    error,
+                let signed_out = match error {
                     ClientError::Api {
-                        status: 401 | 403,
-                        ..
-                    } | ClientError::NoResumableDeviceIdentity
-                ) && let Err(error) = manager.clear().await
+                        status: 401 | 403, ..
+                    } => Some(true),
+                    ClientError::NoResumableDeviceIdentity => Some(false),
+                    _ => None,
+                };
+                if let Some(signed_out) = signed_out
+                    && let Err(error) = manager.clear_session(signed_out).await
                 {
-                    tracing::warn!(%error, "Failed to persist rejected session sign-out");
+                    tracing::warn!(%error, "Failed to persist ended saved session");
                 }
                 manager.discard_engine().await;
             }
@@ -270,6 +270,10 @@ impl EngineManager {
     }
 
     pub async fn clear(&self) -> KeychainResult<()> {
+        self.clear_session(true).await
+    }
+
+    async fn clear_session(&self, signed_out: bool) -> KeychainResult<()> {
         self.stop_calendar_refresh().await;
         let profile = self.saved_profile().await.unwrap_or_else(|| SavedProfile {
             server_url: self.default_server_url.clone(),
@@ -279,7 +283,8 @@ impl EngineManager {
             &self.data_dir,
             &StoredProfile {
                 profile,
-                signed_out: true,
+                signed_out,
+                resume: None,
             },
         )?;
         self.clear_credentials().await;
@@ -294,6 +299,7 @@ impl EngineManager {
         }
         if let Some(credentials) = self.stored_creds.write().await.as_mut() {
             credentials.session = None;
+            credentials.session_id = None;
         }
     }
 
@@ -315,45 +321,69 @@ impl EngineManager {
             device_name: session.device_name,
             server_url: session.server_url,
             session: material,
+            session_id: None,
         };
         self.save_credentials(credentials).await;
     }
 
-    async fn save_credentials(&self, credentials: Credentials) {
+    async fn save_credentials(&self, mut credentials: Credentials) {
         let mut stored = self.stored_creds.write().await;
+        let mut same_session = false;
         if let Some(previous) = stored.as_ref() {
             let mut comparison = credentials.clone();
+            comparison.session_id = previous.session_id;
             if let (Some(previous), Some(current)) =
                 (previous.session.as_ref(), comparison.session.as_mut())
-                && current.last_confirmed_at >= previous.last_confirmed_at
-                && current
-                    .last_confirmed_at
-                    .saturating_sub(previous.last_confirmed_at)
-                    < CONFIRMATION_SAVE_INTERVAL
             {
                 current.last_confirmed_at = previous.last_confirmed_at;
             }
-            if previous == &comparison {
-                return;
+            same_session = previous == &comparison;
+            if same_session {
+                credentials.session_id = previous.session_id;
+                if let (Some(previous), Some(current)) =
+                    (previous.session.as_ref(), credentials.session.as_ref())
+                    && current.last_confirmed_at >= previous.last_confirmed_at
+                    && current
+                        .last_confirmed_at
+                        .saturating_sub(previous.last_confirmed_at)
+                        < CONFIRMATION_SAVE_INTERVAL
+                {
+                    return;
+                }
+                if credentials.session.is_none() {
+                    return;
+                }
             }
         }
-        let mut profile = StoredProfile::from(credentials.profile());
-        if credentials.session.is_some()
-            && let Err(error) = self.credential_store.store(&credentials)
-        {
-            tracing::warn!(%error, "Failed to save session credentials; login will be required after restart");
-            profile.signed_out = true;
-        }
+        let profile = if credentials.session.is_some() {
+            if !same_session || credentials.session_id.is_none() {
+                credentials.session_id = Some(keychain::new_session_id());
+            }
+            match self.credential_store.store(&credentials) {
+                Ok(location) => credentials.stored_profile(location),
+                Err(error) => {
+                    tracing::warn!(%error, "Failed to save session credentials; keeping the previous valid copy and retrying later");
+                    if stored.as_ref().is_some_and(|previous| {
+                        previous.username == credentials.username
+                            && previous.server_url == credentials.server_url
+                            && previous.device_name == credentials.device_name
+                    }) {
+                        return;
+                    }
+                    credentials.session = None;
+                    credentials.session_id = None;
+                    StoredProfile::from(credentials.profile())
+                }
+            }
+        } else {
+            StoredProfile::from(credentials.profile())
+        };
         if let Err(error) = keychain::store_profile(&self.data_dir, &profile) {
             tracing::warn!(%error, "Failed to store remembered login profile");
             *stored = Some(Credentials::from(credentials.profile()));
             return;
         }
-        *stored = Some(if profile.signed_out {
-            Credentials::from(profile.profile)
-        } else {
-            credentials
-        });
+        *stored = Some(credentials);
     }
 
     /// Watch handle for engine install/clear events so the state watcher can
@@ -462,6 +492,7 @@ mod tests {
             server_url: server_url.to_string(),
             username: username.to_string(),
             session: None,
+            session_id: None,
         }
     }
 
@@ -533,6 +564,7 @@ mod tests {
     async fn missing_device_identity_falls_back_to_remembered_login() {
         let directory = tempfile::tempdir().unwrap();
         let mut credentials = creds("https://stored.example", "alice");
+        credentials.session_id = Some([1; 16]);
         credentials.session = Some(keychain::StoredSession {
             token: zeroize::Zeroizing::new("saved-token".into()),
             data_key: zeroize::Zeroizing::new([7; 32]),
@@ -541,6 +573,11 @@ mod tests {
         });
         let store = Arc::new(keychain::TestStore::default());
         store.store(&credentials).unwrap();
+        keychain::store_profile(
+            directory.path(),
+            &credentials.stored_profile(keychain::SessionLocation::Test),
+        )
+        .unwrap();
         let manager = EngineManager::load_with_store(
             directory.path().into(),
             "http://127.0.0.1:8787".into(),
@@ -557,6 +594,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(directory.path().join("profile.json")).unwrap())
                 .unwrap();
         assert_eq!(saved.as_object().unwrap().len(), 4);
+        assert_eq!(saved["signed_out"], false);
         assert!(saved.get("session").is_none());
     }
 
@@ -677,6 +715,102 @@ mod tests {
                 .device_identity_wrapping_key,
             [10; 32]
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_confirmation_write_keeps_the_previous_copy_and_retries_later() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(keychain::TestStore::default());
+        let manager = EngineManager::load_with_store(
+            directory.path().into(),
+            "http://127.0.0.1:8787".into(),
+            store.clone(),
+            false,
+        )
+        .await;
+        let mut credentials = creds("https://stored.example", "alice");
+        let start = chrono::Utc::now().timestamp_millis();
+        credentials.session = Some(keychain::StoredSession {
+            token: zeroize::Zeroizing::new("saved-token".into()),
+            data_key: zeroize::Zeroizing::new([7; 32]),
+            device_identity_wrapping_key: zeroize::Zeroizing::new([8; 32]),
+            last_confirmed_at: start,
+        });
+        manager.save_credentials(credentials.clone()).await;
+        let previous = store.load().unwrap().unwrap();
+        let profile_bytes = std::fs::read(directory.path().join("profile.json")).unwrap();
+        store.fail_writes.store(true, Ordering::SeqCst);
+        credentials.session.as_mut().unwrap().last_confirmed_at =
+            start + CONFIRMATION_SAVE_INTERVAL;
+        manager.save_credentials(credentials.clone()).await;
+        assert!(store.load().unwrap().as_ref() == Some(&previous));
+        assert!(manager.stored_creds.read().await.as_ref() == Some(&previous));
+        assert_eq!(
+            std::fs::read(directory.path().join("profile.json")).unwrap(),
+            profile_bytes
+        );
+        let profile = keychain::load_profile(directory.path()).unwrap().unwrap();
+        assert!(!profile.signed_out);
+        assert!(
+            CredentialStore::load(store.as_ref(), &profile)
+                .unwrap()
+                .as_ref()
+                == Some(&previous)
+        );
+        assert_eq!(store.writes.load(Ordering::SeqCst), 2);
+
+        store.fail_writes.store(false, Ordering::SeqCst);
+        manager.save_credentials(credentials).await;
+        let persisted = store.load().unwrap().unwrap();
+        assert_eq!(persisted.session_id, previous.session_id);
+        assert_eq!(
+            persisted.session.unwrap().last_confirmed_at,
+            start + CONFIRMATION_SAVE_INTERVAL
+        );
+        assert_eq!(store.writes.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_for_a_different_account_keeps_its_prefill_and_cannot_resume_the_old_account()
+     {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(keychain::TestStore::default());
+        let manager = EngineManager::load_with_store(
+            directory.path().into(),
+            "http://127.0.0.1:8787".into(),
+            store.clone(),
+            false,
+        )
+        .await;
+        let mut credentials = creds("https://alice.example", "alice");
+        credentials.session = Some(keychain::StoredSession {
+            token: zeroize::Zeroizing::new("saved-token".into()),
+            data_key: zeroize::Zeroizing::new([7; 32]),
+            device_identity_wrapping_key: zeroize::Zeroizing::new([8; 32]),
+            last_confirmed_at: chrono::Utc::now().timestamp_millis(),
+        });
+        manager.save_credentials(credentials.clone()).await;
+        store.fail_writes.store(true, Ordering::SeqCst);
+        store.fail_deletes.store(true, Ordering::SeqCst);
+        credentials.username = "bob".into();
+        credentials.server_url = "https://bob.example".into();
+        manager.save_credentials(credentials).await;
+        let profile = keychain::load_profile(directory.path()).unwrap().unwrap();
+        assert!(!profile.signed_out);
+        assert!(profile.resume.is_none());
+        let restarted = EngineManager::load_with_store(
+            directory.path().into(),
+            "http://127.0.0.1:8787".into(),
+            store.clone(),
+            false,
+        )
+        .await;
+        let state = restarted.current_state().await;
+        assert!(state.session.is_none());
+        let remembered = state.saved_profile.unwrap();
+        assert_eq!(remembered.username, "bob");
+        assert_eq!(remembered.server_url, "https://bob.example");
+        assert_eq!(store.load().unwrap().unwrap().username, "alice");
     }
 
     #[tokio::test]

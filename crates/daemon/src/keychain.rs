@@ -32,6 +32,7 @@ pub struct Credentials {
     pub server_url: String,
     pub username: String,
     pub session: Option<StoredSession>,
+    pub session_id: Option<[u8; 16]>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +73,27 @@ impl Credentials {
             username: self.username.clone(),
         }
     }
+
+    pub fn stored_profile(&self, store: SessionLocation) -> StoredProfile {
+        StoredProfile {
+            profile: self.profile(),
+            signed_out: false,
+            resume: self
+                .session_id
+                .map(|session_id| ResumeRecord { session_id, store }),
+        }
+    }
+
+    pub fn matches(&self, profile: &StoredProfile, store: SessionLocation) -> bool {
+        !profile.signed_out
+            && self.session.is_some()
+            && self.username == profile.profile.username
+            && self.server_url == profile.profile.server_url
+            && self.device_name == profile.profile.device_name
+            && profile.resume.as_ref().is_some_and(|resume| {
+                resume.store == store && Some(resume.session_id) == self.session_id
+            })
+    }
 }
 
 impl From<SavedProfile> for Credentials {
@@ -81,16 +103,33 @@ impl From<SavedProfile> for Credentials {
             server_url: profile.server_url,
             username: profile.username,
             session: None,
+            session_id: None,
         }
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLocation {
+    Protected,
+    Login,
+    Test,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeRecord {
+    pub session_id: [u8; 16],
+    pub store: SessionLocation,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StoredProfile {
     #[serde(flatten)]
     pub profile: SavedProfile,
     #[serde(default)]
     pub signed_out: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume: Option<ResumeRecord>,
 }
 
 impl From<SavedProfile> for StoredProfile {
@@ -98,14 +137,15 @@ impl From<SavedProfile> for StoredProfile {
         Self {
             profile,
             signed_out: false,
+            resume: None,
         }
     }
 }
 
 pub trait CredentialStore: Send + Sync {
     fn supports_resume(&self) -> bool;
-    fn load(&self) -> KeychainResult<Option<Credentials>>;
-    fn store(&self, credentials: &Credentials) -> KeychainResult<()>;
+    fn load(&self, profile: &StoredProfile) -> KeychainResult<Option<Credentials>>;
+    fn store(&self, credentials: &Credentials) -> KeychainResult<SessionLocation>;
     fn clear(&self) -> KeychainResult<()>;
 }
 
@@ -116,11 +156,11 @@ impl CredentialStore for PlatformStore {
         cfg!(all(target_os = "macos", not(test)))
     }
 
-    fn load(&self) -> KeychainResult<Option<Credentials>> {
-        load_credentials()
+    fn load(&self, profile: &StoredProfile) -> KeychainResult<Option<Credentials>> {
+        load_credentials(profile)
     }
 
-    fn store(&self, credentials: &Credentials) -> KeychainResult<()> {
+    fn store(&self, credentials: &Credentials) -> KeychainResult<SessionLocation> {
         store_credentials(credentials)
     }
 
@@ -154,7 +194,7 @@ pub enum KeychainError {
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-fn store_credentials(creds: &Credentials) -> KeychainResult<()> {
+fn store_credentials(creds: &Credentials) -> KeychainResult<SessionLocation> {
     session_store::store(
         &session_store::MacKeychain::Protected,
         &session_store::MacKeychain::Login,
@@ -163,10 +203,11 @@ fn store_credentials(creds: &Credentials) -> KeychainResult<()> {
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-fn load_credentials() -> KeychainResult<Option<Credentials>> {
+fn load_credentials(profile: &StoredProfile) -> KeychainResult<Option<Credentials>> {
     session_store::load(
         &session_store::MacKeychain::Protected,
         &session_store::MacKeychain::Login,
+        profile,
     )
 }
 
@@ -217,12 +258,12 @@ fn load_or_create_ipc_secret_uncached(_data_dir: &Path) -> KeychainResult<Zeroiz
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn store_credentials(_creds: &Credentials) -> KeychainResult<()> {
+fn store_credentials(_creds: &Credentials) -> KeychainResult<SessionLocation> {
     Err(KeychainError::ResumeUnavailable)
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn load_credentials() -> KeychainResult<Option<Credentials>> {
+fn load_credentials(_profile: &StoredProfile) -> KeychainResult<Option<Credentials>> {
     Ok(None)
 }
 
@@ -406,11 +447,16 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     bytes
 }
 
+pub fn new_session_id() -> [u8; 16] {
+    random_bytes()
+}
+
 #[cfg(test)]
 #[derive(Default)]
 pub struct TestStore {
     pub credentials: std::sync::Mutex<Option<Credentials>>,
     pub fail_reads: std::sync::atomic::AtomicBool,
+    pub fail_writes: std::sync::atomic::AtomicBool,
     pub fail_deletes: std::sync::atomic::AtomicBool,
     pub writes: std::sync::atomic::AtomicUsize,
     pub reads: std::sync::atomic::AtomicUsize,
@@ -423,23 +469,21 @@ impl CredentialStore for TestStore {
         true
     }
 
-    fn load(&self) -> KeychainResult<Option<Credentials>> {
-        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "test credential read denied",
-            )
-            .into());
+    fn load(&self, profile: &StoredProfile) -> KeychainResult<Option<Credentials>> {
+        let credentials = self.load()?;
+        if credentials
+            .as_ref()
+            .is_some_and(|credentials| !credentials.matches(profile, SessionLocation::Test))
+        {
+            let _ = self.clear();
+            return Ok(None);
         }
-        Ok(self.credentials.lock().unwrap().clone())
+        Ok(credentials)
     }
 
-    fn store(&self, credentials: &Credentials) -> KeychainResult<()> {
-        self.writes
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *self.credentials.lock().unwrap() = Some(credentials.clone());
-        Ok(())
+    fn store(&self, credentials: &Credentials) -> KeychainResult<SessionLocation> {
+        self.store(credentials)?;
+        Ok(SessionLocation::Test)
     }
 
     fn clear(&self) -> KeychainResult<()> {
@@ -453,6 +497,35 @@ impl CredentialStore for TestStore {
             .into());
         }
         *self.credentials.lock().unwrap() = None;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl TestStore {
+    pub fn load(&self) -> KeychainResult<Option<Credentials>> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "test credential read denied",
+            )
+            .into());
+        }
+        Ok(self.credentials.lock().unwrap().clone())
+    }
+
+    pub fn store(&self, credentials: &Credentials) -> KeychainResult<()> {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail_writes.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "test credential write denied",
+            )
+            .into());
+        }
+        *self.credentials.lock().unwrap() = Some(credentials.clone());
         Ok(())
     }
 }

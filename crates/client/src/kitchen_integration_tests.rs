@@ -25,6 +25,77 @@ fn simmer(minutes: u32) -> Value {
     json!({"text": "Simmer the {onion}.", "timers": [{"label": "Simmer", "minutes": minutes}]})
 }
 
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn a_failed_cache_hydration_loads_step_timers_before_the_first_state_notification() {
+    crate::ensure_crypto_provider();
+    let directory = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(directory.path()).await;
+    let engine = signed_in(&format!("http://{address}"), directory.path(), "cook", true).await;
+    let id = engine
+        .write_app_document(
+            "kitchen.recipes",
+            None,
+            None,
+            onion_soup(json!([simmer(20)])),
+        )
+        .await
+        .unwrap();
+    engine
+        .kitchen_change_session(&id, 1, 2, timer(KitchenTimerAction::Start))
+        .await
+        .unwrap();
+    engine.stop_session_work().await;
+    let material = engine.session_resume_material().await.unwrap();
+    let epoch = engine.history_epoch.load(Ordering::SeqCst);
+    *engine.session_work.lock().unwrap() = (epoch, crate::session_work::SessionWork::new());
+    engine.app_data.close().await;
+    engine
+        .open_app_data(epoch, &material.data_key)
+        .await
+        .unwrap();
+    engine.kitchen_timers.lock().await.take();
+    assert!(
+        engine
+            .query_app_data("SELECT id FROM kitchen.recipes")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let held = engine.app_data.session.lock().await;
+    let mut notifications = engine.subscribe();
+    let version = engine.state_version();
+    let publication = engine.show_cached_state(Err(LocalStoreError::Io(std::io::Error::other(
+        "cache hydration failed",
+    ))));
+    tokio::pin!(publication);
+    assert!(futures_util::poll!(publication.as_mut()).is_pending());
+    assert!(!notifications.has_changed().unwrap());
+    assert_eq!(engine.state_version(), version);
+    drop(held);
+    publication.await;
+    notifications.changed().await.unwrap();
+    assert_eq!(engine.state_version(), version + 1);
+    let alarms = engine.next_alarms(24, "UTC").await.unwrap();
+    assert_eq!(
+        alarms
+            .iter()
+            .map(|alarm| alarm.label.as_str())
+            .collect::<Vec<_>>(),
+        ["Simmer · Onion soup"]
+    );
+    assert_eq!(
+        engine
+            .query_app_data("SELECT id FROM kitchen.recipes")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    engine.stop_session_work().await;
+}
+
 fn timer(action: KitchenTimerAction) -> KitchenSessionChange {
     KitchenSessionChange::Timer {
         step: 0,

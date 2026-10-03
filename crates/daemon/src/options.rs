@@ -5,7 +5,7 @@ use clap::Parser;
 pub struct Options {
     #[arg(long, default_value = "http://127.0.0.1:8787")]
     pub server_url: String,
-    #[arg(long, env = "CLIPPER_DISABLE_CLIPBOARD_WATCHING")]
+    #[arg(long, env = "CLIPPER_DISABLE_CLIPBOARD_WATCHING", value_parser = clap::builder::BoolishValueParser::new())]
     pub disable_clipboard_watching: bool,
 }
 
@@ -28,20 +28,44 @@ mod tests {
 
     #[test]
     fn clipboard_watching_can_be_disabled_by_environment() {
-        if std::env::var_os("CLIPPER_OPTIONS_TEST_CHILD").is_some() {
-            let options = Options::try_parse_from(["clipper-daemon"]).unwrap();
-            assert!(options.disable_clipboard_watching);
+        if let Ok(expected) = std::env::var("CLIPPER_OPTIONS_TEST_CHILD") {
+            let options = Options::try_parse_from(["clipper-daemon"]);
+            if expected == "invalid" {
+                assert!(options.is_err());
+            } else {
+                assert_eq!(
+                    options.unwrap().disable_clipboard_watching,
+                    expected == "true"
+                );
+            }
             return;
         }
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "options::tests::clipboard_watching_can_be_disabled_by_environment",
-                "--exact",
-            ])
-            .env("CLIPPER_OPTIONS_TEST_CHILD", "1")
-            .env("CLIPPER_DISABLE_CLIPBOARD_WATCHING", "true")
-            .status()
-            .unwrap();
-        assert!(status.success());
+        for (value, expected) in [
+            ("1", "true"),
+            ("true", "true"),
+            ("TRUE", "true"),
+            ("TrUe", "true"),
+            ("yes", "true"),
+            ("YeS", "true"),
+            ("0", "false"),
+            ("false", "false"),
+            ("FALSE", "false"),
+            ("FaLsE", "false"),
+            ("no", "false"),
+            ("No", "false"),
+            ("maybe", "invalid"),
+        ] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "options::tests::clipboard_watching_can_be_disabled_by_environment",
+                    "--exact",
+                ])
+                .env("CLIPPER_OPTIONS_TEST_CHILD", expected)
+                .env("CLIPPER_DISABLE_CLIPBOARD_WATCHING", value)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "environment value {value}");
+        }
     }
 }

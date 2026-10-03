@@ -17,7 +17,8 @@
 - Any extra daemon started for QA on the owner's Mac must use
   `--disable-clipboard-watching` or `CLIPPER_DISABLE_CLIPBOARD_WATCHING=true`.
   This includes test accounts and temporary data directories. Do not capture the
-  owner's clipboard for QA.
+  owner's clipboard for QA. The environment variable accepts `1`/`0`,
+  `true`/`false`, and `yes`/`no`, case-insensitively; QA must use an enabled value.
 
 - Use the project environment from the checked-in `.envrc`. The shell hooks
   load the flake tools automatically, so run commands directly from the repo.

@@ -54,7 +54,8 @@ For the macOS daemon, `crates/daemon/src/keychain.rs` stores:
 - The 32-byte **IPC secret** (`ipc-secret-v1`) used for the local daemon/UI HMAC
   handshake — unrelated to data encryption. See `docs/local-ipc-security.md`.
 - A `Credentials` record under service `com.clipper.daemon`, account
-  `credentials`: device name, server URL, username, and session-resume material.
+  `credentials`: device name, server URL, username, a random non-secret session
+  ID, and session-resume material.
   The daemon first tries the macOS data protection keychain with
   `AccessibleWhenUnlockedThisDeviceOnly`, no iCloud synchronization, and no
   user-presence constraint. An entitled build can resume unattended while the
@@ -79,10 +80,14 @@ the regular login keychain. See
 See [Apple's default access-rule documentation](https://developer.apple.com/documentation/security/secaccesscreate%28_%3A_%3A_%3A%29)
 for trusted applications and prompts.
 
-Reads check the protected store first, then the login store if the protected
-item is absent or the build lacks entitlement/signing access. A successful
-save attempts to remove the superseded copy from the other store. Logout
-attempts deletion in both stores, even if either fails. Logs name the store
+The non-secret profile records the current session ID and which store holds
+it. Reads inspect both stores but return only the item matching that record,
+username, server URL, and device name. Ignore and try to delete other copies,
+including copies left behind after failed deletion. An absent session record
+or no matching item requires login with the remembered profile prefilled.
+A successful save records the chosen store and attempts to remove the
+superseded copy from the other store. Logout attempts deletion in both stores,
+even if either fails. Logs name the store
 used for every credential read or save. Locked stores, denied access, and
 other failures do not cause a storage downgrade. If the selected item's read
 is denied after an ad-hoc signature change, startup keeps sign-in prefilled
@@ -90,8 +95,9 @@ with the remembered server URL and username. The IPC secret remains separate.
 
 The daemon keeps non-secret profile metadata in `Clipper/profile.json`, with
 `0700` directory and `0600` file permissions. This includes the username,
-device name, server URL, and a `signed_out` marker. Logout atomically saves and
-syncs that marker before reporting success. Startup checks it before reading
+device name, server URL, the current session record, and a `signed_out` marker.
+Only explicit logout or a server rejection sets `signed_out`. Logout atomically
+saves and syncs that marker before reporting success. Startup checks it before reading
 session credentials, refuses resume, and retries credential deletion. A
 profile that cannot be read also prevents resume. The server URL and username
 remain available when a keychain read fails.
@@ -107,8 +113,14 @@ The server session is validated on resume. The existing offline unlock rule
 allows a session confirmed within three days when the server cannot be reached.
 Unchanged session credentials are not rewritten for each minute's confirmation:
 the daemon persists a newer confirmation at most once every six hours. Token,
-key, or profile changes are saved immediately. The persisted confirmation can
-therefore shorten offline availability by up to six hours; it never extends it.
+key, or profile changes are saved immediately with a new session ID.
+Confirmation updates keep the same ID. A failed credential write keeps the previously saved
+copy and its profile record valid, logs the failure, and retries later. It does
+not mark the session signed out. If a different account cannot be saved, remember
+its login profile without a resume record, so the old account cannot return.
+Normally the persisted confirmation shortens offline availability by up to six
+hours. Repeated write failures can shorten it further. It never extends the
+offline window.
 
 The browser retains resume material in tab-scoped `sessionStorage`, rather than
 the durable object cache in `localStorage`. Android retains resume material in

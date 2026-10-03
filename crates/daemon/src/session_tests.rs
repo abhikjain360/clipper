@@ -131,7 +131,9 @@ fn registered_session_resumes_after_daemon_restart() {
     assert!(store.load().unwrap().unwrap().session.is_some());
     let profile: serde_json::Value =
         serde_json::from_slice(&std::fs::read(data.join("profile.json")).unwrap()).unwrap();
-    assert_eq!(profile.as_object().unwrap().len(), 4);
+    assert_eq!(profile.as_object().unwrap().len(), 5);
+    assert!(profile["resume"].get("session_id").is_some());
+    assert_eq!(profile["resume"]["store"], "test");
     assert!(profile.get("session").is_none());
     drop(server);
     runtime().block_on(async {
@@ -226,7 +228,12 @@ fn a_platform_without_a_secret_store_keeps_only_the_login_profile() {
     assert!(!store.supports_resume());
     let state = register(&data, &url, store.clone());
     assert!(state.session.is_some());
-    assert!(store.load().unwrap().is_none());
+    assert!(
+        store
+            .load(&keychain::load_profile(&data).unwrap().unwrap())
+            .unwrap()
+            .is_none()
+    );
     assert!(!data.join("credentials.json").exists());
     let profile: serde_json::Value =
         serde_json::from_slice(&std::fs::read(data.join("profile.json")).unwrap()).unwrap();
@@ -305,5 +312,47 @@ fn logout_never_reports_success_when_the_signed_out_marker_cannot_be_saved() {
             cmd_logout("logout".into(), true, &manager).await,
             DaemonResponse::Success { .. }
         ));
+    });
+}
+
+#[test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+fn a_locked_credential_store_at_confirmation_does_not_break_resume_after_restart() {
+    use std::sync::atomic::Ordering;
+
+    let directory = tempfile::tempdir().unwrap();
+    let (server, url) = start_server(directory.path());
+    let data = directory.path().join("desktop");
+    let store = Arc::new(keychain::TestStore::default());
+    let before = register(&data, &url, store.clone()).session.unwrap();
+    let mut saved = store.load().unwrap().unwrap();
+    saved.session.as_mut().unwrap().last_confirmed_at -= 6 * 60 * 60 * 1000 + 60_000;
+    store.store(&saved).unwrap();
+    let profile_bytes = std::fs::read(data.join("profile.json")).unwrap();
+    store.fail_writes.store(true, Ordering::SeqCst);
+    let writes = store.writes.load(Ordering::SeqCst);
+    runtime().block_on(async {
+        let manager = load(&data, store.clone()).await;
+        assert_eq!(
+            manager.current_state().await.session.unwrap().device_id,
+            before.device_id
+        );
+    });
+    assert!(store.writes.load(Ordering::SeqCst) > writes);
+    assert!(store.load().unwrap().as_ref() == Some(&saved));
+    assert_eq!(
+        std::fs::read(data.join("profile.json")).unwrap(),
+        profile_bytes
+    );
+    assert!(!keychain::load_profile(&data).unwrap().unwrap().signed_out);
+    drop(server);
+    runtime().block_on(async {
+        let restarted = load(&data, store.clone()).await;
+        let state = restarted.current_state().await;
+        assert!(state.offline);
+        let session = state.session.unwrap();
+        assert_eq!(session.device_id, before.device_id);
+        assert_eq!(session.username, "alice");
+        assert_eq!(session.server_url, url);
     });
 }

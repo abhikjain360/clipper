@@ -693,20 +693,13 @@ impl SyncEngine {
             .hydrate_ciphertext_cache(&cache_key, RECENT_CLIPBOARD_LIMIT)
             .await;
         #[cfg(not(target_family = "wasm"))]
-        let app_data = self.open_app_data(epoch, &cache_key).await;
-        self.bump_version();
-
-        match visible {
-            Ok(visible) => self.publish_visible_state(visible).await,
-            Err(error) => warn!("Failed to hydrate local ciphertext cache: {}", error),
+        if let Err(error) = self.open_app_data(epoch, &cache_key).await {
+            warn!("Failed to open local app data: {error}");
         }
+        self.show_cached_state(visible).await;
 
         #[cfg(not(target_family = "wasm"))]
         {
-            match app_data {
-                Ok(()) => self.show_held_app_documents().await,
-                Err(error) => warn!("Failed to open local app data: {error}"),
-            }
             let engine = Arc::clone(self);
             self.spawn_session_work(epoch, engine.app_data_sync_loop(epoch));
             let engine = Arc::clone(self);
@@ -3487,6 +3480,16 @@ impl SyncEngine {
         let mut receiver = self.ws_restart_rx.clone();
         receiver.mark_unchanged();
         receiver
+    }
+
+    async fn show_cached_state(&self, visible: Result<LocalVisibleState, LocalStoreError>) {
+        #[cfg(not(target_family = "wasm"))]
+        self.show_held_app_documents().await;
+        self.bump_version();
+        match visible {
+            Ok(visible) => self.publish_visible_state(visible).await,
+            Err(error) => warn!("Failed to hydrate local ciphertext cache: {}", error),
+        }
     }
 
     async fn publish_visible_state(&self, mut visible: LocalVisibleState) {
