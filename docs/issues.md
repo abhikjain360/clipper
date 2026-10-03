@@ -1154,6 +1154,15 @@ Each entry has:
 - **Decision:** fix (Claude): `run_work` boxes the operation as soon as it is
   called, so a caller holds only a pointer.
 
+### 135. The mobile header's icon buttons have no accessibility labels
+
+- **Status:** open
+- **Severity:** low. On main.
+- **Where:** `mobile/src/App.tsx`, the two icon buttons beside the title.
+- **What happens:** screen readers and UI automation see two unnamed buttons;
+  one of them is Logout.
+- **Decision:**
+
 ## Product decisions
 
 ### 25. A changed occurrence without its series rejects the whole import
