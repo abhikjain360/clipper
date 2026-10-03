@@ -51,6 +51,7 @@ minimumReleaseAgeExclude:
   - expo-sharing@57.0.15
   - js-yaml@5.4.3
   - "@expo/router-server@57.0.12"
+  - vite@8.3.3
 peerDependencyRules:
   allowedVersions:
     # Tamagui's cross-platform peer graph (via @floating-ui/react-native and
