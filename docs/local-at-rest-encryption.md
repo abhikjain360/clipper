@@ -65,6 +65,16 @@ For the macOS daemon, `crates/daemon/src/keychain.rs` stores:
   This lets local ad-hoc builds resume without an Apple team or access-group
   entitlement.
 
+The default daemon data directory keeps service `com.clipper.daemon` and the
+existing account names so existing items still work. Every other data directory
+uses service `com.clipper.daemon.<hash>`, where `<hash>` is the lowercase SHA-256
+hex digest of its canonical path. Both session stores and the IPC secret use
+that service. An independent QA directory cannot read, overwrite or delete the
+default directory's items. Path aliases use the same items as their target;
+moving a directory changes its names and requires a new login. The daemon,
+desktop app and CLI use the shared `clipper-daemon-client` derivation. Select a
+directory with `CLIPPER_DATA_DIR`, or `--data-dir` for the daemon and CLI.
+
 The login keychain is local to this Mac and normally unlocked while the user
 is logged in. Its default access rule trusts the creating binary; other
 programs get a macOS prompt. The daemon uses the same default rule as its IPC

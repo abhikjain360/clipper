@@ -1,9 +1,11 @@
+use clipper_daemon_client::data_dir::KeychainNames;
+
 use super::{Credentials, KeychainError, KeychainResult, SessionLocation, StoredProfile};
 
 pub(super) trait KeychainStore {
-    fn load(&self) -> KeychainResult<Option<Credentials>>;
-    fn store(&self, credentials: &Credentials) -> KeychainResult<()>;
-    fn clear(&self) -> KeychainResult<()>;
+    fn load(&self, names: &KeychainNames) -> KeychainResult<Option<Credentials>>;
+    fn store(&self, names: &KeychainNames, credentials: &Credentials) -> KeychainResult<()>;
+    fn clear(&self, names: &KeychainNames) -> KeychainResult<()>;
 }
 
 const MISSING_ENTITLEMENT: i32 = -34018;
@@ -29,24 +31,25 @@ fn allows_login_keychain(error: &KeychainError) -> bool {
 pub(super) fn store(
     protected: &dyn KeychainStore,
     login: &dyn KeychainStore,
+    names: &KeychainNames,
     credentials: &Credentials,
 ) -> KeychainResult<SessionLocation> {
-    match protected.store(credentials) {
+    match protected.store(names, credentials) {
         Ok(()) => {
             tracing::info!(
                 store = "macOS data protection keychain",
                 "Saved session credentials"
             );
-            if let Err(error) = login.clear() {
+            if let Err(error) = login.clear(names) {
                 tracing::warn!(%error, "Failed to remove superseded login-keychain credentials");
             }
             Ok(SessionLocation::Protected)
         }
         Err(error) if allows_login_keychain(&error) => {
             tracing::warn!(%error, "Data protection keychain unavailable for this signing identity; using the login keychain");
-            login.store(credentials)?;
+            login.store(names, credentials)?;
             tracing::info!(store = "macOS login keychain", "Saved session credentials");
-            if let Err(error) = protected.clear() {
+            if let Err(error) = protected.clear(names) {
                 tracing::warn!(%error, "Failed to remove superseded data-protection-keychain credentials");
             }
             Ok(SessionLocation::Login)
@@ -58,6 +61,7 @@ pub(super) fn store(
 pub(super) fn load(
     protected: &dyn KeychainStore,
     login: &dyn KeychainStore,
+    names: &KeychainNames,
     profile: &StoredProfile,
 ) -> KeychainResult<Option<Credentials>> {
     let mut current = None;
@@ -66,14 +70,14 @@ pub(super) fn load(
         (SessionLocation::Protected, protected),
         (SessionLocation::Login, login),
     ] {
-        match store.load() {
+        match store.load(names) {
             Ok(Some(credentials)) if credentials.matches(profile, location) => {
                 tracing::info!(store = ?location, "Loaded current session credentials");
                 current = Some(credentials);
             }
             Ok(Some(_)) => {
                 tracing::warn!(store = ?location, "Ignoring credentials that do not match the current session record");
-                if let Err(error) = store.clear() {
+                if let Err(error) = store.clear(names) {
                     tracing::warn!(%error, store = ?location, "Failed to delete stale session credentials");
                 }
             }
@@ -86,7 +90,7 @@ pub(super) fn load(
                     .is_some_and(|resume| resume.store == location)
                 {
                     current_error = Some(error);
-                } else if let Err(error) = store.clear() {
+                } else if let Err(error) = store.clear(names) {
                     tracing::warn!(%error, store = ?location, "Failed to delete stale session credentials");
                 }
             }
@@ -101,9 +105,10 @@ pub(super) fn load(
 pub(super) fn clear(
     protected: &dyn KeychainStore,
     login: &dyn KeychainStore,
+    names: &KeychainNames,
 ) -> KeychainResult<()> {
-    let protected = protected.clear();
-    let login = login.clear();
+    let protected = protected.clear(names);
+    let login = login.clear(names);
     match &protected {
         Ok(()) => tracing::info!(
             store = "macOS data protection keychain",
@@ -133,10 +138,10 @@ pub enum MacKeychain {
 
 #[cfg(all(target_os = "macos", not(test)))]
 impl MacKeychain {
-    fn options(&self) -> security_framework::passwords::PasswordOptions {
+    fn options(&self, names: &KeychainNames) -> security_framework::passwords::PasswordOptions {
         let mut options = security_framework::passwords::PasswordOptions::new_generic_password(
-            super::SERVICE,
-            super::ACCOUNT,
+            &names.service,
+            &names.credentials_account,
         );
         if matches!(self, Self::Protected) {
             options.use_protected_keychain();
@@ -156,8 +161,8 @@ fn platform_error(error: security_framework::base::Error) -> KeychainError {
 
 #[cfg(all(target_os = "macos", not(test)))]
 impl KeychainStore for MacKeychain {
-    fn load(&self) -> KeychainResult<Option<Credentials>> {
-        match security_framework::passwords::generic_password(self.options()) {
+    fn load(&self, names: &KeychainNames) -> KeychainResult<Option<Credentials>> {
+        match security_framework::passwords::generic_password(self.options(names)) {
             Ok(data) => {
                 let data = zeroize::Zeroizing::new(data);
                 serde_json::from_slice(&data)
@@ -169,13 +174,13 @@ impl KeychainStore for MacKeychain {
         }
     }
 
-    fn store(&self, credentials: &Credentials) -> KeychainResult<()> {
+    fn store(&self, names: &KeychainNames, credentials: &Credentials) -> KeychainResult<()> {
         use security_framework::access_control::{ProtectionMode, SecAccessControl};
 
         let json = zeroize::Zeroizing::new(
             serde_json::to_string(credentials).map_err(KeychainError::Encode)?,
         );
-        let mut options = self.options();
+        let mut options = self.options(names);
         if matches!(self, Self::Protected) {
             let access = SecAccessControl::create_with_protection(
                 Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
@@ -188,8 +193,8 @@ impl KeychainStore for MacKeychain {
             .map_err(platform_error)
     }
 
-    fn clear(&self) -> KeychainResult<()> {
-        match security_framework::passwords::delete_generic_password_options(self.options()) {
+    fn clear(&self, names: &KeychainNames) -> KeychainResult<()> {
+        match security_framework::passwords::delete_generic_password_options(self.options(names)) {
             Ok(()) => Ok(()),
             Err(error) if error.code() == super::ERR_SEC_ITEM_NOT_FOUND => Ok(()),
             Err(error) => Err(platform_error(error)),
@@ -220,7 +225,7 @@ mod tests {
     }
 
     impl KeychainStore for FakeStore {
-        fn load(&self) -> KeychainResult<Option<Credentials>> {
+        fn load(&self, _names: &KeychainNames) -> KeychainResult<Option<Credentials>> {
             self.calls.lock().unwrap().push("load");
             match self.read_error {
                 Some(status) => Err(error(status)),
@@ -228,7 +233,7 @@ mod tests {
             }
         }
 
-        fn store(&self, credentials: &Credentials) -> KeychainResult<()> {
+        fn store(&self, _names: &KeychainNames, credentials: &Credentials) -> KeychainResult<()> {
             self.calls.lock().unwrap().push("store");
             if let Some(status) = self.write_error {
                 return Err(error(status));
@@ -237,13 +242,158 @@ mod tests {
             Ok(())
         }
 
-        fn clear(&self) -> KeychainResult<()> {
+        fn clear(&self, _names: &KeychainNames) -> KeychainResult<()> {
             self.calls.lock().unwrap().push("clear");
             if let Some(status) = self.delete_error {
                 return Err(error(status));
             }
             *self.credentials.lock().unwrap() = None;
             Ok(())
+        }
+    }
+
+    fn names() -> KeychainNames {
+        KeychainNames {
+            service: "com.clipper.daemon".into(),
+            credentials_account: "credentials".into(),
+            ipc_secret_account: "ipc-secret-v1".into(),
+        }
+    }
+
+    impl FakeStore {
+        fn store(&self, credentials: &Credentials) -> KeychainResult<()> {
+            KeychainStore::store(self, &names(), credentials)
+        }
+
+        fn clear(&self) -> KeychainResult<()> {
+            KeychainStore::clear(self, &names())
+        }
+    }
+
+    fn store(
+        protected: &dyn KeychainStore,
+        login: &dyn KeychainStore,
+        credentials: &Credentials,
+    ) -> KeychainResult<SessionLocation> {
+        super::store(protected, login, &names(), credentials)
+    }
+
+    fn load(
+        protected: &dyn KeychainStore,
+        login: &dyn KeychainStore,
+        profile: &StoredProfile,
+    ) -> KeychainResult<Option<Credentials>> {
+        super::load(protected, login, &names(), profile)
+    }
+
+    fn clear(protected: &dyn KeychainStore, login: &dyn KeychainStore) -> KeychainResult<()> {
+        super::clear(protected, login, &names())
+    }
+
+    #[derive(Default)]
+    struct NamedStore {
+        items: Mutex<std::collections::HashMap<(String, String), Credentials>>,
+        write_error: Option<i32>,
+    }
+
+    impl KeychainStore for NamedStore {
+        fn load(&self, names: &KeychainNames) -> KeychainResult<Option<Credentials>> {
+            Ok(self
+                .items
+                .lock()
+                .unwrap()
+                .get(&(names.service.clone(), names.credentials_account.clone()))
+                .cloned())
+        }
+
+        fn store(&self, names: &KeychainNames, credentials: &Credentials) -> KeychainResult<()> {
+            if let Some(status) = self.write_error {
+                return Err(error(status));
+            }
+            self.items.lock().unwrap().insert(
+                (names.service.clone(), names.credentials_account.clone()),
+                credentials.clone(),
+            );
+            Ok(())
+        }
+
+        fn clear(&self, names: &KeychainNames) -> KeychainResult<()> {
+            self.items
+                .lock()
+                .unwrap()
+                .remove(&(names.service.clone(), names.credentials_account.clone()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn qa_login_fallback_restart_and_logout_do_not_read_or_replace_the_default_sessions() {
+        for fallback in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let default = root.path().join("default");
+            let qa = root.path().join("qa");
+            std::fs::create_dir(&default).unwrap();
+            std::fs::create_dir(&qa).unwrap();
+            let owner_names = KeychainNames::new(&default, &default).unwrap();
+            let qa_names = KeychainNames::new(&qa, &default).unwrap();
+            let protected = NamedStore {
+                write_error: fallback.then_some(MISSING_ENTITLEMENT),
+                ..Default::default()
+            };
+            let login = NamedStore::default();
+            let owner = credentials();
+            let key = (
+                owner_names.service.clone(),
+                owner_names.credentials_account.clone(),
+            );
+            protected
+                .items
+                .lock()
+                .unwrap()
+                .insert(key.clone(), owner.clone());
+            login
+                .items
+                .lock()
+                .unwrap()
+                .insert(key.clone(), owner.clone());
+            let owner_profile = owner.stored_profile(SessionLocation::Protected);
+            assert!(
+                super::load(&protected, &login, &qa_names, &owner_profile)
+                    .unwrap()
+                    .is_none()
+            );
+            let mut guest = credentials();
+            guest.username = "qa".into();
+            guest.session_id = Some([2; 16]);
+            let location = super::store(&protected, &login, &qa_names, &guest).unwrap();
+            assert_eq!(
+                location,
+                if fallback {
+                    SessionLocation::Login
+                } else {
+                    SessionLocation::Protected
+                }
+            );
+            let restarted = KeychainNames::new(&qa, &default).unwrap();
+            assert_credentials(
+                super::load(
+                    &protected,
+                    &login,
+                    &restarted,
+                    &guest.stored_profile(location),
+                )
+                .unwrap(),
+                &guest,
+            );
+            super::clear(&protected, &login, &qa_names).unwrap();
+            assert!(
+                KeychainStore::load(&protected, &qa_names)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(KeychainStore::load(&login, &qa_names).unwrap().is_none());
+            assert_credentials(protected.items.lock().unwrap().get(&key).cloned(), &owner);
+            assert_credentials(login.items.lock().unwrap().get(&key).cloned(), &owner);
         }
     }
 

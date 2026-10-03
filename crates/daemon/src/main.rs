@@ -62,18 +62,6 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const MAX_IPC_CONNECTIONS: usize = 64;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn app_data_dir() -> DaemonResult<PathBuf> {
-    dirs::data_dir()
-        .map(|base| base.join("Clipper"))
-        .ok_or(DaemonError::DataDirUnavailable)
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn data_dir() -> DaemonResult<PathBuf> {
-    app_data_dir()
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 
@@ -228,8 +216,15 @@ async fn run() -> DaemonResult<()> {
     use clap::Parser;
 
     let options = options::Options::parse();
-
-    let log_dir = log_dir();
+    let data_dir = clipper_daemon_client::data_dir::data_dir(options.data_dir)
+        .ok_or(DaemonError::DataDirUnavailable)?;
+    ensure_private_dir(&data_dir)?;
+    let log_dir = if Some(&data_dir) == clipper_daemon_client::data_dir::default_data_dir().as_ref()
+    {
+        log_dir()
+    } else {
+        data_dir.join("logs")
+    };
     ensure_private_dir(&log_dir)?;
 
     let log_file = std::fs::OpenOptions::new()
@@ -249,8 +244,6 @@ async fn run() -> DaemonResult<()> {
         .ok();
 
     let sock_path = ipc_path::socket_path();
-    let data_dir = data_dir()?;
-    ensure_private_dir(&data_dir)?;
     if let Some(sock_dir) = sock_path.parent() {
         ipc_path::ensure_private_socket_dir(sock_dir)?;
     }

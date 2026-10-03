@@ -224,7 +224,7 @@ fn a_platform_without_a_secret_store_keeps_only_the_login_profile() {
     let directory = tempfile::tempdir().unwrap();
     let (_server, url) = start_server(directory.path());
     let data = directory.path().join("desktop");
-    let store = Arc::new(keychain::PlatformStore);
+    let store = Arc::new(keychain::PlatformStore::new(data.clone()));
     assert!(!store.supports_resume());
     let state = register(&data, &url, store.clone());
     assert!(state.session.is_some());

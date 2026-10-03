@@ -1,6 +1,6 @@
 //! Platform credential persistence for the daemon.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clipper_client::engine::{SavedProfile, SessionResumeMaterial};
 use clipper_daemon_types::ipc_secret_cache::{IpcSecretCache, cached_secret, empty_cache};
@@ -11,12 +11,6 @@ use zeroize::{Zeroize, Zeroizing};
 #[cfg(any(target_os = "macos", test))]
 mod session_store;
 
-#[cfg(all(target_os = "macos", not(test)))]
-const SERVICE: &str = "com.clipper.daemon";
-#[cfg(all(target_os = "macos", not(test)))]
-const ACCOUNT: &str = "credentials";
-#[cfg(all(target_os = "macos", not(test)))]
-const IPC_SECRET_ACCOUNT: &str = "ipc-secret-v1";
 const IPC_SECRET_BYTES: usize = 32;
 #[cfg(all(target_os = "macos", not(test)))]
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
@@ -149,7 +143,15 @@ pub trait CredentialStore: Send + Sync {
     fn clear(&self) -> KeychainResult<()>;
 }
 
-pub struct PlatformStore;
+pub struct PlatformStore {
+    data_dir: PathBuf,
+}
+
+impl PlatformStore {
+    pub fn new(data_dir: PathBuf) -> Self {
+        Self { data_dir }
+    }
+}
 
 impl CredentialStore for PlatformStore {
     fn supports_resume(&self) -> bool {
@@ -157,15 +159,15 @@ impl CredentialStore for PlatformStore {
     }
 
     fn load(&self, profile: &StoredProfile) -> KeychainResult<Option<Credentials>> {
-        load_credentials(profile)
+        load_credentials(&self.data_dir, profile)
     }
 
     fn store(&self, credentials: &Credentials) -> KeychainResult<SessionLocation> {
-        store_credentials(credentials)
+        store_credentials(&self.data_dir, credentials)
     }
 
     fn clear(&self) -> KeychainResult<()> {
-        clear_credentials()
+        clear_credentials(&self.data_dir)
     }
 }
 
@@ -194,43 +196,59 @@ pub enum KeychainError {
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-fn store_credentials(creds: &Credentials) -> KeychainResult<SessionLocation> {
+fn store_credentials(data_dir: &Path, creds: &Credentials) -> KeychainResult<SessionLocation> {
+    let names = clipper_daemon_client::data_dir::KeychainNames::for_data_dir(data_dir)?;
     session_store::store(
         &session_store::MacKeychain::Protected,
         &session_store::MacKeychain::Login,
+        &names,
         creds,
     )
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-fn load_credentials(profile: &StoredProfile) -> KeychainResult<Option<Credentials>> {
+fn load_credentials(
+    data_dir: &Path,
+    profile: &StoredProfile,
+) -> KeychainResult<Option<Credentials>> {
+    let names = clipper_daemon_client::data_dir::KeychainNames::for_data_dir(data_dir)?;
     session_store::load(
         &session_store::MacKeychain::Protected,
         &session_store::MacKeychain::Login,
+        &names,
         profile,
     )
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-fn clear_credentials() -> KeychainResult<()> {
+fn clear_credentials(data_dir: &Path) -> KeychainResult<()> {
+    let names = clipper_daemon_client::data_dir::KeychainNames::for_data_dir(data_dir)?;
     session_store::clear(
         &session_store::MacKeychain::Protected,
         &session_store::MacKeychain::Login,
+        &names,
     )
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-fn load_or_create_ipc_secret_uncached(_data_dir: &Path) -> KeychainResult<Zeroizing<Vec<u8>>> {
-    match security_framework::passwords::get_generic_password(SERVICE, IPC_SECRET_ACCOUNT) {
+fn load_or_create_ipc_secret_uncached(data_dir: &Path) -> KeychainResult<Zeroizing<Vec<u8>>> {
+    let names = clipper_daemon_client::data_dir::KeychainNames::for_data_dir(data_dir)?;
+    match security_framework::passwords::get_generic_password(
+        &names.service,
+        &names.ipc_secret_account,
+    ) {
         Ok(secret) if secret.len() == IPC_SECRET_BYTES => Ok(Zeroizing::new(secret)),
         Ok(mut secret) => {
             let actual = secret.len();
             secret.zeroize();
             let secret = new_ipc_secret();
-            _ = security_framework::passwords::delete_generic_password(SERVICE, IPC_SECRET_ACCOUNT);
+            _ = security_framework::passwords::delete_generic_password(
+                &names.service,
+                &names.ipc_secret_account,
+            );
             security_framework::passwords::set_generic_password(
-                SERVICE,
-                IPC_SECRET_ACCOUNT,
+                &names.service,
+                &names.ipc_secret_account,
                 &secret,
             )
             .map_err(|e| KeychainError::Store(e.to_string()))?;
@@ -246,8 +264,8 @@ fn load_or_create_ipc_secret_uncached(_data_dir: &Path) -> KeychainResult<Zeroiz
         Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => {
             let secret = new_ipc_secret();
             security_framework::passwords::set_generic_password(
-                SERVICE,
-                IPC_SECRET_ACCOUNT,
+                &names.service,
+                &names.ipc_secret_account,
                 &secret,
             )
             .map_err(|e| KeychainError::Store(e.to_string()))?;
@@ -258,17 +276,20 @@ fn load_or_create_ipc_secret_uncached(_data_dir: &Path) -> KeychainResult<Zeroiz
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn store_credentials(_creds: &Credentials) -> KeychainResult<SessionLocation> {
+fn store_credentials(_data_dir: &Path, _creds: &Credentials) -> KeychainResult<SessionLocation> {
     Err(KeychainError::ResumeUnavailable)
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn load_credentials(_profile: &StoredProfile) -> KeychainResult<Option<Credentials>> {
+fn load_credentials(
+    _data_dir: &Path,
+    _profile: &StoredProfile,
+) -> KeychainResult<Option<Credentials>> {
     Ok(None)
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn clear_credentials() -> KeychainResult<()> {
+fn clear_credentials(_data_dir: &Path) -> KeychainResult<()> {
     Ok(())
 }
 
@@ -425,12 +446,12 @@ fn reject_non_regular_existing_file(path: &Path) -> std::io::Result<()> {
 /// raise a keychain prompt.
 static IPC_SECRET: IpcSecretCache = empty_cache();
 
-/// The shared IPC secret, creating it on first use. Read from the platform
-/// store once per process.
 pub fn load_or_create_ipc_secret(data_dir: &Path) -> KeychainResult<Zeroizing<Vec<u8>>> {
-    cached_secret(&IPC_SECRET, || {
+    ensure_private_dir(data_dir)?;
+    let canonical = std::fs::canonicalize(data_dir)?;
+    cached_secret(&IPC_SECRET, &canonical, || {
         tracing::debug!("Reading IPC secret from the platform credential store");
-        load_or_create_ipc_secret_uncached(data_dir)
+        load_or_create_ipc_secret_uncached(&canonical)
     })
 }
 

@@ -1,8 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 
-pub fn spawn_daemon(server_url: &str) {
+pub fn spawn_daemon(server_url: &str, data_dir: &Path) {
     let Some(path) = find_daemon_binary() else {
         warn!("clipper-daemon binary not found; clipboard sync won't persist when window closes");
         return;
@@ -11,6 +11,8 @@ pub fn spawn_daemon(server_url: &str) {
     match std::process::Command::new(&path)
         .arg("--server-url")
         .arg(server_url)
+        .arg("--data-dir")
+        .arg(data_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

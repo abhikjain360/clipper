@@ -1,3 +1,4 @@
+pub mod data_dir;
 pub mod ipc_secret;
 
 #[cfg(unix)]

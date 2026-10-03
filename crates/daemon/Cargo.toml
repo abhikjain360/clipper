@@ -17,6 +17,7 @@ base64.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["env"] }
 clipper-client.workspace = true
+clipper-daemon-client.workspace = true
 clipper-core.workspace = true
 clipper-daemon-types.workspace = true
 dirs.workspace = true

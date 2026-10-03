@@ -39,13 +39,8 @@ impl EngineManager {
         if let Err(error) = keychain::remove_plaintext_credentials(&data_dir) {
             tracing::warn!(%error, "Failed to remove obsolete plaintext credentials; session resume remains disabled");
         }
-        Self::load_with_store(
-            data_dir,
-            default_server_url,
-            Arc::new(PlatformStore),
-            clipboard_watching,
-        )
-        .await
+        let store = Arc::new(PlatformStore::new(data_dir.clone()));
+        Self::load_with_store(data_dir, default_server_url, store, clipboard_watching).await
     }
 
     pub async fn load_with_store(
@@ -146,13 +141,8 @@ impl EngineManager {
         default_server_url: String,
         stored_creds: Option<Credentials>,
     ) -> Arc<Self> {
-        Self::with_store(
-            data_dir,
-            default_server_url,
-            stored_creds,
-            Arc::new(PlatformStore),
-            false,
-        )
+        let store = Arc::new(PlatformStore::new(data_dir.clone()));
+        Self::with_store(data_dir, default_server_url, stored_creds, store, false)
     }
 
     fn with_store(

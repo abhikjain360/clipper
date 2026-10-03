@@ -286,21 +286,23 @@ stay as a record. Cooking sessions do not start or stop the block's timer.
 
 ## Import
 
-The recipes and pantry of the earlier cooking app are imported once. Claude
-runs the import from the cooking workspace, with Clipper running on the Mac,
+The recipes and pantry of the earlier cooking app are imported into Clipper.
+Claude runs the import from the cooking workspace, with Clipper running on the Mac,
 using `jq` and `clipper`. No import code is committed.
 
-1. Check that the kitchen collections are empty, so the import cannot run
-   twice.
-2. Rename the fields of each `kitchen/recipes/*.json` file to snake_case and
-   write it to `kitchen.recipes` as a new document.
-3. Write each item of `kitchen/pantry.json` to `kitchen.pantry` and each
-   equipment entry to `kitchen.equipment`.
-4. Skip `kitchen/cooking-log.json`.
-5. Compare counts (3 recipes, 87 pantry items, 27 pieces of equipment), run
+The import is idempotent. Running it again reuses existing records and adds
+only missing recipes, pantry items and equipment. It does not add duplicates
+or require empty collections.
+
+1. Rename the fields of each `kitchen/recipes/*.json` file to snake_case and
+   write missing recipes to `kitchen.recipes` as new documents.
+2. Write missing items of `kitchen/pantry.json` to `kitchen.pantry` and missing
+   equipment entries to `kitchen.equipment`.
+3. Skip `kitchen/cooking-log.json`.
+4. Compare counts (3 recipes, 87 pantry items, 27 pieces of equipment), run
    the cross-row checks, and open each recipe on the phone.
-6. In `kitchen/profile.md`, name the favourite recipe by title instead of by
+5. In `kitchen/profile.md`, name the favourite recipe by title instead of by
    file path, and remove the weight line.
-7. Rewrite `AGENTS.md` and the cook skill for Clipper, then delete the earlier
+6. Rewrite `AGENTS.md` and the cook skill for Clipper, then delete the earlier
    app's code, its Node project files and everything in `kitchen/` except
    `profile.md`.

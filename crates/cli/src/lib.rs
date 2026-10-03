@@ -26,6 +26,8 @@ use uuid::Uuid;
     about = "Read devices and manage the local Clipper daemon's schedule and app data"
 )]
 pub struct Cli {
+    #[arg(long, global = true, env = "CLIPPER_DATA_DIR")]
+    pub data_dir: Option<std::path::PathBuf>,
     #[command(subcommand)]
     pub command: Command,
 }

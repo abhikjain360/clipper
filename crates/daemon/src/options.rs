@@ -3,6 +3,8 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(name = "clipper-daemon")]
 pub struct Options {
+    #[arg(long, env = "CLIPPER_DATA_DIR")]
+    pub data_dir: Option<std::path::PathBuf>,
     #[arg(long, default_value = "http://127.0.0.1:8787")]
     pub server_url: String,
     #[arg(long, env = "CLIPPER_DISABLE_CLIPBOARD_WATCHING", value_parser = clap::builder::BoolishValueParser::new())]
@@ -24,6 +26,20 @@ mod tests {
         .unwrap();
         assert!(options.disable_clipboard_watching);
         assert_eq!(options.server_url, "https://test.example");
+    }
+
+    #[test]
+    fn a_qa_daemon_can_select_its_own_data_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let options = Options::try_parse_from([
+            std::ffi::OsStr::new("clipper-daemon"),
+            std::ffi::OsStr::new("--data-dir"),
+            root.path().as_os_str(),
+            std::ffi::OsStr::new("--disable-clipboard-watching"),
+        ])
+        .unwrap();
+        assert_eq!(options.data_dir.as_deref(), Some(root.path()));
+        assert!(options.disable_clipboard_watching);
     }
 
     #[test]

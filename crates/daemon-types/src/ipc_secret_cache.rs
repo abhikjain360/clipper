@@ -16,17 +16,21 @@
 //! by hand) is not picked up until restart. That is the right way round:
 //! rotation is manual surgery, prompts were every launch.
 
-use std::sync::Mutex;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use zeroize::Zeroizing;
 
 /// Where a process keeps its copy of the secret. Declare one per process as a
 /// `static` and pass it to [`cached_secret`].
-pub type IpcSecretCache = Mutex<Option<Zeroizing<Vec<u8>>>>;
+pub type IpcSecretCache = Mutex<BTreeMap<PathBuf, Zeroizing<Vec<u8>>>>;
 
 /// An empty cache, for initialising a `static IpcSecretCache`.
 pub const fn empty_cache() -> IpcSecretCache {
-    Mutex::new(None)
+    Mutex::new(BTreeMap::new())
 }
 
 /// Return the cached secret, calling `load` exactly once to populate it.
@@ -38,17 +42,18 @@ pub const fn empty_cache() -> IpcSecretCache {
 /// caller can retry.
 pub fn cached_secret<E>(
     cache: &IpcSecretCache,
+    data_dir: &Path,
     load: impl FnOnce() -> Result<Zeroizing<Vec<u8>>, E>,
 ) -> Result<Zeroizing<Vec<u8>>, E> {
     let mut cached = cache.lock().expect("IPC secret cache lock poisoned");
-    if let Some(secret) = cached.as_deref() {
+    if let Some(secret) = cached.get(data_dir) {
         return Ok(Zeroizing::new(secret.to_vec()));
     }
     let secret = load()?;
     // Hand back a copy rather than the cached value: `Zeroizing` is not `Clone`,
     // and the caller's copy is zeroized when it drops.
     let copy = Zeroizing::new(secret.to_vec());
-    *cached = Some(secret);
+    cached.insert(data_dir.to_path_buf(), secret);
     Ok(copy)
 }
 
@@ -79,7 +84,8 @@ mod tests {
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 scope.spawn(|| {
-                    let secret = cached_secret(&CACHE, load).expect("infallible");
+                    let secret =
+                        cached_secret(&CACHE, Path::new("test"), load).expect("infallible");
                     assert_eq!(&secret[..], &[7u8; 32]);
                 });
             }
@@ -104,8 +110,12 @@ mod tests {
             Ok(Zeroizing::new(vec![1u8; 32]))
         };
 
-        assert_eq!(cached_secret(&CACHE, load), Err("store unavailable"));
-        let secret = cached_secret(&CACHE, load).expect("second attempt succeeds");
+        assert_eq!(
+            cached_secret(&CACHE, Path::new("test"), load),
+            Err("store unavailable")
+        );
+        let secret =
+            cached_secret(&CACHE, Path::new("test"), load).expect("second attempt succeeds");
         assert_eq!(&secret[..], &[1u8; 32]);
         assert_eq!(ATTEMPTS.load(Ordering::SeqCst), 2);
     }

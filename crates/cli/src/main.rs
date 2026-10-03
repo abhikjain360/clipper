@@ -24,9 +24,8 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), Error> {
-    let data_dir = dirs::data_dir()
-        .ok_or(Error::DataDirectory)?
-        .join("Clipper");
+    let data_dir =
+        clipper_daemon_client::data_dir::data_dir(cli.data_dir).ok_or(Error::DataDirectory)?;
     let mut connection = Connection::connect(&ipc_path::socket_path(), &data_dir).await?;
     cli.command
         .execute(

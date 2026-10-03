@@ -124,11 +124,10 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
-            let daemon_data_dir = dirs::data_dir()
-                .ok_or("could not determine data directory")?
-                .join("Clipper");
+            let daemon_data_dir = clipper_daemon_client::data_dir::data_dir(None)
+                .ok_or("could not determine data directory")?;
 
-            daemon_spawn::spawn_daemon(DEFAULT_BASE_URL);
+            daemon_spawn::spawn_daemon(DEFAULT_BASE_URL, &daemon_data_dir);
 
             let (daemon, daemon_fut) = DaemonClient::new_with_future(daemon_data_dir);
             tauri::async_runtime::spawn(daemon_fut);

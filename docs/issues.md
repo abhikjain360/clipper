@@ -503,6 +503,10 @@ Each entry has:
   denied keychain access does not trigger a storage downgrade. Linux has no
   session secret store and requires login at each start. The broader IPC
   peer-trust issue remains open.
+  Keychain items and IPC secret caches are now scoped to the daemon's data
+  directory. The default directory keeps its existing names; independent QA
+  directories use a canonical-path hash, preventing accidental access to the
+  owner's items (entry 165). This does not change same-user IPC trust.
 
 ### 54. Whether a username exists can still be learned
 
@@ -761,6 +765,24 @@ Each entry has:
 - **Decision:** fix (Claude): count every separator the parser splits on.
 
 ## Bugs
+
+### 165. Extra macOS daemons shared the owner's keychain items
+
+- **Status:** fixed in the working tree; not committed.
+- **Severity:** high.
+- **Where:** daemon session credentials and IPC secret; shared daemon client.
+- **What happened:** every data directory used the same keychain service and
+  accounts. A QA daemon read the owner's IPC secret and could overwrite or
+  delete the owner's saved session. The process cache also held one IPC secret
+  regardless of directory.
+- **Fix:** keep today's names for the default directory. Other directories use
+  a service suffixed with the SHA-256 hash of their canonical path. Protected
+  and login session stores and the IPC secret all use that namespace. Clients
+  share the naming code and cache secrets per canonical directory. The daemon
+  and CLI accept `--data-dir`; all desktop components accept `CLIPPER_DATA_DIR`.
+  Fake-store tests cover unchanged default names, distinct directories, aliases,
+  cached reconnects, fallback session saves, restarts and logout isolation.
+  QA must use its own directory and socket and disable clipboard watching.
 
 ### 164. Shared persisted heads could hide missing content or misidentify a source revision
 

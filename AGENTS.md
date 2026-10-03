@@ -15,9 +15,13 @@
 ## Environment
 
 - Any extra daemon started for QA on the owner's Mac must use
-  `--disable-clipboard-watching` or `CLIPPER_DISABLE_CLIPBOARD_WATCHING=true`.
-  This includes test accounts and temporary data directories. Do not capture the
-  owner's clipboard for QA. The environment variable accepts `1`/`0`,
+  its own data directory (`--data-dir` or `CLIPPER_DATA_DIR`), its own socket
+  (`CLIPPER_DAEMON_SOCKET_PATH`), and `--disable-clipboard-watching` or
+  `CLIPPER_DISABLE_CLIPBOARD_WATCHING=true`. Keychain items are namespaced by
+  the canonical data directory, so an extra daemon with its own directory no
+  longer reads or changes the owner's keychain items. Do not reuse the owner's
+  directory or an alias of it. This includes test accounts. Do not capture the
+  owner's clipboard for QA. The clipboard-watching environment variable accepts `1`/`0`,
   `true`/`false`, and `yes`/`no`, case-insensitively; QA must use an enabled value.
 
 - Use the project environment from the checked-in `.envrc`. The shell hooks
