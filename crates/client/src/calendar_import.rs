@@ -727,11 +727,8 @@ impl SyncEngine {
                 "Import event identity mismatch".into(),
             ));
         }
-        if source && self.holds_listed_head(item).await? {
-            let expected = LocalHead {
-                revision: item.revision,
-                parent_hash: crypto::object_envelope_parent_hash(&item.envelope.body)?,
-            };
+        if source {
+            let expected = self.verify_listed_head(item).await?;
             if let Some(record) = self
                 .local_store
                 .schedule_record_at_head(id, expected)

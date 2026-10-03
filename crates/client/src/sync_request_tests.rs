@@ -11,6 +11,16 @@ pub(super) fn encrypted_item(
     seq: i64,
     head: Option<LocalHead>,
 ) -> (ObjectListItem, Vec<u8>) {
+    encrypted_item_with_text(kind, id, seq, head, &format!("clipboard {seq}"))
+}
+
+fn encrypted_item_with_text(
+    kind: ObjectKind,
+    id: ObjectId,
+    seq: i64,
+    head: Option<LocalHead>,
+    text: &str,
+) -> (ObjectListItem, Vec<u8>) {
     let payload_id = uuid::Uuid::now_v7().into();
     let placement = head.map_or(EnvelopePlacement::Create, EnvelopePlacement::Revise);
     let aad = object_envelope_body_for_aad(
@@ -44,7 +54,6 @@ pub(super) fn encrypted_item(
             (meta_nonce, meta_ciphertext, nonce, ciphertext)
         }
         ObjectKind::Clipboard => {
-            let text = format!("clipboard {seq}");
             let meta = ClipboardMeta {
                 mime_type: "text/plain".into(),
                 size: Some(text.len() as i64),
@@ -213,7 +222,9 @@ async fn reconnect_snapshots_of_held_objects_request_only_list_pages() {
             .await
             .unwrap();
         restarted.publish_visible_state(visible).await;
+        let payload_reads = restarted.local_store.payload_read_count();
         let generation = snapshot(&restarted, kind, 501).await;
+        assert_eq!(restarted.local_store.payload_read_count(), payload_reads);
         assert_eq!(state.lock().unwrap().requests.len(), 2);
         let item = state.lock().unwrap().objects[0].0.clone();
         assert!(
@@ -231,8 +242,80 @@ async fn reconnect_snapshots_of_held_objects_request_only_list_pages() {
             .unwrap();
         assert_eq!(state.lock().unwrap().requests.len(), 1);
         assert!(!state.lock().unwrap().requests[0].contains("/payloads/"));
+        assert_eq!(restarted.local_store.payload_read_count(), payload_reads);
         server.abort();
     }
+}
+
+#[tokio::test]
+#[cfg(not(target_family = "wasm"))]
+async fn a_reconnect_with_large_held_clipboard_payloads_does_not_read_the_cached_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let engine = SyncEngine::new_with_data_dir(&url, directory.path());
+    activate(&engine, "profile", KEY).await;
+    let text = "x".repeat(8 * 1024 * 1024);
+    let state = Arc::new(std::sync::Mutex::new(ServerState {
+        objects: (1..=2)
+            .map(|seq| {
+                encrypted_item_with_text(
+                    ObjectKind::Clipboard,
+                    uuid::Uuid::now_v7().into(),
+                    seq,
+                    None,
+                    &text,
+                )
+            })
+            .collect(),
+        ..Default::default()
+    }));
+    let server = tokio::spawn(serve(listener, state.clone()));
+    snapshot(&engine, ObjectKind::Clipboard, 2).await;
+    let restarted = SyncEngine::new_with_data_dir(&url, directory.path());
+    activate(&restarted, "profile", KEY).await;
+    let visible = restarted
+        .local_store
+        .hydrate_ciphertext_cache(&KEY, RECENT_CLIPBOARD_LIMIT)
+        .await
+        .unwrap();
+    restarted.publish_visible_state(visible).await;
+    assert_eq!(restarted.local_store.payload_read_count(), 2);
+    state.lock().unwrap().requests.clear();
+    snapshot(&restarted, ObjectKind::Clipboard, 2).await;
+    assert_eq!(state.lock().unwrap().requests.len(), 1);
+    assert_eq!(restarted.local_store.payload_read_count(), 2);
+    assert_eq!(restarted.local_store.cache_check_count(), 2);
+    server.abort();
+}
+
+#[tokio::test]
+#[cfg(not(target_family = "wasm"))]
+async fn an_unchanged_calendar_source_is_checked_once_without_reading_cached_payload_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let engine = SyncEngine::new_with_data_dir(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        directory.path(),
+    );
+    activate(&engine, "profile", KEY).await;
+    let id = uuid::Uuid::now_v7().into();
+    let state = Arc::new(std::sync::Mutex::new(ServerState {
+        objects: vec![encrypted_item(ObjectKind::Schedule, id, 1, None)],
+        ..Default::default()
+    }));
+    let server = tokio::spawn(serve(listener, state.clone()));
+    engine.read_calendar_source(&id.to_string()).await.unwrap();
+    state.lock().unwrap().requests.clear();
+    let checks = engine.local_store.cache_check_count();
+    let reads = engine.local_store.payload_read_count();
+    let (source, head) = engine.read_calendar_source(&id.to_string()).await.unwrap();
+    assert_eq!(source.name, "event 1");
+    assert_eq!(head.revision, 1);
+    assert_eq!(state.lock().unwrap().requests.len(), 1);
+    assert_eq!(engine.local_store.cache_check_count(), checks + 1);
+    assert_eq!(engine.local_store.payload_read_count(), reads);
+    server.abort();
 }
 
 #[tokio::test]

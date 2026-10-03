@@ -157,6 +157,8 @@ Source reads during a refresh still fetch current metadata and verify its
 signature, revision and continuity. If that head matches this session's
 in-memory source record's own revision and envelope body hash, and its verified
 payload ciphertext is available, reuse the decrypted source payload.
+Each source read performs this cache check once. It checks presence and recorded
+ciphertext length and hash without reading or hashing the cached payload bytes.
 Each new head is downloaded and authenticated once, then reused by later reads
 in that refresh and later refreshes until the head changes. Source write
 conflicts still reread current metadata; the cache never substitutes an older

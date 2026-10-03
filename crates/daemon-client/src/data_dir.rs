@@ -65,6 +65,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_keychain_names_match_b417e0ds_parent_byte_for_byte() {
+        let root = tempfile::tempdir().unwrap();
+        let default = root.path().join("Clipper");
+        std::fs::create_dir(&default).unwrap();
+        let names = KeychainNames::new(&default, &default).unwrap();
+        assert_eq!(names.service.as_bytes(), b"com.clipper.daemon");
+        assert_eq!(names.credentials_account.as_bytes(), b"credentials");
+        assert_eq!(names.ipc_secret_account.as_bytes(), b"ipc-secret-v1");
+        #[cfg(unix)]
+        {
+            let alias = root.path().join("alias");
+            std::os::unix::fs::symlink(&default, &alias).unwrap();
+            let names = KeychainNames::new(&alias, &default).unwrap();
+            assert_eq!(names.service.as_bytes(), b"com.clipper.daemon");
+            assert_eq!(names.credentials_account.as_bytes(), b"credentials");
+            assert_eq!(names.ipc_secret_account.as_bytes(), b"ipc-secret-v1");
+        }
+    }
+
+    #[test]
     fn configured_directories_are_shared_and_an_explicit_directory_takes_precedence() {
         if let Some(expected) = std::env::var_os("CLIPPER_DIRECTORY_TEST_CHILD") {
             assert_eq!(data_dir(None), Some(PathBuf::from(&expected)));

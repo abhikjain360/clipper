@@ -157,6 +157,8 @@ async fn a_calendar_source_read_downloads_the_revision_another_tab_persisted() {
         crypto::object_envelope_parent_hash(&current.envelope.body).unwrap()
     );
     serve(&current, &payload);
+    let checks = first.local_store.cache_check_count();
+    let reads = first.local_store.payload_read_count();
     assert_eq!(
         first
             .read_calendar_source(&id.to_string())
@@ -167,4 +169,6 @@ async fn a_calendar_source_read_downloads_the_revision_another_tab_persisted() {
         "event 2"
     );
     assert_eq!(downloads(), 0);
+    assert_eq!(first.local_store.cache_check_count(), checks + 1);
+    assert_eq!(first.local_store.payload_read_count(), reads);
 }

@@ -2727,16 +2727,20 @@ impl SyncEngine {
     }
 
     async fn holds_listed_head(&self, item: &ObjectListItem) -> Result<bool, ClientError> {
-        verify_object_list_item_envelope(item)?;
-        self.check_revision_advance(item).await?;
-        let head = LocalHead {
-            revision: item.revision,
-            parent_hash: crypto::object_envelope_parent_hash(&item.envelope.body)?,
-        };
+        let head = self.verify_listed_head(item).await?;
         self.local_store
             .holds_cached_head(&item.id.to_string(), head)
             .await
             .map_err(Into::into)
+    }
+
+    async fn verify_listed_head(&self, item: &ObjectListItem) -> Result<LocalHead, ClientError> {
+        verify_object_list_item_envelope(item)?;
+        self.check_revision_advance(item).await?;
+        Ok(LocalHead {
+            revision: item.revision,
+            parent_hash: crypto::object_envelope_parent_hash(&item.envelope.body)?,
+        })
     }
 
     /// The chain position this client holds for an object, or a typed error.

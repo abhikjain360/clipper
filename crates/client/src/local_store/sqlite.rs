@@ -474,6 +474,20 @@ pub(super) fn read_payload(
         .map_err(Into::into)
 }
 
+pub(super) fn payload_size(
+    connection: &Connection,
+    object_id: &str,
+) -> Result<Option<i64>, LocalStoreError> {
+    connection
+        .query_row(
+            "SELECT length(ciphertext) FROM object_payloads WHERE object_id = ?1",
+            params![object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
 /// Only the browser store deletes a payload on its own; on native the row
 /// cascades with its object. Kept for the test that simulates a lost payload.
 #[cfg(test)]

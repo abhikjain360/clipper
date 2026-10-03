@@ -304,6 +304,14 @@ decrypted records in memory; another tab's persisted revision cannot make this
 tab skip a download. Each in-memory record carries the revision and body hash
 of its own content, including when it is used to prepare a write.
 
+Skip checks compare the recorded ciphertext length and hash with the envelope
+and check payload presence. Native storage checks the SQLite blob's length
+without loading it; browser storage checks that the payload key exists without
+reading or decoding its value. Reconnects do not read or hash held payload bytes.
+Bytes are still hash-checked and authenticated when downloaded or read to
+rebuild decrypted content. A missing native payload or a length mismatch forces
+a download.
+
 ## Collab Docs
 
 Collab docs are server-visible documents, not encrypted objects, so

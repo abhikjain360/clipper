@@ -766,9 +766,24 @@ Each entry has:
 
 ## Bugs
 
-### 165. Extra macOS daemons shared the owner's keychain items
+### 166. Reconnect skip checks read and hashed every held payload
 
 - **Status:** fixed in the working tree; not committed.
+- **Severity:** medium. Found in `7e0a7cc`.
+- **Where:** local store cache eligibility and calendar source reuse.
+- **What happened:** every reconnect loaded and hashed held payload ciphertext
+  to confirm its presence. Large clipboard histories could read gigabytes.
+  Source reads ran the same cache check twice.
+- **Fix:** compare recorded payload length and hash with the envelope and check
+  presence, keeping the exact in-memory head and all revision checks. Native
+  storage queries the blob length; browser storage checks the key without
+  loading its value. Actual payload reads still verify bytes. Source reads check
+  the cache once. Tests count payload reads for large held clipboard objects and
+  cache checks for source reads, and reject missing or mismatched cache entries.
+
+### 165. Extra macOS daemons shared the owner's keychain items
+
+- **Status:** fixed in `551eff8`.
 - **Severity:** high.
 - **Where:** daemon session credentials and IPC secret; shared daemon client.
 - **What happened:** every data directory used the same keychain service and
@@ -783,10 +798,12 @@ Each entry has:
   Fake-store tests cover unchanged default names, distinct directories, aliases,
   cached reconnects, fallback session saves, restarts and logout isolation.
   QA must use its own directory and socket and disable clipboard watching.
+  Byte assertions confirm that the default service and both account names
+  exactly match the daemon and client constants in `b417e0d`'s parent.
 
 ### 164. Shared persisted heads could hide missing content or misidentify a source revision
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `7e0a7cc`; performance follow-up in entry 166.
 - **Severity:** medium. Found in `1d519d3`.
 - **Where:** client head reuse and local schedule source reads.
 - **What happened:** another browser tab could advance localStorage while this

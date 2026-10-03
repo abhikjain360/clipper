@@ -311,6 +311,10 @@ pub struct LocalStore {
     /// directory and the profile is not known when the store is constructed.
     #[cfg(not(target_family = "wasm"))]
     database: Mutex<Option<OpenDatabase>>,
+    #[cfg(test)]
+    payload_reads: atomic::AtomicUsize,
+    #[cfg(test)]
+    cache_checks: atomic::AtomicUsize,
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -334,6 +338,10 @@ impl LocalStore {
             visible_stamp: atomic::AtomicU64::new(0),
             #[cfg(not(target_family = "wasm"))]
             database: Mutex::new(None),
+            #[cfg(test)]
+            payload_reads: atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            cache_checks: atomic::AtomicUsize::new(0),
         }
     }
 
@@ -2028,6 +2036,8 @@ impl LocalStore {
         object_id: &str,
         expected: LocalHead,
     ) -> Result<Option<LocalObjectRecord>, LocalStoreError> {
+        #[cfg(test)]
+        self.cache_checks.fetch_add(1, atomic::Ordering::Relaxed);
         let record = self.memory.lock().await.records.get(object_id).cloned();
         let Some(record) = record.filter(|record| record.head == Some(expected)) else {
             return Ok(None);
@@ -2045,13 +2055,22 @@ impl LocalStore {
                 if local_head_from_present(&present)? != expected {
                     return Ok(false);
                 }
-                let payload = single_payload(present_encrypted_object(&present)?)?;
-                let Some(ciphertext) = self.stored_object_payload_ciphertext(object_id).await?
-                else {
+                let encrypted = present_encrypted_object(&present)?;
+                let payload = single_payload(encrypted)?;
+                let [recorded] = encrypted.envelope.body.payloads.as_slice() else {
                     return Ok(false);
                 };
-                verify_payload_ciphertext(payload, &ciphertext)?;
-                Ok::<_, LocalStoreError>(true)
+                if payload.id != recorded.id
+                    || payload.nonce != recorded.nonce
+                    || payload.ciphertext_size != recorded.ciphertext_size
+                    || payload.sha256_ciphertext != recorded.sha256_ciphertext
+                    || recorded.ciphertext_size < 0
+                    || recorded.sha256_ciphertext.len() != crypto::SHA256_BYTES
+                {
+                    return Ok(false);
+                }
+                self.cached_payload_present(object_id, recorded.ciphertext_size)
+                    .await
             }
             .await;
             match available {
@@ -2064,6 +2083,16 @@ impl LocalStore {
             }
         }
         Ok(Some(record))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn payload_read_count(&self) -> usize {
+        self.payload_reads.load(atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_check_count(&self) -> usize {
+        self.cache_checks.load(atomic::Ordering::Relaxed)
     }
 
     /// Read records and their revision heads under the same sync lock. A write
@@ -2396,8 +2425,21 @@ impl LocalStore {
         &self,
         object_id: &str,
     ) -> Result<Option<Vec<u8>>, LocalStoreError> {
+        #[cfg(test)]
+        self.payload_reads.fetch_add(1, atomic::Ordering::Relaxed);
         self.with_database(|connection| sqlite::read_payload(connection, object_id))
             .await
+    }
+
+    async fn cached_payload_present(
+        &self,
+        object_id: &str,
+        ciphertext_size: i64,
+    ) -> Result<bool, LocalStoreError> {
+        Ok(self
+            .with_database(|connection| sqlite::payload_size(connection, object_id))
+            .await?
+            == Some(ciphertext_size))
     }
 
     async fn live_stored_object_records(&self) -> Result<Vec<StoredObjectRecord>, LocalStoreError> {
@@ -2621,12 +2663,27 @@ impl LocalStore {
         &self,
         object_id: &str,
     ) -> Result<Option<Vec<u8>>, LocalStoreError> {
+        #[cfg(test)]
+        self.payload_reads.fetch_add(1, atomic::Ordering::Relaxed);
         let storage = browser_storage()?;
         let json = storage
             .get_item(&self.object_payload_ciphertext_key(object_id))
             .map_err(storage_error)?;
         json.map(|json| serde_json::from_str(&json).map_err(Into::into))
             .transpose()
+    }
+
+    async fn cached_payload_present(
+        &self,
+        object_id: &str,
+        _ciphertext_size: i64,
+    ) -> Result<bool, LocalStoreError> {
+        let storage = browser_storage()?;
+        js_sys::Reflect::has(
+            storage.as_ref(),
+            &wasm_bindgen::JsValue::from_str(&self.object_payload_ciphertext_key(object_id)),
+        )
+        .map_err(storage_error)
     }
 
     /// Every object still held or still being fetched. Delete markers are
@@ -3684,6 +3741,47 @@ mod tests {
 
     fn encrypted_clipboard(item: &DecryptedClipboardItem, payload: &[u8]) -> EncryptedInlineObject {
         encrypted_clipboard_at(item, payload, 1, None, ObjectEnvelopeOperation::Create)
+    }
+
+    #[tokio::test]
+    async fn cache_reuse_rejects_mismatched_metadata_and_truncated_payloads_without_reading_bytes()
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalStore::new(directory.path());
+        store.set_profile("profile".into());
+        let id = uuid::Uuid::now_v7().to_string();
+        let entry = item(&id, "held", "2026-10-06T12:00:00Z");
+        let encrypted = encrypted_clipboard(&entry, b"held");
+        store
+            .persist_local_clipboard_present_encrypted(&entry, b"held", &encrypted, 1, 1, 100)
+            .await
+            .unwrap();
+        let head = store.local_head(&id).await.unwrap().unwrap();
+        let original = store.stored_object_record(&id).await.unwrap().unwrap();
+        assert!(store.holds_cached_head(&id, head).await.unwrap());
+        for change_hash in [false, true] {
+            let mut damaged = original.clone();
+            let StoredObjectRecord::Present(present) = &mut damaged else {
+                unreachable!()
+            };
+            let StoredPresentContent::Encrypted(object) = &mut present.content else {
+                unreachable!()
+            };
+            if change_hash {
+                object.payloads[0].sha256_ciphertext[0] ^= 1;
+            } else {
+                object.payloads[0].ciphertext_size += 1;
+            }
+            store.write_stored_object_record(&damaged).await.unwrap();
+            assert!(!store.holds_cached_head(&id, head).await.unwrap());
+        }
+        store.write_stored_object_record(&original).await.unwrap();
+        store.with_database(|connection| {
+            connection.execute("UPDATE object_payloads SET ciphertext = substr(ciphertext, 1, length(ciphertext) - 1) WHERE object_id = ?1", rusqlite::params![id])?;
+            Ok(())
+        }).await.unwrap();
+        assert!(!store.holds_cached_head(&id, head).await.unwrap());
+        assert_eq!(store.payload_read_count(), 0);
     }
 
     fn encrypted_clipboard_at(
