@@ -445,7 +445,7 @@ Access keys are one-time registration invites. They are stored only as hashes
 (`access_keys.key_hash`, the table primary key), never in cleartext.
 
 - `key_hash = Argon2id(access_key, salt = access_key_hash_salt,
-secret = access_key_pepper, params = config.crypto.access_key_hash_params)`,
+  secret = access_key_pepper, params = config.crypto.access_key_hash_params)`,
   base64-encoded (`server_auth::hash_access_key` →
   `crypto::access_key_hash_with_params`). Default params are
   `m_cost = 19 MiB, t_cost = 2, p_cost = 1`, output 32 bytes.
