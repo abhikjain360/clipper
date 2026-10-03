@@ -2,18 +2,27 @@ import "./index";
 
 import {
   ConnectionStatus as NativeConnectionStatus,
+  LogoutOutcome_Tags as NativeLogoutOutcomeTags,
+  type LogoutOutcome as NativeLogoutOutcome,
   type AppState as NativeAppState,
   type ClipboardPayload as NativeClipboardPayload,
   type CollabItem as NativeCollabItem,
   type DecryptedClipboardItem,
   type DecryptedFileItem,
   type DeviceInfo as NativeDeviceInfo,
+  type ActualView as NativeActualView,
+  type AlarmView as NativeAlarmView,
+  type CalendarSourceView as NativeCalendarSourceView,
+  type ScheduleItemView as NativeScheduleItemView,
 } from "./generated/clipper_app_types";
 import {
   MobileClipperClient,
+  MobileError,
   type MobileClipperClientLike,
 } from "./generated/clipper_mobile_uniffi";
 import type {
+  ActualView,
+  AlarmView,
   AppState,
   ClipboardItem,
   ClipboardPayload,
@@ -21,7 +30,10 @@ import type {
   CollabItem,
   ConnectionStatus,
   DeviceInfo,
+  CalendarSourceView,
   FileItem,
+  LogoutOutcome,
+  ScheduleItemView,
 } from "@clipper/shared";
 
 export interface CreateMobileBackendOptions {
@@ -85,23 +97,79 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     listDevices: async () => (await client.listDevices()).map(mapDeviceInfo),
     login: async (passphrase, username, deviceName, serverUrl) =>
       clientFor(serverUrl).login(passphrase, username, deviceName, serverUrl),
-    logout: async () => client.logout(),
+    logout: async (cancelRunningWork) => mapLogoutOutcome(await client.logout(cancelRunningWork)),
     refresh: async () => client.refresh(),
     register: async (accessKey, username, passphrase, deviceName, serverUrl) =>
       clientFor(serverUrl).register(accessKey, username, passphrase, deviceName, serverUrl),
     removeDevice: async (deviceId) => client.removeDevice(deviceId),
     renameCollabDoc: async (objectId, title) =>
       mapCollabItem(await client.renameCollabDoc(objectId, title)),
-    // Browser-only session resume (see the web client). The mobile app resumes
-    // from the OS keystore via its own flow, so these are inert here and exist
-    // only to satisfy the shared backend contract.
-    resume: async () => {
-      throw new Error("Session resume is handled by the mobile keystore flow");
+    // Schedule editing is not on mobile yet: the web and desktop grid comes
+    // first, and these three carry the schedule
+    // domain types, which UniFFI cannot express without flattening them into
+    // strings. Series still *sync* to this device and appear in
+    // `state.scheduleItems` — only creating and expanding are missing. These
+    // throw rather than silently no-op so a premature caller is obvious.
+    nextAlarms: async (withinHours, observerZone) =>
+      (await client.nextAlarms(withinHours, observerZone)).map(mapAlarmView),
+    addCalendarSource: async () => {
+      throw new Error("Adding a calendar source is not available on mobile yet");
+    },
+    syncCalendarSource: async () => {
+      throw new Error("Syncing a calendar source is not available on mobile yet");
+    },
+    startActual: async () => {
+      throw new Error("The timer is not available on mobile yet");
+    },
+    stopActual: async () => {
+      throw new Error("The timer is not available on mobile yet");
+    },
+    actualsBetween: async () => {
+      throw new Error("actualsBetween is not supported on mobile");
+    },
+    updateScheduleItem: async () => {
+      throw new Error("Editing schedule items is not available on mobile yet");
+    },
+    createScheduleItem: async () => {
+      throw new Error("Creating schedule items is not available on mobile yet");
+    },
+    deleteScheduleObject: async () => {
+      throw new Error("Deleting schedule items is not available on mobile yet");
+    },
+    expandSchedule: async () => {
+      throw new Error("Expanding the schedule is not available on mobile yet");
+    },
+    resume: async (token, dataKey, wrappingKey, username, deviceName, serverUrl) => {
+      try {
+        await clientFor(serverUrl).resume(
+          token,
+          dataKey,
+          wrappingKey,
+          username,
+          deviceName,
+          serverUrl,
+        );
+      } catch (error) {
+        if (
+          MobileError.SessionResumeRejected.instanceOf(error) ||
+          MobileError.InvalidResumeKey.instanceOf(error)
+        ) {
+          throw Object.assign(new Error("Saved session is no longer valid; sign in again"), {
+            code: "SESSION_RESUME_REJECTED",
+          });
+        }
+        throw error;
+      }
     },
     sendClipboardPayload: async (mimeType, bytes) =>
       client.sendClipboardPayload(mimeType, arrayBufferFrom(bytes)),
     sendClipboardText: async (text) => client.sendClipboardText(text),
-    sessionResumeMaterial: async () => null,
+    sessionResumeMaterial: async () => {
+      const material = await client.sessionResumeMaterial();
+      return material
+        ? { token: material.token, dataKey: material.dataKey, wrappingKey: material.wrappingKey }
+        : null;
+    },
     stateVersion: () => client.stateVersion(),
     uploadFileBytes: async (filename, mimeType, bytes) =>
       client.uploadFileBytes(filename, mimeType, arrayBufferFrom(bytes)),
@@ -116,6 +184,18 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
 
 export default createMobileBackend;
 
+function mapLogoutOutcome(outcome: NativeLogoutOutcome): LogoutOutcome {
+  switch (outcome.tag) {
+    case NativeLogoutOutcomeTags.SignedOut:
+      return { status: "signed_out" };
+    case NativeLogoutOutcomeTags.WorkRunning:
+      return {
+        status: "work_running",
+        work: outcome.inner[0].map((work) => ({ label: work.label })),
+      };
+  }
+}
+
 function mapAppState(state: NativeAppState): AppState {
   return {
     clipboard_items: state.clipboardItems.map(mapClipboardItem),
@@ -123,6 +203,10 @@ function mapAppState(state: NativeAppState): AppState {
     connection_status: mapConnectionStatus(state.connectionStatus),
     error: state.error ?? null,
     files: state.files.map(mapFileItem),
+    calendar_sources: state.calendarSources.map(mapCalendarSourceView),
+    running_actual: state.runningActual ? mapActualView(state.runningActual) : null,
+    schedule_items: state.scheduleItems.map(mapScheduleItemView),
+    schedule_warnings: state.scheduleWarnings,
     saved_profile: state.savedProfile
       ? {
           device_name: state.savedProfile.deviceName,
@@ -148,6 +232,56 @@ function mapCollabItem(item: NativeCollabItem): CollabItem {
     share_url: item.shareUrl ?? null,
     title: item.title,
     updated_at: item.updatedAt,
+  };
+}
+
+function mapAlarmView(alarm: NativeAlarmView): AlarmView {
+  return {
+    // UniFFI maps Rust's i64 to bigint. Epoch milliseconds sit far inside
+    // Number.MAX_SAFE_INTEGER, and the platform alarm APIs want a plain number.
+    fire_at_millis: Number(alarm.fireAtMillis),
+    item_id: alarm.itemId,
+    label: alarm.label,
+    occurrence_key: alarm.occurrenceKey,
+    occurrence_start_millis: Number(alarm.occurrenceStartMillis),
+  };
+}
+
+function mapActualView(actual: NativeActualView): ActualView {
+  return {
+    end: actual.end,
+    id: actual.id,
+    item_id: actual.itemId,
+    running: actual.running,
+    start: actual.start,
+    title: actual.title,
+  };
+}
+
+function mapCalendarSourceView(source: NativeCalendarSourceView): CalendarSourceView {
+  return {
+    enabled: source.enabled,
+    event_count: source.eventCount,
+    raw_import_file_id: source.rawImportFileId ?? null,
+    raw_import_available: source.rawImportAvailable,
+    id: source.id,
+    location: source.location,
+    name: source.name,
+    protocol: source.protocol,
+  };
+}
+
+function mapScheduleItemView(item: NativeScheduleItemView): ScheduleItemView {
+  return {
+    all_day: item.allDay,
+    created_at: item.createdAt,
+    definition_json: item.definitionJson,
+    has_alarm: item.hasAlarm,
+    id: item.id,
+    recurrence: item.recurrence,
+    revision: numberFromBigInt(item.revision),
+    time_summary: item.timeSummary,
+    title: item.title,
   };
 }
 

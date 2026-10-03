@@ -1,7 +1,7 @@
 # Server Resource Limits
 
 This document describes the abuse and resource-limit controls the Clipper
-server enforces today: request rate limiting, per-user storage quotas, and the
+server enforces: request rate limiting, per-user storage quotas, and the
 in-memory caps that bound WebSocket and auth state. It reflects the code in
 `crates/server/src`, not an aspirational policy.
 
@@ -21,16 +21,21 @@ rate is `N` per minute and whose burst capacity is also `N`: a fresh key may
 spend `N` cells immediately, after which cells replenish at `N`/minute. A
 rejected check does not consume a cell.
 
-The `RateLimiter` holds six independent buckets:
+The `RateLimiter` holds six independent buckets. Each item gives the bucket,
+its key, its default rate per minute and its config field:
 
-| Bucket               | Key                                                      | Default `/min` | Config field                                |
-| -------------------- | -------------------------------------------------------- | -------------- | ------------------------------------------- |
-| `auth_by_client`     | resolved client IP (see keying below)                    | 10             | `rate_limit.auth_per_client_per_minute`     |
-| `auth_by_username`   | SHA-256 of the submitted username, truncated to 16 bytes | 30             | `rate_limit.auth_per_username_per_minute`   |
-| `auth_global`        | none (one direct bucket for the whole server)            | 3000           | `rate_limit.auth_global_per_minute`         |
-| `api_by_client`      | resolved client IP                                       | 2400           | `rate_limit.api_per_client_per_minute`      |
-| `api_by_user`        | authenticated `user_id` (UUID)                           | 1200           | `rate_limit.api_per_user_per_minute`        |
-| `ws_tickets_by_user` | authenticated `user_id` (UUID)                           | 30             | `rate_limit.ws_tickets_per_user_per_minute` |
+- `auth_by_client`: the resolved client IP (see keying below); 10;
+  `rate_limit.auth_per_client_per_minute`.
+- `auth_by_username`: SHA-256 of the submitted username, truncated to 16 bytes;
+  30; `rate_limit.auth_per_username_per_minute`.
+- `auth_global`: no key (one direct bucket for the whole server); 3000;
+  `rate_limit.auth_global_per_minute`.
+- `api_by_client`: the resolved client IP; 2400;
+  `rate_limit.api_per_client_per_minute`.
+- `api_by_user`: the authenticated `user_id`; 1200;
+  `rate_limit.api_per_user_per_minute`.
+- `ws_tickets_by_user`: the authenticated `user_id`; 30;
+  `rate_limit.ws_tickets_per_user_per_minute`.
 
 `garde` rejects any of these set to `0`. There is no separate burst knob.
 
@@ -89,12 +94,21 @@ only `challenge` consults it.
 The authenticated routes:
 
 - `POST /api/auth/logout`
+- `GET /api/auth/validate`
+- `GET /api/auth/devices`
+- `DELETE /api/auth/devices/{id}`
 - `POST /api/ws-ticket`
 - `POST /api/objects/init`
 - `GET` / `PUT /api/objects/{id}/payloads/{payload_id}`
 - `POST /api/objects/{id}/complete`
+- `POST /api/objects/{id}/revisions`
+- `GET /api/objects/{id}/revisions/{revision}`
+- `GET /api/objects/{id}/revisions/{revision}/payloads/{payload_id}`
 - `GET` / `DELETE /api/objects/{id}`
 - `GET /api/objects`
+- `GET` / `POST /api/collab-docs`
+- `GET /api/collab-docs/{id}/meta`
+- `PATCH` / `DELETE /api/collab-docs/{id}`
 - `GET /api/ws`
 
 are wrapped by three layers. From outermost to innermost:
@@ -121,18 +135,25 @@ This second, tighter per-user bucket exists because all minted tickets share
 one in-memory map; unbounded minting by one account would let it churn that
 shared map (see the per-user pending-ticket cap below).
 
-### Routes with no rate-limit middleware
+### Unauthenticated routes outside the auth router
 
-Two routes are merged at the top level of the router with **no** rate-limit
+One route is merged at the top level of the router with **no** rate-limit
 layer:
 
 - `GET /api/health`
-- `GET /api/ws-ticket/connect` (the ticket-redeeming WebSocket upgrade handled
-  by `ws_ticket_handler`)
 
-`ws_ticket_handler` is unauthenticated (it authenticates by consuming a ticket)
-and does a SHA-256 plus an in-memory map lookup per request. Neither route is
-covered by a per-client or global bucket. See "Gaps" below.
+Three other unauthenticated routes are merged at the top level with
+`api_rate_limit_middleware` applied per client IP:
+
+- `GET /api/ws-ticket/connect` authenticates by consuming a ticket and does a
+  SHA-256 plus an in-memory map lookup per request.
+- `GET /api/collab-docs/{id}/ws` (the collab Y-sync socket) and
+  `GET /api/s/{share_token}/meta` (the share-page lookup) authenticate by the
+  share token.
+
+The server sets no header-read timeout, whole-request deadline or connection
+cap, and the rate limiters run only after request headers are parsed:
+[`docs/issues.md`](issues.md), entry 30.
 
 ### Response on rejection
 
@@ -162,10 +183,9 @@ cleanup (`crates/server/src/cleanup.rs`).
 
 ### Limits
 
-| Limit                           | Default                | Config field                    |
-| ------------------------------- | ---------------------- | ------------------------------- |
-| Aggregate stored bytes per user | 10 GiB (`10 * 1024^3`) | `limits.max_user_storage_bytes` |
-| Object rows per user            | 10,000                 | `limits.max_user_objects`       |
+- Aggregate stored bytes per user: default 10 GiB (`10 * 1024^3`),
+  `limits.max_user_storage_bytes`.
+- Object rows per user: default 10,000, `limits.max_user_objects`.
 
 Both are validated to be non-zero and to fit in a signed 64-bit integer (they
 are stored and compared as `i64` database counters).
@@ -178,61 +198,72 @@ single user can accumulate: `issue_session`
 (`crates/server/src/routes/auth.rs`) counts the user's existing devices before
 inserting a new one and rejects the login with `403 Device limit reached` once
 the user is at the cap. An existing device re-authenticating reuses its row and
-is never blocked. The count and insert are not one transaction, so concurrent
-new-device logins can overshoot the cap by a small margin — acceptable for a
-coarse anti-abuse bound that still prevents unbounded growth. The value is
-validated like the other quotas (non-zero, fits `i64`).
+is never blocked. The count, device insert, and session insert share one
+transaction, so concurrent new-device logins cannot race past the cap and a
+failed session insert cannot orphan a device. The value is validated like the
+other quotas (non-zero, fits `i64`).
 
-A user at the cap frees a slot by reclaiming a device. The
-`objects.source_device_id` foreign key is `ON DELETE SET NULL`, so deleting a
-device detaches the objects it created (their provenance pointer becomes NULL)
-rather than blocking the delete or cascading into the objects; the authoritative
-source device id still lives, signed, inside each object envelope. (The
-user-facing device-removal endpoint is shipped: `DELETE /api/auth/devices/{id}`,
-user-scoped, with the device's sessions cascade-deleted — see
-`docs/revocation.md`.)
+A user at the cap frees a slot by removing a device with
+`DELETE /api/auth/devices/{id}`, which also deletes that device's sessions (see
+"Sessions and bearer tokens" in [`opaque.md`](opaque.md)). The
+`object_revisions.source_device_id` foreign key is `ON DELETE SET NULL`, so
+deleting a device detaches the revisions it created rather than blocking the
+delete or cascading into object history; the authoritative source device id
+stays, signed, inside each revision envelope.
 
 ### What counts toward the quota
 
 The reserved byte amount for an object is computed by
-`init_request_storage_bytes`, which sums **only** the declared
-`ciphertext_size` of each payload in the init request (with a per-payload
+the init/revise handlers, which sum the declared `ciphertext_size` of
+each payload in the revision request plus the length of the revision's
+`meta_ciphertext` (with a per-payload
 `>= 0` check and a checked add that rejects overflow as `PayloadTooLarge`).
 
 This means:
 
 - **Payload ciphertext bytes count.** This is the encrypted blob/clipboard
   content, whether inline or streamed.
-- **Object metadata ciphertext (`meta_ciphertext`) and the signed envelope do
-  not count** toward `storage_bytes`. They are separately bounded only by
-  `limits.max_object_meta_ciphertext_bytes` (default 64 KiB) per object and by
-  the per-user `object_count` cap.
-- Every successfully initialized object increments `object_count` by exactly 1,
-  regardless of kind or payload count.
+- **Object metadata ciphertext (`meta_ciphertext`) bytes count.** Every stored
+  revision holds its metadata alongside its payloads, so a revision with no
+  payloads still reserves its metadata length. Metadata is separately bounded
+  by `limits.max_object_meta_ciphertext_bytes` (default 64 KiB) per revision.
+- **The signed envelope bytes do not count** toward `storage_bytes`. Only
+  payload and metadata ciphertext are charged, so a revision with empty payloads
+  and empty metadata costs nothing: [`docs/issues.md`](issues.md), entry 102.
+- A genesis revision increments `object_count` by exactly 1. Later revisions
+  reserve their payload bytes with `objects_added = 0`, so retained history is
+  charged without consuming another object slot.
 
-Both clipboard and file objects reserve quota at init time. (Clipboard objects
-are additionally trimmed to `clipboard.max_items`, which releases their quota;
-see below.)
+Clipboard, file, and schedule objects reserve quota at init time. File and
+schedule revisions reserve their additional bytes when written. Clipboard
+objects are additionally trimmed to `clipboard.max_items`, which releases the
+whole object's usage; see below.
 
 ### Where and how it is enforced
 
-Reservation happens inside the `init_object` transaction, via
-`reserve_user_storage_quota` → `storage_quota::try_reserve_user_storage`, after
-the object and payload rows are inserted but before the transaction commits. The
-reservation is a single conditional `UPDATE users` that both increments the
-counters and asserts the post-increment values stay within bounds:
+Ordinary writes reserve storage inside the `init_object` or `revise_object`
+transaction, via `reserve_user_storage_quota` →
+`storage_quota::try_reserve_user_storage`, after the object and payload rows are
+inserted but before the transaction commits. Tombstone revisions instead use
+`charge_user_storage` without a limit check, as described below. The reservation
+is a single conditional `UPDATE users` that both increments the counters and
+asserts the post-increment values stay within bounds:
 
 ```rust
 .col_expr(StorageBytes, StorageBytes + storage_bytes)
-.col_expr(ObjectCount,  ObjectCount + 1)
+.col_expr(ObjectCount,  ObjectCount + objects_added)
 .filter(Id.eq(user_id))
 .filter(StorageBytes.lte(max_storage_bytes - storage_bytes))
-.filter(ObjectCount.lte(max_objects - 1))
+.filter(ObjectCount.lte(max_objects - objects_added))
 ```
 
 The update affects exactly one row only if both filters hold, so the check and
-the increment are atomic under SQLite's write lock — concurrent inits for the
-same user cannot race past the limit. `try_reserve_user_storage` also
+the increment are atomic under SQLite's write lock — concurrent ordinary
+writes for the same user cannot race past the limit. Tombstone revisions are
+the exception: they use `charge_user_storage` without a limit check because a
+tombstone is the only way back under the limit. Their metadata is capped at
+256 bytes, so an account can exceed its limit by at most one capped tombstone
+per object. `try_reserve_user_storage` also
 short-circuits to `Ok(false)` if a single object's `storage_bytes` already
 exceeds `max_storage_bytes`, and returns an error for invalid arguments
 (negative bytes, `max_objects < 1`).
@@ -258,18 +289,21 @@ undone, and any staged inline payload files are removed on drop).
 `storage_quota::release_user_storage` decrements both counters (guarded so they
 never go negative) and is called whenever an object's bytes leave the system:
 
-- **File delete** (`DELETE /api/objects/{id}`): inside the delete transaction,
-  releasing `object_count: 1` and the summed payload bytes.
+- **Object purge** (`DELETE /api/objects/{id}`): after a signed tombstone has
+  made the file or schedule object non-live, the purge transaction locks the
+  object, removes its entire revision chain, and releases `object_count: 1`
+  plus every revision's payload and metadata bytes.
 - **Clipboard trim** (`cleanup::trim_user_clipboard`, spawned after each
   clipboard init/complete and also run by the periodic cleanup loop): deletes
   clipboard objects beyond `clipboard.max_items` and releases their usage.
 - **Orphan upload cleanup** (`cleanup::cleanup_orphan_object_uploads`): deletes
-  never-completed objects with no upload progress for
-  `cleanup.orphan_upload_ttl_secs` and releases their usage. Eligibility keys on
-  the server-assigned `objects.updated_at` (stamped at init and bumped on each
-  payload upload), never the client envelope's `created_at`, so a backdated or
-  future-dated `created_at` can neither force an instant reap nor escape the
-  sweep.
+  incomplete revisions with no upload progress for
+  `cleanup.orphan_upload_ttl_secs`, releases those revisions' bytes, and removes
+  the object slot only when an unpublished genesis was the whole object.
+  Eligibility keys on server-assigned `object_revisions.stored_at` (stamped at
+  init/revise and bumped on each payload upload), never the client envelope's
+  `created_at`, so a forged timestamp can neither force an instant reap nor
+  escape the sweep.
 
 `delete_objects_and_release_usage` recomputes the freed usage from the rows
 being deleted (`object_usage_by_user`) inside the transaction and asserts the
@@ -328,11 +362,22 @@ held by an RAII guard (`WsConnectionGuard`) for the connection's lifetime and
 released on any exit — clean close, idle timeout, or socket error — and the
 per-user counter entry is dropped once it returns to zero.
 
-This is **independent of `max_user_devices`**: one device (e.g. a browser
-profile) can open several connections — multiple tabs, or transient reconnect
+This is **independent of `max_user_devices`**: one device (e.g. a browser profile)
+can open several connections — multiple tabs, or transient reconnect
 overlap — so the connection ceiling is its own knob, not derived from the device
-count. There is no global aggregate cap; total live connections are bounded only
-transitively (registered users × this per-user cap).
+count.
+
+### Process-wide concurrent WebSocket connections
+
+`limits.max_ws_connections` (default 1024) caps live `/api/ws` connections
+server-wide, across all users. `handle_socket` acquires a permit from a
+process-wide semaphore immediately after the per-user slot above; a connection
+arriving at the ceiling is rejected with the same typed `connection_limit`
+WebSocket error. The permit is held for the connection's lifetime alongside the
+per-user slot guard, so it is released on any exit. The collab Y-sync sockets
+(`GET /api/collab-docs/:id/ws`) are not covered by this ceiling; they are
+bounded per document room (`MAX_CONNS_PER_ROOM = 64`, hard-coded in
+`collab_sync.rs`).
 
 ### Per-user pending WebSocket tickets
 
@@ -370,6 +415,16 @@ capacity an **arbitrary** existing entry is evicted to make room (unlike the
 WS-ticket map, which evicts oldest-first and is per-user). These are global, not
 per-user, caps.
 
+### Request body size
+
+The public auth router sets a 64 KiB `DefaultBodyLimit`. The authenticated
+router sets none, so it gets axum's implicit 2 MiB limit. `Postcard::from_request`
+(`routes/mod.rs`) reads the whole request body into memory before any
+size-specific check, so an `init_object` body with an inline payload above about
+2 MiB gets a generic 400 rather than `PayloadTooLarge`:
+[`docs/issues.md`](issues.md), entry 31. Streamed payload uploads
+(`PUT .../payloads/...`) are bounded incrementally against the declared size.
+
 ## Configuration Summary
 
 Resource limits are configured through `ServerConfig` (`crates/server/src/config.rs`).
@@ -378,8 +433,8 @@ override flag. The relevant sections:
 
 - `[rate_limit]` — the six bucket rates plus `prune_interval_secs`.
 - `[limits]` — `max_user_storage_bytes`, `max_user_objects`,
-  `max_user_devices`, `max_user_ws_connections`, `max_file_blob_bytes`,
-  `max_file_meta_ciphertext_bytes`, `max_object_meta_ciphertext_bytes`.
+  `max_user_devices`, `max_user_ws_connections`, `max_ws_connections`,
+  `max_file_blob_bytes`, `max_object_meta_ciphertext_bytes`.
 - `[auth]` — `max_pending_challenges`, `max_pending_ws_tickets`,
   `challenge_ttl_secs`.
 - `[clipboard]` — `max_items` (per-user clipboard retention) and `ttl_days`.
@@ -389,51 +444,6 @@ override flag. The relevant sections:
 
 The WebSocket message-size cap, pre-hello timeout, ping interval, idle timeout,
 and broadcast channel capacity are **not** configurable; they are constants in
-`ws.rs` and `state.rs`. The per-user concurrent-connection cap
-(`limits.max_user_ws_connections`) is the one WebSocket lifecycle limit that is
-configurable.
-
-## Gaps / Not Covered Today
-
-These are factual gaps in the current controls, called out so they are not
-mistaken for safeguards that exist:
-
-- **The authed router has no explicit request body size limit (`init_object`
-  buffers before its size checks).** The public-auth router carries a 64 KiB
-  `DefaultBodyLimit`, but the authed router has no explicit limit and inherits
-  axum's implicit 2 MiB `DefaultBodyLimit`. `Postcard::from_request`
-  (`routes/mod.rs`) reads the entire request body into memory with
-  `Bytes::from_request` before any size-specific check runs, so for `init_object`
-  the full postcard body — inline payload ciphertext plus metadata ciphertext —
-  is buffered (capped at the implicit 2 MiB) before
-  `max_object_meta_ciphertext_bytes` and the per-payload `max_file_blob_bytes`
-  checks run. Consequence: an inline payload above ~2 MiB is rejected with a
-  generic 400 rather than `PayloadTooLarge`, and raising
-  `max_object_meta_ciphertext_bytes` above 2 MiB silently has no effect.
-  (Streamed payload uploads via `PUT .../payloads/...` are the exception: they
-  are bounded incrementally against the declared size.)
-
-- **`/api/health` is unthrottled.** It is not behind a per-client or global
-  rate-limit layer. (`/api/ws-ticket/connect` is now covered by the
-  `api_rate_limit_middleware`.)
-
-- **No HTTP header-read timeout, whole-request timeout, or connection/concurrency
-  cap.** The server runs a bare `axum::serve`; hyper applies no header-read or
-  whole-request deadline by default and Tokio caps no accepted connections, and
-  the rate limiters run only _after_ hyper has parsed the request line + headers.
-  A peer that trickles headers one byte at a time is therefore never counted
-  against any bucket — an unauthenticated slow-loris that also pins a task + FD
-  per connection. The streaming upload path has no per-chunk read timeout either.
-  Partly mitigated in the documented reverse-proxy deployment (proxies usually
-  apply their own header/idle timeouts); enforce in-process or require the proxy.
-
-- **Metadata and envelope bytes are not charged to the storage quota.** Only
-  payload ciphertext counts toward `storage_bytes`. The number of metadata-only
-  bytes a user can accumulate is bounded only by `object_count`
-  (`max_object_meta_ciphertext_bytes` × `max_user_objects`), not by the
-  byte quota.
-
-- **No global aggregate cap on live WebSocket connections.** The per-user cap
-  (`max_user_ws_connections`) bounds each account, and the server ping / idle
-  close reaps dead connections, but the server-wide total is bounded only
-  transitively (registered users × the per-user cap), not by a global ceiling.
+`ws.rs` and `state.rs`. The per-user and process-wide connection caps
+(`limits.max_user_ws_connections`, `limits.max_ws_connections`) are the
+WebSocket limits that are configurable.

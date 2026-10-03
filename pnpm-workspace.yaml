@@ -2,50 +2,62 @@ packages:
   - mobile
   - packages/*
   - web
+packageExtensions:
+  # Tamagui's extractor imports the TypeScript JS compiler API at runtime,
+  # but declares it only as a dev dependency. TypeScript 7 does not expose
+  # that API; give the extractor the same compatible line it develops against.
+  # Upgrade/removal criteria: AGENTS.md, "Dependency Notes".
+  "@tamagui/static@2.7.7":
+    dependencies:
+      typescript: ~5.9.2
 overrides:
-  uuid: 11.1.1
-  esbuild: 0.28.1
-  esbuild-wasm: 0.28.1
+  js-yaml: 5.4.3
+  uuid: 14.0.2
+  esbuild: 0.28.2
+  esbuild-wasm: 0.28.2
   # Keep Expo SDK 57's native tooling on the matching metro-config; transitive
   # deps (react-native-worklets via Tamagui) otherwise pull 0.87.
-  "@react-native/metro-config": 0.86.2
+  "@react-native/metro-config": 0.86.3
   # @expo/log-box 57 wants dom-webview ^57.0.1 but resolution otherwise keeps
   # the stale 56.x line.
   "@expo/dom-webview": 57.0.1
+  "@expo/metro": 56.1.0
   # CodeMirror requires a single @codemirror/state (and view) instance — facets
   # use identity checks. Transitive deps (lang packs, theme-one-dark, language)
-  # pull 6.6.0/6.43.1 while our direct deps pin 6.7.1/6.43.9; the resulting
+  # pull older versions while our direct deps pin 6.7.6/6.43.13; the resulting
   # duplicate instances make EditorState.create reject extensions from the other
   # copy ("Unrecognized extension value"). Pin both to one version.
-  "@codemirror/state": 6.7.1
-  "@codemirror/view": 6.43.9
+  "@codemirror/state": 6.7.6
+  "@codemirror/view": 6.43.13
+  tinypool: 2.2.0
 allowBuilds:
   esbuild: true
   msgpackr-extract: true
-patchedDependencies:
-  uniffi-bindgen-react-native@0.31.0-5: patches/uniffi-bindgen-react-native@0.31.0-5.patch
 minimumReleaseAgeExclude:
-  - "@expo/cli@57.0.18"
-  - "@expo/config-plugins@57.0.9"
-  - "@expo/config@57.0.9"
+  - "@expo/cli@57.0.18 || 57.0.28"
+  - "@expo/config-plugins@57.0.9 || 57.0.10"
+  - "@expo/config@57.0.9 || 57.0.10"
   - "@expo/fingerprint@0.20.10"
-  - "@expo/image-utils@0.11.5"
-  - "@expo/metro-config@57.0.10"
-  - "@expo/metro-file-map@57.0.2"
-  - "@expo/prebuild-config@57.0.14"
-  - "@expo/require-utils@57.0.5"
-  - babel-preset-expo@57.0.8
-  - expo-asset@57.0.14
-  - expo-constants@57.0.14
-  - expo-modules-autolinking@57.0.11
-  - expo-modules-core@57.0.13
-  - expo@57.0.16
+  - "@expo/image-utils@0.11.5 || 0.11.6"
+  - "@expo/metro-config@57.0.10 || 57.0.13"
+  - "@expo/metro-file-map@57.0.2 || 57.0.4"
+  - "@expo/prebuild-config@57.0.14 || 57.0.17"
+  - "@expo/require-utils@57.0.5 || 57.0.6"
+  - babel-preset-expo@57.0.8 || 57.0.14
+  - expo-asset@57.0.14 || 57.0.19
+  - expo-constants@57.0.14 || 57.0.21
+  - expo-modules-autolinking@57.0.11 || 57.0.14
+  - expo-modules-core@57.0.13 || 57.0.21
+  - expo@57.0.16 || 57.0.27
   - expo-sharing@57.0.15
+  - js-yaml@5.4.3
+  - "@expo/router-server@57.0.12"
+  - vite@8.3.3
 peerDependencyRules:
   allowedVersions:
     # Tamagui's cross-platform peer graph (via @floating-ui/react-native and
     # @tamagui/animations-reanimated) auto-installs react-native/react-dom into
     # the web app's tree where they are never executed; mobile versions are
     # pinned by the Expo SDK, so allow the mismatches.
-    react-native: 0.87.0
+    react-native: 0.87.1
     react: 19.2.3

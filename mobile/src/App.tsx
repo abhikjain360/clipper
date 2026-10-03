@@ -1,4 +1,5 @@
 import {
+  AlarmClock,
   Clipboard,
   Copy,
   Download,
@@ -17,7 +18,29 @@ import {
   X,
 } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Modal, Platform, StatusBar, TextInput } from "react-native";
+import {
+  alarmsSupported,
+  areNotificationsEnabled,
+  cancelAllAlarms,
+  canScheduleExactAlarms,
+  canUseFullScreenIntent,
+  dismissAlarm,
+  openExactAlarmSettings,
+  openFullScreenIntentSettings,
+  openNotificationSettings,
+  plannedAlarmCount,
+  ringNow,
+  setAlarms,
+} from "../modules/clipper-alarm";
+import {
+  AppState as NativeAppState,
+  Linking,
+  Modal,
+  PermissionsAndroid,
+  Platform,
+  StatusBar,
+  TextInput,
+} from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { TamaguiProvider } from "tamagui";
 import {
@@ -35,12 +58,19 @@ import {
   XStack,
   YStack,
 } from "tamagui";
-import type { AppState, ClipboardItem, CollabItem, DeviceInfo, FileItem } from "@clipper/shared";
+import type {
+  AppState,
+  ClipboardItem,
+  CollabItem,
+  DeviceInfo,
+  FileItem,
+  RunningWorkView,
+} from "@clipper/shared";
 import {
   backend,
-  clearCredentials,
   devDefaultServerUrl,
   formatBackendError,
+  isResumeRejected,
   pickUploadFile,
   readClipboardText,
   resumeSession,
@@ -51,7 +81,7 @@ import {
 import { subscribeToCollabDoc, type CollabDocStatus } from "./collabDoc";
 import tamaguiConfig from "./tamagui.config";
 
-type TabName = "clipboard" | "files" | "devices" | "collab";
+type TabName = "clipboard" | "files" | "devices" | "collab" | "alarms";
 type ViewerContent = { title: string; content: string };
 
 // Android renders code with the platform "monospace" family; iOS has no such
@@ -61,6 +91,33 @@ const MONOSPACE_FONT = Platform.select({
   android: "monospace",
   default: "monospace",
 });
+
+/**
+ * How far ahead alarms are handed to the platform.
+ *
+ * A week rather than a day, so a device that stays offline over a weekend still
+ * rings on Monday. The registry itself holds far fewer at a time — each fire
+ * moves the alarm window forward from the device-protected mirror.
+ */
+const ALARM_WINDOW_HOURS = 24 * 7;
+
+function clearAlarms() {
+  try {
+    cancelAllAlarms();
+  } catch {}
+  try {
+    dismissAlarm();
+  } catch {}
+}
+
+/** The device's IANA zone, which resolves floating alarms. */
+function deviceTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
 
 export default function App() {
   return (
@@ -85,6 +142,9 @@ function ClipperApp() {
   // re-point the backend at a new server (a fresh native client), so the loop
   // must re-subscribe to that client's state channel instead of the old one's.
   const sessionKey = state?.session?.device_id ?? null;
+  const currentSessionKey = useRef(sessionKey);
+  currentSessionKey.current = sessionKey;
+  const previousSessionKey = useRef<string | null>(null);
 
   // Cold-start session resume. Empty deps + the component staying mounted across
   // background/refocus mean this runs exactly once per process launch: bringing a
@@ -97,9 +157,10 @@ function ClipperApp() {
       try {
         await backend.connect();
         await resumeSession();
-      } catch {
+      } catch (caught) {
         // Nothing stored, biometric cancelled, or auto-login failed — fall
         // through to the manual login screen.
+        if (isResumeRejected(caught)) clearAlarms();
       } finally {
         if (!cancelled) setResuming(false);
       }
@@ -143,6 +204,70 @@ function ClipperApp() {
       controller.abort();
     };
   }, [sessionKey, resuming]);
+
+  // Keep the platform's alarm registry in step with the schedule.
+  //
+  // Keyed on the schedule alone, not the whole state: every sync publishes a new
+  // state object, and re-registering alarms dozens of times during a
+  // reconciliation is pure waste. The pushed plan is compared against the last
+  // one as well, since two different schedules can still produce identical
+  // alarms.
+  // Keyed on the stored record, not the formatted summary. Toggling an alarm
+  // changes neither the recurrence text nor the time text, so a summary-based
+  // key would leave the registry stale exactly when it matters most.
+  const scheduleKey =
+    state?.schedule_items.map((item) => `${item.id}:${item.definition_json}`).join("|") ?? "";
+  const lastPushedPlan = useRef<string | null>(null);
+  const [alarmRefreshGeneration, setAlarmRefreshGeneration] = useState(0);
+
+  useEffect(() => {
+    const wasAuthenticated = previousSessionKey.current !== null;
+    previousSessionKey.current = sessionKey;
+    if (!wasAuthenticated || sessionKey !== null) return;
+
+    lastPushedPlan.current = null;
+    clearAlarms();
+  }, [sessionKey]);
+
+  useEffect(() => {
+    const subscription = NativeAppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        setAlarmRefreshGeneration((generation) => generation + 1);
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    if (!alarmsSupported || !state?.session) return;
+
+    let cancelled = false;
+    const effectSessionKey = sessionKey;
+    void (async () => {
+      try {
+        const alarms = await backend.nextAlarms?.(ALARM_WINDOW_HOURS, deviceTimeZone());
+        if (cancelled || currentSessionKey.current !== effectSessionKey || !alarms) return;
+        const plan = alarms.map((alarm) => ({
+          itemId: alarm.item_id,
+          occurrenceKey: alarm.occurrence_key,
+          label: alarm.label,
+          fireAtMillis: alarm.fire_at_millis,
+          occurrenceStartMillis: alarm.occurrence_start_millis,
+        }));
+        const fingerprint = `${effectSessionKey}:${alarmRefreshGeneration}:${JSON.stringify(plan)}`;
+        if (fingerprint === lastPushedPlan.current) return;
+        setAlarms(plan);
+        lastPushedPlan.current = fingerprint;
+      } catch {
+        // A failed push leaves the previous registry in place, which is the
+        // safe outcome: stale alarms beat none. The next change retries.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [alarmRefreshGeneration, scheduleKey, sessionKey]);
 
   if (startupError) {
     return <CenteredStatus title="Cannot start Clipper" message={startupError} />;
@@ -189,7 +314,9 @@ function LoginScreen({
       // Persist behind biometric so the next cold start can resume without the
       // passphrase. Best-effort and self-contained: a cancelled/unavailable
       // biometric leaves the session unsaved without failing the login.
-      await saveCredentials({ passphrase, username, deviceName: "", serverUrl });
+      await saveCredentials();
+      setPassphrase("");
+      setAccessKey("");
       onState(await backend.getState());
     } catch (caught) {
       setError(formatBackendError(caught));
@@ -247,6 +374,10 @@ function LoginScreen({
                 value={accessKey}
                 autoCapitalize="none"
                 autoCorrect={false}
+                autoComplete="off"
+                textContentType="none"
+                importantForAutofill="no"
+                secureTextEntry
                 onChangeText={setAccessKey}
               />
             </Field>
@@ -275,6 +406,8 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
   const [tab, setTab] = useState<TabName>("clipboard");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [runningWork, setRunningWork] = useState<RunningWorkView[] | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   async function refresh() {
     setBusy(true);
@@ -289,22 +422,27 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
     }
   }
 
-  async function logout() {
+  async function logout(cancelRunningWork = false) {
     setError(null);
-    // Forget the stored passphrase so the device stops auto-resuming.
-    await clearCredentials();
+    setLoggingOut(true);
     try {
-      await backend.logout();
-    } catch (caught) {
-      // logout tears down local state best-effort even when the server call
-      // fails; surface the error but still refresh below so the UI leaves the
-      // authenticated screen rather than stranding the user with keys cleared.
-      setError(formatBackendError(caught));
-    }
-    try {
+      const outcome = await backend.logout(cancelRunningWork);
+      if (outcome.status === "work_running") {
+        setRunningWork(outcome.work);
+        return;
+      }
+      setRunningWork(null);
+      try {
+        cancelAllAlarms();
+      } catch {}
+      try {
+        dismissAlarm();
+      } catch {}
       onState(await backend.getState());
     } catch (caught) {
       setError(formatBackendError(caught));
+    } finally {
+      setLoggingOut(false);
     }
   }
 
@@ -333,9 +471,31 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
             onPress={refresh}
             disabled={busy}
           />
-          <Button size="$3" icon={<LogOut size={16} />} onPress={() => void logout()} />
+          <Button
+            size="$3"
+            icon={<LogOut size={16} />}
+            disabled={loggingOut}
+            onPress={() => void logout(false)}
+          />
         </XStack>
       </XStack>
+
+      {runningWork && (
+        <Card m="$3" p="$3" gap="$2" borderWidth={1} borderColor="#303940">
+          <Paragraph>Work is still running</Paragraph>
+          {runningWork.map((work, index) => (
+            <Text key={index}>{work.label}</Text>
+          ))}
+          <XStack gap="$2" flexWrap="wrap">
+            <Button disabled={loggingOut} onPress={() => setRunningWork(null)}>
+              Wait
+            </Button>
+            <Button theme="red" disabled={loggingOut} onPress={() => void logout(true)}>
+              Cancel them and log out
+            </Button>
+          </XStack>
+        </Card>
+      )}
 
       <YStack p="$4" gap="$3" flex={1}>
         <Tabs
@@ -369,6 +529,14 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                 <Text>Collab</Text>
               </XStack>
             </Tabs.Tab>
+            {alarmsSupported && (
+              <Tabs.Tab value="alarms" flex={1}>
+                <XStack items="center" gap="$2">
+                  <AlarmClock size={16} />
+                  <Text>Alarms</Text>
+                </XStack>
+              </Tabs.Tab>
+            )}
           </Tabs.List>
 
           {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
@@ -390,6 +558,11 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
               onError={setError}
             />
           </Tabs.Content>
+          {alarmsSupported && (
+            <Tabs.Content value="alarms" flex={1}>
+              <AlarmsPanel onError={setError} />
+            </Tabs.Content>
+          )}
         </Tabs>
       </YStack>
     </YStack>
@@ -622,6 +795,152 @@ function FilesPanel({
 
       <ContentViewer viewing={viewing} onClose={() => setViewing(null)} onError={onError} />
     </YStack>
+  );
+}
+
+/**
+ * Whether alarms will actually work, and a way to prove it.
+ *
+ * An alarm app that silently fails is worse than no alarm app, and on Android
+ * there are two ways it can: the OS may refuse exact alarms, and a vendor may
+ * kill the process before one fires. The first is visible here. The second is
+ * not detectable from inside the app at all — it needs the user to allow
+ * autostart and exempt Clipper from battery optimisation by hand, which is why
+ * that is written on the screen rather than assumed.
+ */
+function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
+  const [exact, setExact] = useState(true);
+  const [notifications, setNotifications] = useState(true);
+  const [fullScreen, setFullScreen] = useState(true);
+  const [planned, setPlanned] = useState(0);
+
+  const refresh = useCallback(() => {
+    try {
+      setExact(canScheduleExactAlarms());
+      setNotifications(areNotificationsEnabled());
+      setFullScreen(canUseFullScreenIntent());
+      setPlanned(plannedAlarmCount());
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }, [onError]);
+
+  useEffect(() => {
+    refresh();
+    const interval = setInterval(refresh, 2_000);
+    const subscription = NativeAppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") refresh();
+    });
+    return () => {
+      clearInterval(interval);
+      subscription.remove();
+    };
+  }, [refresh]);
+
+  const requestNotifications = useCallback(async () => {
+    try {
+      if (Platform.OS === "android" && Number(Platform.Version) >= 33) {
+        const result = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+        );
+        if (
+          result === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN ||
+          (result === PermissionsAndroid.RESULTS.GRANTED && !areNotificationsEnabled())
+        ) {
+          if (!openNotificationSettings()) await Linking.openSettings();
+        }
+      } else if (!openNotificationSettings()) {
+        await Linking.openSettings();
+      }
+      refresh();
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }, [onError, refresh]);
+
+  const openFullScreenSettings = useCallback(async () => {
+    try {
+      if (!openFullScreenIntentSettings()) await Linking.openSettings();
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }, [onError]);
+
+  return (
+    <ScrollView flex={1}>
+      <YStack gap="$3" p="$3">
+        <Card bg="#171a1d" p="$3" gap="$2">
+          <H2 size="$5">Exact alarms</H2>
+          <Paragraph color={exact ? "#7bd88f" : "#ff7b7b"}>
+            {exact
+              ? "Exact scheduling is permitted."
+              : "Exact scheduling is not permitted. Alarms will not be scheduled until you allow it."}
+          </Paragraph>
+          {!exact && <Button onPress={() => openExactAlarmSettings()}>Open system setting</Button>}
+        </Card>
+
+        <Card bg="#171a1d" p="$3" gap="$2">
+          <H2 size="$5">Notifications</H2>
+          <Paragraph color={notifications ? "#7bd88f" : "#ff7b7b"}>
+            {notifications
+              ? "Alarm notifications are enabled."
+              : "Notifications are disabled. Alarms cannot show their notification."}
+          </Paragraph>
+          {!notifications && (
+            <Button onPress={() => void requestNotifications()}>Allow notifications</Button>
+          )}
+        </Card>
+
+        <Card bg="#171a1d" p="$3" gap="$2">
+          <H2 size="$5">Full-screen alarms</H2>
+          <Paragraph color={fullScreen ? "#7bd88f" : "#ff7b7b"}>
+            {fullScreen
+              ? "Full-screen alarm display is available."
+              : "Full-screen alarm display is disabled. Android may show only a notification."}
+          </Paragraph>
+          {!fullScreen && (
+            <Button onPress={() => void openFullScreenSettings()}>Open system setting</Button>
+          )}
+        </Card>
+
+        <Card bg="#171a1d" p="$3" gap="$2">
+          <H2 size="$5">Scheduled</H2>
+          <Paragraph color="#8b949e">
+            {planned === 1
+              ? "1 upcoming alarm in the mirrored plan"
+              : `${planned} upcoming alarms in the mirrored plan`}
+          </Paragraph>
+          <Paragraph fontSize={12} color="#8b949e">
+            Planned alarms are mirrored to storage the system unlocks at boot, so they survive a
+            restart and ring before you unlock the device. The schedule itself stays encrypted.
+          </Paragraph>
+          <Button onPress={refresh}>Refresh</Button>
+        </Card>
+
+        <Card bg="#171a1d" p="$3" gap="$2">
+          <H2 size="$5">Test</H2>
+          <Paragraph fontSize={12} color="#8b949e">
+            Rings immediately, exercising the same path a real alarm takes — foreground service,
+            full-screen intent, and the ring screen over the lock screen.
+          </Paragraph>
+          <XStack gap="$2">
+            <Button theme="blue" onPress={() => ringNow("Test alarm")}>
+              Ring now
+            </Button>
+            <Button onPress={() => dismissAlarm()}>Stop</Button>
+          </XStack>
+        </Card>
+
+        <Card bg="#171a1d" p="$3" gap="$2">
+          <H2 size="$5">Vendor settings</H2>
+          <Paragraph fontSize={12} color="#8b949e">
+            On Xiaomi, HyperOS, and similar, alarms only survive if Clipper has Autostart enabled
+            and is exempt from battery optimisation. Nothing in the app can set these or detect that
+            they are missing — an alarm simply never arrives.
+          </Paragraph>
+        </Card>
+      </YStack>
+    </ScrollView>
   );
 }
 

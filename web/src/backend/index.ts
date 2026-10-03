@@ -81,6 +81,12 @@ export function formatBackendError(error: unknown): string {
 
 const SESSION_RESUME_KEY = "clipper.session.v2";
 
+try {
+    if (typeof sessionStorage !== "undefined") sessionStorage.removeItem("clipper.session.v1");
+} catch {
+    // Storage may be unavailable in private browsing or restricted contexts.
+}
+
 type SessionResume = {
     token: string;
     dataKey: string;

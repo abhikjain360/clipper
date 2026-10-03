@@ -3,6 +3,8 @@
 //! Runs as a per-user background service and exposes a Unix socket for app
 //! control.
 
+#![recursion_limit = "256"]
+
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn main() {
     std::process::exit(1);
@@ -53,6 +55,8 @@ use crate::{
 const PRIVATE_DIR_MODE: u32 = 0o700;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const PRIVATE_FILE_MODE: u32 = 0o600;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const MAX_IPC_CONNECTIONS: usize = 64;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn app_data_dir() -> DaemonResult<PathBuf> {
     dirs::data_dir()
@@ -208,6 +212,14 @@ fn peer_uid_matches_current_user(stream: &UnixStream) -> io::Result<bool> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+fn try_acquire_ipc_slot(
+    slots: &Arc<tokio::sync::Semaphore>,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    // Non-blocking: a full slot set drops the new connection at accept time.
+    slots.clone().try_acquire_owned().ok()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -359,6 +371,10 @@ async fn run() -> DaemonResult<()> {
         }
     };
 
+    // Cap concurrent connections so same-user peers that never finish the
+    // handshake cannot exhaust tasks and file descriptors.
+    let connection_slots = Arc::new(tokio::sync::Semaphore::new(MAX_IPC_CONNECTIONS));
+
     // Accept loop with graceful shutdown
     tokio::select! {
         _ = async {
@@ -373,17 +389,29 @@ async fn run() -> DaemonResult<()> {
                                 continue;
                             }
                         }
+                        let Some(permit) = try_acquire_ipc_slot(&connection_slots) else {
+                            warn!(
+                                max_connections = MAX_IPC_CONNECTIONS,
+                                "Rejected IPC client: too many connections"
+                            );
+                            continue;
+                        };
                         let engine_manager = Arc::clone(&engine_manager);
                         let client_mgr = Arc::clone(&client_mgr);
                         let data_dir = data_dir.clone();
                         let (read_half, write_half) = stream.into_split();
-                        tokio::spawn(handler::handle_connection(
-                            read_half,
-                            write_half,
-                            engine_manager,
-                            client_mgr,
-                            data_dir,
-                        ));
+                        tokio::spawn(async move {
+                            // Hold the permit for the whole connection.
+                            let _permit = permit;
+                            handler::handle_connection(
+                                read_half,
+                                write_half,
+                                engine_manager,
+                                client_mgr,
+                                data_dir,
+                            )
+                            .await;
+                        });
                     }
                     Err(e) => {
                         error!("Accept error: {}", e);

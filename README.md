@@ -4,8 +4,8 @@ Encrypted clipboard and file sync.
 
 > **Status: early and experimental.** Clipper is pre-1.0, has not been security
 > audited, and has known unfixed issues tracked in
-> [`docs/rust-code-review.md`](docs/rust-code-review.md). Don't trust it with
-> secrets you can't afford to lose yet. See [SECURITY.md](SECURITY.md).
+> [`docs/issues.md`](docs/issues.md). Don't trust it with secrets you can't
+> afford to lose yet. See [SECURITY.md](SECURITY.md).
 
 > **Contributions:** upstream pull requests are closed for now. Clipper is
 > experimental both as a product and as a development-process experiment: it is
@@ -32,6 +32,8 @@ bearer tokens or sync metadata from plain HTTP.
 
 `crates/server` is the Axum API and SQLite storage.
 `crates/client` is the shared Rust sync client.
+`crates/schedule` is the scheduling domain: series, recurrence expansion,
+calendar ingest and the alarm plan.
 `crates/web-wasm` is the wasm-bindgen adapter for the browser client.
 `crates/mobile-uniffi` is the UniFFI adapter for React Native mobile.
 `crates/daemon` is the local macOS/Linux background process.
@@ -47,11 +49,12 @@ bearer tokens or sync metadata from plain HTTP.
 The browser client is a Vite/React app that uses the shared Rust sync client
 through `crates/web-wasm`.
 
-The native desktop client is a Tauri shell around the same React UI. Its Rust
-backend runs `clipper-client` in-process, stores client data under the app data
-directory, and uses Tauri plugins for native file dialogs and clipboard access.
-On macOS and Linux, `clipper-client` starts its platform clipboard watcher after
-login.
+The native desktop client is a Tauri shell around the same React UI. The shell
+starts the local `clipper-daemon` and talks to it over local IPC. The daemon
+runs `clipper-client` and stores client data under the user's data directory, so
+sync continues after the window closes. The shell uses Tauri plugins for native
+file dialogs and clipboard access. On macOS and Linux, `clipper-client` starts
+its platform clipboard watcher after login.
 
 The mobile client is React Native/Expo for Android. It has native RN components
 under `mobile/src`, shares frontend contracts through `packages/shared`, and
@@ -201,7 +204,6 @@ max_pending_ws_tickets = 4096
 
 [limits]
 max_file_blob_bytes = 536870912
-max_file_meta_ciphertext_bytes = 65536
 max_object_meta_ciphertext_bytes = 65536
 max_user_storage_bytes = 10737418240
 max_user_objects = 10000
@@ -262,3 +264,17 @@ other project under the AGPL. Only modifications to Clipper's own source code
 carry the AGPL's copyleft — including its network-use (SaaS) disclosure
 requirement — and must be released in source form. See [LICENSE](LICENSE) for
 the exact terms.
+
+### Standalone web hosting headers
+
+Vite dev and preview send these headers. Configure your production static host
+or reverse proxy to send them too, including on SPA fallback HTML responses:
+
+```http
+Content-Security-Policy: frame-ancestors 'none'
+X-Frame-Options: DENY
+```
+
+The remaining CSP restrictions are in `web/index.html`. The framing restriction
+must be an HTTP header: browsers ignore `frame-ancestors` in meta tags. A static
+build cannot set HTTP response headers by itself.

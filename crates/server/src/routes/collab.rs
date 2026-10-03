@@ -42,7 +42,7 @@ use crate::{
 };
 
 /// Bytes of randomness in a `share_token`. The token is the sole credential for
-/// unauthenticated share-link access (Phase 3), so it must be unguessable; 32
+/// unauthenticated share-link access, so it must be unguessable; 32
 /// bytes (256 bits) matches the WebSocket ticket secret.
 const SHARE_TOKEN_BYTES: usize = 32;
 
@@ -75,9 +75,6 @@ pub async fn create_collab_doc(
     let state_ref = &state;
 
     let seq = with_txn(state.db(), "create_collab_doc", async move |txn| {
-        // The collab_docs insert is the first write, so it takes the SQLite write
-        // lock. Allocate the seq only after that, matching the event_log.seq
-        // boundary rule (seq order must match commit order).
         collab_docs::ActiveModel {
             id: Set(collab_doc_id),
             owner_user_id: Set(user_id),
@@ -101,22 +98,20 @@ pub async fn create_collab_doc(
 
         let seq = state_ref.next_event_seq();
 
-        // A collab object: ciphertext columns null, collab_doc_id set, status
-        // complete from the start (no upload phase). created_seq is set here so
-        // the `status = 'complete' => created_seq NOT NULL` check holds.
+        // A collab object carries no revisions: its content is the Y-doc, which
+        // has its own versioning, and there is no upload phase to be pending
+        // for. So it is visible the moment it exists, which `published_seq`
+        // says directly — the column that replaced `status`.
         objects::ActiveModel {
             id: Set(object_id),
             user_id: Set(user_id),
             kind: Set(ObjectKind::Collab.to_string()),
-            meta_ciphertext: Set(None),
-            meta_nonce: Set(None),
             created_at: Set(now_ref.to_owned()),
             updated_at: Set(now_ref.to_owned()),
             expires_at: Set(None),
-            source_device_id: Set(Some(device_id)),
-            envelope: Set(None),
-            status: Set("complete".into()),
-            created_seq: Set(Some(seq)),
+            head_revision: Set(None),
+            published_seq: Set(Some(seq)),
+            deleted_at: Set(None),
             collab_doc_id: Set(Some(collab_doc_id)),
         }
         .insert(txn)
@@ -163,6 +158,8 @@ pub async fn create_collab_doc(
         object_kind: ObjectKind::Collab,
         object_id: object_id.into(),
         created_at: now.clone(),
+        envelope: None,
+        source_device_signing_public_key: None,
     });
 
     info!(device_id = %device_id, object_id = %object_id, "Collab doc created");
@@ -251,9 +248,6 @@ pub async fn rename_collab_doc(
     let state_ref = &state;
 
     let (seq, doc) = with_txn(state.db(), "rename_collab_doc", async move |txn| {
-        // The collab_docs update is the first write, so it takes the SQLite
-        // write lock; the seq is allocated only after that (see the seq
-        // ordering rule in CLAUDE.md).
         let doc = collab_docs::ActiveModel {
             id: Set(collab_doc_id),
             title: Set(title_ref.to_owned()),
@@ -306,6 +300,8 @@ pub async fn rename_collab_doc(
         object_kind: ObjectKind::Collab,
         object_id: object_uuid.into(),
         created_at: now,
+        envelope: None,
+        source_device_signing_public_key: None,
     });
 
     info!(device_id = %auth.device_id, object_id = %object_uuid, "Collab doc renamed");
@@ -419,7 +415,6 @@ pub async fn delete_collab_doc(
             ));
         }
 
-        // Allocated after the delete above has taken the write lock.
         let seq = state_ref.next_event_seq();
         event_log::ActiveModel {
             seq: Set(seq),
@@ -453,6 +448,8 @@ pub async fn delete_collab_doc(
         object_kind: ObjectKind::Collab,
         object_id: object_uuid.into(),
         created_at: now,
+        envelope: None,
+        source_device_signing_public_key: None,
     });
 
     info!(device_id = %auth.device_id, object_id = %object_uuid, "Collab doc deleted");

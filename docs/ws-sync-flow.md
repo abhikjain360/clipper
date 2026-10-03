@@ -1,344 +1,350 @@
 # WebSocket Sync Flow
 
-This document describes the sync flow between a signed-in client and the
-server.
+This document describes how a signed-in client keeps its local copy of the
+user's objects in step with the server.
 
-The sync model has two jobs:
+Sync has two parts:
 
-- WebSocket carries live changes after a connection starts.
-- HTTP materializes exact objects and bounded snapshots when the client needs
-  encrypted object contents.
+- The WebSocket carries live change events after a connection starts.
+- HTTP fetches single objects, and lists of objects called snapshots, when the
+  client needs encrypted object contents.
 
-The client does not treat a server watermark as already-applied local state. A
-change is only locally applied after the corresponding local write succeeds.
-
-## Implementation Status
-
-The generation/snapshot sync flow described in this document is implemented
-today. The only forward-looking items are called out explicitly under "Future
-Work" below.
-
-Implemented and in use today:
-
-- Per-user server-side live broadcast: each user gets its own in-memory
-  `tokio::sync::broadcast` channel, created on first WebSocket subscribe and
-  pruned when its last receiver drops
-  (`AppState::subscribe_ws_broadcasts` / `broadcast_ws_event` /
-  `prune_idle_ws_broadcast_channel`). One user's burst can only lag that user's
-  own receivers.
-- Generation + create-sequence reconciliation: every connection/reconnect
-  starts a new client generation; objects carry a server-assigned
-  `created_seq`; snapshots, sweeps, and live events are gated on the current
-  generation (`SyncEngine`/`LocalStore`).
-- Committed-sequence mutation responses: object init, complete, and delete all
-  return the committed sequence to the originating device
-  (`ObjectInitResponse::Complete { created_seq }`,
-  `ObjectCompleteResponse { created_seq }`,
-  `ObjectDeleteResponse { deleted_seq }`), so the device can write the object
-  locally as present without waiting for its own event to echo back.
-- Live WebSocket events after a watermark, with no historical replay on the
-  socket: the server sends a `hello_ack` carrying `stream_start_seq` and then
-  forwards only newer live events; HTTP snapshots own everything at or before
-  the watermark.
-- Web (browser/wasm) WebSocket support via a one-time ticket exchanged over the
-  `clipper-ticket` subprotocol; native clients connect with a Bearer token.
-- 64 KiB inbound WebSocket message/frame cap on both upgrade paths
-  (`WS_MAX_MESSAGE_BYTES`).
-- Per-user WebSocket ticket limits: a per-user-per-minute mint rate limit plus a
-  per-user cap on simultaneously outstanding unconsumed tickets, evicted
-  oldest-first within that user.
-
-See "Transport And Server Mechanics (Current)" for the wire/infra details these
-guarantees rest on.
-
-### Future Work
-
-- Clipboard delete events. Today clipboard items leave sync only through
-  retention (TTL / max-item trimming), never through a live delete event; only
-  file objects support delete. The delete-marker machinery already exists on
-  the client, so if clipboard delete events are added later they can reuse the
-  same flow.
-- Local-store peer-to-peer sync is tracked separately in
-  `local-store-p2p-roadmap.md` and is out of scope here.
+The server gives every committed change a sequence number (`event_log.seq`). A
+sequence number is a microsecond timestamp that the server assigns and that
+only increases, so sequence order is commit order. The client never treats a
+sequence number the server reports as a change it has already applied: a change
+counts as applied only after the matching local write succeeds.
 
 ## Object Semantics
 
-Clipboard history is retention-bounded. A clipboard item may disappear from sync
-when it falls outside the server's clipboard retention window. When that happens,
-clients may remove their local copy.
+Clipboard history is retention-bounded. A clipboard item leaves sync when it
+falls outside the server's clipboard retention window: older than the TTL, or
+outside the newest `clipboard.max_items`. Clients then remove their local copy.
+The user cannot delete a clipboard item, so clipboard items never produce
+delete events.
 
-Files are durable until the user deletes them. A file must not disappear only
-because old event history was pruned. File sync rebuilds from the server's
-durable file snapshot.
+Files and schedule objects stay until the user deletes them. They do not
+disappear because old event history was pruned; each reconnect rebuilds them
+from the server's object listing.
 
-Every materialized object has a server-assigned create sequence. The client must
-not keep a visible present object without that sequence, because ordering and
-snapshot sweeps depend on it.
+Files and schedule objects have revisions. Each edit appends a new signed
+revision, and the newest published revision is the object's head. A delete
+appends a tombstone revision, and a later revision can restore the object.
+Purging removes the whole chain from the server. `object-envelopes.md`
+describes the chain.
+
+Every object the server lists carries the sequence number at which its head was
+published (`created_seq` on the wire). An edit or a restore publishes a new
+head, so the object's sequence number moves forward. The client must not show
+an object without a sequence number, because ordering and snapshot sweeps
+depend on it.
+
+Collab docs follow different rules; see "Collab Docs" below.
 
 ## Connection Start
 
 1. The client opens a WebSocket after login or reconnect.
-2. The server starts listening for live events for that user. It subscribes to
-   the user's broadcast channel _before_ reading the high-water sequence, so no
-   live event can slip between the snapshot watermark and the live
-   subscription.
-3. The server chooses a stream watermark representing all events committed up to
-   that moment (`stream_start_seq`, the largest committed `event_log.seq` for
-   the user).
-4. The server sends the watermark to the client in a `hello_ack` message.
+2. The server subscribes to the user's live broadcast channel before it reads
+   the latest sequence number, so no event can fall between the two.
+3. The server reads the stream start (`stream_start_seq`): the largest sequence
+   number committed for the user. It takes the larger of the newest
+   `event_log` row and the newest published object, because old `event_log`
+   rows are pruned after a retention window.
+4. The server sends the stream start to the client in a `hello_ack` message.
 5. The client starts a new reconciliation generation.
-6. HTTP snapshots are responsible for objects created at or before the
-   watermark.
-7. WebSocket live processing is responsible for events after the watermark.
+6. HTTP snapshots cover objects whose sequence number is at or before the
+   stream start.
+7. The WebSocket covers events after the stream start.
 
-The server does not replay old events on the WebSocket. The WebSocket only
-delivers live events after the watermark, and additionally drops any buffered
-event whose `seq` is at or below the watermark. This avoids gaps between replay
-and live subscription, and avoids double-applying an event that snapshots
-already cover.
+The server does not replay old events on the WebSocket. It forwards only live
+events, and it drops any buffered event whose sequence number is at or below the
+stream start, because the snapshots already cover it.
 
-The server also does not echo a device's own changes back to that same device:
-live broadcasts are filtered by source device id, so a connection never
-receives the events it originated. The originating device instead learns the
-committed sequence from the mutation's HTTP response.
+The server does not echo a device's own changes back to it: live broadcasts are
+filtered by source device id. The originating device learns the committed
+sequence number from the HTTP response to its own write.
 
 ## Reconciliation Generation
 
-Each connection, reconnect, invalidation, or manual refresh starts a new
-generation.
+A generation is one pass of reconciliation. Each connection, reconnect,
+invalidation or manual refresh starts a new one, and every local sync write
+carries the generation it belongs to.
 
 During a generation:
 
-1. Existing visible objects stay visible while snapshots run.
-2. Snapshot results confirm matching local objects for the current generation.
-3. Live events note pending creates or delete markers in local state.
-4. In-flight work checks that its generation is still current before committing
-   a local write.
-5. A successful snapshot may remove old local objects that were in snapshot scope
-   but were not seen.
-6. A failed or partial snapshot does not sweep anything. (Caveat, 2026-07-19
-   audit R20: a per-_item_ failure — tampered ciphertext, transient download
-   error, unsupported MIME — does not fail the snapshot; the item is treated as
-   "not seen" and the end-of-snapshot sweep removes its previously good local
-   copy.)
+1. Objects already shown stay visible while snapshots run.
+2. Each object a snapshot lists is marked as seen in the current generation.
+3. Live events record pending fetches and deletes in local state.
+4. Every sync write checks that its generation is still the current one before
+   it commits. A write from an older generation is dropped.
+5. When a snapshot finishes, the client sweeps that kind: local objects at or
+   before the stream start that were not seen in this generation become gone.
+6. A failed snapshot sweeps nothing. A single listed item that fails
+   verification, download or decryption does not fail the snapshot: it still
+   counts as seen, so the copy this device already holds is kept.
 
-The client applies local state changes one at a time so snapshot work, live
-events, and object fetches cannot overwrite each other incorrectly.
+The client applies local state changes one at a time, under one lock, so
+snapshot work, live events and object fetches cannot overwrite each other.
 
 ## Local Object State
 
-The client tracks each known object in one of three states.
+The client holds each object it knows about in one of three states:
 
-1. Present means the object has been materialized locally with a known create
-   sequence.
-2. Pending create means a live create event was seen, but the object has not
-   been fetched and decrypted yet.
-3. Deleted means a delete event was seen in the current generation and older
-   snapshot or fetch results must not resurrect the object. _(Known flaw,
-   2026-07-19 audit R18: the sweep deletes stale-generation delete markers, so
-   this protection currently lasts only one generation — a server that keeps
-   listing a deleted file resurrects it on the client's second reconnect.)_
+1. Present: the object is fetched, verified and stored with its sequence
+   number.
+2. Pending fetch: a live event named the object and the fetch has not finished.
+3. Gone: the object was deleted, swept, or reported missing by the server. A
+   gone object keeps only its sequence number and its anchor.
 
-Persisted local object records hold only encrypted object material (metadata
-ciphertext, payload descriptors, the signed envelope, and for clipboard the
-payload ciphertext). The device signing key is stored wrapped, and on
-non-wasm platforms the cache directory is created private (0700, owner-checked)
-with records written 0600. Decrypted display state lives only in memory and is
-rebuilt by decrypting the cached ciphertext on load.
+An anchor is the newest revision of an object this device has accepted: its
+revision number and the hash of its signed envelope body. The client refuses
+any served revision that would move an object behind its anchor, including
+after a delete or a sweep, so a server cannot bring back an older revision.
+There are two kinds of anchor:
 
-Visible lists are derived only from present objects:
+- Absent: the object was missing from a snapshot, the server answered 404, or
+  a delete event's tombstone was missing or failed its checks. The same head
+  may come back later; only an older or different revision is refused.
+- Tombstone: the anchor is a signed tombstone, either one this device signed
+  or one a live delete event carried and the client verified.
 
-1. Clipboard shows present clipboard objects sorted newest first by create
-   sequence.
-2. Files show present file objects sorted newest first by create sequence.
-3. Pending objects are hidden.
-4. Deleted objects are hidden.
+Native clients store objects in a SQLite database. Cached content and anchors
+live in separate tables, so dropping the cache never drops an anchor, and a gone
+object is an anchor row with nothing else. The browser keeps the same records in
+`localStorage`. `local-at-rest-encryption.md` describes the storage format and
+file permissions.
 
-The signed creation time is display metadata. It does not control sync ordering.
+Stored records hold only encrypted material: metadata ciphertext, payload
+descriptors, the signed envelope, and for clipboard and schedule objects the
+payload ciphertext. Decrypted display state lives only in memory and is rebuilt
+by decrypting the stored ciphertext when the client starts.
+
+Visible lists come only from present objects:
+
+1. Clipboard shows present clipboard objects, newest sequence number first.
+2. Files shows present file objects, newest sequence number first.
+3. Pending and gone objects are hidden.
+
+The signed creation time is display metadata. It does not control sync
+ordering.
 
 ## Local Writes
 
 When this device creates an object:
 
 1. The client chooses the object id before sending the create.
-2. The server commits the object and assigns the create sequence.
-3. The mutation response returns that sequence (`created_seq`).
-4. The client writes the object locally as present only after it knows the
-   sequence.
-5. The server does not need to echo the event back to the same device.
+2. The server commits the object and assigns its sequence number.
+3. The response returns that sequence number (`created_seq`).
+4. The client stores the object as present only after it knows the sequence
+   number.
 
-If the response is lost after the server committed:
+When this device revises or deletes a file or schedule object, it signs a
+revision that names the head it holds as its parent. The server accepts the
+revision only if that parent is still the head, and otherwise answers with a
+revision conflict. The response returns the new sequence number. A tombstone
+this device signed is stored locally as a Tombstone anchor.
+
+If the response to a create is lost after the server committed:
 
 1. The client retries the same create with the same object id.
 2. The server treats the retry as the same object.
-3. If the object is complete, the server returns the original create sequence.
+3. If the object is complete, the server returns the original sequence number.
 4. If the object is still waiting for upload or completion, the server returns
    the existing pending state.
-5. If the object id is reused for different data, the server reports a conflict.
+5. If the object id is reused for different data, the server reports a
+   conflict.
 
-The same rule prevents a local visible object from existing without a create
-sequence.
+## Live Create And Update Events
 
-## Live Create Events
+The server sends a `created` event when an object is created, and when a
+revision restores a deleted object. For a file or schedule object, an `updated`
+event means a new head was published. The client handles both the same way:
 
-When the client receives a live create event:
+1. If the object is gone with a later sequence number than the event, ignore the
+   event: the delete came after it.
+2. If the object is present with the same or a later sequence number, ignore the
+   event as a duplicate.
+3. If the object is present with an earlier sequence number, keep showing it,
+   record the new sequence number, and fetch the new head.
+4. Otherwise record a hidden pending fetch, keeping any anchor the object
+   already has.
+5. Fetch that object from the server.
+6. Verify the envelope, check the revision against the anchor, and decrypt.
+7. Before storing the result, check again that the generation is still current
+   and that no later delete has arrived. The revision check runs again at this
+   point, because another event may have landed during the fetch.
+8. If every check passes, store the object as present.
 
-1. If a newer delete marker already exists for that object, ignore the create.
-2. If the object is already present with the same or newer sequence, ignore the
-   duplicate.
-3. If the object is already present but older, refresh its sequence and keep it
-   present.
-4. If the object is not materialized, write or update a hidden pending-create
-   state.
-5. Fetch that exact object from the server.
-6. Verify and decrypt the object.
-7. Before committing the result, re-check the current generation and any delete
-   marker for the object.
-8. If still valid, replace the pending state with a present object.
+For a clipboard object the fetch downloads and decrypts the payload. For a
+schedule object it downloads and decrypts the record payload. For a file it
+decrypts the metadata only; the user starts the download of the file itself.
 
-For clipboard creates, materialization fetches and decrypts the clipboard
-payload during sync.
+An `updated` event for a clipboard object is logged and ignored, because
+clipboard items have no revisions. An `updated` event for a collab doc means it
+was renamed; see "Collab Docs".
 
-For file creates, materialization fetches and decrypts file metadata only. File
-blob download remains user-initiated.
+If the fetch fails:
 
-If materialization fails:
-
-1. The pending object remains hidden.
-2. The client retries while the generation is still current. _(Status note,
-   2026-07-19 audit R21: retry is **not implemented** — the spawned task warns
-   once and gives up; the item stays hidden until the next reconnect's
-   snapshot, or permanently for collab docs, which have no snapshot — R9.)_
-3. If the server says the object is absent or no longer retained, the pending
-   state is removed.
-4. The client does not fall back to a broad refresh for a single create.
+1. A pending object stays hidden.
+2. The fetch is not retried. The next reconnect's snapshot recovers the object.
+3. If the server answers 404, the client marks the object gone and keeps its
+   anchor. This also hides a copy the device held before the event.
+4. The client does not fall back to a broad refresh for one object.
 
 ## Live Delete Events
 
-Live delete events currently exist for file objects only. When the client
-receives a live file delete:
+The server sends a `deleted` event when a tombstone revision is published for a
+file or schedule object, and when a collab doc is deleted. Purging an object
+that is already tombstoned sends no event, because every client dropped it when
+the tombstone arrived. Clipboard items never produce delete events.
 
-1. Write a delete marker with the delete sequence.
-2. Remove the local file metadata from visible state.
-3. Remove any cached local blob for that file.
-4. Ignore later snapshot or fetch results for that object if they are older than
-   the delete marker. _(Bounded by the R18 flaw noted above: the marker is only
-   honored for one generation today.)_
+When the client receives a `deleted` event for a file, schedule object or collab
+doc:
 
-A delete event for any non-file object kind is logged and ignored by the client,
-because the server only emits delete events for files.
+1. If the local record has a later sequence number, ignore the event. With the
+   same sequence number, only a tombstone for an object already stored as gone
+   is checked and kept, under the rules in step 3.
+2. Otherwise drop the cached content and payload ciphertext, and remove the
+   object from the visible lists.
+3. Store the object as gone with the delete's sequence number. For a file or
+   schedule object the event carries the signed tombstone; the client checks
+   it against the event and the held anchor and keeps it as a Tombstone
+   anchor. A missing or failing tombstone leaves an Absent anchor on the held
+   head.
+4. Later snapshot or fetch results with an earlier sequence number than the
+   delete are ignored. Sweeps never remove a gone record, so this holds across
+   reconnects.
 
-Clipboard currently disappears through retention rather than live delete events.
-If clipboard delete events are added later, they follow the same delete-marker
-flow.
+A `deleted` event for any other kind is logged and ignored.
 
-## File Snapshot
+## File And Schedule Snapshots
 
-After receiving the connection watermark, the client builds a file snapshot for
-all files created at or before that watermark.
+After receiving the stream start, the client lists all files, and separately
+all schedule objects, whose sequence number is at or before it.
 
-1. The client asks the server for file metadata pages in create-sequence order,
-   bounded by the watermark (`created_seq_lte = stream_start_seq`).
-2. For each returned file, the client skips it if a newer delete marker exists.
-3. Otherwise the client verifies and decrypts file metadata.
-4. The client writes the file as present and marks it seen in the current
+1. The client asks for pages of objects in sequence-number order, bounded by the
+   stream start (`created_seq_lte = stream_start_seq`). Each page must continue
+   from the previous one and stay within the stream start; a page that does not
+   fails the snapshot.
+2. For each listed object, the client skips it if a later delete is recorded.
+3. Otherwise the client verifies the envelope, checks the revision against the
+   anchor, and decrypts the metadata, plus the payload for a schedule object.
+4. The client stores the object as present and marks it seen in the current
    generation.
-5. The client continues until all pages complete.
-6. After the full snapshot succeeds, the client removes local files that were
-   created at or before the watermark but were not seen in the generation.
-7. Objects created after the watermark are left alone because they belong to
-   live WebSocket processing.
+5. The client continues until the last page.
+6. After the whole snapshot succeeds, the client sweeps: local objects of that
+   kind at or before the stream start that were not seen become gone, and keep
+   their anchors.
+7. Objects after the stream start are left alone, because the WebSocket covers
+   them.
 
-If any file snapshot page fails, the client keeps existing local file state and
-waits for a later successful generation.
+The listing leaves out tombstoned objects, so a device that missed a delete
+event drops the object at the sweep.
+
+A listed revision older than the one this device holds is an ordinary race with
+a live event or with this device's own write. The client keeps its own copy,
+marks it seen, and continues.
+
+If any page fails, the client keeps its existing local state and waits for a
+later generation.
 
 ## Clipboard Snapshot
 
-After receiving the connection watermark, the client builds a clipboard snapshot
-for the server's retained clipboard view through that watermark.
+After receiving the stream start, the client lists the server's retained
+clipboard items up to the stream start.
 
-1. The client asks the server for retained clipboard pages bounded by the
-   watermark.
-2. The server returns only clipboard items that are still inside the current
-   retention window (within the TTL and within the most-recent
-   `clipboard.max_items`).
-3. For each returned item, the client skips it if a newer delete marker exists.
-4. Otherwise the client verifies and decrypts metadata and payload.
-5. The client writes the item as present and marks it seen in the current
+1. The client asks for retained clipboard pages bounded by the stream start.
+2. The server returns only clipboard items inside the retention window.
+3. For each listed item, the client skips it if a later delete is recorded.
+4. Otherwise the client verifies the envelope and decrypts metadata and payload.
+5. The client stores the item as present and marks it seen in the current
    generation.
-6. The client continues until all retained pages complete.
-7. After the full snapshot succeeds, the client removes local clipboard objects
-   that were created at or before the watermark but were not seen in the
-   generation.
-8. Objects created after the watermark are left alone because they belong to
-   live WebSocket processing.
+6. The client continues until the last page.
+7. After the whole snapshot succeeds, the client sweeps local clipboard objects
+   at or before the stream start that were not seen.
+8. Objects after the stream start are left alone, because the WebSocket covers
+   them.
 
-If a clipboard item is absent from the retained snapshot, the client may remove
-its local copy after the snapshot succeeds. Absence means the item is outside
-the current clipboard retention contract.
+An item missing from the retained listing is outside the retention window, so
+the client removes its local copy at the sweep.
 
-If the clipboard snapshot fails, the client does not sweep local clipboard
-state.
+If the clipboard snapshot fails, the client does not sweep clipboard state.
+
+## Collab Docs
+
+Collab docs are server-visible documents, not encrypted objects, so
+`GET /api/objects` does not list them. The client lists them with
+`GET /api/collab-docs` as its own snapshot, alongside the file, clipboard and
+schedule snapshots, and sweeps collab docs the listing leaves out. The listing
+is one unpaged response.
+
+The collab endpoints report timestamps rather than sequence numbers. The client
+therefore orders a collab doc by its server `created_at` in microseconds, which
+is on the same scale as a sequence number and does not change on a rename.
+
+Live events for collab docs:
+
+- `created`: the client reads the doc's metadata from
+  `GET /api/collab-docs/{id}/meta`.
+- `updated`: the doc was renamed, and the client reads its metadata again.
+- `deleted`: handled as in "Live Delete Events".
+
+Collab docs have no revisions and no anchors, so a swept collab doc is removed
+outright. The document content syncs over a separate Y-sync WebSocket
+(`/api/collab-docs/{id}/ws`), not over this event stream.
 
 ## Manual Refresh
 
 Manual refresh uses the same flow as reconnect.
 
-1. The client asks the current WebSocket flow to restart.
+1. The client asks the running WebSocket loop to drop the current connection.
 2. A new WebSocket connection is established.
-3. The server sends a new watermark.
+3. The server sends a new stream start.
 4. The client starts a new generation.
-5. File and clipboard snapshots rebuild against the new watermark.
+5. Every snapshot runs again against the new stream start.
 6. Sweeps happen only after their matching snapshots succeed.
-
-Manual refresh does not use a separate sync path. Internally it signals the
-running WebSocket loop to drop the current connection and reconnect; the
-reconnect path does the rest.
 
 ## Invalidation And Lag
 
-If the live WebSocket stream is no longer reliable, the server invalidates the
+If a connection's live stream becomes unreliable, the server invalidates the
 connection and closes it. This happens when a connection falls behind the
 per-user broadcast buffer (a `Lagged` receive): the server sends an
 `invalidate` message and then closes the socket cleanly (close code `AWAY`,
-reason `lagged`) so the client reconnects without treating it as an error.
+reason `lagged`), so the client reconnects without treating it as an error.
 
 On invalidation:
 
 1. The client stops trusting that connection.
 2. The client starts a fresh WebSocket connection.
-3. The server sends a new watermark.
+3. The server sends a new stream start.
 4. The client starts a new generation.
 5. New snapshots and live processing take over.
-6. In-flight work from the old generation is ignored at local write time.
+6. In-flight work from the old generation is dropped at local write time.
 
-The `invalidate` message carries a `target` field. The client currently treats
-any invalidation as a full reconnect regardless of `target`.
+The `invalidate` message carries a `target` field. The client treats every
+invalidation as a full reconnect, whatever the `target`.
 
 ## Ordering And Duplicates
 
-The client must tolerate duplicate and out-of-order events.
+The client must tolerate duplicate and out-of-order events. For each object:
 
-For each object:
+1. The later sequence number wins.
+2. Duplicate or earlier creates and updates are ignored.
+3. A later delete hides the object and stops earlier creates from bringing it
+   back.
+4. An event never turns a present object back into a pending one; the present
+   copy stays visible while the new head is fetched.
+5. A served revision never moves an object behind its anchor.
+6. A visible object without a sequence number is invalid local state and must
+   be repaired or removed.
 
-1. Newer known state wins.
-2. Duplicate or older creates are ignored.
-3. Newer deletes hide the object and block older creates from resurrecting it —
-   but see R18: the blocking marker survives only one generation today. Also
-   note "newer" is computed on server-supplied seqs with no sanity bound
-   (2026-07-19 audit R2): a far-future seq poisons this ordering and makes the
-   object delete-immune until R2's validation lands.
-4. A create never downgrades a present object back to pending.
-5. A visible present object without a create sequence is invalid local state and
-   must be repaired or removed.
+Sequence numbers from the server are compared as given, with no range check
+(`docs/issues.md`, entry 35).
 
-This keeps sync correct across retries, reconnects, invalidations, and delayed
-HTTP materialization.
+This keeps sync correct across retries, reconnects, invalidations and delayed
+HTTP fetches.
 
-## Transport And Server Mechanics (Current)
-
-This section records the concrete wire and server-side mechanics the flow above
-relies on. All of it is implemented.
+## Transport And Server Mechanics
 
 ### Connecting
 
@@ -348,15 +354,15 @@ There are two WebSocket entry points:
   routes. They authenticate with an `Authorization: Bearer <token>` header (the
   same session token used for HTTP), so this path reuses the standard auth and
   rate-limit middleware.
-- Browser/wasm clients cannot set request headers on a WebSocket, so they first
+- Browser clients cannot set request headers on a WebSocket, so they first
   `POST /api/ws-ticket` (authenticated) to mint a short-lived single-use ticket,
   then connect to the public `GET /api/ws-ticket/connect` advertising two
   subprotocols: the literal marker `clipper-ticket` and the ticket value. The
   server consumes the ticket, recovers the authenticated identity, and upgrades.
 
-In both cases the upgrade caps inbound messages and frames at 64 KiB. Clients
-only ever send a small JSON `hello` plus control frames, so this bound keeps
-per-connection memory small.
+In both cases the upgrade caps inbound messages and frames at 64 KiB
+(`WS_MAX_MESSAGE_BYTES`). Clients only send a small JSON `hello` plus control
+frames, so this bound keeps per-connection memory small.
 
 ### Hello handshake
 
@@ -364,42 +370,40 @@ After upgrade the client sends `{"type":"hello"}`. The server replies with
 `hello_ack` carrying `server_time` and `stream_start_seq`. A first frame that is
 not a valid hello is answered with a typed `error` (`expected_hello` or
 `invalid_hello`) followed by a clean close. The client must see `hello_ack`
-before it starts a generation and reconciliation.
+before it starts a generation.
 
 ### Live broadcast fan-out
 
-Each user has its own in-memory broadcast channel (capacity 256). Object
-mutations call `broadcast_ws_event` with a `WsBroadcast` that includes the
-`user_id`, the `source_device_id`, the committed `seq`, and the object's kind /
-id / created-at. A connected socket:
+Each user has their own in-memory broadcast channel (capacity 256), created on
+the first WebSocket subscribe. Object writes call `broadcast_ws_event` with a
+`WsBroadcast` that includes the `user_id`, the `source_device_id`, the committed
+sequence number, the event type, and the object's kind, id and creation time. A
+connected socket:
 
-- drops events whose `seq <= stream_start_seq` (snapshots own those),
-- drops events whose `source_device_id` equals its own device (no self-echo),
-- otherwise forwards an `event` message.
+- drops events whose sequence number is at or below its stream start, because
+  snapshots cover them,
+- drops events whose `source_device_id` is its own device, so a device never
+  hears its own writes,
+- forwards every other event as an `event` message.
 
-Because channels are partitioned by user, a flood from one account can only lag
-that account's own receivers, not other users'. Idle channels are removed once
-their last receiver drops.
+Because channels are per user, a flood from one account can only lag that
+account's own receivers. A channel is removed once its last receiver drops.
 
 ### Ticket limits
 
 WebSocket tickets are minted per user and bounded two ways:
 
-- A per-user-per-minute mint rate limit (`ws_tickets_per_user_per_minute`,
-  default 30). Over-quota minting returns HTTP 429.
-- A cap on simultaneously outstanding unconsumed tickets per user
-  (`auth.max_pending_ws_tickets`). At capacity, the oldest unconsumed ticket for
-  that user is evicted first, so a burst from one account cannot displace
-  another account's about-to-be-used ticket. Tickets are single-use and expire
-  after 60 seconds.
-
-These per-user partitions exist specifically so one account cannot evict or
-starve another account's tickets or live stream.
+- A per-user mint rate limit (`ws_tickets_per_user_per_minute`, default 30).
+  Minting over the limit returns HTTP 429.
+- A cap on unconsumed tickets per user (`auth.max_pending_ws_tickets`). At the
+  cap, that user's oldest unconsumed ticket is evicted first, so a burst from
+  one account cannot displace another account's ticket. Tickets are single-use
+  and expire after 60 seconds.
 
 ### Connection close cases
 
-- Client close / transport end: the socket loop exits and the server prunes the
-  idle channel.
-- Lagged receiver: `invalidate` then close with code `AWAY`, reason `lagged`.
+- Client close or transport end: the socket loop exits and the server removes
+  the idle channel.
+- Lagged receiver: `invalidate`, then close with code `AWAY`, reason `lagged`.
 - Server channel closed (shutdown): close with code `AWAY`, reason
   `server shutting down`.

@@ -10,8 +10,8 @@ use axum::{
 };
 use chrono::Utc;
 use clipper_core::models::{
-    ObjectEventType, ObjectId, ObjectKind, WsClientMessage, WsError, WsServerMessage,
-    WsTicketResponse,
+    ObjectEnvelope, ObjectEventType, ObjectId, ObjectKind, WsClientMessage, WsError,
+    WsServerMessage, WsTicketResponse,
 };
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::broadcast::error::RecvError;
@@ -94,6 +94,8 @@ pub struct WsBroadcast {
     pub object_kind: ObjectKind,
     pub object_id: ObjectId,
     pub created_at: String,
+    pub envelope: Option<ObjectEnvelope>,
+    pub source_device_signing_public_key: Option<Vec<u8>>,
 }
 
 pub async fn ws_handler(
@@ -177,6 +179,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
     // whether the client closes cleanly, idles out, or the socket errors.
     let Some(_slot) = state.try_acquire_ws_slot(auth.user_id) else {
         debug!(device_id = %device_id, "WebSocket rejected: per-user connection cap reached");
+        return close_with_error(socket, WsError::ConnectionLimit).await;
+    };
+    // Then the process-wide ceiling, so many accounts together cannot exhaust
+    // FDs/tasks either. Held alongside the per-user slot above.
+    let Ok(_global) = state.ws_global_cap().try_acquire_owned() else {
+        debug!(device_id = %device_id, "WebSocket rejected: global connection cap reached");
         return close_with_error(socket, WsError::ConnectionLimit).await;
     };
 
@@ -330,6 +338,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
                             object_kind: evt.object_kind,
                             object_id: evt.object_id,
                             created_at: evt.created_at,
+                            envelope: evt.envelope.map(Box::new),
+                            source_device_signing_public_key: evt.source_device_signing_public_key,
                         };
                         if !send_bounded(
                             &mut socket,
@@ -424,13 +434,15 @@ pub(crate) async fn get_latest_seq(state: &AppState, user_id: Uuid) -> Result<i6
         .into_tuple::<i64>()
         .one(state.db())
         .await?;
+    // Tombstoned objects are included deliberately: their seq was published,
+    // and a watermark that skipped them would move backwards when the newest
+    // thing a user did was a delete.
     let latest_object_seq: Option<i64> = objects::Entity::find()
         .filter(objects::Column::UserId.eq(user_id))
-        .filter(objects::Column::Status.eq("complete"))
-        .filter(objects::Column::CreatedSeq.is_not_null())
-        .order_by(objects::Column::CreatedSeq, Order::Desc)
+        .filter(objects::Column::PublishedSeq.is_not_null())
+        .order_by(objects::Column::PublishedSeq, Order::Desc)
         .select_only()
-        .column(objects::Column::CreatedSeq)
+        .column(objects::Column::PublishedSeq)
         .into_tuple::<Option<i64>>()
         .one(state.db())
         .await?
@@ -480,6 +492,8 @@ mod tests {
             object_kind: ObjectKind::File,
             object_id: Uuid::now_v7().into(),
             created_at: Utc::now().to_rfc3339(),
+            envelope: None,
+            source_device_signing_public_key: None,
         }
     }
 

@@ -3,7 +3,7 @@
 //!
 //! Collab docs are the one server-visible object kind: the server applies and
 //! relays Y-CRDT updates, so `collab_docs.yjs_state` is plaintext (null until
-//! the first Y-sync edit in Phase 3). Clipboard and file objects keep their
+//! the first Y-sync edit). Clipboard and file objects keep their
 //! end-to-end-encrypted `meta_ciphertext`/`meta_nonce`/`envelope`; a collab
 //! object leaves all three null and points at a `collab_docs` row instead.
 //!
@@ -19,11 +19,12 @@
 //! `legacy_alter_table = OFF`). `object_payloads.object_id` references
 //! `objects`, so the rename repoints that FK at `objects_old`, which is then
 //! dropped — leaving a dangling reference that fails every later payload insert.
-//! `PRAGMA legacy_alter_table`/`foreign_keys` are unreliable here because
-//! SeaORM runs all migrations inside one transaction (where `foreign_keys` is a
-//! no-op) over a pooled SQLite connection. So instead `object_payloads` is
-//! rebuilt right after `objects`, which re-emits its FK pointing at the new
-//! `objects` table deterministically, with no reliance on pragmas.
+//! `PRAGMA legacy_alter_table`/`foreign_keys` are not a reliable fix over a
+//! pooled SQLite connection. Foreign keys are enforced while migrations run,
+//! so dropping `objects_old` cascades to `object_payloads`; the rename also
+//! repoints that child's FK at `objects_old`. Rebuilding `object_payloads`
+//! right after `objects` re-emits its FK pointing at the new `objects` table
+//! deterministically, with no reliance on pragmas.
 
 use sea_orm_migration::prelude::*;
 

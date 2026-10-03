@@ -1,5 +1,17 @@
 # Agent Notes
 
+- Always use built in harness commands for reading and writing instead of bash/python, whenever possible.
+- **Do not talk in prose.** Talk in simple English, your explanations should follow linearly/serially, or at least like a waterfall, not requiring cyclic back-and-forth of reading paragraphs or sentences to understand. No mannered prose. If there's a literal phrase available, please use it. The same applies for comments.
+
+## Known issues and scheduler specs
+
+- Known bugs, security issues and undecided product questions are in
+  `docs/issues.md`. Add an entry when you find one and update its status when it
+  is fixed or decided.
+- `docs/schedule-model.md` specifies the schedule data model.
+  `docs/calendar-imports.md` specifies import snapshots, replacement and
+  deletion.
+
 ## Environment
 
 - Use the project environment from the checked-in `.envrc`. The shell hooks
@@ -109,7 +121,8 @@
   mobile-context variant (react 19.2.3), shipping two React copies and crashing
   render with "Cannot read properties of null (reading 'useContext')". Do not
   remove the dep or the aliases while web and mobile pin different react
-  versions.
+  versions. Vite's `resolve.dedupe` also keeps nested Tamagui peer contexts
+  on the web app's React and React DOM.
 - Use the configured logger (`tracing` in Rust code) for diagnostics instead of
   direct `println!`, `eprintln!`, or `dbg!` calls.
 - The Tauri CSP's `connect-src` must keep `ws:` and `wss:`
@@ -121,12 +134,34 @@
   no narrower static origin list to use.
 - `sha2` must stay on the `0.10` line while `opaque-ke` depends on the `digest`
   0.10 trait ecosystem.
+- The `pnpm-workspace.yaml` package extension gives `@tamagui/static` a
+  TypeScript `~5.9` dependency. Tamagui's static extractor imports the
+  TypeScript JavaScript compiler API at runtime to read tsconfig files and
+  resolve aliases, declares it only as a dev dependency, and TypeScript 7 does
+  not expose that API. Clipper's own type checks use `tsgo` and are not affected.
+  Before removing or changing the extension on a Tamagui upgrade:
+  - Check the published `@tamagui/static` package, not only its release notes,
+    for imports of `sys`, `findConfigFile`, `readConfigFile`,
+    `parseJsonConfigFileContent` and `nodeModuleNameResolver` from
+    `typescript`, or for a correctly declared runtime dependency.
+  - Upgrade the pinned Tamagui packages together.
+  - Verify a frozen-lockfile install, the Vite development transforms of
+    `main.tsx`, `App.tsx` and `SchedulePanel.tsx`, and the production web build.
+    Read the build logs: Tamagui can report extraction errors while Vite exits
+    successfully.
 
 ## Boundaries
 
 - Shared HTTP/WebSocket payloads live in `crates/api-types`.
-- Daemon IPC types live in `crates/daemon-types`.
+- Daemon IPC types live in `crates/daemon-types`. Its state types re-export
+  `crates/app-types`, so daemon IPC and app state share one definition.
 - Display-ready app state lives in `crates/app-types`.
+- The scheduling domain (series, overrides, recordings, recurrence expansion,
+  calendar ingest and the alarm plan) lives in `crates/schedule`. It does no
+  I/O, crypto or storage.
+- The crypto core lives in `crates/core`. The filesystem rollback guard for file
+  writes lives in `crates/fs-txn`.
+- `web/src/backend/index.ts` chooses the Tauri or the wasm backend at runtime.
 - Browser wasm bindings live in `crates/web-wasm`.
 - Tauri desktop commands live in `web/src-tauri`.
 - Shared browser/native React UI lives in `web/src`.
@@ -151,8 +186,10 @@
 - Collab docs are the one server-visible object kind, and their metadata follows
   from that: `collab_docs.title` is a plaintext column so the doc list can render
   titles without a Y-sync WebSocket per row, and `share_url` is built server-side
-  from `server.public_web_url`. Renames emit an `event_log` `updated` event —
-  collab is the only kind that admits one. Collab objects are excluded from
+  from `server.public_web_url`. Renames emit an `event_log` `updated` event;
+  encrypted objects also emit `updated` when a visible revision replaces the
+  head. Their revisions are immutable, signed, and parent-linked; deletion
+  appends a tombstone, while HTTP DELETE is irreversible purge. Collab objects are excluded from
   `GET /api/objects`, so `GET /api/collab-docs` is their only reconciliation
   source; the client snapshots it alongside files and clipboard.
 - Auth is multi-user: access keys are one-time registration invites stored as

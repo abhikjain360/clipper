@@ -14,18 +14,19 @@ reference and reach for the field matching the column they touch.
 
 ## What is wrapped at rest
 
-Today exactly four database columns are AEAD-wrapped
-(XChaCha20-Poly1305, stored as `nonce_24 ‖ ciphertext_tag`). Each uses
-its own HKDF subkey **and** its own AAD string, so a ciphertext cannot be
-moved between columns even though every subkey descends from the same
-root:
+Exactly four database columns are AEAD-wrapped (XChaCha20-Poly1305,
+stored as `nonce_24 ‖ ciphertext_tag`). Each uses its own HKDF subkey
+**and** its own AAD string, so a ciphertext cannot be moved between
+columns even though every subkey descends from the same root. Each item
+below gives the column, its subkey and AAD label, and its scope:
 
-| Column                               | Subkey / AAD               | Scope                         |
-| ------------------------------------ | -------------------------- | ----------------------------- |
-| `server_config.opaque_server_setup`  | `…opaque-server-setup:v1`  | server-wide                   |
-| `server_config.access_key_hash_salt` | `…access-key-hash-salt:v1` | server-wide                   |
-| `users.opaque_password_file`         | `…opaque-password-file:v1` | per-user                      |
-| `users.encryption_salt`              | `…encryption-salt:v1`      | per-user (legacy placeholder) |
+- `server_config.opaque_server_setup`: `…opaque-server-setup:v1`,
+  server-wide.
+- `server_config.access_key_hash_salt`: `…access-key-hash-salt:v1`,
+  server-wide.
+- `users.opaque_password_file`: `…opaque-password-file:v1`, per user.
+- `users.encryption_salt`: `…encryption-salt:v1`, per user (a placeholder;
+  see below).
 
 The two per-user columns additionally bind the authenticated `user_id`
 into the AAD (`<column-aad> ‖ ":user_id:" ‖ <16 raw UUID bytes>`, see
@@ -36,14 +37,13 @@ not match. The two server-wide columns live in the single
 `server_config` row (`id = 1`) and use a fixed per-column AAD with no
 `user_id`.
 
-`users.encryption_salt` is a **legacy non-null column**. Client
-object-encryption keys now derive from OPAQUE's `export_key`, so the
-server no longer generates or returns a salt. At registration the column
-is filled with a wrapped _empty_ plaintext (`wrap_encryption_salt(…, &[])`
-in `crates/server/src/routes/auth.rs`) — i.e. a real AEAD blob whose
-payload is zero bytes, not a plaintext zero and not NULL. The wrapper and
-subkey are retained only until the column itself is removed from the
-schema.
+`users.encryption_salt` is a non-null column that nothing reads. Client
+object-encryption keys derive from OPAQUE's `export_key`, so the server
+neither generates nor returns a salt. At registration the column is
+filled with a wrapped _empty_ plaintext (`wrap_encryption_salt(…, &[])`
+in `crates/server/src/routes/auth.rs`) — a real AEAD blob whose payload
+is zero bytes, not a plaintext zero and not NULL. Removing the column,
+its wrapper and its subkey is [`docs/issues.md`](issues.md), entry 111.
 
 Beyond wrapping, the pepper is also fed to Argon2id as its `secret`
 parameter when hashing invite access keys (the `access_key_pepper`
@@ -123,15 +123,13 @@ shell rc files, anything that gets snapshotted with the database.
 
 ## Rotation
 
-There is no in-place rotation yet. The pepper is single-version: the
-HKDF labels and AAD strings are all `…:v1`, and no key-id is stored
-inside the wrapped blobs. To change it: drop the database, generate a new
-pepper, run `init`, re-issue invites. (There is no "dump users, re-wrap"
-path — existing rows can only be unwrapped with the original pepper.)
-
-A future revision will add a key-id byte inside the wrapped blob plus an
-admin re-wrap command. Until then, treat the pepper as permanent for the
-lifetime of the database.
+There is no in-place rotation. The pepper is single-version: the HKDF
+labels and AAD strings are all `…:v1`, and no key-id is stored inside the
+wrapped blobs. To change it: drop the database, generate a new pepper, run
+`init`, re-issue invites. (There is no "dump users, re-wrap" path —
+existing rows can only be unwrapped with the original pepper.) Treat the
+pepper as permanent for the lifetime of the database. Adding rotation is
+[`docs/issues.md`](issues.md), entry 68.
 
 ## Loss
 

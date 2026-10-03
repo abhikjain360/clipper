@@ -178,7 +178,7 @@ pub fn start_clipboard_watcher(engine: Arc<SyncEngine>) {
                     let engine = Arc::clone(&engine);
                     rt.block_on(async {
                         if let Err(e) = engine
-                            .send_clipboard_payload(&payload.mime_type, &payload.bytes)
+                            .capture_clipboard_payload(&payload.mime_type, &payload.bytes)
                             .await
                         {
                             warn!("Clipboard upload failed: {}", e);

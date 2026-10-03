@@ -7,7 +7,7 @@ use std::{
 
 use clipper_client::{
     api_client::ClientError,
-    engine::{SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
+    engine::{ScheduleItem, SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
 };
 use hmac::{Hmac, Mac};
 use rand::RngExt;
@@ -15,7 +15,7 @@ use sha2::Sha256;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::unix::{OwnedReadHalf, OwnedWriteHalf},
-    sync::Mutex,
+    sync::{Mutex, Semaphore},
 };
 use tracing::{debug, warn};
 use zeroize::Zeroize;
@@ -25,14 +25,21 @@ use crate::{
     engine_manager::EngineManager,
     keychain::{self, Credentials},
     protocol::{
-        AuthChallenge, AuthenticateResult, ClipboardPayloadResult, CopyToLocalResult,
-        DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, DeviceListResult,
-        IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams, RegisterParams,
-        RegisterResult, UploadFileResult, ipc_client_auth_message, ipc_daemon_auth_message,
+        ActualsBetweenParams, AddCalendarSourceParams, AuthChallenge, AuthenticateResult,
+        ClipboardPayloadResult, CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest,
+        DaemonResponse, DeviceListResult, ExpandScheduleParams, IPC_AUTH_NONCE_BYTES,
+        IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams, RegisterParams, RegisterResult,
+        StartActualParams, UpdateScheduleItemParams, UploadFileResult, ipc_client_auth_message,
+        ipc_daemon_auth_message,
     },
 };
 
 const MAX_IPC_REQUEST_LINE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_IPC_REQUESTS_IN_FLIGHT: usize = 8;
+
+/// Bound on the HMAC handshake. Mirrors WS_HELLO_TIMEOUT in
+/// crates/server/src/ws.rs. A peer that never answers must not hold a slot.
+pub(crate) const IPC_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -47,10 +54,35 @@ pub async fn handle_connection(
     let writer = Arc::new(Mutex::new(write_half));
     let mut reader = BufReader::new(read_half);
 
-    if !authenticate_connection(&mut reader, &writer, &data_dir).await {
+    // Bound the handshake so a peer that connects and stays silent cannot
+    // hold a connection slot forever.
+    let authenticated = tokio::time::timeout(
+        IPC_HANDSHAKE_TIMEOUT,
+        authenticate_connection(&mut reader, &writer, &data_dir),
+    )
+    .await
+    .unwrap_or(false);
+    if !authenticated {
         return;
     }
 
+    run_connection(
+        reader,
+        writer,
+        engine_manager,
+        client_mgr,
+        Arc::new(Semaphore::new(MAX_IPC_REQUESTS_IN_FLIGHT)),
+    )
+    .await;
+}
+
+async fn run_connection(
+    mut reader: BufReader<OwnedReadHalf>,
+    writer: Arc<Mutex<OwnedWriteHalf>>,
+    engine_manager: Arc<EngineManager>,
+    client_mgr: Arc<ClientManager>,
+    requests_in_flight: Arc<Semaphore>,
+) {
     let (client_id, mut broadcast_rx) = client_mgr.register().await;
 
     // Send initial state
@@ -78,33 +110,41 @@ pub async fn handle_connection(
                         if trimmed.is_empty() {
                             continue;
                         }
-                        let response = match serde_json::from_str::<DaemonRequest>(&trimmed) {
-                            Ok(req) => dispatch_command(req, &engine_manager).await,
-                            Err(e) => DaemonResponse::error_message(
-                                String::new(),
-                                format!("Invalid request: {}", e),
-                            ),
-                        };
+                        let parsed = serde_json::from_str::<DaemonRequest>(&trimmed);
                         trimmed.zeroize();
-                        if let Ok(json) = serde_json::to_string(&response) {
-                            let mut w = writer.lock().await;
-                            let resp_line = format!("{}\n", json);
-                            if w.write_all(resp_line.as_bytes()).await.is_err() {
-                                break;
+                        match parsed {
+                            Ok(req) => {
+                                let bypasses_slots = matches!(req.command, DaemonCommand::Logout(_));
+                                let requests_in_flight = Arc::clone(&requests_in_flight);
+                                let engine_manager = Arc::clone(&engine_manager);
+                                let writer = Arc::clone(&writer);
+                                tokio::spawn(async move {
+                                    let permit = if bypasses_slots {
+                                        None
+                                    } else {
+                                        match requests_in_flight.acquire_owned().await {
+                                            Ok(permit) => Some(permit),
+                                            Err(_) => return,
+                                        }
+                                    };
+                                    let response = dispatch_command(req, &engine_manager).await;
+                                    _ = write_response(&writer, response).await;
+                                    drop(permit);
+                                });
+                            }
+                            Err(e) => {
+                                let response = DaemonResponse::error_message(
+                                    String::new(),
+                                    format!("Invalid request: {}", e),
+                                );
+                                if !write_response(&writer, response).await {
+                                    break;
+                                }
                             }
                         }
                     }
                     Err(RequestLineError::TooLong) => {
                         warn!(client_id, max_bytes = MAX_IPC_REQUEST_LINE_BYTES, "IPC request line too large");
-                        let response = DaemonResponse::error_message(
-                            String::new(),
-                            "Request line too large",
-                        );
-                        if let Ok(json) = serde_json::to_string(&response) {
-                            let mut w = writer.lock().await;
-                            let resp_line = format!("{}\n", json);
-                            _ = w.write_all(resp_line.as_bytes()).await;
-                        }
                         break;
                     }
                     Err(RequestLineError::Utf8) => {
@@ -128,7 +168,8 @@ pub async fn handle_connection(
             }
         } => {}
         _ = async {
-            while let Some(event_line) = broadcast_rx.recv().await {
+            while broadcast_rx.changed().await.is_ok() {
+                let event_line = broadcast_rx.borrow_and_update().clone();
                 let mut w = writer_for_broadcast.lock().await;
                 let line = format!("{}\n", event_line);
                 if w.write_all(line.as_bytes()).await.is_err() {
@@ -138,8 +179,21 @@ pub async fn handle_connection(
         } => {}
     }
 
+    requests_in_flight.close();
+    if let Err(error) = shutdown_connection(reader.get_ref()) {
+        warn!(client_id, %error, "Failed to shut down IPC connection");
+    }
     client_mgr.unregister(client_id).await;
     debug!(client_id, "Client disconnected");
+}
+
+fn shutdown_connection(reader: &OwnedReadHalf) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    if unsafe { libc::shutdown(reader.as_ref().as_raw_fd(), libc::SHUT_RDWR) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 async fn authenticate_connection(
@@ -382,7 +436,9 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
         DaemonCommand::Login(params) => cmd_login(id, params, manager).await,
         DaemonCommand::Register(params) => cmd_register(id, params, manager).await,
         DaemonCommand::GetState => cmd_get_state(id, manager).await,
-        DaemonCommand::Logout => cmd_logout(id, manager).await,
+        DaemonCommand::Logout(params) => {
+            cmd_logout(id, params.unwrap_or_default().cancel_running_work, manager).await
+        }
         // Everything else needs a session: resolve the engine once, or report
         // that the user has not logged in yet.
         command => {
@@ -426,11 +482,36 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 DaemonCommand::GetCollabDocMeta(params) => {
                     cmd_get_collab_doc_meta(id, params.object_id, &engine).await
                 }
+                DaemonCommand::CreateScheduleItem(params) => {
+                    cmd_create_schedule_item(id, params.item, &engine).await
+                }
+                DaemonCommand::UpdateScheduleItem(params) => {
+                    cmd_update_schedule_item(id, params, &engine).await
+                }
+                DaemonCommand::DeleteScheduleObject(params) => {
+                    cmd_delete_schedule_object(id, params.object_id, &engine).await
+                }
+                DaemonCommand::ExpandSchedule(params) => {
+                    cmd_expand_schedule(id, params, &engine).await
+                }
+                DaemonCommand::AddCalendarSource(params) => {
+                    cmd_add_calendar_source(id, params, &engine).await
+                }
+                DaemonCommand::StartActual(params) => cmd_start_actual(id, params, &engine).await,
+                DaemonCommand::StopActual(params) => {
+                    cmd_stop_actual(id, params.object_id, &engine).await
+                }
+                DaemonCommand::ActualsBetween(params) => {
+                    cmd_actuals_between(id, params, &engine).await
+                }
+                DaemonCommand::SyncCalendarSource(params) => {
+                    cmd_sync_calendar_source(id, params.object_id, &engine).await
+                }
                 DaemonCommand::Authenticate(_)
                 | DaemonCommand::Login(_)
                 | DaemonCommand::Register(_)
                 | DaemonCommand::GetState
-                | DaemonCommand::Logout => unreachable!("handled by the outer match"),
+                | DaemonCommand::Logout(_) => unreachable!("handled by the outer match"),
             }
         }
     }
@@ -552,20 +633,24 @@ async fn cmd_register(
     }
 }
 
-async fn cmd_logout(id: String, manager: &EngineManager) -> DaemonResponse {
+async fn cmd_logout(
+    id: String,
+    cancel_running_work: bool,
+    manager: &EngineManager,
+) -> DaemonResponse {
     // Nothing to tear down if the user never logged in this daemon lifetime.
     let Some(engine) = manager.engine().await else {
-        return DaemonResponse::success(id, None);
+        return json_success(id, clipper_client::engine::LogoutOutcome::SignedOut);
     };
-    match engine.logout().await {
-        Ok(()) => {
-            if let Err(e) = keychain::clear_credentials() {
-                warn!("Failed to clear stored server profile: {}", e);
+    match engine.logout(cancel_running_work).await {
+        Ok(outcome) => {
+            if outcome == clipper_client::engine::LogoutOutcome::SignedOut {
+                if let Err(e) = keychain::clear_credentials() {
+                    warn!("Failed to clear stored server profile: {}", e);
+                }
+                manager.clear().await;
             }
-            // Drop the engine so the next login/register can target a different
-            // server without restarting the daemon.
-            manager.clear().await;
-            DaemonResponse::success(id, None)
+            json_success(id, outcome)
         }
         Err(e) => client_error(id, e),
     }
@@ -705,6 +790,111 @@ async fn cmd_delete_collab_doc(
     }
 }
 
+async fn cmd_create_schedule_item(
+    id: String,
+    item: ScheduleItem,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.create_schedule_item(item).await {
+        Ok(object_id) => json_success(id, object_id),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_update_schedule_item(
+    id: String,
+    params: UpdateScheduleItemParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine
+        .update_schedule_item(&params.object_id, params.item, params.expected_revision)
+        .await
+    {
+        Ok(object_id) => json_success(id, object_id),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_delete_schedule_object(
+    id: String,
+    object_id: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.delete_schedule_object(&object_id).await {
+        Ok(()) => DaemonResponse::success(id, None),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_expand_schedule(
+    id: String,
+    params: ExpandScheduleParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine
+        .expand_schedule(&params.from, &params.to, &params.observer_zone)
+        .await
+    {
+        Ok(occurrences) => json_success(id, occurrences),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_start_actual(
+    id: String,
+    params: StartActualParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.start_actual(params.plan_context.as_deref()).await {
+        Ok(object_id) => json_success(id, object_id),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_stop_actual(
+    id: String,
+    object_id: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.stop_actual(&object_id).await {
+        Ok(replacement) => json_success(id, replacement),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_actuals_between(
+    id: String,
+    params: ActualsBetweenParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.actuals_between(&params.from, &params.to).await {
+        Ok(actuals) => json_success(id, actuals),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_add_calendar_source(
+    id: String,
+    params: AddCalendarSourceParams,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.add_calendar_source(&params.name, &params.url).await {
+        Ok(object_id) => json_success(id, object_id),
+        Err(e) => client_error(id, e),
+    }
+}
+
+async fn cmd_sync_calendar_source(
+    id: String,
+    object_id: String,
+    engine: &Arc<SyncEngine>,
+) -> DaemonResponse {
+    match engine.sync_calendar_source(&object_id).await {
+        Ok(report) => json_success(id, report),
+        Err(e) => client_error(id, e),
+    }
+}
+
 async fn cmd_rename_collab_doc(
     id: String,
     object_id: String,
@@ -760,6 +950,100 @@ fn platform_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn logout_is_read_when_all_request_slots_are_taken() {
+        let (client, daemon) = tokio::net::UnixStream::pair().unwrap();
+        let (read_half, write_half) = daemon.into_split();
+        let writer = Arc::new(Mutex::new(write_half));
+        let manager = EngineManager::new(PathBuf::new(), "http://127.0.0.1:8787".into(), None);
+        let clients = Arc::new(ClientManager::new());
+        let slots = Arc::new(Semaphore::new(MAX_IPC_REQUESTS_IN_FLIGHT));
+        let _permits = Arc::clone(&slots)
+            .acquire_many_owned(MAX_IPC_REQUESTS_IN_FLIGHT as u32)
+            .await
+            .unwrap();
+        let task = tokio::spawn(run_connection(
+            BufReader::new(read_half),
+            writer,
+            manager,
+            clients,
+            slots,
+        ));
+        let (client_read, mut client_write) = client.into_split();
+        let mut reader = BufReader::new(client_read);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        for request in [
+            DaemonRequest::new("waiting".into(), DaemonCommand::GetState),
+            DaemonRequest::new("logout".into(), DaemonCommand::Logout(None)),
+        ] {
+            client_write
+                .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            loop {
+                line.clear();
+                reader.read_line(&mut line).await.unwrap();
+                if let DaemonResponse::Success { id, .. } = serde_json::from_str(&line).unwrap()
+                    && id == "logout"
+                {
+                    break;
+                }
+            }
+        })
+        .await;
+        task.abort();
+        result.expect("logout bypasses occupied request slots");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_request_closes_the_socket_with_other_writer_owners() {
+        let (client, daemon) = tokio::net::UnixStream::pair().unwrap();
+        let (read_half, write_half) = daemon.into_split();
+        let writer = Arc::new(Mutex::new(write_half));
+        let held_writer = Arc::clone(&writer);
+        let manager = EngineManager::new(PathBuf::new(), "http://127.0.0.1:8787".into(), None);
+        let task = tokio::spawn(run_connection(
+            BufReader::new(read_half),
+            writer,
+            manager,
+            Arc::new(ClientManager::new()),
+            Arc::new(Semaphore::new(MAX_IPC_REQUESTS_IN_FLIGHT)),
+        ));
+        let (client_read, mut client_write) = client.into_split();
+        let mut reader = BufReader::new(client_read);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        client_write
+            .write_all(&vec![b'x'; MAX_IPC_REQUEST_LINE_BYTES + 1])
+            .await
+            .unwrap();
+        task.await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "the client sees EOF while request writers still exist"
+        );
+        assert!(
+            held_writer
+                .lock()
+                .await
+                .write_all(b"late reply\n")
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn read_limited_line_accepts_normal_line() {

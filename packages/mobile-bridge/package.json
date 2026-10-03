@@ -24,15 +24,15 @@
   },
   "dependencies": {
     "@clipper/shared": "workspace:*",
-    "@ubjs/core": "0.31.0-5",
-    "uniffi-bindgen-react-native": "0.31.0-5"
+    "@ubjs/core": "0.31.0-6",
+    "uniffi-bindgen-react-native": "0.31.0-6"
   },
   "devDependencies": {
-    "@types/react": "19.2.18",
+    "@types/react": "19.3.0",
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
-    "oxfmt": "0.64.0",
-    "oxlint": "1.79.0",
-    "react-native": "0.86.2",
+    "oxfmt": "0.72.0",
+    "oxlint": "1.87.0",
+    "react-native": "0.86.3",
     "typescript": "7.0.2"
   },
   "peerDependencies": {
