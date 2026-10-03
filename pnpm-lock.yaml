@@ -282,6 +282,9 @@ importers:
       '@typescript/native-preview':
         specifier: 7.0.0-dev.20260707.2
         version: 7.0.0-dev.20260707.2
+      inline-style-prefixer:
+        specifier: 7.0.1
+        version: 7.0.1
       oxfmt:
         specifier: 0.72.0
         version: 0.72.0
