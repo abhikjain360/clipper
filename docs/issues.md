@@ -1123,6 +1123,7 @@ Each entry has:
   then would leave the source pointing at a purged file, stuck for good. A
   sync cancelled by logout between the upload and the save leaves one too.
 - **Decision:**
+
 ### 123. A series ending on 9999-12-31 never expands
 
 - **Status:** fixed in `90e4a4a`
@@ -1152,6 +1153,7 @@ Each entry has:
   live test's future outgrew the 2 MiB default stack and aborted.
 - **Decision:** fix (Claude): `run_work` boxes the operation as soon as it is
   called, so a caller holds only a pointer.
+
 ## Product decisions
 
 ### 25. A changed occurrence without its series rejects the whole import
@@ -1559,8 +1561,7 @@ Each entry has:
 - **What happened:** the nightly compiler used by `cargo-udeps` exceeded
   its default trait recursion limit while checking `Send` on the nested
   calendar-sync futures and the client's logout test future.
-- **Decision:** raise those two crates' compilation recursion limits to
-  256. The unused-dependency scan then passed without these warnings.
+- **Decision:** raise those two crates' compilation recursion limits to 256. The unused-dependency scan then passed without these warnings.
 
 ### 129. Updated web dependencies resolve a second React through peer contexts
 
@@ -1580,6 +1581,16 @@ Each entry has:
 - **What happened:** the backend contract uses `AbortSignal`, but the package
   declares only the ECMAScript library.
 - **Decision:** include the DOM library, as the web and mobile consumers do.
+
+### 131. The flake pnpm launcher cannot start pnpm 12
+
+- **Status:** decided; hold on pnpm 11.28.2
+- **Severity:** medium; every npm command fails with pnpm 12 pinned.
+- **Where:** the flake's pnpm launcher and `packageManager` pins.
+- **What happened:** pnpm 12.9.1 ships a native executable. The current
+  launcher executes it with Node, which throws a JavaScript syntax error.
+- **Decision:** use the latest stable pnpm 11 release. Upgrade the flake's
+  package-manager bootstrap before switching to pnpm 12.
 
 ## Docs
 
