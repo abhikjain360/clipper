@@ -61,6 +61,7 @@ pub struct DeviceSigningIdentity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalObjectRecord {
     pub id: String,
+    pub head: Option<LocalHead>,
     pub seen_generation: Option<u64>,
     pub event_seq: i64,
     pub created_seq: i64,
@@ -805,6 +806,7 @@ impl LocalStore {
 
         let local_record = LocalObjectRecord {
             id: object_id.to_string(),
+            head: Some(encrypted_object_head(&encrypted.object)?),
             seen_generation: sync_meta.seen_generation,
             event_seq: sync_meta.event_seq,
             created_seq: sync_meta.created_seq,
@@ -1273,6 +1275,7 @@ impl LocalStore {
 
         let local_record = LocalObjectRecord {
             id: item.id.clone(),
+            head: Some(encrypted_object_head(&encrypted.object)?),
             seen_generation: sync_meta.seen_generation,
             event_seq: sync_meta.event_seq,
             created_seq: sync_meta.created_seq,
@@ -1318,6 +1321,7 @@ impl LocalStore {
 
         let local_record = LocalObjectRecord {
             id: item.id.clone(),
+            head: Some(encrypted_object_head(encrypted)?),
             seen_generation,
             event_seq,
             created_seq,
@@ -1373,6 +1377,7 @@ impl LocalStore {
 
         let local_record = LocalObjectRecord {
             id: item.id.clone(),
+            head: None,
             seen_generation,
             event_seq,
             created_seq,
@@ -1733,6 +1738,7 @@ impl LocalStore {
         .map_err(cache_error)?;
         Ok(LocalObjectRecord {
             id: record.id.clone(),
+            head: Some(encrypted_object_head(encrypted)?),
             seen_generation: record.seen_generation,
             event_seq: record.event_seq,
             created_seq: record.created_seq,
@@ -1790,6 +1796,7 @@ impl LocalStore {
         .map_err(|error| LocalStoreError::EncryptedCache(error.to_string()))?;
         Ok(LocalObjectRecord {
             id: record.id.clone(),
+            head: Some(encrypted_object_head(encrypted)?),
             seen_generation: record.seen_generation,
             event_seq: record.event_seq,
             created_seq: record.created_seq,
@@ -1800,9 +1807,6 @@ impl LocalStore {
     }
 
     /// The schedule rows, each stamped with the revision it was read at.
-    ///
-    /// Only series records are read for a head, because reading a head is a
-    /// database read and a JSON parse, and no other record produces a view.
     async fn schedule_items_inner(
         &self,
         records: &[LocalObjectRecord],
@@ -1813,7 +1817,7 @@ impl LocalStore {
             {
                 continue;
             }
-            if let Some(head) = self.local_head(&record.id).await?
+            if let Some(head) = record.head
                 && let Some(view) = schedule_item_view_from_record(record, head.revision)
             {
                 views.push(view);
@@ -1999,20 +2003,67 @@ impl LocalStore {
         object_id: &str,
         expected: LocalHead,
     ) -> Result<Option<ScheduleRecord>, LocalStoreError> {
-        let _sync = self.sync.lock().await;
-        if self.local_head(object_id).await? != Some(expected) {
-            return Ok(None);
-        }
         Ok(self
-            .memory
-            .lock()
-            .await
-            .records
-            .get(object_id)
-            .and_then(|record| match &record.data {
-                LocalObjectData::Schedule(schedule) => Some(schedule.record.clone()),
+            .cached_record_at_head(object_id, expected)
+            .await?
+            .and_then(|record| match record.data {
+                LocalObjectData::Schedule(schedule) => Some(schedule.record),
                 _ => None,
             }))
+    }
+
+    pub async fn holds_cached_head(
+        &self,
+        object_id: &str,
+        expected: LocalHead,
+    ) -> Result<bool, LocalStoreError> {
+        Ok(self
+            .cached_record_at_head(object_id, expected)
+            .await?
+            .is_some())
+    }
+
+    async fn cached_record_at_head(
+        &self,
+        object_id: &str,
+        expected: LocalHead,
+    ) -> Result<Option<LocalObjectRecord>, LocalStoreError> {
+        let record = self.memory.lock().await.records.get(object_id).cloned();
+        let Some(record) = record.filter(|record| record.head == Some(expected)) else {
+            return Ok(None);
+        };
+        if matches!(
+            record.data,
+            LocalObjectData::Schedule(_) | LocalObjectData::Clipboard(_)
+        ) {
+            let available = async {
+                let Some(StoredObjectRecord::Present(present)) =
+                    self.stored_object_record(object_id).await?
+                else {
+                    return Ok(false);
+                };
+                if local_head_from_present(&present)? != expected {
+                    return Ok(false);
+                }
+                let payload = single_payload(present_encrypted_object(&present)?)?;
+                let Some(ciphertext) = self.stored_object_payload_ciphertext(object_id).await?
+                else {
+                    return Ok(false);
+                };
+                verify_payload_ciphertext(payload, &ciphertext)?;
+                Ok::<_, LocalStoreError>(true)
+            }
+            .await;
+            match available {
+                Ok(true) => {}
+                Ok(false) => return Ok(None),
+                Err(error) => {
+                    tracing::warn!(object_id, %error, "Cached content is unavailable; downloading the listed payload again");
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(Some(record))
     }
 
     /// Read records and their revision heads under the same sync lock. A write
@@ -2032,7 +2083,7 @@ impl LocalStore {
         let mut records = Vec::new();
         for record in cached {
             if let LocalObjectData::Schedule(schedule) = record.data
-                && let Some(head) = self.local_head(&record.id).await?
+                && let Some(head) = record.head
             {
                 records.push((record.id, schedule.record, head));
             }
@@ -2059,6 +2110,7 @@ impl LocalStore {
         let payload_size = meta.size.unwrap_or(plaintext.len() as i64);
         let local_record = LocalObjectRecord {
             id: record.id.clone(),
+            head: Some(encrypted_object_head(encrypted)?),
             seen_generation: record.seen_generation,
             event_seq: record.event_seq,
             created_seq: record.created_seq,
@@ -2375,7 +2427,10 @@ impl LocalStore {
     }
 
     #[cfg(test)]
-    async fn remove_payloads_for_object(&self, object_id: &str) -> Result<(), LocalStoreError> {
+    pub(crate) async fn remove_payloads_for_object(
+        &self,
+        object_id: &str,
+    ) -> Result<(), LocalStoreError> {
         self.with_database(|connection| sqlite::delete_payload(connection, object_id))
             .await
     }
@@ -2763,7 +2818,11 @@ fn present_encrypted_object(
 fn local_head_from_present(
     record: &StoredPresentObjectRecord,
 ) -> Result<LocalHead, LocalStoreError> {
-    let body = &present_encrypted_object(record)?.envelope.body;
+    encrypted_object_head(present_encrypted_object(record)?)
+}
+
+fn encrypted_object_head(encrypted: &EncryptedObject) -> Result<LocalHead, LocalStoreError> {
+    let body = &encrypted.envelope.body;
     Ok(LocalHead {
         revision: body.revision,
         parent_hash: crypto::object_envelope_parent_hash(body)
@@ -2850,6 +2909,7 @@ fn collab_record_from_present(record: &StoredPresentObjectRecord) -> Option<Loca
     };
     Some(LocalObjectRecord {
         id: record.id.clone(),
+        head: None,
         seen_generation: record.seen_generation,
         event_seq: record.event_seq,
         created_seq: record.created_seq,
@@ -2883,6 +2943,7 @@ fn decrypt_file_record(
     });
     let local_record = LocalObjectRecord {
         id: record.id.clone(),
+        head: Some(encrypted_object_head(encrypted)?),
         seen_generation: record.seen_generation,
         event_seq: record.event_seq,
         created_seq: record.created_seq,
@@ -3329,7 +3390,7 @@ pub enum LocalStoreError {
     BrowserStorage(String),
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     fn tombstone_body(object_id: &str, kind: ObjectKind, head: LocalHead) -> ObjectEnvelopeBody {
         ObjectEnvelopeBody {

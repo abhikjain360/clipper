@@ -178,7 +178,8 @@ document, an `updated` event means a new head was published. The client handles 
 5. Fetch that object from the server.
 6. Verify the envelope and check the revision against the anchor. For schedule
    and clipboard objects, compare the revision and envelope body hash with the
-   held head. If both match, mark the held object seen without downloading its
+   current session's in-memory record. If both match and its verified payload
+   ciphertext is available, mark the held object seen without downloading its
    payload. Otherwise download, verify and decrypt as before.
 7. Before storing the result, check again that the generation is still current
    and that no later delete has arrived. The revision check runs again at this
@@ -243,7 +244,8 @@ before it.
 2. For each listed object, the client skips it if a later delete is recorded.
 3. Otherwise the client verifies the envelope and checks the revision against
    the anchor. An unchanged schedule head, with the same revision and envelope
-   body hash as the held head, is marked seen without downloading its payload.
+   body hash as this session's in-memory record and available verified payload
+   ciphertext, is marked seen without downloading its payload.
    Other objects are decrypted as before: metadata, plus the payload for a
    schedule object or an app document. Changed payloads are still hash-checked
    and authenticated before they can replace the held copy.
@@ -276,8 +278,9 @@ clipboard items up to the stream start.
 2. The server returns only clipboard items inside the retention window.
 3. For each listed item, the client skips it if a later delete is recorded.
 4. Otherwise the client verifies the envelope and checks the revision against
-   the anchor. If the revision and envelope body hash match the held head, mark
-   the item seen and keep its cached content without a payload download.
+   the anchor. If the revision and envelope body hash match this session's
+   in-memory record and its verified payload ciphertext is available, mark the
+   item seen and keep its cached content without a payload download.
    Otherwise download, verify and decrypt metadata and payload.
 5. The client stores the item as present and marks it seen in the current
    generation.
@@ -295,8 +298,11 @@ If the clipboard snapshot fails, the client does not sweep clipboard state.
 For N held unchanged schedule or clipboard objects, a reconnect needs only
 the list pages, rather than N payload requests. Rollback, same-revision
 conflict, parent-link, signature, generation and sweep checks still apply.
-An absent or discarded cache entry is fetched again; an anchor alone never
-counts as held content.
+An absent or discarded cache entry is fetched again. A persisted head alone
+never counts as held content. Browser tabs share localStorage but have separate
+decrypted records in memory; another tab's persisted revision cannot make this
+tab skip a download. Each in-memory record carries the revision and body hash
+of its own content, including when it is used to prepare a write.
 
 ## Collab Docs
 

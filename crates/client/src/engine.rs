@@ -2733,7 +2733,10 @@ impl SyncEngine {
             revision: item.revision,
             parent_hash: crypto::object_envelope_parent_hash(&item.envelope.body)?,
         };
-        Ok(self.local_store.local_head(&item.id.to_string()).await? == Some(head))
+        self.local_store
+            .holds_cached_head(&item.id.to_string(), head)
+            .await
+            .map_err(Into::into)
     }
 
     /// The chain position this client holds for an object, or a typed error.
@@ -5656,9 +5659,13 @@ fn hex_string(bytes: &[u8]) -> String {
 #[path = "schedule_integration_tests.rs"]
 mod schedule_integration_tests;
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
 #[path = "sync_request_tests.rs"]
 mod sync_request_tests;
+
+#[cfg(all(test, target_family = "wasm"))]
+#[path = "browser_sync_tests.rs"]
+mod browser_sync_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "app_data_integration_tests.rs"]
@@ -5680,7 +5687,7 @@ mod offline_resume_tests;
 #[path = "logout_tests.rs"]
 mod logout_tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     pub(super) async fn request(socket: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {

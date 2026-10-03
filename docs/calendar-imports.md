@@ -154,12 +154,16 @@ imported alarms with user-authored alarms. Local agents can use
    manifest.
 
 Source reads during a refresh still fetch current metadata and verify its
-signature, revision and continuity. If that head matches the held source's
-revision and envelope body hash, reuse the verified decrypted source payload.
+signature, revision and continuity. If that head matches this session's
+in-memory source record's own revision and envelope body hash, and its verified
+payload ciphertext is available, reuse the decrypted source payload.
 Each new head is downloaded and authenticated once, then reused by later reads
 in that refresh and later refreshes until the head changes. Source write
 conflicts still reread current metadata; the cache never substitutes an older
-source revision for the server's current one.
+source revision for the server's current one. Another browser tab can advance
+shared localStorage without changing this tab's memory. Source reads then
+download the current payload; writes derived from an older in-memory record
+retain that record's own head so the server can reject a conflicting write.
 
 A device uploading a batch can discover that another device has finished and
 retired it. If the batch is still active, upload errors remain errors. If it

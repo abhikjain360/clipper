@@ -233,7 +233,8 @@ Each entry has:
 
 ### 36. Reconnects downloaded held payloads and invalidations reset the backoff
 
-- **Status:** payload downloads fixed in the working tree; not committed.
+- **Status:** payload downloads reduced in `1d519d3`; cache eligibility fixed
+  in the working tree; not committed.
   Invalidation backoff remains open.
 - **Severity:** medium (also costs an honest server). On main.
 - **Where:** `crates/client/src/engine.rs`, clipboard and schedule snapshots
@@ -243,8 +244,9 @@ Each entry has:
   clipboard items of 16 MiB. A server `invalidate` ends the connection cleanly, which resets the
   reconnect backoff to one second, so a server can repeat this continuously.
 - **Fix:** verify the envelope and retain rollback and continuity checks, then
-  skip payload downloads only when the held revision and envelope body hash
-  match. Mark unchanged objects seen so sweeps keep them. Request-count tests
+  skip payload downloads only when this session's in-memory revision and
+  envelope body hash match and verified payload ciphertext is available.
+  Mark unchanged objects seen so sweeps keep them. Request-count tests
   cover schedule and clipboard reconnects, changed payload verification, and
   rejected heads. List pages now request the default server maximum of 500.
 - **Remaining:** do not reset the backoff on a server `invalidate`.
@@ -760,9 +762,25 @@ Each entry has:
 
 ## Bugs
 
-### 162. Large calendar imports spent requests on unchanged and newly staged objects
+### 164. Shared persisted heads could hide missing content or misidentify a source revision
 
 - **Status:** fixed in the working tree; not committed.
+- **Severity:** medium. Found in `1d519d3`.
+- **Where:** client head reuse and local schedule source reads.
+- **What happened:** another browser tab could advance localStorage while this
+  tab still held older content or no content. A Present record could also
+  outlive its payload. Comparing only persisted heads skipped needed downloads
+  and could pair an old source payload with a newer head when preparing a write.
+- **Fix:** bind each in-memory record to its own revision and envelope body
+  hash. Snapshot, live materialization and source reuse require that record to
+  match the current head and its verified payload ciphertext to be present.
+  Missing or older content is downloaded and verified. Schedule writes use the
+  content's own head. Browser tests use two stores sharing real localStorage;
+  native tests remove payloads beneath Present records and count downloads.
+
+### 162. Large calendar imports spent requests on unchanged and newly staged objects
+
+- **Status:** fixed in `1d519d3`; cache eligibility follow-up in entry 164.
 - **Severity:** medium.
 - **Where:** client snapshots and `calendar_import.rs`.
 - **What happened:** reconnecting with 1,246 held work events needed roughly
@@ -777,7 +795,7 @@ Each entry has:
 
 ### 163. The recipe page shadowed its load error in a catch block
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `1d519d3`.
 - **Severity:** low.
 - **Where:** `web/src/kitchen/RecipePage.tsx`.
 - **Fix:** use `cause` for the session-change failure; preserve error handling.

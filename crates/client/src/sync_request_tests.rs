@@ -1,12 +1,11 @@
-use super::{
-    tests::{activate, request, response},
-    *,
-};
+#[cfg(not(target_family = "wasm"))]
+use super::tests::{activate, request, response};
+use super::*;
 
 const KEY: [u8; 32] = [7; 32];
 const SIGNING_KEY: [u8; 32] = [9; 32];
 
-fn encrypted_item(
+pub(super) fn encrypted_item(
     kind: ObjectKind,
     id: ObjectId,
     seq: i64,
@@ -24,7 +23,20 @@ fn encrypted_item(
     );
     let (meta_nonce, meta_ciphertext, nonce, ciphertext) = match kind {
         ObjectKind::Schedule => {
-            let record = super::adversarial_history_tests::source_record(&format!("event {seq}"));
+            let record = ScheduleRecord::Source(Box::new(CalendarSource {
+                id: SourceId::new(),
+                name: format!("event {seq}"),
+                kind: SourceKind::Ics {
+                    url: "https://example.invalid/calendar".into(),
+                },
+                enabled: true,
+                owner_email: None,
+                alarms_on: true,
+                target_device: None,
+                active_import: None,
+                pending_imports: Vec::new(),
+                retired_imports: Vec::new(),
+            }));
             let (meta_nonce, meta_ciphertext) =
                 encrypt_schedule_meta(&record.meta(), &KEY, &aad).unwrap();
             let (nonce, ciphertext) =
@@ -83,12 +95,14 @@ fn encrypted_item(
 }
 
 #[derive(Default)]
+#[cfg(not(target_family = "wasm"))]
 struct ServerState {
     objects: Vec<(ObjectListItem, Vec<u8>)>,
     requests: Vec<String>,
     damage_payload: bool,
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn serve(listener: tokio::net::TcpListener, state: Arc<std::sync::Mutex<ServerState>>) {
     loop {
         let (mut socket, _) = listener.accept().await.unwrap();
@@ -149,17 +163,31 @@ async fn serve(listener: tokio::net::TcpListener, state: Arc<std::sync::Mutex<Se
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn snapshot(engine: &Arc<SyncEngine>, kind: ObjectKind, seq: i64) -> u64 {
     let generation = engine.local_store.start_generation().await;
     match kind {
-        ObjectKind::Schedule => engine.snapshot_schedule(generation, seq).await.unwrap(),
-        ObjectKind::Clipboard => engine.snapshot_clipboard(generation, seq).await.unwrap(),
+        ObjectKind::Schedule => tokio::time::timeout(
+            Duration::from_secs(15),
+            engine.snapshot_schedule(generation, seq),
+        )
+        .await
+        .expect("schedule snapshot returns")
+        .unwrap(),
+        ObjectKind::Clipboard => tokio::time::timeout(
+            Duration::from_secs(15),
+            engine.snapshot_clipboard(generation, seq),
+        )
+        .await
+        .expect("clipboard snapshot returns")
+        .unwrap(),
         _ => unreachable!(),
     }
     generation
 }
 
 #[tokio::test]
+#[cfg(not(target_family = "wasm"))]
 async fn reconnect_snapshots_of_held_objects_request_only_list_pages() {
     for kind in [ObjectKind::Schedule, ObjectKind::Clipboard] {
         let directory = tempfile::tempdir().unwrap();
@@ -208,6 +236,69 @@ async fn reconnect_snapshots_of_held_objects_request_only_list_pages() {
 }
 
 #[tokio::test]
+#[cfg(not(target_family = "wasm"))]
+async fn missing_native_payloads_are_downloaded_even_with_a_present_record_and_preview() {
+    for kind in [ObjectKind::Schedule, ObjectKind::Clipboard] {
+        for live in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let engine = SyncEngine::new_with_data_dir(
+                &format!("http://{}", listener.local_addr().unwrap()),
+                directory.path(),
+            );
+            activate(&engine, "profile", KEY).await;
+            let id = uuid::Uuid::now_v7().into();
+            let state = Arc::new(std::sync::Mutex::new(ServerState {
+                objects: vec![encrypted_item(kind, id, 1, None)],
+                ..Default::default()
+            }));
+            let server = tokio::spawn(serve(listener, state.clone()));
+            let generation = snapshot(&engine, kind, 1).await;
+            let item = state.lock().unwrap().objects[0].0.clone();
+            let head = engine.local_head(&id.to_string()).await.unwrap();
+            engine
+                .local_store
+                .remove_payloads_for_object(&id.to_string())
+                .await
+                .unwrap();
+            assert_eq!(engine.local_head(&id.to_string()).await.unwrap(), head);
+            assert!(!engine.holds_listed_head(&item).await.unwrap());
+            assert!(
+                engine
+                    .local_store
+                    .schedule_record_at_head(&id.to_string(), head)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            state.lock().unwrap().requests.clear();
+            if live {
+                engine
+                    .materialize_object(generation, kind, id, 1)
+                    .await
+                    .unwrap();
+            } else {
+                snapshot(&engine, kind, 1).await;
+            }
+            assert_eq!(state.lock().unwrap().requests.len(), 2);
+            assert_eq!(
+                state
+                    .lock()
+                    .unwrap()
+                    .requests
+                    .iter()
+                    .filter(|path| path.contains("/payloads/"))
+                    .count(),
+                1
+            );
+            assert!(engine.holds_listed_head(&item).await.unwrap());
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+#[cfg(not(target_family = "wasm"))]
 async fn changed_heads_download_and_verify_the_payload_while_bad_heads_keep_the_held_copy() {
     let directory = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

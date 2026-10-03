@@ -1395,7 +1395,7 @@ pub enum ClientError {
     Other(String),
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_family = "wasm")))]
 mod crypto_tests {
     use super::*;
 
@@ -1521,7 +1521,7 @@ impl From<crate::local_store::LocalStoreError> for ClientError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
 
