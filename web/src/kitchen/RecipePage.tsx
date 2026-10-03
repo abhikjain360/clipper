@@ -86,9 +86,9 @@ export function RecipePage({
                 setAction(null);
                 setNotes("");
             }
-        } catch (error) {
+        } catch (cause) {
             if (mounted.current) {
-                const message = formatBackendError(error);
+                const message = formatBackendError(cause);
                 setChangeError(message);
                 onError(message);
             }

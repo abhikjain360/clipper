@@ -68,6 +68,7 @@ const UNPLANNED_TITLE: &str = "Unplanned";
 /// series while still refusing a hostile server's unbounded download.
 const MAX_SCHEDULE_PAYLOAD_CIPHERTEXT_BYTES: i64 = 256 * 1024;
 const RECENT_CLIPBOARD_LIMIT: usize = 100;
+const OBJECT_LIST_PAGE_SIZE: u64 = 500;
 /// MIME type used for plain-text clipboard entries.
 pub const TEXT_CLIPBOARD_MIME_TYPE: &str = "text/plain";
 const CLIPBOARD_HYDRATION_CONCURRENCY: usize = 8;
@@ -89,7 +90,7 @@ fn validate_snapshot_page(
 ) -> Result<(), ClientError> {
     let key = |cursor: ObjectListCursor| (cursor.created_seq, cursor.id.into_uuid());
     let mut previous = after.map(key);
-    if page.items.len() > 100 {
+    if page.items.len() > OBJECT_LIST_PAGE_SIZE as usize {
         return Err(ClientError::UnexpectedResponse(
             "snapshot page exceeds requested limit".into(),
         ));
@@ -2725,6 +2726,16 @@ impl SyncEngine {
             .map_err(Into::into)
     }
 
+    async fn holds_listed_head(&self, item: &ObjectListItem) -> Result<bool, ClientError> {
+        verify_object_list_item_envelope(item)?;
+        self.check_revision_advance(item).await?;
+        let head = LocalHead {
+            revision: item.revision,
+            parent_hash: crypto::object_envelope_parent_hash(&item.envelope.body)?,
+        };
+        Ok(self.local_store.local_head(&item.id.to_string()).await? == Some(head))
+    }
+
     /// The chain position this client holds for an object, or a typed error.
     async fn local_head(&self, object_id: &str) -> Result<LocalHead, ClientError> {
         self.local_store
@@ -3183,7 +3194,7 @@ impl SyncEngine {
             let page = api
                 .list_objects(
                     Some(ObjectKind::Schedule),
-                    Some(100),
+                    Some(OBJECT_LIST_PAGE_SIZE),
                     Some(stream_start_seq),
                     after,
                 )
@@ -3196,6 +3207,22 @@ impl SyncEngine {
                         .await?;
                     warn!(id = %item.id, kind = %item.kind, "Skipped a non-schedule object in the schedule snapshot");
                     continue;
+                }
+                match self.holds_listed_head(&item).await {
+                    Ok(true) => {
+                        self.local_store
+                            .mark_snapshot_seen(&item.id.to_string(), generation)
+                            .await?;
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        if let Err(error) = self.keep_held_revision(&item, generation, error).await
+                        {
+                            warn!(id = %item.id, "Failed to verify schedule object: {error}");
+                        }
+                        continue;
+                    }
                 }
                 match self
                     .decrypt_schedule_object_item(api, &item, &encryption_key)
@@ -3736,7 +3763,7 @@ impl SyncEngine {
             let page = api
                 .list_objects(
                     Some(ObjectKind::File),
-                    Some(100),
+                    Some(OBJECT_LIST_PAGE_SIZE),
                     Some(stream_start_seq),
                     after,
                 )
@@ -3853,7 +3880,7 @@ impl SyncEngine {
             let page = api
                 .list_objects(
                     Some(ObjectKind::Clipboard),
-                    Some(100),
+                    Some(OBJECT_LIST_PAGE_SIZE),
                     Some(stream_start_seq),
                     after,
                 )
@@ -3861,7 +3888,6 @@ impl SyncEngine {
             validate_snapshot_page(&page, after, stream_start_seq)?;
             let mut objects = stream::iter(page.items)
                 .map(|item| async move {
-                    let created_seq = item.created_seq;
                     if item.kind != ObjectKind::Clipboard {
                         let error = ClientError::UnexpectedObjectKind {
                             expected: ObjectKind::Clipboard,
@@ -3869,11 +3895,16 @@ impl SyncEngine {
                         };
                         return Err((item, error));
                     }
+                    match self.holds_listed_head(&item).await {
+                        Ok(true) => return Ok((item, None)),
+                        Ok(false) => {}
+                        Err(error) => return Err((item, error)),
+                    }
                     match self
                         .decrypt_clipboard_object_item_with_api(api, &item, encryption_key)
                         .await
                     {
-                        Ok(object) => Ok((object, created_seq)),
+                        Ok(object) => Ok((item, Some(object))),
                         Err(error) => Err((item, error)),
                     }
                 })
@@ -3881,8 +3912,13 @@ impl SyncEngine {
 
             while let Some(loaded) = objects.next().await {
                 match loaded {
-                    Ok((object, created_seq)) => {
-                        self.persist_clipboard_snapshot_item(&object, created_seq, generation)
+                    Ok((item, Some(object))) => {
+                        self.persist_clipboard_snapshot_item(&object, item.created_seq, generation)
+                            .await?;
+                    }
+                    Ok((item, None)) => {
+                        self.local_store
+                            .mark_snapshot_seen(&item.id.to_string(), generation)
                             .await?;
                     }
                     Err((item, error)) => {
@@ -4278,6 +4314,19 @@ impl SyncEngine {
                 created_seq = item.created_seq,
                 "Live create event seq differed from object created_seq",
             );
+        }
+
+        if matches!(kind, ObjectKind::Clipboard | ObjectKind::Schedule) {
+            match self.holds_listed_head(&item).await {
+                Ok(true) => {
+                    self.local_store
+                        .mark_snapshot_seen(&object_id_text, generation)
+                        .await?;
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(error) => return self.keep_held_revision(&item, generation, error).await,
+            }
         }
 
         match kind {
@@ -5606,6 +5655,10 @@ fn hex_string(bytes: &[u8]) -> String {
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "schedule_integration_tests.rs"]
 mod schedule_integration_tests;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "sync_request_tests.rs"]
+mod sync_request_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "app_data_integration_tests.rs"]

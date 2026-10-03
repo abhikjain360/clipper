@@ -1143,6 +1143,147 @@ async fn calendar_feed_server(
 
 #[tokio::test]
 #[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_new_calendar_batches_skip_event_reads_and_reuse_held_source_payloads() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let first =
+        register_proxy_engine(&format!("http://{address}"), &temp.path().join("first")).await;
+    first.stop_session_work().await;
+    *first.session_work.lock().unwrap() = (
+        first.history_epoch.load(Ordering::SeqCst),
+        crate::session_work::SessionWork::new(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let proxy = tokio::spawn(count_calendar_requests(listener, address, requests.clone()));
+    let engine = copy_session(&first, &url, &temp.path().join("counted")).await;
+    let text = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{}END:VCALENDAR\r\n", (0..8).map(|index| {
+        format!("BEGIN:VEVENT\r\nUID:meeting-{index}\r\nSUMMARY:Meeting {index}\r\nDTSTART:20261010T090000Z\r\nDTEND:20261010T100000Z\r\nDTSTAMP:20261008T000000Z\r\nEND:VEVENT\r\n")
+    }).collect::<String>());
+    let (feed_url, _, _, feed_task) = calendar_feed_server(text).await;
+    let source_id = engine.add_calendar_source("Work", &feed_url).await.unwrap();
+    requests.lock().unwrap().clear();
+    let report = engine.sync_calendar_source(&source_id).await.unwrap();
+    assert_eq!(report.added, 8);
+    let source = engine.read_calendar_source(&source_id).await.unwrap().0;
+    let paths = requests.lock().unwrap().clone();
+    for id in &source.active_import.as_ref().unwrap().events {
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.starts_with(&format!("GET /api/objects/{id}")))
+        );
+    }
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path.starts_with(&format!("GET /api/objects/{source_id}/payloads/")))
+    );
+
+    first.read_calendar_source(&source_id).await.unwrap();
+    first
+        .set_calendar_source_alarms(&source_id, false)
+        .await
+        .unwrap();
+    requests.lock().unwrap().clear();
+    let report = engine.sync_calendar_source(&source_id).await.unwrap();
+    assert!(report.feed_unchanged);
+    assert_eq!(report.unchanged, 8);
+    assert!(
+        !engine
+            .read_calendar_source(&source_id)
+            .await
+            .unwrap()
+            .0
+            .alarms_on
+    );
+    let paths = requests.lock().unwrap().clone();
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| path.starts_with(&format!("GET /api/objects/{source_id}/payloads/")))
+            .count(),
+        1
+    );
+    assert!(!paths.iter().any(|path| path.starts_with("POST ")));
+    requests.lock().unwrap().clear();
+    assert!(
+        engine
+            .sync_calendar_source(&source_id)
+            .await
+            .unwrap()
+            .feed_unchanged
+    );
+    assert!(
+        !requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path.contains("/payloads/"))
+    );
+    proxy.abort();
+    feed_task.abort();
+}
+
+async fn count_calendar_requests(
+    listener: tokio::net::TcpListener,
+    upstream: std::net::SocketAddr,
+    requests: Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let mut connections = tokio::task::JoinSet::new();
+    loop {
+        let (mut client, _) = tokio::select! {
+            accepted = listener.accept() => accepted.unwrap(),
+            _ = connections.join_next(), if !connections.is_empty() => continue,
+        };
+        let requests = requests.clone();
+        connections.spawn(async move {
+            let mut bytes = Vec::new();
+            let mut buffer = [0; 8192];
+            let (end, length) = loop {
+                let count = client.read(&mut buffer).await.unwrap();
+                if count == 0 {
+                    return;
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+                if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    requests
+                        .lock()
+                        .unwrap()
+                        .push(headers.lines().next().unwrap().into());
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    break (end, length);
+                }
+            };
+            while bytes.len() < end + 4 + length {
+                let count = client.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            let mut server = tokio::net::TcpStream::connect(upstream).await.unwrap();
+            server.write_all(&bytes[..end]).await.unwrap();
+            server
+                .write_all(b"\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            server.write_all(&bytes[end + 4..]).await.unwrap();
+            tokio::io::copy(&mut server, &mut client).await.unwrap();
+        });
+    }
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
 async fn live_reconnect_between_confirmation_and_handshake_cancels_the_attempt() {
     crate::ensure_crypto_provider();
     let temp = tempfile::tempdir().unwrap();

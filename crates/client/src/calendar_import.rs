@@ -274,7 +274,8 @@ impl SyncEngine {
         let batch = self
             .stage_calendar_import(object_id, &text, fetched_at)
             .await?;
-        self.finish_calendar_import(object_id, &text, &batch).await
+        self.finish_new_calendar_import(object_id, &text, &batch)
+            .await
     }
 
     async fn retire_pending_import(
@@ -396,6 +397,27 @@ impl SyncEngine {
         text: &str,
         batch: &CalendarImport,
     ) -> Result<IngestReport, ClientError> {
+        self.finish_calendar_import_inner(object_id, text, batch, false)
+            .await
+    }
+
+    async fn finish_new_calendar_import(
+        &self,
+        object_id: &str,
+        text: &str,
+        batch: &CalendarImport,
+    ) -> Result<IngestReport, ClientError> {
+        self.finish_calendar_import_inner(object_id, text, batch, true)
+            .await
+    }
+
+    async fn finish_calendar_import_inner(
+        &self,
+        object_id: &str,
+        text: &str,
+        batch: &CalendarImport,
+        new_batch: bool,
+    ) -> Result<IngestReport, ClientError> {
         let (source, _) = self.read_calendar_source(object_id).await?;
         if !source
             .pending_imports
@@ -435,7 +457,7 @@ impl SyncEngine {
             if self.history_epoch.load(Ordering::SeqCst) != epoch {
                 return Err(ClientError::NotAuthenticated);
             }
-            if let Err(error) = self.save_import_event(id, event).await {
+            if let Err(error) = self.save_import_event(id, event, new_batch).await {
                 let (current, _) = self.read_calendar_source(object_id).await?;
                 if current
                     .pending_imports
@@ -534,8 +556,14 @@ impl SyncEngine {
         &self,
         id: &ObjectId,
         event: &IngestedEvent,
+        new_batch: bool,
     ) -> Result<(), ClientError> {
-        if let Some(current) = self.load_import_event(&id.to_string()).await? {
+        let current = if new_batch {
+            None
+        } else {
+            self.load_import_event(&id.to_string()).await?
+        };
+        if let Some(current) = current {
             if current.as_ingested() != Some(event) {
                 return Err(CalendarImportError::EventChanged.into());
             }
@@ -698,6 +726,20 @@ impl SyncEngine {
             return Err(ClientError::InvalidArgument(
                 "Import event identity mismatch".into(),
             ));
+        }
+        if source && self.holds_listed_head(item).await? {
+            let expected = LocalHead {
+                revision: item.revision,
+                parent_hash: crypto::object_envelope_parent_hash(&item.envelope.body)?,
+            };
+            if let Some(record) = self
+                .local_store
+                .schedule_record_at_head(id, expected)
+                .await?
+                && record.as_source().is_some()
+            {
+                return Ok(Some(record));
+            }
         }
         let key = self.current_encryption_key().await?;
         let (record, encrypted) = self

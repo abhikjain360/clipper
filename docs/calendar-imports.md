@@ -126,6 +126,10 @@ imported alarms with user-authored alarms. Local agents can use
    other pending batches and source settings. Upload/verify every event
    in the pending batch. Deterministic object IDs allow resuming accepted writes
    after a lost response; an existing event must match the complete expected data.
+   A freshly staged batch creates its deterministic event IDs directly without
+   an existence GET for each event. A create conflict still reads and verifies
+   the existing event against the complete expected data. Resuming a pending
+   batch keeps the existence and data checks.
 5. Publish one source revision that removes this pending batch and compares its
    fetch time with the active batch. A later fetch activates and retires the
    previous batch. An earlier fetch is retired without replacing the active
@@ -148,6 +152,14 @@ imported alarms with user-authored alarms. Local agents can use
    they do not weaken rollback, body identity or parent-link checks. Source
    reads overtaken by a newer authenticated head retry before updating the
    manifest.
+
+Source reads during a refresh still fetch current metadata and verify its
+signature, revision and continuity. If that head matches the held source's
+revision and envelope body hash, reuse the verified decrypted source payload.
+Each new head is downloaded and authenticated once, then reused by later reads
+in that refresh and later refreshes until the head changes. Source write
+conflicts still reread current metadata; the cache never substitutes an older
+source revision for the server's current one.
 
 A device uploading a batch can discover that another device has finished and
 retired it. If the batch is still active, upload errors remain errors. If it

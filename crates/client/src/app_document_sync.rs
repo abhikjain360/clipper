@@ -506,7 +506,7 @@ impl SyncEngine {
             let page = api
                 .list_objects(
                     Some(ObjectKind::AppDocument),
-                    Some(100),
+                    Some(OBJECT_LIST_PAGE_SIZE),
                     Some(stream_start_seq),
                     after,
                 )

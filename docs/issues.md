@@ -231,18 +231,23 @@ Each entry has:
   `hello_ack.server_time` plus a small grace window.
 - **Decision:**
 
-### 36. Every reconnect downloads every retained clipboard payload again
+### 36. Reconnects downloaded held payloads and invalidations reset the backoff
 
-- **Status:** open; checked in code
+- **Status:** payload downloads fixed in the working tree; not committed.
+  Invalidation backoff remains open.
 - **Severity:** medium (also costs an honest server). On main.
-- **Where:** `crates/client/src/engine.rs`, `snapshot_clipboard`.
-- **What happens:** each pass downloads and decrypts every listed clipboard
-  item even when the device already holds that revision, up to 100 items of
-  16 MiB. A server `invalidate` ends the connection cleanly, which resets the
+- **Where:** `crates/client/src/engine.rs`, clipboard and schedule snapshots
+  and live materialization.
+- **What happened:** each pass downloaded and decrypted every listed clipboard
+  or schedule item even when the device already held that revision, up to 100
+  clipboard items of 16 MiB. A server `invalidate` ends the connection cleanly, which resets the
   reconnect backoff to one second, so a server can repeat this continuously.
-- **Recommendation:** skip the download when the held revision and body hash
-  match the listing, and do not reset the backoff on a server `invalidate`.
-- **Decision:**
+- **Fix:** verify the envelope and retain rollback and continuity checks, then
+  skip payload downloads only when the held revision and envelope body hash
+  match. Mark unchanged objects seen so sweeps keep them. Request-count tests
+  cover schedule and clipboard reconnects, changed payload verification, and
+  rejected heads. List pages now request the default server maximum of 500.
+- **Remaining:** do not reset the backoff on a server `invalidate`.
 
 ### 37. Browser clipboard sync stops on large items
 
@@ -754,6 +759,28 @@ Each entry has:
 - **Decision:** fix (Claude): count every separator the parser splits on.
 
 ## Bugs
+
+### 162. Large calendar imports spent requests on unchanged and newly staged objects
+
+- **Status:** fixed in the working tree; not committed.
+- **Severity:** medium.
+- **Where:** client snapshots and `calendar_import.rs`.
+- **What happened:** reconnecting with 1,246 held work events needed roughly
+  1,264 requests and could hit the 1,200/minute user limit. New imports also
+  checked every fresh deterministic ID with a GET. A refresh repeatedly
+  downloaded the same source payload.
+- **Fix:** unchanged held heads need only 500-item list pages. New batches
+  create event IDs directly, while conflicts and resumed batches retain full
+  verification. Source reads reuse a verified held payload only after checking
+  current metadata and its exact head. Behaviour tests count list, event and
+  source payload requests and verify changed or rejected heads.
+
+### 163. The recipe page shadowed its load error in a catch block
+
+- **Status:** fixed in the working tree; not committed.
+- **Severity:** low.
+- **Where:** `web/src/kitchen/RecipePage.tsx`.
+- **Fix:** use `cause` for the session-change failure; preserve error handling.
 
 ### 158. A stale keychain copy could restore a different account
 

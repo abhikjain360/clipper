@@ -1994,6 +1994,27 @@ impl LocalStore {
             .collect()
     }
 
+    pub async fn schedule_record_at_head(
+        &self,
+        object_id: &str,
+        expected: LocalHead,
+    ) -> Result<Option<ScheduleRecord>, LocalStoreError> {
+        let _sync = self.sync.lock().await;
+        if self.local_head(object_id).await? != Some(expected) {
+            return Ok(None);
+        }
+        Ok(self
+            .memory
+            .lock()
+            .await
+            .records
+            .get(object_id)
+            .and_then(|record| match &record.data {
+                LocalObjectData::Schedule(schedule) => Some(schedule.record.clone()),
+                _ => None,
+            }))
+    }
+
     /// Read records and their revision heads under the same sync lock. A write
     /// derived from a record must follow that record's head, even if live sync
     /// receives another device's edit while the caller is working.

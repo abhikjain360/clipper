@@ -176,7 +176,10 @@ document, an `updated` event means a new head was published. The client handles 
 4. Otherwise record a hidden pending fetch, keeping any anchor the object
    already has.
 5. Fetch that object from the server.
-6. Verify the envelope, check the revision against the anchor, and decrypt.
+6. Verify the envelope and check the revision against the anchor. For schedule
+   and clipboard objects, compare the revision and envelope body hash with the
+   held head. If both match, mark the held object seen without downloading its
+   payload. Otherwise download, verify and decrypt as before.
 7. Before storing the result, check again that the generation is still current
    and that no later delete has arrived. The revision check runs again at this
    point, because another event may have landed during the fetch.
@@ -232,14 +235,18 @@ After receiving the stream start, the client lists all files, and separately
 all schedule objects and all app documents, whose sequence number is at or
 before it.
 
-1. The client asks for pages of objects in sequence-number order, bounded by the
+1. The client asks for pages of up to 500 objects, the server's default maximum,
+   in sequence-number order, bounded by the
    stream start (`created_seq_lte = stream_start_seq`). Each page must continue
    from the previous one and stay within the stream start; a page that does not
    fails the snapshot.
 2. For each listed object, the client skips it if a later delete is recorded.
-3. Otherwise the client verifies the envelope, checks the revision against the
-   anchor, and decrypts the metadata, plus the payload for a schedule object or
-   an app document.
+3. Otherwise the client verifies the envelope and checks the revision against
+   the anchor. An unchanged schedule head, with the same revision and envelope
+   body hash as the held head, is marked seen without downloading its payload.
+   Other objects are decrypted as before: metadata, plus the payload for a
+   schedule object or an app document. Changed payloads are still hash-checked
+   and authenticated before they can replace the held copy.
 4. The client stores the object as present and marks it seen in the current
    generation.
 5. The client continues until the last page.
@@ -264,10 +271,14 @@ later generation.
 After receiving the stream start, the client lists the server's retained
 clipboard items up to the stream start.
 
-1. The client asks for retained clipboard pages bounded by the stream start.
+1. The client asks for retained clipboard pages of up to 500 items, bounded by
+   the stream start.
 2. The server returns only clipboard items inside the retention window.
 3. For each listed item, the client skips it if a later delete is recorded.
-4. Otherwise the client verifies the envelope and decrypts metadata and payload.
+4. Otherwise the client verifies the envelope and checks the revision against
+   the anchor. If the revision and envelope body hash match the held head, mark
+   the item seen and keep its cached content without a payload download.
+   Otherwise download, verify and decrypt metadata and payload.
 5. The client stores the item as present and marks it seen in the current
    generation.
 6. The client continues until the last page.
@@ -280,6 +291,12 @@ An item missing from the retained listing is outside the retention window, so
 the client removes its local copy at the sweep.
 
 If the clipboard snapshot fails, the client does not sweep clipboard state.
+
+For N held unchanged schedule or clipboard objects, a reconnect needs only
+the list pages, rather than N payload requests. Rollback, same-revision
+conflict, parent-link, signature, generation and sweep checks still apply.
+An absent or discarded cache entry is fetched again; an anchor alone never
+counts as held content.
 
 ## Collab Docs
 
