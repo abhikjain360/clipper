@@ -1797,6 +1797,14 @@ impl LocalStore {
         if let Some(record) = self.read_device_identity_record(profile_id).await? {
             match device_identity_from_record(record, profile_id, wrapping_key) {
                 Ok(identity) => return Ok(identity),
+                Err(LocalStoreError::UnsupportedDeviceIdentityVersion(version))
+                    if version < DEVICE_IDENTITY_RECORD_VERSION_V3 =>
+                {
+                    tracing::warn!(
+                        version,
+                        "Replacing a local device identity stored in an older format"
+                    );
+                }
                 Err(
                     error @ (LocalStoreError::DeviceIdentityDecrypt(_)
                     | LocalStoreError::UnsupportedDeviceIdentityVersion(_)
@@ -2048,6 +2056,14 @@ impl LocalStore {
                 .map_err(LocalStoreError::from)?;
             match device_identity_from_record(record, profile_id, wrapping_key) {
                 Ok(identity) => return Ok(identity),
+                Err(LocalStoreError::UnsupportedDeviceIdentityVersion(version))
+                    if version < DEVICE_IDENTITY_RECORD_VERSION_V3 =>
+                {
+                    tracing::warn!(
+                        version,
+                        "Replacing a local device identity stored in an older format"
+                    );
+                }
                 Err(
                     error @ (LocalStoreError::DeviceIdentityDecrypt(_)
                     | LocalStoreError::UnsupportedDeviceIdentityVersion(_)
@@ -3419,6 +3435,46 @@ mod tests {
             json.get("wrapped_signing_secret_key").is_none(),
             "forged plaintext record must not be promoted to a wrapped record"
         );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn an_older_format_device_identity_is_replaced_and_a_newer_one_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::new(tmp.path());
+        let profile = "profile-a";
+        let wrapping_key = [5_u8; 32];
+        let path = store.device_identity_path(profile);
+        for (version, replaced) in [(2_u64, true), (4_u64, false)] {
+            tampered_device_identity_record(&store, profile, &wrapping_key, TEST_DEVICE_ID.into())
+                .await;
+            let bytes = tokio::fs::read(&path).await.expect("identity bytes");
+            let mut json: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("identity json");
+            json["version"] = version.into();
+            write_private_file_atomic(&path, &serde_json::to_vec_pretty(&json).unwrap())
+                .await
+                .expect("rewrite version");
+
+            let result = store
+                .load_or_create_device_signing_identity(profile, &wrapping_key)
+                .await;
+            if replaced {
+                let identity = result.expect("an older record is replaced");
+                assert_eq!(identity.device_id, None);
+                let stored = store
+                    .load_device_signing_identity(profile, &wrapping_key)
+                    .await
+                    .expect("the replacement is readable")
+                    .expect("the replacement is stored");
+                assert_eq!(stored.signing_secret_key, identity.signing_secret_key);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(LocalStoreError::UnsupportedDeviceIdentityVersion(4))
+                ));
+            }
+        }
     }
 
     /// Persist an identity, then rewrite one field of the stored JSON record.
