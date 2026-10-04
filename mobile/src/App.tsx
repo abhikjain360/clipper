@@ -1,5 +1,6 @@
 import {
   AlarmClock,
+  Calendar,
   Clipboard,
   Copy,
   Download,
@@ -11,13 +12,15 @@ import {
   Files,
   Folder,
   LogOut,
+  Menu,
+  PanelLeftClose,
   Pencil,
   RefreshCw,
   Smartphone,
   Trash2,
   X,
 } from "lucide-react-native";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   alarmsSupported,
   areNotificationsEnabled,
@@ -34,6 +37,7 @@ import {
 } from "../modules/clipper-alarm";
 import {
   AppState as NativeAppState,
+  KeyboardAvoidingView,
   Linking,
   Modal,
   PermissionsAndroid,
@@ -53,17 +57,18 @@ import {
   Paragraph,
   ScrollView,
   Spinner,
-  Tabs,
   Text,
   XStack,
   YStack,
 } from "tamagui";
 import type {
+  ActualView,
   AppState,
   ClipboardItem,
   CollabItem,
   DeviceInfo,
   FileItem,
+  OccurrenceView,
   RunningWorkView,
 } from "@clipper/shared";
 import {
@@ -81,7 +86,16 @@ import {
 import { subscribeToCollabDoc, type CollabDocStatus } from "./collabDoc";
 import tamaguiConfig from "./tamagui.config";
 
-type TabName = "clipboard" | "files" | "devices" | "collab" | "alarms";
+type TabName = "clipboard" | "files" | "devices" | "collab" | "schedule" | "alarms";
+
+const navItems = [
+  { value: "clipboard", label: "Clipboard", Icon: Clipboard },
+  { value: "files", label: "Files", Icon: Folder },
+  { value: "devices", label: "Devices", Icon: Smartphone },
+  { value: "collab", label: "Collab", Icon: FileCode },
+  { value: "schedule", label: "Schedule", Icon: Calendar },
+  { value: "alarms", label: "Alarms", Icon: AlarmClock },
+] as const satisfies readonly { value: TabName; label: string; Icon: typeof Clipboard }[];
 type ViewerContent = { title: string; content: string };
 
 // Android renders code with the platform "monospace" family; iOS has no such
@@ -327,83 +341,93 @@ function LoginScreen({
   }
 
   return (
-    <YStack flex={1} items="center" justify="center" p="$4" bg="#101214">
-      <Card width="100%" maxW={460} p="$5" bg="#171a1d" borderColor="#252b31" borderWidth={1}>
-        <YStack gap="$4">
-          <YStack gap="$2">
-            <H1 size="$9">Clipper</H1>
-            <Paragraph color="#9aa4ad">Encrypted clipboard and file sync</Paragraph>
-          </YStack>
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
+      <ScrollView
+        flex={1}
+        bg="#101214"
+        contentContainerStyle={{ grow: 1 }}
+        keyboardShouldPersistTaps="handled"
+      >
+        <YStack flex={1} items="center" justify="center" p="$4">
+          <Card width="100%" maxW={460} p="$5" bg="#171a1d" borderColor="#252b31" borderWidth={1}>
+            <YStack gap="$4">
+              <YStack gap="$2">
+                <H1 size="$9">Clipper</H1>
+                <Paragraph color="#9aa4ad">Encrypted clipboard and file sync</Paragraph>
+              </YStack>
 
-          <XStack gap="$2">
-            <Button
-              flex={1}
-              theme={mode === "login" ? "blue" : undefined}
-              onPress={() => setMode("login")}
-            >
-              Login
-            </Button>
-            <Button
-              flex={1}
-              theme={mode === "register" ? "blue" : undefined}
-              onPress={() => setMode("register")}
-            >
-              Register
-            </Button>
-          </XStack>
+              <XStack gap="$2">
+                <Button
+                  flex={1}
+                  theme={mode === "login" ? "blue" : undefined}
+                  onPress={() => setMode("login")}
+                >
+                  Login
+                </Button>
+                <Button
+                  flex={1}
+                  theme={mode === "register" ? "blue" : undefined}
+                  onPress={() => setMode("register")}
+                >
+                  Register
+                </Button>
+              </XStack>
 
-          <Field label="Server URL">
-            <Input
-              value={serverUrl}
-              autoCapitalize="none"
-              autoCorrect={false}
-              onChangeText={setServerUrl}
-            />
-          </Field>
-          <Field label="Username">
-            <Input
-              value={username}
-              autoCapitalize="none"
-              autoCorrect={false}
-              onChangeText={setUsername}
-            />
-          </Field>
-          {mode === "register" && (
-            <Field label="Access key">
-              <Input
-                value={accessKey}
-                autoCapitalize="none"
-                autoCorrect={false}
-                autoComplete="off"
-                textContentType="none"
-                importantForAutofill="no"
-                secureTextEntry
-                onChangeText={setAccessKey}
-              />
-            </Field>
-          )}
-          <Field label="Passphrase">
-            <Input value={passphrase} secureTextEntry onChangeText={setPassphrase} />
-          </Field>
+              <Field label="Server URL">
+                <Input
+                  value={serverUrl}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  onChangeText={setServerUrl}
+                />
+              </Field>
+              <Field label="Username">
+                <Input
+                  value={username}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  onChangeText={setUsername}
+                />
+              </Field>
+              {mode === "register" && (
+                <Field label="Access key">
+                  <Input
+                    value={accessKey}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    autoComplete="off"
+                    textContentType="none"
+                    importantForAutofill="no"
+                    secureTextEntry
+                    onChangeText={setAccessKey}
+                  />
+                </Field>
+              )}
+              <Field label="Passphrase">
+                <Input value={passphrase} secureTextEntry onChangeText={setPassphrase} />
+              </Field>
 
-          {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
+              {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
 
-          <Button
-            theme="blue"
-            disabled={busy}
-            icon={busy ? <Spinner /> : undefined}
-            onPress={() => void authenticate()}
-          >
-            {mode === "login" ? "Login" : "Register"}
-          </Button>
+              <Button
+                theme="blue"
+                disabled={busy}
+                icon={busy ? <Spinner /> : undefined}
+                onPress={() => void authenticate()}
+              >
+                {mode === "login" ? "Login" : "Register"}
+              </Button>
+            </YStack>
+          </Card>
         </YStack>
-      </Card>
-    </YStack>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
 function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppState) => void }) {
   const [tab, setTab] = useState<TabName>("clipboard");
+  const [navExpanded, setNavExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [runningWork, setRunningWork] = useState<RunningWorkView[] | null>(null);
@@ -429,6 +453,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
       const outcome = await backend.logout(cancelRunningWork);
       if (outcome.status === "work_running") {
         setRunningWork(outcome.work);
+        setNavExpanded(true);
         return;
       }
       setRunningWork(null);
@@ -446,127 +471,369 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
     }
   }
 
-  return (
-    <YStack flex={1} bg="#101214">
-      <XStack
-        items="center"
-        justify="space-between"
-        gap="$3"
-        px="$4"
-        py="$3"
-        bg="#171a1d"
-        borderBottomColor="#252b31"
-        borderBottomWidth={1}
-      >
-        <YStack>
-          <H2 size="$7">Clipper</H2>
-          <Paragraph size="$2" color="#9aa4ad">
-            {state.connection_status}
-          </Paragraph>
-        </YStack>
-        <XStack items="center" gap="$2">
-          <Button
-            size="$3"
-            icon={busy ? <Spinner /> : <RefreshCw size={16} />}
-            onPress={refresh}
-            disabled={busy}
-          />
-          <Button
-            size="$3"
-            icon={<LogOut size={16} />}
-            disabled={loggingOut}
-            onPress={() => void logout(false)}
-          />
-        </XStack>
-      </XStack>
+  const destinations = navItems.filter((item) => item.value !== "alarms" || alarmsSupported);
 
-      {runningWork && (
-        <Card m="$3" p="$3" gap="$2" borderWidth={1} borderColor="#303940">
-          <Paragraph>Work is still running</Paragraph>
-          {runningWork.map((work, index) => (
-            <Text key={index}>{work.label}</Text>
-          ))}
-          <XStack gap="$2" flexWrap="wrap">
+  const navigation = (expanded: boolean) => (
+    <YStack flex={1} justify="space-between" py="$2" px="$1.5" gap="$2">
+      <YStack gap="$1.5">
+        <Button
+          chromeless
+          aria-label={expanded ? "Collapse navigation" : "Expand navigation"}
+          icon={expanded ? <PanelLeftClose size={20} /> : <Menu size={20} />}
+          justify={expanded ? "flex-start" : "center"}
+          onPress={() => setNavExpanded(!expanded)}
+        />
+        {destinations.map(({ value, label, Icon }) => (
+          <Button
+            key={value}
+            aria-label={label}
+            theme={tab === value ? "blue" : undefined}
+            icon={<Icon size={20} />}
+            justify={expanded ? "flex-start" : "center"}
+            onPress={() => {
+              setTab(value);
+              setNavExpanded(false);
+            }}
+          >
+            {expanded ? label : null}
+          </Button>
+        ))}
+      </YStack>
+      <YStack gap="$1.5">
+        <Button
+          aria-label="Refresh"
+          icon={busy ? <Spinner /> : <RefreshCw size={20} />}
+          onPress={refresh}
+          disabled={busy}
+          justify={expanded ? "flex-start" : "center"}
+        >
+          {expanded ? "Refresh" : null}
+        </Button>
+        <Button
+          aria-label="Logout"
+          icon={<LogOut size={20} />}
+          onPress={() => void logout(false)}
+          disabled={loggingOut}
+          justify={expanded ? "flex-start" : "center"}
+        >
+          {expanded ? "Logout" : null}
+        </Button>
+        {expanded && runningWork && (
+          <Card p="$3" gap="$2" borderWidth={1} borderColor="#303940">
+            <Paragraph>Work is still running</Paragraph>
+            {runningWork.map((work, index) => (
+              <Text key={index}>{work.label}</Text>
+            ))}
             <Button disabled={loggingOut} onPress={() => setRunningWork(null)}>
               Wait
             </Button>
-            <Button theme="red" disabled={loggingOut} onPress={() => void logout(true)}>
-              Cancel them and log out
+            <Button
+              theme="red"
+              height="auto"
+              py="$2"
+              disabled={loggingOut}
+              onPress={() => void logout(true)}
+            >
+              <Text>Cancel them and log out</Text>
             </Button>
-          </XStack>
-        </Card>
-      )}
-
-      <YStack p="$4" gap="$3" flex={1}>
-        <Tabs
-          value={tab}
-          onValueChange={(value) => setTab(value as TabName)}
-          flex={1}
-          orientation="horizontal"
+          </Card>
+        )}
+        <XStack
+          items="center"
+          justify={expanded ? "flex-start" : "center"}
+          gap="$2"
+          px="$2"
+          py="$2"
+          aria-label={`Clipper: ${state.connection_status}`}
         >
-          <Tabs.List>
-            <Tabs.Tab value="clipboard" flex={1}>
-              <XStack items="center" gap="$2">
-                <Clipboard size={16} />
-                <Text>Clipboard</Text>
-              </XStack>
-            </Tabs.Tab>
-            <Tabs.Tab value="files" flex={1}>
-              <XStack items="center" gap="$2">
-                <Folder size={16} />
-                <Text>Files</Text>
-              </XStack>
-            </Tabs.Tab>
-            <Tabs.Tab value="devices" flex={1}>
-              <XStack items="center" gap="$2">
-                <Smartphone size={16} />
-                <Text>Devices</Text>
-              </XStack>
-            </Tabs.Tab>
-            <Tabs.Tab value="collab" flex={1}>
-              <XStack items="center" gap="$2">
-                <FileCode size={16} />
-                <Text>Collab</Text>
-              </XStack>
-            </Tabs.Tab>
-            {alarmsSupported && (
-              <Tabs.Tab value="alarms" flex={1}>
-                <XStack items="center" gap="$2">
-                  <AlarmClock size={16} />
-                  <Text>Alarms</Text>
-                </XStack>
-              </Tabs.Tab>
-            )}
-          </Tabs.List>
-
-          {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
-
-          <Tabs.Content value="clipboard" flex={1}>
-            <ClipboardPanel items={state.clipboard_items} onState={onState} onError={setError} />
-          </Tabs.Content>
-          <Tabs.Content value="files" flex={1}>
-            <FilesPanel files={state.files} onState={onState} onError={setError} />
-          </Tabs.Content>
-          <Tabs.Content value="devices" flex={1}>
-            <DevicesPanel onError={setError} />
-          </Tabs.Content>
-          <Tabs.Content value="collab" flex={1}>
-            <CollabPanel
-              collabDocs={state.collab_docs}
-              serverUrl={state.session?.server_url ?? ""}
-              onState={onState}
-              onError={setError}
-            />
-          </Tabs.Content>
-          {alarmsSupported && (
-            <Tabs.Content value="alarms" flex={1}>
-              <AlarmsPanel onError={setError} />
-            </Tabs.Content>
-          )}
-        </Tabs>
+          <Clipboard size={22} color="#9aa4ad" />
+          {expanded && <Text fontWeight="600">Clipper</Text>}
+        </XStack>
+        {expanded && <ConnectionBadge status={state.connection_status} />}
       </YStack>
     </YStack>
   );
+
+  return (
+    <XStack flex={1} bg="#101214">
+      <YStack width={64} bg="#171a1d" borderRightColor="#252b31" borderRightWidth={1}>
+        {navigation(false)}
+      </YStack>
+
+      <YStack flex={1} p="$3" gap="$3">
+        {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
+
+        {tab === "clipboard" && (
+          <ClipboardPanel items={state.clipboard_items} onState={onState} onError={setError} />
+        )}
+        {tab === "files" && <FilesPanel files={state.files} onState={onState} onError={setError} />}
+        {tab === "devices" && <DevicesPanel onError={setError} />}
+        {tab === "collab" && (
+          <CollabPanel
+            collabDocs={state.collab_docs}
+            serverUrl={state.session?.server_url ?? ""}
+            onState={onState}
+            onError={setError}
+          />
+        )}
+        {tab === "schedule" && <SchedulePanel state={state} onState={onState} onError={setError} />}
+        {tab === "alarms" && alarmsSupported && <AlarmsPanel onError={setError} />}
+      </YStack>
+
+      {navExpanded && (
+        <XStack position="absolute" t={0} b={0} l={0} r={0} z={10}>
+          <YStack width={220} bg="#171a1d" borderRightColor="#252b31" borderRightWidth={1}>
+            {navigation(true)}
+          </YStack>
+          <YStack flex={1} bg="rgba(0,0,0,0.5)" onPress={() => setNavExpanded(false)} />
+        </XStack>
+      )}
+    </XStack>
+  );
+}
+
+function SchedulePanel({
+  state,
+  onState,
+  onError,
+}: {
+  state: AppState;
+  onState: (state: AppState) => void;
+  onError: (error: string | null) => void;
+}) {
+  const [now, setNow] = useState(Date.now);
+  const [occurrences, setOccurrences] = useState<OccurrenceView[]>([]);
+  const [actuals, setActuals] = useState<ActualView[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const loadGeneration = useRef(0);
+  const zone = deviceTimeZone();
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const from = today.toISOString();
+  const days = useMemo(
+    () =>
+      Array.from({ length: 7 }, (_, index) => {
+        const start = new Date(from);
+        start.setDate(start.getDate() + index);
+        const end = new Date(start);
+        end.setDate(end.getDate() + 1);
+        return { start, end };
+      }),
+    [from],
+  );
+  const weekEnd = new Date(today);
+  weekEnd.setDate(weekEnd.getDate() + 7);
+  const to = weekEnd.toISOString();
+  const running = state.running_actual;
+
+  const loadSchedule = useCallback(async () => {
+    const generation = ++loadGeneration.current;
+    setLoading(true);
+    try {
+      const [expanded, recorded] = await Promise.all([
+        backend.expandSchedule(from, to, zone),
+        backend.actualsBetween(from, to),
+      ]);
+      if (generation !== loadGeneration.current) return;
+      expanded.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+      recorded.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+      setOccurrences(expanded);
+      setActuals(recorded);
+    } catch (caught) {
+      if (generation === loadGeneration.current) onError(formatBackendError(caught));
+    } finally {
+      if (generation === loadGeneration.current) setLoading(false);
+    }
+  }, [from, to, zone, onError]);
+
+  useEffect(() => {
+    void loadSchedule();
+    return () => {
+      loadGeneration.current += 1;
+    };
+  }, [loadSchedule, state]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    const subscription = NativeAppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        setNow(Date.now());
+        void loadSchedule();
+      }
+    });
+    return () => {
+      clearInterval(timer);
+      subscription.remove();
+    };
+  }, [loadSchedule]);
+
+  async function changeTimer(action: () => Promise<string>) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    onError(null);
+    try {
+      await action();
+      setNow(Date.now());
+      onState(await backend.getState());
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  return (
+    <YStack gap="$3" flex={1} pt="$3">
+      <XStack items="center" gap="$2">
+        <H2 size="$6">Schedule</H2>
+        {loading && <Spinner size="small" />}
+      </XStack>
+      <ScrollView flex={1}>
+        <YStack gap="$3" pb="$4">
+          {running ? (
+            <ListCard>
+              <YStack gap="$2">
+                <Text>{running.title || "Unplanned"}</Text>
+                <Paragraph size="$2" color="#9aa4ad">
+                  Started {new Date(running.start).toLocaleString(undefined, { timeZone: zone })}
+                </Paragraph>
+                <Text color="#d0a33a">
+                  Running · {formatElapsed(now - Date.parse(running.start))}
+                </Text>
+                <Button
+                  disabled={busy}
+                  onPress={() => void changeTimer(() => backend.stopActual(running.id))}
+                >
+                  Stop
+                </Button>
+              </YStack>
+            </ListCard>
+          ) : (
+            <Button disabled={busy} onPress={() => void changeTimer(() => backend.startActual())}>
+              Start unplanned
+            </Button>
+          )}
+          {state.schedule_warnings.map((warning, index) => (
+            <Paragraph key={`${index}:${warning}`} size="$2" color="#d0a33a">
+              {warning}
+            </Paragraph>
+          ))}
+          {days.map((day, index) => {
+            const planned = occurrences.filter((occurrence) =>
+              overlapsScheduleDay(occurrence, day, now),
+            );
+            const recorded = actuals.filter((actual) => overlapsScheduleDay(actual, day, now));
+            return (
+              <ListCard key={day.start.toISOString()}>
+                <YStack gap="$3">
+                  <Text fontWeight="600">
+                    {index === 0 ? "Today · " : ""}
+                    {day.start.toLocaleDateString(undefined, {
+                      weekday: "long",
+                      month: "short",
+                      day: "numeric",
+                      timeZone: zone,
+                    })}
+                  </Text>
+                  {planned.length === 0 && !loading && (
+                    <Paragraph size="$2" color="#9aa4ad">
+                      Nothing scheduled
+                    </Paragraph>
+                  )}
+                  {planned.map((occurrence) => (
+                    <YStack key={`${occurrence.item_id}:${occurrence.occurrence_key}`} gap="$1">
+                      <Text color={occurrence.cancelled ? "#9aa4ad" : undefined}>
+                        {occurrence.title}
+                      </Text>
+                      <Paragraph size="$2" color="#9aa4ad">
+                        {scheduleTime(occurrence.start, day.start, zone)} –{" "}
+                        {scheduleTime(occurrence.end, day.start, zone)}
+                      </Paragraph>
+                      {occurrence.all_day && (
+                        <Text fontSize={12} color="#9aa4ad">
+                          All day
+                        </Text>
+                      )}
+                      {occurrence.source && (
+                        <Text fontSize={12} color="#9aa4ad">
+                          {occurrence.source}
+                        </Text>
+                      )}
+                      {occurrence.cancelled ? (
+                        <Text fontSize={12} color="#ff7b7b">
+                          Cancelled
+                        </Text>
+                      ) : (
+                        <Button
+                          size="$3"
+                          disabled={busy}
+                          onPress={() =>
+                            void changeTimer(() => backend.startActual(occurrence.plan_context))
+                          }
+                        >
+                          Start
+                        </Button>
+                      )}
+                    </YStack>
+                  ))}
+                  <Text fontWeight="600" color="#9aa4ad">
+                    Recorded time
+                  </Text>
+                  {recorded.length === 0 && !loading && (
+                    <Paragraph size="$2" color="#9aa4ad">
+                      No recorded time
+                    </Paragraph>
+                  )}
+                  {recorded.map((actual) => (
+                    <YStack key={actual.id} gap="$1">
+                      <Text>{actual.title || "Unplanned"}</Text>
+                      <Paragraph size="$2" color="#9aa4ad">
+                        {scheduleTime(actual.start, day.start, zone)} –{" "}
+                        {actual.running ? "Running" : scheduleTime(actual.end, day.start, zone)}
+                      </Paragraph>
+                    </YStack>
+                  ))}
+                </YStack>
+              </ListCard>
+            );
+          })}
+        </YStack>
+      </ScrollView>
+    </YStack>
+  );
+}
+
+function overlapsScheduleDay(
+  span: { start: string; end: string },
+  day: { start: Date; end: Date },
+  now: number,
+): boolean {
+  return (
+    Date.parse(span.start) < day.end.getTime() &&
+    (span.end ? Date.parse(span.end) : now) > day.start.getTime()
+  );
+}
+
+function scheduleTime(value: string, day: Date, zone: string): string {
+  const date = new Date(value);
+  const time = date.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: zone,
+  });
+  if (date.toDateString() === day.toDateString()) return time;
+  return `${date.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: zone })} ${time}`;
+}
+
+function formatElapsed(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function ClipboardPanel({
@@ -642,7 +909,7 @@ function ClipboardPanel({
       </XStack>
 
       {items.length === 0 ? (
-        <EmptyState icon={<Clipboard size={28} />} title="No clipboard items yet" />
+        <EmptyState icon={<Clipboard size={28} color="#5b6571" />} title="No clipboard items yet" />
       ) : (
         <ScrollView>
           <YStack gap="$2" pb="$4">
@@ -751,7 +1018,7 @@ function FilesPanel({
       </XStack>
 
       {files.length === 0 ? (
-        <EmptyState icon={<Folder size={28} />} title="No files yet" />
+        <EmptyState icon={<Folder size={28} color="#5b6571" />} title="No files yet" />
       ) : (
         <ScrollView>
           <YStack gap="$2" pb="$4">
@@ -995,7 +1262,7 @@ function DevicesPanel({ onError }: { onError: (error: string | null) => void }) 
       {devices === null ? (
         <EmptyState icon={<Spinner />} title="Loading devices..." />
       ) : devices.length === 0 ? (
-        <EmptyState icon={<Smartphone size={28} />} title="No devices" />
+        <EmptyState icon={<Smartphone size={28} color="#5b6571" />} title="No devices" />
       ) : (
         <ScrollView>
           <YStack gap="$2" pb="$4">
@@ -1127,7 +1394,7 @@ function CollabPanel({
       />
 
       {collabDocs.length === 0 ? (
-        <EmptyState icon={<FileText size={28} />} title="No collab docs yet" />
+        <EmptyState icon={<FileText size={28} color="#5b6571" />} title="No collab docs yet" />
       ) : (
         <ScrollView>
           <YStack gap="$2" pb="$4">
@@ -1203,6 +1470,19 @@ function ListCard({ children }: { children: ReactNode }) {
     <Card p="$3" bg="#171a1d" borderColor="#252b31" borderWidth={1}>
       {children}
     </Card>
+  );
+}
+
+function ConnectionBadge({ status }: { status: AppState["connection_status"] }) {
+  const color =
+    status === "Connected" ? "#3ddc84" : status === "Connecting" ? "#f2c94c" : "#9099a1";
+  return (
+    <XStack items="center" gap="$2" px="$2" py="$1" rounded="$2" bg="#22282e">
+      <YStack width={8} height={8} rounded={999} bg={color} />
+      <Text fontSize={12} color="#9aa4ad">
+        {status}
+      </Text>
+    </XStack>
   );
 }
 
@@ -1349,7 +1629,7 @@ function CollabDocReader({
         </XStack>
         {content.length === 0 && status === "unavailable" ? (
           <EmptyState
-            icon={<FileText size={28} />}
+            icon={<FileText size={28} color="#5b6571" />}
             title="Can't open this doc"
             subtitle="It may have been deleted, or this device is offline."
           />

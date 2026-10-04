@@ -1420,8 +1420,9 @@ Each entry has:
 
 - **Status:** open
 - **Where:** `mobile/src`.
-- **What happens:** the Android app shows alarms but cannot create or edit
-  plans; the browser's responsive layout does not cover the React Native app.
+- **What happens:** the Android app shows the schedule and records actual time
+  but cannot create or edit plans; the browser's responsive layout does not
+  cover the React Native app.
 - **Decision:**
 
 ### 108. Calendar refresh is manual and only on native clients
@@ -1437,9 +1438,9 @@ Each entry has:
 
 - **Status:** open
 - **Where:** `mobile/modules/clipper-alarm`.
-- **What happens:** snooze, custom sounds and volume ramp, flashlight,
-  skip-next, widget, configurable auto-silence and a missed-alarm notification
-  are not ported; ringing stops after a fixed ten minutes.
+- **What happens:** custom sounds and volume ramp, flashlight, skip-next,
+  configurable snooze length, configurable auto-silence and a missed-alarm
+  notification are not ported; ringing stops after a fixed ten minutes.
 - **Decision:**
 
 ### 110. Owner QA on installed builds

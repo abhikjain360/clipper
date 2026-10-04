@@ -10,6 +10,7 @@ import {
   type DecryptedClipboardItem,
   type DecryptedFileItem,
   type DeviceInfo as NativeDeviceInfo,
+  type OccurrenceView as NativeOccurrenceView,
   type ActualView as NativeActualView,
   type AlarmView as NativeAlarmView,
   type CalendarSourceView as NativeCalendarSourceView,
@@ -33,6 +34,7 @@ import type {
   CalendarSourceView,
   FileItem,
   LogoutOutcome,
+  OccurrenceView,
   ScheduleItemView,
 } from "@clipper/shared";
 
@@ -104,12 +106,6 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     removeDevice: async (deviceId) => client.removeDevice(deviceId),
     renameCollabDoc: async (objectId, title) =>
       mapCollabItem(await client.renameCollabDoc(objectId, title)),
-    // Schedule editing is not on mobile yet: the web and desktop grid comes
-    // first, and these three carry the schedule
-    // domain types, which UniFFI cannot express without flattening them into
-    // strings. Series still *sync* to this device and appear in
-    // `state.scheduleItems` — only creating and expanding are missing. These
-    // throw rather than silently no-op so a premature caller is obvious.
     nextAlarms: async (withinHours, observerZone) =>
       (await client.nextAlarms(withinHours, observerZone)).map(mapAlarmView),
     addCalendarSource: async () => {
@@ -118,15 +114,9 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     syncCalendarSource: async () => {
       throw new Error("Syncing a calendar source is not available on mobile yet");
     },
-    startActual: async () => {
-      throw new Error("The timer is not available on mobile yet");
-    },
-    stopActual: async () => {
-      throw new Error("The timer is not available on mobile yet");
-    },
-    actualsBetween: async () => {
-      throw new Error("actualsBetween is not supported on mobile");
-    },
+    startActual: async (planContext) => client.startActual(planContext),
+    stopActual: async (objectId) => client.stopActual(objectId),
+    actualsBetween: async (from, to) => (await client.actualsBetween(from, to)).map(mapActualView),
     updateScheduleItem: async () => {
       throw new Error("Editing schedule items is not available on mobile yet");
     },
@@ -136,9 +126,8 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     deleteScheduleObject: async () => {
       throw new Error("Deleting schedule items is not available on mobile yet");
     },
-    expandSchedule: async () => {
-      throw new Error("Expanding the schedule is not available on mobile yet");
-    },
+    expandSchedule: async (from, to, observerZone) =>
+      (await client.expandSchedule(from, to, observerZone)).map(mapOccurrenceView),
     resume: async (token, dataKey, wrappingKey, username, deviceName, serverUrl) => {
       try {
         await clientFor(serverUrl).resume(
@@ -244,6 +233,21 @@ function mapAlarmView(alarm: NativeAlarmView): AlarmView {
     label: alarm.label,
     occurrence_key: alarm.occurrenceKey,
     occurrence_start_millis: Number(alarm.occurrenceStartMillis),
+  };
+}
+
+function mapOccurrenceView(occurrence: NativeOccurrenceView): OccurrenceView {
+  return {
+    item_id: occurrence.itemId,
+    occurrence_key: occurrence.occurrenceKey,
+    plan_context: occurrence.planContext,
+    title: occurrence.title,
+    start: occurrence.start,
+    end: occurrence.end,
+    all_day: occurrence.allDay,
+    overridden: occurrence.overridden,
+    source: occurrence.source ?? null,
+    cancelled: occurrence.cancelled,
   };
 }
 

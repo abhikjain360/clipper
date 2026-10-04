@@ -2,7 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clipper_app_types::{
-    AlarmView, AppState, ClipboardPayload, CollabItem, DeviceInfo, LogoutOutcome,
+    ActualView, AlarmView, AppState, ClipboardPayload, CollabItem, DeviceInfo, LogoutOutcome,
+    OccurrenceView,
 };
 use clipper_client::{
     api_client::ClientError,
@@ -234,6 +235,34 @@ impl MobileClipperClient {
             .engine
             .next_alarms(within_hours, &observer_zone)
             .await?)
+    }
+
+    pub async fn expand_schedule(
+        &self,
+        from: String,
+        to: String,
+        observer_zone: String,
+    ) -> Result<Vec<OccurrenceView>, MobileError> {
+        Ok(self
+            .engine
+            .expand_schedule(&from, &to, &observer_zone)
+            .await?)
+    }
+
+    pub async fn start_actual(&self, plan_context: Option<String>) -> Result<String, MobileError> {
+        Ok(self.engine.start_actual(plan_context.as_deref()).await?)
+    }
+
+    pub async fn stop_actual(&self, object_id: String) -> Result<String, MobileError> {
+        Ok(self.engine.stop_actual(&object_id).await?)
+    }
+
+    pub async fn actuals_between(
+        &self,
+        from: String,
+        to: String,
+    ) -> Result<Vec<ActualView>, MobileError> {
+        Ok(self.engine.actuals_between(&from, &to).await?)
     }
 
     pub async fn refresh(&self) -> Result<(), MobileError> {
