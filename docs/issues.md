@@ -766,6 +766,19 @@ Each entry has:
 
 ## Bugs
 
+### 181. The desktop schedule did not show how to start a block timer
+
+- **Status:** fixed in the working tree; uncommitted
+- **Severity:** low.
+- **Where:** `web/src/SchedulePanel.tsx`.
+- **What happens:** calendar blocks start timers when clicked, but no visible
+  Start control explains that action.
+- **Decision:** add a separate Next view with the Android schedule's seven days
+  from today, expanded occurrences, recipe links, Start buttons, cancellation
+  labels and recorded time. Share the calendar's loader and Start action. Save
+  the chosen view per server and username. Keep calendar clicks and the owner's
+  block list.
+
 ### 180. Calendar hover cards stayed open and piled over the grid
 
 - **Status:** fixed in the working tree; uncommitted

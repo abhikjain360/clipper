@@ -150,11 +150,42 @@ export function SchedulePanel({
     const resizeSidebar = (width: number) =>
         setSidebarWidth(Math.round(Math.max(300, Math.min(maxSidebarWidth, width))));
     const [editing, setEditing] = useState<ScheduleItemView | null>(null);
+    const viewKey = `clipper.schedule.view:${encodeURIComponent(state.session?.server_url ?? "")}:${encodeURIComponent(state.session?.username ?? "")}`;
+    const [mode, setMode] = useState<"calendar" | "next">(() => {
+        try {
+            return localStorage.getItem(viewKey) === "next" ? "next" : "calendar";
+        } catch {
+            return "calendar";
+        }
+    });
+    useEffect(() => {
+        try {
+            localStorage.setItem(viewKey, mode);
+        } catch {}
+    }, [viewKey, mode]);
+    const [now, setNow] = useState(Date.now);
+    useEffect(() => {
+        if (mode !== "next") return;
+        const update = () => setNow(Date.now());
+        update();
+        const timer = setInterval(update, 1000);
+        document.addEventListener("visibilitychange", update);
+        window.addEventListener("focus", update);
+        return () => {
+            clearInterval(timer);
+            document.removeEventListener("visibilitychange", update);
+            window.removeEventListener("focus", update);
+        };
+    }, [mode]);
+    const today = startOfDay(new Date(now)).getTime();
     const [view, setView] = useState<CalendarView>("week");
     const [selectedDate, setSelectedDate] = useState(() => startOfDay(new Date()));
     const { start: weekStart, end: weekEnd } = useMemo(
-        () => calendarWindow(selectedDate, view),
-        [selectedDate, view],
+        () =>
+            mode === "calendar"
+                ? calendarWindow(selectedDate, view)
+                : { start: new Date(today), end: addDays(new Date(today), 7) },
+        [selectedDate, view, mode, today],
     );
     const [occurrences, setOccurrences] = useState<OccurrenceView[]>([]);
     const [plans, setPlans] = useState<KitchenPlan[]>([]);
@@ -164,7 +195,7 @@ export function SchedulePanel({
     const [starting, setStarting] = useState(false);
     const refresh = useMemo(
         () => ({}),
-        [state, items, sources, running, view, selectedDate, occurrences, actuals, plans],
+        [state, items, sources, running, mode, view, selectedDate, occurrences, actuals, plans],
     );
     const hover = useCalendarHover(refresh);
     const closeHover = hover.close;
@@ -210,6 +241,21 @@ export function SchedulePanel({
         };
     }, [loadWeek, items, sources, running, state]);
 
+    async function startOccurrence(occurrence: OccurrenceView) {
+        if (starting) return;
+        setStarting(true);
+        onError(null);
+        try {
+            const backend = await clipperBackend();
+            await backend.startActual(occurrence.plan_context);
+            onState(await backend.getState());
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        } finally {
+            setStarting(false);
+        }
+    }
+
     return (
         <YStack gap="$3">
             <RunningTimer running={running} onState={onState} onError={onError} />
@@ -236,83 +282,134 @@ export function SchedulePanel({
                 >
                     <XStack items="center" justify="space-between" gap="$2" flexWrap="wrap">
                         <XStack items="center" gap="$2">
-                            {loading && <Spinner size="small" />}
-                        </XStack>
-                        <XStack gap="$2" flexWrap="wrap" items="center" minW={0} maxW="100%">
                             <ToggleGroup
                                 type="single"
-                                value={view}
+                                value={mode}
                                 disableDeactivation
-                                aria-label="Calendar view"
+                                aria-label="Schedule view"
                                 onValueChange={(value) => {
-                                    if (value === "day" || value === "week" || value === "month")
-                                        setView(value);
+                                    if (value === "calendar" || value === "next") setMode(value);
                                 }}
                             >
                                 <XStack>
-                                    {(["day", "week", "month"] as const).map((mode) => (
+                                    {(["calendar", "next"] as const).map((option) => (
                                         <ToggleGroup.Item
-                                            // The child Button theme supplies the selected styling.
                                             activeStyle={{}}
                                             asChild
-                                            key={mode}
-                                            value={mode}
-                                            aria-label={
-                                                mode.slice(0, 1).toUpperCase() + mode.slice(1)
-                                            }
+                                            key={option}
+                                            value={option}
                                         >
                                             <Button
                                                 size="$2"
-                                                theme={view === mode ? "blue" : undefined}
+                                                theme={mode === option ? "blue" : undefined}
                                             >
-                                                {mode.slice(0, 1).toUpperCase() + mode.slice(1)}
+                                                {option === "calendar" ? "Calendar" : "Next"}
                                             </Button>
                                         </ToggleGroup.Item>
                                     ))}
                                 </XStack>
                             </ToggleGroup>
-                            <Button
-                                size="$2"
-                                icon={<ChevronLeft size={16} />}
-                                onPress={() => setSelectedDate(movePeriod(selectedDate, view, -1))}
-                                aria-label={`Previous ${view}`}
-                            />
-                            <CalendarDatePicker value={selectedDate} onChange={setSelectedDate}>
-                                {view === "week"
-                                    ? weekLabel(weekStart)
-                                    : selectedDate.toLocaleDateString(
-                                          undefined,
-                                          view === "month"
-                                              ? { month: "long", year: "numeric" }
-                                              : {
-                                                    weekday: "long",
-                                                    month: "short",
-                                                    day: "numeric",
-                                                    year: "numeric",
-                                                },
-                                      )}
-                            </CalendarDatePicker>
-                            <Button
-                                size="$2"
-                                icon={<ChevronRight size={16} />}
-                                onPress={() => setSelectedDate(movePeriod(selectedDate, view, 1))}
-                                aria-label={`Next ${view}`}
-                            />
+                            {loading && <Spinner size="small" />}
                         </XStack>
+                        {mode === "calendar" && (
+                            <XStack gap="$2" flexWrap="wrap" items="center" minW={0} maxW="100%">
+                                <ToggleGroup
+                                    type="single"
+                                    value={view}
+                                    disableDeactivation
+                                    aria-label="Calendar view"
+                                    onValueChange={(value) => {
+                                        if (
+                                            value === "day" ||
+                                            value === "week" ||
+                                            value === "month"
+                                        )
+                                            setView(value);
+                                    }}
+                                >
+                                    <XStack>
+                                        {(["day", "week", "month"] as const).map((option) => (
+                                            <ToggleGroup.Item
+                                                // The child Button theme supplies the selected styling.
+                                                activeStyle={{}}
+                                                asChild
+                                                key={option}
+                                                value={option}
+                                                aria-label={
+                                                    option.slice(0, 1).toUpperCase() +
+                                                    option.slice(1)
+                                                }
+                                            >
+                                                <Button
+                                                    size="$2"
+                                                    theme={view === option ? "blue" : undefined}
+                                                >
+                                                    {option.slice(0, 1).toUpperCase() +
+                                                        option.slice(1)}
+                                                </Button>
+                                            </ToggleGroup.Item>
+                                        ))}
+                                    </XStack>
+                                </ToggleGroup>
+                                <Button
+                                    size="$2"
+                                    icon={<ChevronLeft size={16} />}
+                                    onPress={() =>
+                                        setSelectedDate(movePeriod(selectedDate, view, -1))
+                                    }
+                                    aria-label={`Previous ${view}`}
+                                />
+                                <CalendarDatePicker value={selectedDate} onChange={setSelectedDate}>
+                                    {view === "week"
+                                        ? weekLabel(weekStart)
+                                        : selectedDate.toLocaleDateString(
+                                              undefined,
+                                              view === "month"
+                                                  ? { month: "long", year: "numeric" }
+                                                  : {
+                                                        weekday: "long",
+                                                        month: "short",
+                                                        day: "numeric",
+                                                        year: "numeric",
+                                                    },
+                                          )}
+                                </CalendarDatePicker>
+                                <Button
+                                    size="$2"
+                                    icon={<ChevronRight size={16} />}
+                                    onPress={() =>
+                                        setSelectedDate(movePeriod(selectedDate, view, 1))
+                                    }
+                                    aria-label={`Next ${view}`}
+                                />
+                            </XStack>
+                        )}
                     </XStack>
-                    {periodStart(selectedDate, view).getTime() !==
-                        periodStart(new Date(), view).getTime() && (
-                        <Button
-                            size="$2"
-                            self="flex-start"
-                            onPress={() => setSelectedDate(startOfDay(new Date()))}
-                        >
-                            {view === "day" ? "Back to today" : `Back to this ${view}`}
-                        </Button>
-                    )}
+                    {mode === "calendar" &&
+                        periodStart(selectedDate, view).getTime() !==
+                            periodStart(new Date(), view).getTime() && (
+                            <Button
+                                size="$2"
+                                self="flex-start"
+                                onPress={() => setSelectedDate(startOfDay(new Date()))}
+                            >
+                                {view === "day" ? "Back to today" : `Back to this ${view}`}
+                            </Button>
+                        )}
 
                     <CalendarHoverContext.Provider value={hover}>
-                        {view === "month" ? (
+                        {mode === "next" ? (
+                            <NextList
+                                start={weekStart}
+                                occurrences={occurrences}
+                                plans={plans}
+                                actuals={actuals}
+                                now={now}
+                                loading={loading}
+                                starting={starting}
+                                onStart={startOccurrence}
+                            />
+                        ) : view === "month" ? (
                             <MonthGrid
                                 start={weekStart}
                                 end={weekEnd}
@@ -332,20 +429,7 @@ export function SchedulePanel({
                                 occurrences={occurrences}
                                 plans={plans}
                                 actuals={actuals}
-                                onStart={async (occurrence) => {
-                                    if (starting) return;
-                                    setStarting(true);
-                                    onError(null);
-                                    try {
-                                        const backend = await clipperBackend();
-                                        await backend.startActual(occurrence.plan_context);
-                                        onState(await backend.getState());
-                                    } catch (caught) {
-                                        onError(formatBackendError(caught));
-                                    } finally {
-                                        setStarting(false);
-                                    }
-                                }}
+                                onStart={startOccurrence}
                             />
                         )}
                     </CalendarHoverContext.Provider>
@@ -440,6 +524,139 @@ export function SchedulePanel({
             </Dialog>
         </YStack>
     );
+}
+
+function NextList({
+    start,
+    occurrences,
+    plans,
+    actuals,
+    now,
+    loading,
+    starting,
+    onStart,
+}: {
+    start: Date;
+    occurrences: OccurrenceView[];
+    plans: KitchenPlan[];
+    actuals: ActualView[];
+    now: number;
+    loading: boolean;
+    starting: boolean;
+    onStart: (occurrence: OccurrenceView) => void;
+}) {
+    const days = useMemo(
+        () => Array.from({ length: 7 }, (_, index) => addDays(start, index)),
+        [start],
+    );
+    const planned = useMemo(
+        () => occurrences.toSorted((a, b) => Date.parse(a.start) - Date.parse(b.start)),
+        [occurrences],
+    );
+    const recorded = useMemo(
+        () => actuals.toSorted((a, b) => Date.parse(a.start) - Date.parse(b.start)),
+        [actuals],
+    );
+
+    return (
+        <YStack
+            gap="$3"
+            style={{ maxHeight: "max(320px, calc(100dvh - 240px))", overflowY: "auto" }}
+        >
+            {days.map((day, index) => {
+                const dayPlanned = planned.filter((occurrence) =>
+                    overlapsDay(occurrence, day, now),
+                );
+                const dayRecorded = recorded.filter((actual) => overlapsDay(actual, day, now));
+                return (
+                    <Card
+                        key={day.toISOString()}
+                        bg="#1d2329"
+                        p="$3"
+                        gap="$3"
+                        style={{ borderColor: "#252b31", borderWidth: 1, flexShrink: 0 }}
+                    >
+                        <Text fontWeight="600">
+                            {index === 0 ? "Today · " : ""}
+                            {day.toLocaleDateString(undefined, {
+                                weekday: "long",
+                                month: "short",
+                                day: "numeric",
+                            })}
+                        </Text>
+                        {dayPlanned.length === 0 && !loading && (
+                            <Paragraph size="$2" color="#9aa4ad">
+                                Nothing scheduled
+                            </Paragraph>
+                        )}
+                        {dayPlanned.map((occurrence) => (
+                            <YStack
+                                key={`${occurrence.item_id}:${occurrence.occurrence_key}`}
+                                gap="$1"
+                            >
+                                <Text color={occurrence.cancelled ? "#9aa4ad" : undefined}>
+                                    {occurrence.title}
+                                </Text>
+                                <Paragraph size="$2" color="#9aa4ad">
+                                    {scheduleTime(occurrence.start, day)} –{" "}
+                                    {scheduleTime(occurrence.end, day)}
+                                </Paragraph>
+                                {occurrence.all_day && (
+                                    <Text fontSize={12} color="#9aa4ad">
+                                        All day
+                                    </Text>
+                                )}
+                                {occurrence.source && (
+                                    <Text fontSize={12} color="#9aa4ad">
+                                        {occurrence.source}
+                                    </Text>
+                                )}
+                                <ScheduleRecipes occurrence={occurrence} plans={plans} />
+                                {occurrence.cancelled ? (
+                                    <Text fontSize={12} color="#ff7b7b">
+                                        Cancelled
+                                    </Text>
+                                ) : (
+                                    <Button
+                                        size="$3"
+                                        self="flex-start"
+                                        disabled={starting}
+                                        onPress={() => onStart(occurrence)}
+                                    >
+                                        Start
+                                    </Button>
+                                )}
+                            </YStack>
+                        ))}
+                        <Text fontWeight="600" color="#9aa4ad">
+                            Recorded time
+                        </Text>
+                        {dayRecorded.length === 0 && !loading && (
+                            <Paragraph size="$2" color="#9aa4ad">
+                                No recorded time
+                            </Paragraph>
+                        )}
+                        {dayRecorded.map((actual) => (
+                            <YStack key={actual.id} gap="$1">
+                                <Text>{actual.title || "Unplanned"}</Text>
+                                <Paragraph size="$2" color="#9aa4ad">
+                                    {scheduleTime(actual.start, day)} –{" "}
+                                    {actual.running ? "Running" : scheduleTime(actual.end, day)}
+                                </Paragraph>
+                            </YStack>
+                        ))}
+                    </Card>
+                );
+            })}
+        </YStack>
+    );
+}
+
+function scheduleTime(value: string, day: Date): string {
+    const date = new Date(value);
+    const time = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    if (date.toDateString() === day.toDateString()) return time;
+    return `${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
 }
 
 function MonthGrid({
