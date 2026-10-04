@@ -37,7 +37,7 @@ import {
     type KeyboardEvent as ReactKeyboardEvent,
     type ReactNode,
 } from "react";
-import { Route, Switch, useLocation } from "wouter";
+import { Redirect, Route, Switch, useLocation } from "wouter";
 import { Card, H1, H2, Label, Paragraph, Spinner, Text, XStack, YStack } from "tamagui";
 import {
     clearSessionResume,
@@ -398,12 +398,12 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
     const [navExpanded, setNavExpanded] = useState(false);
     const mobileNav = useRef<HTMLDialogElement>(null);
     const destinations = [
-        { path: "/", label: "Clipboard", icon: Clipboard },
-        { path: "/files", label: "Files", icon: Folder },
-        { path: "/collab", label: "Collab Docs", icon: FileText },
         { path: "/schedule", label: "Schedule", icon: CalendarClock },
-        { path: "/kitchen", label: "Kitchen", icon: CookingPot },
         { path: "/gym", label: "Gym", icon: Dumbbell },
+        { path: "/kitchen", label: "Kitchen", icon: CookingPot },
+        { path: "/collab", label: "Collab Docs", icon: FileText },
+        { path: "/files", label: "Files", icon: Folder },
+        { path: "/clipboard", label: "Clipboard", icon: Clipboard },
         { path: "/devices", label: "Devices", icon: Smartphone },
     ];
     const navigation = (expanded: boolean, mobile = false) => (
@@ -432,12 +432,8 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                     <Button
                         key={path}
                         aria-label={label}
-                        aria-current={
-                            (path === "/" ? location === path : location.startsWith(path))
-                                ? "page"
-                                : undefined
-                        }
-                        selected={path === "/" ? location === path : location.startsWith(path)}
+                        aria-current={location.startsWith(path) ? "page" : undefined}
+                        selected={location.startsWith(path)}
                         icon={<Icon size={20} />}
                         justify={expanded ? "flex-start" : "center"}
                         onPress={() => {
@@ -571,12 +567,15 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                         <Route path="/devices">
                             <DevicesPanel onError={setError} />
                         </Route>
-                        <Route>
+                        <Route path="/clipboard">
                             <ClipboardPanel
                                 items={state.clipboard_items}
                                 onState={onState}
                                 onError={setError}
                             />
+                        </Route>
+                        <Route>
+                            <Redirect to="/schedule" />
                         </Route>
                     </Switch>
                 </YStack>
