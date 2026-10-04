@@ -315,7 +315,7 @@ impl SyncEngine {
                 ) {
                     return Err(error);
                 }
-                warn!(source_id = %object_id, batch_id = %batch.object_id, %error, "Retiring unreadable calendar import");
+                warn!(source_id = %object_id, batch_id = %batch.object_id, %error, "Retiring unusable calendar import");
                 self.retire_pending_import(object_id, &batch).await?;
             }
         }
@@ -331,7 +331,6 @@ impl SyncEngine {
             .await?;
         self.publish_visible_state(visible).await;
         let outcome = validated_feed(&text, &source)?;
-        let content_hash = feed_hash(&outcome)?;
         let (source, _) = self.read_calendar_source(object_id).await?;
         if self.history_epoch.load(Ordering::SeqCst) != epoch {
             return Err(ClientError::NotAuthenticated);
@@ -345,7 +344,9 @@ impl SyncEngine {
             && source
                 .active_import
                 .as_ref()
-                .is_some_and(|batch| batch.content_hash == content_hash)
+                .map(|batch| matches_feed_hash(&outcome, &batch.content_hash))
+                .transpose()?
+                .unwrap_or(false)
             && self
                 .local_store
                 .import_file_object(
@@ -537,7 +538,7 @@ impl SyncEngine {
         }
         let epoch = self.history_epoch.load(Ordering::SeqCst);
         let outcome = validated_feed(text, &source)?;
-        if feed_hash(&outcome)? != batch.content_hash {
+        if !matches_feed_hash(&outcome, &batch.content_hash)? {
             return Err(CalendarImportError::FeedChanged.into());
         }
         let snapshot_id = batch.object_id;
@@ -1414,6 +1415,28 @@ fn validated_feed(
 }
 
 fn feed_hash(outcome: &clipper_schedule::IngestOutcome) -> Result<Vec<u8>, ClientError> {
+    let mut outcome = outcome.clone();
+    for event in &mut outcome.events {
+        clear_alarm_metadata(event);
+    }
+    parsed_feed_hash(&outcome)
+}
+
+fn clear_alarm_metadata(event: &mut IngestedEvent) {
+    event.alarm_uses_default = None;
+    for entry in &mut event.alarm_overrides {
+        entry.uses_default = None;
+    }
+}
+
+fn matches_feed_hash(
+    outcome: &clipper_schedule::IngestOutcome,
+    expected: &[u8],
+) -> Result<bool, ClientError> {
+    Ok(feed_hash(outcome)? == expected || parsed_feed_hash(outcome)? == expected)
+}
+
+fn parsed_feed_hash(outcome: &clipper_schedule::IngestOutcome) -> Result<Vec<u8>, ClientError> {
     let mut events: Vec<_> = outcome.events.iter().collect();
     events.sort_by(|a, b| a.uid.cmp(&b.uid));
     let bytes = serde_json::to_vec(&(events, &outcome.rules))

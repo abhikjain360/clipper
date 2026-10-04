@@ -32,6 +32,7 @@ fn event_hash(event: &IngestedEvent, rule: Option<&str>) -> Result<String, Clien
     event.import = Some(uuid::Uuid::nil().into());
     event.import_fetched_at = None;
     event.raw_import = None;
+    clear_alarm_metadata(&mut event);
     if let clipper_schedule::Recurrence::Imported { import, .. } = &mut event.recurrence {
         *import = uuid::Uuid::nil().into();
     }
@@ -212,6 +213,7 @@ impl SyncEngine {
             .into_iter()
             .collect();
         let mut snapshots = HashMap::new();
+        let mut checked_feeds = HashSet::new();
         let mut held = HashMap::new();
         for batch in source.imports() {
             if batch.window.is_some()
@@ -269,7 +271,11 @@ impl SyncEngine {
                         matches!(
                             event.recurrence,
                             clipper_schedule::Recurrence::Imported { .. }
-                        )
+                        ) || event.alarm_uses_default.is_none()
+                            || event
+                                .alarm_overrides
+                                .iter()
+                                .any(|entry| entry.uses_default.is_none())
                     }))
                     && !snapshots.contains_key(&raw)
                 {
@@ -299,11 +305,12 @@ impl SyncEngine {
                     && raw == batch.object_id
                     && let Some(parsed) = parsed
                     && !batch.content_hash.is_empty()
-                    && feed_hash(parsed)? != batch.content_hash
+                    && checked_feeds.insert((raw, batch.content_hash.clone()))
+                    && !matches_feed_hash(parsed, &batch.content_hash)?
                 {
                     return Err(CalendarImportError::FeedChanged.into());
                 }
-                let event = if let Some(event) = stored {
+                let mut event = if let Some(event) = stored {
                     event
                 } else {
                     let mut event = parsed
@@ -330,6 +337,24 @@ impl SyncEngine {
                     );
                     event
                 };
+                if let Some(original) = parsed.and_then(|parsed| {
+                    parsed
+                        .events
+                        .iter()
+                        .find(|original| original.uid == event.uid)
+                }) {
+                    event.alarm_uses_default =
+                        event.alarm_uses_default.or(original.alarm_uses_default);
+                    for entry in &mut event.alarm_overrides {
+                        if entry.uses_default.is_none() {
+                            entry.uses_default = original
+                                .alarm_overrides
+                                .iter()
+                                .find(|original| original.recurrence_id == entry.recurrence_id)
+                                .and_then(|original| original.uses_default);
+                        }
+                    }
+                }
                 let rule = parsed.and_then(|outcome| {
                     outcome
                         .rules
@@ -440,7 +465,20 @@ impl SyncEngine {
             });
             if raw_available
                 && rule_current
-                && old.is_some_and(|held| held.owned && held.hash == hash)
+                && old.is_some_and(|held| {
+                    held.owned
+                        && held.hash == hash
+                        && held.event.alarm_uses_default == event.alarm_uses_default
+                        && held
+                            .event
+                            .alarm_overrides
+                            .iter()
+                            .map(|entry| (entry.recurrence_id, entry.uses_default))
+                            .eq(event
+                                .alarm_overrides
+                                .iter()
+                                .map(|entry| (entry.recurrence_id, entry.uses_default)))
+                })
             {
                 unchanged += 1;
                 continue;
@@ -609,7 +647,7 @@ impl SyncEngine {
             }
             batch = pending.clone();
             let outcome = validated_feed(text, &source)?;
-            if feed_hash(&outcome)? != batch.content_hash
+            if !matches_feed_hash(&outcome, &batch.content_hash)?
                 || batch.events.len() != batch.uids.len()
                 || batch.events.len() != batch.hashes.len()
             {
@@ -1177,5 +1215,32 @@ impl SyncEngine {
             .await?;
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calendar_hashes_ignore_reminder_metadata_but_keep_offsets() {
+        let text = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:meeting\r\nDTSTART:20261009T090000Z\r\nRRULE:FREQ=DAILY;COUNT=3\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:meeting\r\nRECURRENCE-ID:20261010T090000Z\r\nDTSTART:20261010T110000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let parsed =
+            clipper_schedule::parse_ics(text, SourceId::new(), uuid::Uuid::nil().into()).unwrap();
+        let mut previous = parsed.clone();
+        for event in &mut previous.events {
+            clear_alarm_metadata(event);
+        }
+        assert_eq!(feed_hash(&parsed).unwrap(), feed_hash(&previous).unwrap());
+        assert_eq!(
+            event_hash(&parsed.events[0], None).unwrap(),
+            event_hash(&previous.events[0], None).unwrap()
+        );
+        previous.events[0].alarm_seconds_before = vec![600];
+        assert_ne!(feed_hash(&parsed).unwrap(), feed_hash(&previous).unwrap());
+        assert_ne!(
+            event_hash(&parsed.events[0], None).unwrap(),
+            event_hash(&previous.events[0], None).unwrap()
+        );
     }
 }

@@ -766,6 +766,21 @@ Each entry has:
 
 ## Bugs
 
+### 189. Parser metadata changes blocked calendar refreshes
+
+- **Status:** fixed in the working tree; uncommitted.
+- **Severity:** high; meeting updates stop arriving on every device.
+- **Where:** calendar import hashing, pending recovery and completed-import reads.
+- **What happened:** full-feed and event hashes serialized derived fallback
+  reminder fields. Adding those fields changed hashes for unchanged meetings.
+  Pending recovery already retired mismatches, but active or retained imports
+  also checked their parsed feed hashes during planning and cleanup. A mismatch
+  there returned the same error outside pending recovery and blocked fresh fetches.
+- **Decision:** exclude derived reminder metadata from hashes and accept the
+  existing full-feed hashes with or without it. Keep real reminder changes
+  visible. Retire incompatible pending definitions through verified cleanup,
+  recover written events and fetch fresh data on the same refresh with stable IDs.
+
 ### 188. Calendar snapshots appeared in the user's Files list
 
 - **Status:** fixed in the working tree; uncommitted.

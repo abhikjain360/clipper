@@ -80,7 +80,12 @@ intentionally duplicated.
   recurrence, provider overrides, status, organizer, attendance, the owner's
   PARTSTAT and alarm offsets. Unsupported recurrence rules are included.
   Snapshot IDs and import ordering times are excluded, as are provider fetch
-  timestamps such as DTSTAMP and LAST-MODIFIED. Event order and alarm order
+  timestamps such as DTSTAMP and LAST-MODIFIED. Derived fallback-reminder
+  metadata is excluded so its presence does not change a meeting's hash.
+  Readers also accept existing full-feed hashes that included this metadata.
+  Real changes between a fallback and an explicit reminder still update the
+  event; missing reminder metadata is recovered from its authenticated raw feed.
+  Event order and alarm order
   do not affect the comparison.
 - Supported RRULEs become typed `Cadence` values only when conversion preserves
   every clause. An unsupported recurrence stores only its import and UID; the
@@ -166,6 +171,10 @@ use this fallback.
    in-window tombstones. Finish pending batches from their raw files, then fetch
    a new response even after recovery. Unreadable or inconsistent pending data
    is retired through verified cleanup. Network failures leave it for retry.
+   A pending batch whose parsed definition or hashes no longer match its raw
+   feed is retired the same way. Restore already written revisions from their
+   completed import when available; otherwise keep them for the fresh feed to
+   repair. Preserve stable IDs and wait for verified ownership before purging.
    Record fetch completion locally before parsing or uploading.
    Partially written events remain resumable when the previous raw file is
    missing. Authenticated records belonging to a pending or recorded retired

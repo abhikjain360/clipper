@@ -20,6 +20,247 @@ fn several_events(start: chrono::DateTime<Utc>, rule: &str) -> String {
     format!("{}{}{}", &text[..first], events, &text[last..])
 }
 
+fn parsed_hash(outcome: &clipper_schedule::IngestOutcome, metadata: bool) -> Vec<u8> {
+    let mut events = outcome.events.clone();
+    if !metadata {
+        for event in &mut events {
+            event.alarm_uses_default = None;
+            for entry in &mut event.alarm_overrides {
+                entry.uses_default = None;
+            }
+        }
+    }
+    events.sort_by(|a, b| a.uid.cmp(&b.uid));
+    crypto::sha256(&serde_json::to_vec(&(events, &outcome.rules)).unwrap()).to_vec()
+}
+
+fn parsed_event_hash(event: &IngestedEvent, rule: Option<&str>) -> String {
+    let bytes = serde_json::to_vec(&(event, rule)).unwrap();
+    crypto::sha256(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_calendar_refresh_recovers_batches_from_different_parser_output() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let server = format!("http://{address}");
+    let engine = register_proxy_engine(&server, &temp.path().join("client")).await;
+    let now = Utc::now();
+    let original = several_events(
+        now + chrono::TimeDelta::days(1),
+        "RRULE:FREQ=DAILY;COUNT=3;BYHOUR=9,17\r\n",
+    );
+    let (url, feed, requests, task) = calendar_feed_server(original.clone()).await;
+    let id = engine.add_calendar_source("Work", &url).await.unwrap();
+    engine.sync_calendar_source(&id).await.unwrap();
+    let first = engine.read_calendar_source(&id).await.unwrap().0;
+    let ids = first.active_import.as_ref().unwrap().events.clone();
+    let parsed =
+        clipper_schedule::parse_ics(&original, first.id, uuid::Uuid::nil().into()).unwrap();
+    assert_ne!(parsed_hash(&parsed, false), parsed_hash(&parsed, true));
+    for metadata in [false, true] {
+        for difference in ["absent_metadata", "present_metadata", "definition"] {
+            let (mut source, head) = engine.read_calendar_source(&id).await.unwrap();
+            let bytes = engine
+                .read_import_snapshot(source.active_import.as_ref().unwrap().object_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let active = clipper_schedule::parse_ics(
+                std::str::from_utf8(&bytes).unwrap(),
+                source.id,
+                uuid::Uuid::nil().into(),
+            )
+            .unwrap();
+            source.active_import.as_mut().unwrap().content_hash = parsed_hash(&active, metadata);
+            engine
+                .write_schedule_record(
+                    &id,
+                    ScheduleRecord::Source(Box::new(source)),
+                    EnvelopePlacement::Revise(head),
+                )
+                .await
+                .unwrap();
+            let unchanged = engine.sync_calendar_source(&id).await.unwrap();
+            assert!(unchanged.feed_unchanged);
+            let text = original.replace("SUMMARY:Meeting", "SUMMARY:Pending");
+            let mut pending = engine
+                .stage_windowed_calendar_import(&id, &text, Utc::now())
+                .await
+                .unwrap();
+            let mut parsed =
+                clipper_schedule::parse_ics(&text, first.id, uuid::Uuid::nil().into()).unwrap();
+            for event in &mut parsed.events {
+                if difference == "definition" {
+                    event.title = "Earlier normalized title".into();
+                }
+                if difference != "present_metadata" {
+                    event.alarm_uses_default = None;
+                    for entry in &mut event.alarm_overrides {
+                        entry.uses_default = None;
+                    }
+                }
+            }
+            pending.content_hash = parsed_hash(&parsed, difference == "present_metadata");
+            pending.hashes = pending
+                .uids
+                .iter()
+                .map(|uid| {
+                    let event = parsed
+                        .events
+                        .iter()
+                        .find(|event| &event.uid == uid)
+                        .unwrap();
+                    let rule = parsed
+                        .rules
+                        .iter()
+                        .find(|(rule_uid, _)| rule_uid == uid)
+                        .map(|(_, rule)| rule.as_str());
+                    parsed_event_hash(event, rule)
+                })
+                .collect();
+            let (mut source, head) = engine.read_calendar_source(&id).await.unwrap();
+            source.pending_imports[0] = pending.clone();
+            engine
+                .write_schedule_record(
+                    &id,
+                    ScheduleRecord::Source(Box::new(source)),
+                    EnvelopePlacement::Revise(head),
+                )
+                .await
+                .unwrap();
+            let event_id = pending.events[0].to_string();
+            let mut event = parsed
+                .events
+                .iter()
+                .find(|event| event.uid == pending.uids[0])
+                .unwrap()
+                .clone();
+            event.import = first.import_anchor;
+            event.raw_import = Some(pending.object_id);
+            event.import_fetched_at = Some(pending.fetched_at);
+            if let Recurrence::Imported { import, .. } = &mut event.recurrence {
+                *import = pending.object_id;
+            }
+            let (_, event_head) = load_schedule_object(&engine, &event_id).await;
+            engine
+                .write_schedule_record(
+                    &event_id,
+                    ScheduleRecord::Ingested(Box::new(event)),
+                    EnvelopePlacement::Revise(event_head),
+                )
+                .await
+                .unwrap();
+            let text = original.replace("SUMMARY:Meeting", "SUMMARY:Fresh");
+            *feed.write().await = text;
+            let before = requests.load(Ordering::SeqCst);
+            let report =
+                tokio::time::timeout(Duration::from_secs(20), engine.sync_calendar_source(&id))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+            assert_eq!(requests.load(Ordering::SeqCst), before + 1);
+            let source = engine.read_calendar_source(&id).await.unwrap().0;
+            assert!(source.pending_imports.is_empty());
+            assert!(source.retired_imports.is_empty());
+            assert_eq!(source.active_import.as_ref().unwrap().events.len(), 3);
+            let records = engine.local_store.schedule_records_with_ids().await;
+            let events: Vec<_> = records
+                .iter()
+                .filter_map(|(id, record)| record.as_ingested().map(|event| (id, event)))
+                .filter(|(_, event)| event.source == source.id)
+                .collect();
+            assert_eq!(events.len(), 3);
+            for (id, event) in events {
+                assert!(ids.iter().any(|expected| expected.to_string() == *id));
+                assert_eq!(event.title, "Fresh");
+                assert!(source.contains_event(id, event));
+            }
+            assert!(matches!(
+                engine.api.get_object(&pending.object_id.to_string()).await,
+                Err(ClientError::Api { status: 404, .. })
+            ));
+            assert!(
+                engine
+                    .sync_calendar_source(&id)
+                    .await
+                    .unwrap()
+                    .feed_unchanged
+            );
+            *feed.write().await = original.clone();
+            engine.sync_calendar_source(&id).await.unwrap();
+        }
+    }
+    task.abort();
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_calendar_refresh_applies_feed_reminders_with_the_same_offset() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let engine =
+        register_proxy_engine(&format!("http://{address}"), &temp.path().join("client")).await;
+    let start =
+        chrono::DateTime::from_timestamp(Utc::now().timestamp() / 60 * 60 + 7200, 0).unwrap();
+    let original = calendar(start, "Meeting", "");
+    let (url, feed, _, task) = calendar_feed_server(original.clone()).await;
+    let id = engine.add_calendar_source("Work", &url).await.unwrap();
+    engine.sync_calendar_source(&id).await.unwrap();
+    engine
+        .set_calendar_source_alarm_lead(&id, 10)
+        .await
+        .unwrap();
+    let source = engine.read_calendar_source(&id).await.unwrap().0;
+    let event_id = source.active_import.as_ref().unwrap().events[0].to_string();
+    let (record, head) = load_schedule_object(&engine, &event_id).await;
+    let mut event = record.as_ingested().unwrap().clone();
+    event.alarm_uses_default = None;
+    engine
+        .write_schedule_record(
+            &event_id,
+            ScheduleRecord::Ingested(Box::new(event)),
+            EnvelopePlacement::Revise(head),
+        )
+        .await
+        .unwrap();
+    for explicit in [true, false] {
+        *feed.write().await = if explicit {
+            original.replace("END:VEVENT", "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT5M\r\nDESCRIPTION:Reminder\r\nEND:VALARM\r\nEND:VEVENT")
+        } else {
+            original.clone()
+        };
+        let report = engine.sync_calendar_source(&id).await.unwrap();
+        assert_eq!(report.updated, 1);
+        let alarms = engine.next_alarms(24, "UTC").await.unwrap();
+        assert_eq!(alarms.len(), 1);
+        assert_eq!(
+            alarms[0].fire_at_millis,
+            (start - chrono::TimeDelta::minutes(if explicit { 5 } else { 10 })).timestamp_millis()
+        );
+        let source = engine.read_calendar_source(&id).await.unwrap().0;
+        assert_eq!(
+            source.active_import.as_ref().unwrap().events[0].to_string(),
+            event_id
+        );
+        assert!(
+            engine
+                .sync_calendar_source(&id)
+                .await
+                .unwrap()
+                .feed_unchanged
+        );
+    }
+    task.abort();
+}
+
 async fn interrupted_calendar_proxy(
     listener: tokio::net::TcpListener,
     upstream: std::net::SocketAddr,
