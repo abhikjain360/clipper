@@ -54,51 +54,9 @@ fn server_command(binary: &Path, data: &Path) -> Command {
 async fn live_schedule_revisions_timers_feeds_and_two_devices() {
     crate::ensure_crypto_provider();
     let temp = tempfile::tempdir().expect("tempdir");
-    let binary = std::env::var_os("CLIPPER_TEST_SERVER_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/clipper-server")
-        });
-    assert!(binary.exists(), "cargo build -p clipper-server first");
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
-    let address = listener.local_addr().expect("address");
-    drop(listener);
     let data = temp.path();
-    std::fs::write(data.join("config.toml"), format!(
-        "[server]\ndata_dir = {:?}\naddr = {:?}\n[rate_limit]\nauth_per_client_per_minute = 200\nauth_per_username_per_minute = 200\n",
-        data.join("server").to_str().expect("path"), address.to_string()
-    )).expect("config");
-    assert!(
-        server_command(&binary, data)
-            .arg("init")
-            .status()
-            .expect("init")
-            .success()
-    );
-    assert!(
-        server_command(&binary, data)
-            .args(["add-access-key", "--access-key", "test-invite"])
-            .status()
-            .expect("invite")
-            .success()
-    );
-    let _server = TestServer(
-        server_command(&binary, data)
-            .arg("serve")
-            .spawn()
-            .expect("server"),
-    );
+    let (_server, address) = start_server(data).await;
     let url = format!("http://{address}");
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if reqwest::get(format!("{url}/api/health")).await.is_ok() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(30)).await;
-        }
-    })
-    .await
-    .expect("server starts");
 
     let first = SyncEngine::new_with_data_dir(&url, data.join("first"));
     first
@@ -125,6 +83,332 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
     })
     .await;
 
+    check_schedule(first, second, &url, data).await;
+}
+
+async fn start_server(data: &Path) -> (TestServer, std::net::SocketAddr) {
+    let binary = std::env::var_os("CLIPPER_TEST_SERVER_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/clipper-server")
+        });
+    assert!(binary.exists(), "cargo build -p clipper-server first");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
+    let address = listener.local_addr().expect("address");
+    drop(listener);
+    std::fs::write(data.join("config.toml"), format!(
+        "[server]\ndata_dir = {:?}\naddr = {:?}\n[rate_limit]\nauth_per_client_per_minute = 200\nauth_per_username_per_minute = 200\n",
+        data.join("server").to_str().expect("path"), address.to_string()
+    )).expect("config");
+    assert!(
+        server_command(&binary, data)
+            .arg("init")
+            .status()
+            .expect("init")
+            .success()
+    );
+    assert!(
+        server_command(&binary, data)
+            .args(["add-access-key", "--access-key", "test-invite"])
+            .status()
+            .expect("invite")
+            .success()
+    );
+    let server = TestServer(
+        server_command(&binary, data)
+            .arg("serve")
+            .spawn()
+            .expect("server"),
+    );
+    let url = format!("http://{address}");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if reqwest::get(format!("{url}/api/health")).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .expect("server starts");
+
+    (server, address)
+}
+
+async fn lossy_proxy(
+    listener: tokio::net::TcpListener,
+    upstream: std::net::SocketAddr,
+    armed: Arc<std::sync::Mutex<Option<&'static [u8]>>>,
+) {
+    loop {
+        let Ok((client, _)) = listener.accept().await else {
+            return;
+        };
+        let armed = Arc::clone(&armed);
+        tokio::spawn(async move {
+            let Ok(server) = tokio::net::TcpStream::connect(upstream).await else {
+                return;
+            };
+            let (mut client_read, mut client_write) = client.into_split();
+            let (mut server_read, mut server_write) = server.into_split();
+            let swallow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let marks = Arc::clone(&swallow);
+            let upward = tokio::spawn(async move {
+                let mut buffer = vec![0_u8; 65536];
+                loop {
+                    let read = match client_read.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    let chunk = &buffer[..read];
+                    let hit = {
+                        let mut armed = armed.lock().unwrap();
+                        let hit = chunk.starts_with(b"POST ")
+                            && armed.is_some_and(|needle| {
+                                chunk.windows(needle.len()).any(|w| w == needle)
+                            });
+                        if hit {
+                            *armed = None;
+                        }
+                        hit
+                    };
+                    if hit {
+                        marks.store(true, Ordering::SeqCst);
+                    }
+                    if server_write.write_all(chunk).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            let mut buffer = vec![0_u8; 65536];
+            loop {
+                let read = match server_read.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => read,
+                };
+                if swallow.load(Ordering::SeqCst) {
+                    break;
+                }
+                if client_write.write_all(&buffer[..read]).await.is_err() {
+                    break;
+                }
+            }
+            upward.abort();
+        });
+    }
+}
+
+async fn register_proxy_engine(url: &str, data: &Path) -> Arc<SyncEngine> {
+    let engine = SyncEngine::new_with_data_dir(url, data);
+    engine
+        .register_with_platform(
+            "test-invite",
+            "recovery-test",
+            "local-test-passphrase",
+            "Test",
+            "test",
+        )
+        .await
+        .unwrap();
+    wait_for(&engine, |state| {
+        matches!(state.connection_status, ConnectionStatus::Connected)
+    })
+    .await;
+    engine
+}
+
+async fn copy_session(engine: &SyncEngine, url: &str, data: &Path) -> Arc<SyncEngine> {
+    let copy = SyncEngine::new_with_data_dir(url, data);
+    copy.api.restore_token(engine.api.token().unwrap());
+    *copy.encryption_key.write().await = engine.encryption_key.read().await.clone();
+    *copy.device_signing_key.write().await = engine.device_signing_key.read().await.clone();
+    copy.state.write().await.session = engine.state.read().await.session.clone();
+    copy.local_store.set_profile(profile_id_from_encryption_key(
+        &copy.current_encryption_key().await.unwrap(),
+    ));
+    copy
+}
+
+async fn load_schedule_object(engine: &SyncEngine, id: &str) -> (ScheduleRecord, LocalHead) {
+    let item = engine.api.get_object(id).await.unwrap();
+    let key = engine.current_encryption_key().await.unwrap();
+    let (record, encrypted) = engine
+        .decrypt_schedule_object_item(&engine.api, &item, &key)
+        .await
+        .unwrap();
+    let visible = engine
+        .local_store
+        .persist_local_schedule_present_encrypted(
+            StoredObjectIdentity {
+                object_id: id,
+                created_at: &item.created_at,
+                source_device_id: &item.source_device_id.to_string(),
+            },
+            record.clone(),
+            &encrypted,
+            item.created_seq,
+            item.created_seq,
+            RECENT_CLIPBOARD_LIMIT,
+        )
+        .await
+        .unwrap();
+    engine.publish_visible_state(visible).await;
+    (record, engine.local_head(id).await.unwrap())
+}
+
+async fn server_running_timers(engine: &SyncEngine) -> usize {
+    let key = engine.current_encryption_key().await.unwrap();
+    let page = engine
+        .api
+        .list_objects(Some(ObjectKind::Schedule), Some(100), None, None)
+        .await
+        .unwrap();
+    let mut running = 0;
+    for item in page.items {
+        let (record, _) = engine
+            .decrypt_schedule_object_item(&engine.api, &item, &key)
+            .await
+            .unwrap();
+        if matches!(record, ScheduleRecord::Actual(actual) if matches!(actual.span, clipper_schedule::ActualSpan::Running { .. }))
+        {
+            running += 1;
+        }
+    }
+    running
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn lost_timer_replies_recover_committed_starts_and_stops() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, upstream) = start_server(temp.path()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let armed = Arc::new(std::sync::Mutex::new(None));
+    let proxy = tokio::spawn(lossy_proxy(listener, upstream, Arc::clone(&armed)));
+    let engine = register_proxy_engine(&url, &temp.path().join("client")).await;
+    let timer = engine.start_actual(None).await.unwrap();
+    *armed.lock().unwrap() = Some(b"/revisions HTTP/1.1");
+    let stopped = engine.stop_actual(&timer).await;
+    assert!(
+        engine.get_state().await.running_actual.is_none(),
+        "lost stop reply: {stopped:?}"
+    );
+    stopped.unwrap();
+    let next = engine.start_actual(None).await.unwrap();
+    engine.stop_actual(&next).await.unwrap();
+    *armed.lock().unwrap() = Some(b"/objects/init HTTP/1.1");
+    let timer = engine.start_actual(None).await.unwrap();
+    assert!(armed.lock().unwrap().is_none());
+    assert_eq!(engine.get_state().await.running_actual.unwrap().id, timer);
+    assert_eq!(server_running_timers(&engine).await, 1);
+    let copy = copy_session(
+        &engine,
+        &format!("http://{upstream}"),
+        &temp.path().join("copy"),
+    )
+    .await;
+    load_schedule_object(&copy, &timer).await;
+    copy.stop_actual(&timer).await.unwrap();
+    assert!(engine.get_state().await.running_actual.is_some());
+    assert!(matches!(
+        engine.stop_actual(&timer).await,
+        Err(ClientError::Api { status: 409, .. })
+    ));
+    assert!(engine.get_state().await.running_actual.is_none());
+    let next = engine.start_actual(None).await.unwrap();
+    engine.stop_actual(&next).await.unwrap();
+    engine.logout().await.unwrap();
+    proxy.abort();
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn calendar_sync_retries_reuse_raw_feeds_and_remove_rejected_uploads() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, upstream) = start_server(temp.path()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let armed = Arc::new(std::sync::Mutex::new(None));
+    let proxy = tokio::spawn(lossy_proxy(listener, upstream, Arc::clone(&armed)));
+    let engine = register_proxy_engine(&url, &temp.path().join("client")).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let feed_url = format!("http://{}/feed.ics", listener.local_addr().unwrap());
+    let feed = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0_u8; 4096];
+            if socket.read(&mut buffer).await.unwrap() == 0 {
+                continue;
+            }
+            let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:meeting\r\nSUMMARY:Planning\r\nDTSTART:20260908T090000Z\r\nDTEND:20260908T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/calendar\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    let source = engine.add_calendar_source("Work", &feed_url).await.unwrap();
+    *armed.lock().unwrap() = Some(b"/revisions HTTP/1.1");
+    let _ = engine.sync_calendar_source(&source).await;
+    assert!(armed.lock().unwrap().is_none());
+    for _ in 0..3 {
+        let _ = engine.sync_calendar_source(&source).await;
+    }
+    let files = engine
+        .api
+        .list_objects(Some(ObjectKind::File), Some(100), None, None)
+        .await
+        .unwrap();
+    assert!(
+        files.items.len() <= 1,
+        "{} raw feeds remain after retries",
+        files.items.len()
+    );
+    let copy = copy_session(
+        &engine,
+        &format!("http://{upstream}"),
+        &temp.path().join("copy"),
+    )
+    .await;
+    let (record, head) = load_schedule_object(&copy, &source).await;
+    let ScheduleRecord::Source(mut changed) = record else {
+        panic!("calendar source")
+    };
+    changed.name = "Changed".into();
+    copy.write_schedule_record(
+        &source,
+        ScheduleRecord::Source(changed),
+        EnvelopePlacement::Revise(head),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        engine.sync_calendar_source(&source).await,
+        Err(ClientError::Api { status: 409, .. })
+    ));
+    let after = engine
+        .api
+        .list_objects(Some(ObjectKind::File), Some(100), None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        after.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+        files.items.iter().map(|item| item.id).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        engine.local_head(&source).await.unwrap().revision,
+        head.revision + 1
+    );
+    engine.logout().await.unwrap();
+    feed.abort();
+    proxy.abort();
+}
+
+async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &str, data: &Path) {
     let item = ScheduleItem {
         id: ScheduleItemId::new(),
         title: "Floating workout".into(),
@@ -971,7 +1255,7 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
         .delete_schedule_object(&object_id)
         .await
         .expect("delete restored fixture");
-    let third = SyncEngine::new_with_data_dir(&url, data.join("third"));
+    let third = SyncEngine::new_with_data_dir(url, data.join("third"));
     third
         .login_with_platform("local-test-passphrase", "scheduler-test", "Third", "test")
         .await
@@ -996,7 +1280,7 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
         .session_resume_material()
         .await
         .expect("derived resume material");
-    let resumed = SyncEngine::new_with_data_dir(&url, data.join("first"));
+    let resumed = SyncEngine::new_with_data_dir(url, data.join("first"));
     resumed
         .resume_with_platform(
             resume.token.clone(),

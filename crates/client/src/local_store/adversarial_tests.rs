@@ -126,6 +126,106 @@ fn new_store(tmp: &tempfile::TempDir) -> LocalStore {
     store
 }
 
+#[tokio::test]
+async fn sweeps_remove_stale_objects_beside_damaged_anchors_and_keep_readable_positions() {
+    for corruption in [
+        "UPDATE object_anchors SET parent_hash = x'00' WHERE object_id = ?1",
+        "UPDATE object_anchors SET kind = 'unknown' WHERE object_id = ?1",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = new_store(&tmp);
+        let generation = store.start_generation().await;
+        let pending = item(
+            "eeeeeeee-1111-4111-8111-111111111111",
+            "pending",
+            "2026-01-01T00:00:00Z",
+        );
+        let healthy = item(
+            "eeeeeeee-2222-4222-8222-222222222222",
+            "healthy",
+            "2026-01-01T00:00:00Z",
+        );
+        for entry in [&pending, &healthy] {
+            let encrypted = encrypted_clipboard_at(
+                entry,
+                entry.text.as_bytes(),
+                1,
+                None,
+                ObjectEnvelopeOperation::Create,
+            );
+            store
+                .persist_local_clipboard_present_encrypted(
+                    entry,
+                    entry.text.as_bytes(),
+                    &encrypted,
+                    1,
+                    1,
+                    10,
+                )
+                .await
+                .unwrap();
+        }
+        let head = store.local_head(&healthy.id).await.unwrap().unwrap();
+        store
+            .apply_live_delete(ObjectKind::Clipboard, &pending.id, 2, generation, 10)
+            .await
+            .unwrap();
+        store
+            .mark_pending_fetch(ObjectKind::Clipboard, &pending.id, 3, generation)
+            .await
+            .unwrap();
+        store
+            .with_database(|connection| {
+                connection.execute(corruption, params![&pending.id])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let generation = store.start_generation().await;
+            store
+                .sweep_kind(ObjectKind::Clipboard, generation, 100, 10)
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .stored_object_record(&pending.id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(matches!(
+                store.stored_object_record(&healthy.id).await.unwrap(),
+                Some(StoredObjectRecord::Deleted(_))
+            ));
+            let record = store
+                .stored_object_record(&healthy.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                revision_anchor_for_record(&record).unwrap().unwrap().head,
+                head
+            );
+            assert!(
+                store
+                    .with_database(|connection| sqlite::forget_object(connection, &healthy.id))
+                    .await
+                    .is_err()
+            );
+            let record = store
+                .stored_object_record(&healthy.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                revision_anchor_for_record(&record).unwrap().unwrap().head,
+                head
+            );
+        }
+    }
+}
+
 fn revision_error_text(error: &LocalStoreError) -> String {
     error.to_string()
 }

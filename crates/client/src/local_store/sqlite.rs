@@ -513,14 +513,8 @@ fn anchor_has_chain_position(
     connection: &Connection,
     object_id: &str,
 ) -> Result<bool, LocalStoreError> {
-    let found: Option<i64> = connection
-        .query_row(
-            "SELECT 1 FROM object_anchors WHERE object_id = ?1 AND anchor_kind IS NOT NULL",
-            params![object_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(found.is_some())
+    Ok(read_anchor_row(connection, object_id)?
+        .is_some_and(|marker| marker.revision_anchor.is_some()))
 }
 
 #[allow(clippy::too_many_arguments)]
