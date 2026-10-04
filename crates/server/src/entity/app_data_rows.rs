@@ -1,24 +1,25 @@
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "sessions")]
+#[sea_orm(table_name = "app_data_rows")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub id: Uuid,
-    #[sea_orm(column_type = "Blob", unique)]
-    pub token_hash: Vec<u8>,
     pub user_id: Uuid,
-    pub device_id: Uuid,
+    #[sea_orm(primary_key, auto_increment = false, column_type = "Blob")]
+    pub row_key: Vec<u8>,
+    pub revision: i64,
+    #[sea_orm(unique)]
+    pub sequence: i64,
+    pub deleted: bool,
+    #[sea_orm(column_type = "Blob", nullable)]
+    pub nonce: Option<Vec<u8>>,
+    #[sea_orm(column_type = "Blob", nullable)]
+    pub ciphertext: Option<Vec<u8>>,
+    pub device_id: Option<Uuid>,
+    #[sea_orm(column_type = "Blob")]
+    pub signature: Vec<u8>,
     #[sea_orm(column_type = "Text")]
-    pub created_at: String,
-    #[sea_orm(column_type = "Text")]
-    pub expires_at: String,
-    #[sea_orm(column_type = "Text")]
-    pub last_seen_at: String,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub user_agent: Option<String>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub ip_addr: Option<String>,
+    pub received_at: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -28,7 +29,7 @@ pub enum Relation {
         from = "Column::DeviceId",
         to = "super::devices::Column::Id",
         on_update = "Cascade",
-        on_delete = "Cascade"
+        on_delete = "SetNull"
     )]
     Devices,
     #[sea_orm(

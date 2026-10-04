@@ -1150,11 +1150,13 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "getrandom 0.4.3",
  "hkdf 0.12.4",
+ "hmac 0.12.1",
  "opaque-ke",
  "postcard",
  "rand 0.10.3",
  "rand 0.8.8",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "zeroize",
@@ -1252,6 +1254,16 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "clipper-gym"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]

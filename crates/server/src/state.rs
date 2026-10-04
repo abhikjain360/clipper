@@ -23,12 +23,12 @@ use crate::{
     auth::AuthInfo,
     collab_sync::{CollabRoom, MAX_CONNS_PER_ROOM},
     config::ServerConfig,
-    entity::{event_log, object_revisions, objects},
+    entity::{app_data_rows, event_log, object_revisions, objects},
     error::ServerResult,
     migration,
     rate_limit::RateLimiter,
     secret::ServerSecrets,
-    ws::WsBroadcast,
+    ws::{AppDataBroadcast, WsBroadcast},
 };
 
 const WS_TICKET_BYTES: usize = 32;
@@ -54,6 +54,7 @@ pub struct AppStateInner {
     pub secrets: Arc<ServerSecrets>,
     rate_limiter: RateLimiter,
     ws_channels: std::sync::Mutex<HashMap<Uuid, broadcast::Sender<WsBroadcast>>>,
+    app_data_channels: std::sync::Mutex<HashMap<Uuid, broadcast::Sender<AppDataBroadcast>>>,
     /// Count of live WebSocket connections per user, bounding concurrent
     /// connections so one authenticated account cannot exhaust FDs/tasks. Slots
     /// are reserved in `try_acquire_ws_slot` and released when the returned guard
@@ -214,10 +215,18 @@ impl AppState {
             .one(self.db())
             .await?
             .flatten();
+        let max_app_data_seq: Option<i64> = app_data_rows::Entity::find()
+            .select_only()
+            .column(app_data_rows::Column::Sequence)
+            .order_by_desc(app_data_rows::Column::Sequence)
+            .into_tuple()
+            .one(self.db())
+            .await?;
         let seed = max_event_seq
             .unwrap_or(0)
             .max(max_revision_seq.unwrap_or(0))
-            .max(max_published_seq.unwrap_or(0));
+            .max(max_published_seq.unwrap_or(0))
+            .max(max_app_data_seq.unwrap_or(0));
         self.inner.event_seq.store(seed, Ordering::SeqCst);
         Ok(())
     }
@@ -274,6 +283,7 @@ impl AppState {
                 secrets: Arc::new(secrets),
                 rate_limiter,
                 ws_channels: std::sync::Mutex::new(HashMap::new()),
+                app_data_channels: std::sync::Mutex::new(HashMap::new()),
                 ws_connections: std::sync::Mutex::new(HashMap::new()),
                 ws_global_cap: Arc::new(tokio::sync::Semaphore::new(ws_global_permits)),
                 collab_rooms: std::sync::Mutex::new(HashMap::new()),
@@ -353,6 +363,40 @@ impl AppState {
                 tx
             })
             .subscribe()
+    }
+
+    pub fn subscribe_app_data_changes(&self, user_id: Uuid) -> Receiver<AppDataBroadcast> {
+        let mut channels = self.inner.app_data_channels.lock().expect("lock poisoned");
+        channels
+            .entry(user_id)
+            .or_insert_with(|| broadcast::channel(WS_BROADCAST_CAPACITY).0)
+            .subscribe()
+    }
+
+    pub fn broadcast_app_data_change(&self, user_id: Uuid, source_device_id: Uuid, sequence: i64) {
+        let sender = self
+            .inner
+            .app_data_channels
+            .lock()
+            .expect("lock poisoned")
+            .get(&user_id)
+            .cloned();
+        if let Some(sender) = sender {
+            _ = sender.send(AppDataBroadcast {
+                source_device_id,
+                sequence,
+            });
+        }
+    }
+
+    pub fn prune_idle_app_data_channel(&self, user_id: Uuid) {
+        let mut channels = self.inner.app_data_channels.lock().expect("lock poisoned");
+        if channels
+            .get(&user_id)
+            .is_some_and(|sender| sender.receiver_count() == 0)
+        {
+            channels.remove(&user_id);
+        }
     }
 
     /// Fan a live event out to the user's WebSocket subscribers.

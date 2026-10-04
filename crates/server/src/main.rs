@@ -301,6 +301,10 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
             delete(routes::auth::delete_device),
         )
         .route("/api/ws-ticket", post(ws::mint_ws_ticket))
+        .route(
+            "/api/app-data/changes",
+            routes::app_data::change_routes(&state),
+        )
         .route("/api/objects/init", post(routes::objects::init_object))
         .route(
             "/api/objects/{id}/payloads/{payload_id}",

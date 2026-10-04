@@ -94,6 +94,7 @@ uuid_id!(UserId);
 uuid_id!(DeviceId);
 uuid_id!(ObjectId);
 uuid_id!(ObjectPayloadId);
+uuid_id!(AppDataRowId);
 
 /// Binary request/response body format used by Rust-only object endpoints.
 pub const POSTCARD_CONTENT_TYPE: &str = "application/vnd.clipper.postcard";
@@ -633,6 +634,84 @@ pub struct ObjectListCursor {
 pub struct ObjectListResponse {
     pub items: Vec<ObjectListItem>,
     pub next_after: Option<ObjectListCursor>,
+}
+
+pub const MAX_APP_DATA_BATCH_CHANGES: usize = 200;
+pub const MAX_APP_DATA_PAGE_CHANGES: u64 = 500;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppDataChange {
+    pub row_key: Vec<u8>,
+    pub revision: u64,
+    pub replaces_revision: u64,
+    pub deleted: bool,
+    pub nonce: Option<Vec<u8>>,
+    pub ciphertext: Option<Vec<u8>>,
+    pub device_id: DeviceId,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct AppDataChangesRequest {
+    #[garde(length(max = MAX_APP_DATA_BATCH_CHANGES))]
+    pub changes: Vec<AppDataChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppDataRow {
+    pub row_key: Vec<u8>,
+    pub revision: u64,
+    pub sequence: i64,
+    pub deleted: bool,
+    pub nonce: Option<Vec<u8>>,
+    pub ciphertext: Option<Vec<u8>>,
+    pub device_id: Option<DeviceId>,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppDataChangeRefusal {
+    BadSignature,
+    TooLarge,
+    OverQuota,
+    Malformed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppDataChangeResult {
+    Accepted { sequence: i64 },
+    Conflict { current: Option<AppDataRow> },
+    Refused { reason: AppDataChangeRefusal },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppDataChangesResponse {
+    pub results: Vec<AppDataChangeResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppDataChangesQuery {
+    #[serde(default)]
+    pub after: i64,
+    #[serde(default = "app_data_default_page_limit")]
+    pub limit: u64,
+}
+
+fn app_data_default_page_limit() -> u64 {
+    MAX_APP_DATA_PAGE_CHANGES
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppDataChangesPage {
+    pub rows: Vec<AppDataRow>,
+    pub newest_sequence: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum WsAppDataMessage {
+    #[serde(rename = "app_data_changed")]
+    Changed { sequence: i64 },
 }
 
 // -- Collab docs --

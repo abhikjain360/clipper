@@ -42,6 +42,8 @@ const DEFAULT_CONFIG: ConfigDefaults = ConfigDefaults {
     limits: LimitsConfig {
         max_file_blob_bytes: 512 * 1024 * 1024,
         max_object_meta_ciphertext_bytes: 64 * 1024,
+        max_app_data_ciphertext_bytes: 64 * 1024 + 16,
+        max_user_app_data_rows: 200_000,
         max_user_storage_bytes: DEFAULT_MAX_USER_STORAGE_BYTES,
         max_user_objects: DEFAULT_MAX_USER_OBJECTS,
         max_user_devices: DEFAULT_MAX_USER_DEVICES,
@@ -289,6 +291,10 @@ impl AuthConfig {
 
 #[derive(Debug, Clone, Validate)]
 pub struct LimitsConfig {
+    #[garde(range(min = 16))]
+    pub max_app_data_ciphertext_bytes: usize,
+    #[garde(custom(validate_max_user_objects))]
+    pub max_user_app_data_rows: u64,
     #[garde(custom(validate_max_file_blob_bytes))]
     pub max_file_blob_bytes: u64,
     #[garde(range(min = 1))]
@@ -321,6 +327,8 @@ impl LimitsConfig {
             [
                 max_file_blob_bytes,
                 max_object_meta_ciphertext_bytes,
+                max_app_data_ciphertext_bytes,
+                max_user_app_data_rows,
                 max_user_storage_bytes,
                 max_user_objects,
                 max_user_devices,
@@ -533,6 +541,10 @@ pub struct AuthConfigOverrides {
 #[derive(Args, Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LimitsConfigOverrides {
+    #[arg(long = "max-app-data-ciphertext-bytes")]
+    pub max_app_data_ciphertext_bytes: Option<usize>,
+    #[arg(long = "max-user-app-data-rows")]
+    pub max_user_app_data_rows: Option<u64>,
     /// Maximum encrypted file blob size.
     #[arg(long = "max-file-blob-bytes")]
     pub max_file_blob_bytes: Option<u64>,

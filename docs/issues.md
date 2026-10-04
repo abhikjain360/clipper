@@ -1756,6 +1756,17 @@ Each entry has:
 - **Decision:** keep the working installed layout during this upgrade. Review
   the workspace configuration before changing the linker.
 
+### 143. Entity generation replaces direct device-user relations with row-table joins
+
+- **Status:** fixed
+- **Severity:** medium; generated relation queries can return the wrong rows.
+- **Where:** `scripts/server-entities.ts`.
+- **What happens:** the row table has user and device foreign keys. SeaORM
+  codegen treats it as a join table and replaces the existing direct
+  device-user relations with relations through app-data rows.
+- **Decision:** preserve direct relations in the generator's post-processing.
+  Regenerate entities instead of editing their relation implementations.
+
 ## Docs
 
 ### 29. Doc claims the code did not satisfy

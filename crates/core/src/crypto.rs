@@ -17,6 +17,8 @@ use rand::Rng;
 use sha2::{Digest, Sha256, digest::OutputSizeUser};
 use zeroize::Zeroizing;
 
+pub mod app_data;
+
 pub const XCHACHA20_NONCE_BYTES: usize =
     <<XChaCha20Poly1305 as AeadCore>::NonceSize as Unsigned>::USIZE;
 pub const SHA256_BYTES: usize = <<Sha256 as OutputSizeUser>::OutputSize as Unsigned>::USIZE;

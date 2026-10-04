@@ -11,6 +11,7 @@ use sea_orm::{DatabaseConnection, DatabaseTransaction, DbErr};
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::{debug, error, trace, warn};
 
+pub mod app_data;
 pub mod auth;
 pub mod collab;
 pub mod health;

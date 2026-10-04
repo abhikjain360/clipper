@@ -10,8 +10,8 @@ use axum::{
 };
 use chrono::Utc;
 use clipper_core::models::{
-    ObjectEnvelope, ObjectEventType, ObjectId, ObjectKind, WsClientMessage, WsError,
-    WsServerMessage, WsTicketResponse,
+    ObjectEnvelope, ObjectEventType, ObjectId, ObjectKind, WsAppDataMessage, WsClientMessage,
+    WsError, WsServerMessage, WsTicketResponse,
 };
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::broadcast::error::RecvError;
@@ -96,6 +96,12 @@ pub struct WsBroadcast {
     pub created_at: String,
     pub envelope: Option<ObjectEnvelope>,
     pub source_device_signing_public_key: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AppDataBroadcast {
+    pub source_device_id: Uuid,
+    pub sequence: i64,
 }
 
 pub async fn ws_handler(
@@ -205,6 +211,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
     // Subscribe before reading the high-water seq. HTTP snapshots own state
     // through stream_start_seq; this live stream owns events after it.
     let mut rx = state.subscribe_ws_broadcasts(auth.user_id);
+    let mut app_data_rx = state.subscribe_app_data_changes(auth.user_id);
 
     // `get_latest_seq` returns `Ok(0)` for a genuinely empty user, so reserve a
     // zero watermark for that case only. On a transient DB error do NOT send a
@@ -216,7 +223,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
         Err(error) => {
             debug!(device_id = %device_id, %error, "WebSocket snapshot watermark query failed; closing so the client retries");
             drop(rx);
+            drop(app_data_rx);
             state.prune_idle_ws_broadcast_channel(auth.user_id);
+            state.prune_idle_app_data_channel(auth.user_id);
             _ = send_bounded(
                 &mut socket,
                 Message::Close(Some(CloseFrame {
@@ -241,7 +250,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
     .await
     {
         drop(rx);
+        drop(app_data_rx);
         state.prune_idle_ws_broadcast_channel(auth.user_id);
+        state.prune_idle_app_data_channel(auth.user_id);
         return;
     }
 
@@ -316,6 +327,33 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
                     .await
                 {
                     break;
+                }
+            }
+            broadcast = app_data_rx.recv() => {
+                match broadcast {
+                    Ok(change) => {
+                        if !should_forward_app_data_change(&change, auth.device_id, stream_start_seq) {
+                            continue;
+                        }
+                        let msg = WsAppDataMessage::Changed { sequence: change.sequence };
+                        if !send_bounded(
+                            &mut socket,
+                            Message::Text(serde_json::to_string(&msg).unwrap().into()),
+                            WS_SEND_TIMEOUT,
+                        ).await {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => {
+                        let msg = WsServerMessage::Invalidate { target: "all".to_string() };
+                        _ = send_bounded(&mut socket, Message::Text(serde_json::to_string(&msg).unwrap().into()), WS_SEND_TIMEOUT).await;
+                        _ = send_bounded(&mut socket, Message::Close(Some(CloseFrame { code: close_code::AWAY, reason: "lagged".into() })), WS_SEND_TIMEOUT).await;
+                        break;
+                    }
+                    Err(RecvError::Closed) => {
+                        _ = send_bounded(&mut socket, Message::Close(Some(CloseFrame { code: close_code::AWAY, reason: "server shutting down".into() })), WS_SEND_TIMEOUT).await;
+                        break;
+                    }
                 }
             }
             broadcast = rx.recv() => {
@@ -396,7 +434,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
     }
 
     drop(rx);
+    drop(app_data_rx);
     state.prune_idle_ws_broadcast_channel(auth.user_id);
+    state.prune_idle_app_data_channel(auth.user_id);
     info!(device_id = %device_id, "WebSocket disconnected");
 }
 
@@ -447,9 +487,11 @@ pub(crate) async fn get_latest_seq(state: &AppState, user_id: Uuid) -> Result<i6
         .one(state.db())
         .await?
         .flatten();
+    let latest_app_data_seq = crate::routes::app_data::newest_sequence(state.db(), user_id).await?;
     Ok(latest_event_seq
         .unwrap_or(0)
-        .max(latest_object_seq.unwrap_or(0)))
+        .max(latest_object_seq.unwrap_or(0))
+        .max(latest_app_data_seq))
 }
 
 /// Whether the session backing a live connection is still usable: present and
@@ -477,6 +519,14 @@ async fn session_still_valid(state: &AppState, session_id: Uuid) -> bool {
 
 fn should_forward_live_broadcast(evt: &WsBroadcast, device_id: Uuid) -> bool {
     evt.source_device_id != device_id
+}
+
+pub(crate) fn should_forward_app_data_change(
+    change: &AppDataBroadcast,
+    device_id: Uuid,
+    stream_start_seq: i64,
+) -> bool {
+    change.source_device_id != device_id && change.sequence > stream_start_seq
 }
 
 #[cfg(test)]
