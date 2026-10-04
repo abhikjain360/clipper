@@ -1392,6 +1392,7 @@ function ScheduleComposer({
     const [allDay, setAllDay] = useState(false);
     const [floating, setFloating] = useState(false);
     const [repeat, setRepeat] = useState<RepeatSelection>("once");
+    const [intervalText, setIntervalText] = useState("1");
     const [alarm, setAlarm] = useState(false);
     const [alarmLead, setAlarmLead] = useState("0");
     // The series id survives an edit, so overrides and logged time keep
@@ -1437,6 +1438,7 @@ function ScheduleComposer({
         setAlarm(parsed.alarm != null);
         setAlarmLead(String(parsed.alarm?.minutes_before ?? 0));
         setRepeat(repeatChoiceOf(parsed.recurrence));
+        setIntervalText(String(parsed.recurrence.kind === "every" ? parsed.recurrence.interval : 1));
         setDays(weekdaysOf(parsed.recurrence) ?? ["mon", "wed", "fri"]);
         if (parsed.span.kind === "all_day") {
             setAllDay(true);
@@ -1466,6 +1468,15 @@ function ScheduleComposer({
         }
         if (repeat === "weekly" && days.length === 0) {
             onError("Pick at least one weekday");
+            return;
+        }
+        const repeatInterval = Number(intervalText);
+        if (
+            repeat !== "once" &&
+            repeat !== "custom" &&
+            (!Number.isInteger(repeatInterval) || repeatInterval < 1 || repeatInterval > 65_535)
+        ) {
+            onError("Repeat interval must be a whole number from 1 to 65,535");
             return;
         }
         if (allDay && (!/^\d+$/.test(allDayDays) || Number(allDayDays) < 1)) {
@@ -1509,10 +1520,22 @@ function ScheduleComposer({
                                 duration: snapMinutes(minutes),
                             },
                 recurrence: moveMonthlyRule
-                    ? buildRecurrence("monthly", days, date, original.current?.recurrence ?? null)
+                    ? buildRecurrence(
+                          "monthly",
+                          days,
+                          date,
+                          repeatInterval,
+                          original.current?.recurrence ?? null,
+                      )
                     : original.current && !recurrenceChanged
                       ? original.current.recurrence
-                      : buildRecurrence(repeat, days, date, original.current?.recurrence ?? null),
+                      : buildRecurrence(
+                            repeat,
+                            days,
+                            date,
+                            repeatInterval,
+                            original.current?.recurrence ?? null,
+                        ),
                 reference: original.current?.reference ?? null,
                 alarm: alarm
                     ? { minutes_before: Math.max(0, Number.parseInt(alarmLead, 10) || 0) }
@@ -1547,6 +1570,7 @@ function ScheduleComposer({
         original.current = null;
         setSpanChanged(false);
         setRecurrenceChanged(false);
+        setIntervalText("1");
         setZone(observerZone());
         setAllDayDays("1");
         setOpen(false);
@@ -1718,6 +1742,29 @@ function ScheduleComposer({
                     </Toggle>
                 ))}
             </XStack>
+
+            {repeat !== "once" && repeat !== "custom" && (
+                <XStack gap="$2" items="center">
+                    <Text>Every</Text>
+                    <Input
+                        value={intervalText}
+                        onChangeText={(value) => {
+                            setIntervalText(value);
+                            setRecurrenceChanged(true);
+                        }}
+                        width={100}
+                        type="number"
+                        min={1}
+                        max={65_535}
+                        step={1}
+                        keyboardType="numeric"
+                        aria-label="Repeat interval"
+                    />
+                    <Text>
+                        {repeat === "daily" ? "days" : repeat === "monthly" ? "months" : "weeks"}
+                    </Text>
+                </XStack>
+            )}
 
             {repeat === "weekly" && (
                 <XStack gap="$2" flexWrap="wrap">

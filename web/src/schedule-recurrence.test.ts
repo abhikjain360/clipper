@@ -3,15 +3,12 @@ import { test } from "node:test";
 
 import type { Recurrence } from "@clipper/shared";
 
-import { buildRecurrence, isDerivedMonthlyRule, repeatChoiceOf } from "./schedule-recurrence.ts";
-
-/// Narrow a rebuild to the repeating case so a test can read its parts. A
-/// rebuild that collapsed to `once` is a failure everywhere this is used.
-function repeating(recurrence: Recurrence): Extract<Recurrence, { kind: "every" }> {
-    assert.equal(recurrence.kind, "every");
-    if (recurrence.kind !== "every") throw new Error("unreachable");
-    return recurrence;
-}
+import {
+    buildRecurrence,
+    isDerivedMonthlyRule,
+    repeatChoiceOf,
+    weekdaysOf,
+} from "./schedule-recurrence.ts";
 
 const fortnightly: Recurrence = {
     kind: "every",
@@ -32,114 +29,110 @@ const secondTuesday: Recurrence = {
     end: { when: "never" },
 };
 
-const yearly: Recurrence = {
-    kind: "every",
-    frequency: { unit: "yearly", month: "march", day: { from: "from_start", day: 14 } },
-    interval: 1,
-    end: { when: "never" },
-};
-
-/// Rules outside the repeat row's supported choices must show as custom, so
-/// choosing Once is an explicit recurrence change.
-test("a cadence the row cannot express reports custom, not once", () => {
-    assert.equal(repeatChoiceOf(fortnightly), "custom");
-    assert.equal(repeatChoiceOf(secondTuesday), "custom");
-    assert.equal(repeatChoiceOf(yearly), "custom");
-    assert.equal(
-        repeatChoiceOf({ kind: "imported", import: "saved-import", uid: "provider-event" }),
-        "custom",
-    );
-
-    // The five it can express still round-trip.
-    assert.equal(repeatChoiceOf({ kind: "once" }), "once");
-    assert.equal(
-        repeatChoiceOf({
+test("stored intervals select a supported pill and round-trip through the repeat controls", () => {
+    const rules: Extract<Recurrence, { kind: "every" }>[] = [
+        {
             kind: "every",
             frequency: { unit: "daily" },
-            interval: 1,
+            interval: 3,
             end: { when: "never" },
-        }),
-        "daily",
-    );
-    assert.equal(
-        repeatChoiceOf({
+        },
+        fortnightly,
+        {
             kind: "every",
-            frequency: {
-                unit: "weekly",
-                weekdays: ["mon", "tue", "wed", "thu", "fri"],
-            },
+            frequency: { unit: "weekly", weekdays: ["mon", "tue", "wed", "thu", "fri"] },
+            interval: 2,
+            end: { when: "never" },
+        },
+        {
+            kind: "every",
+            frequency: { unit: "monthly", by: "on_day", from: "from_start", day: 8 },
+            interval: 65_535,
+            end: { when: "on", value: "2026-12-31T00:00:00Z" },
+        },
+    ];
+
+    for (const rule of rules) {
+        const choice = repeatChoiceOf(rule);
+        assert.notEqual(choice, "custom");
+        assert.deepEqual(
+            buildRecurrence(choice, weekdaysOf(rule) ?? [], "2026-09-08", rule.interval, rule),
+            rule,
+        );
+    }
+});
+
+test("unsupported rules stay custom until a supported repeat setting replaces them", () => {
+    const rules: Recurrence[] = [
+        secondTuesday,
+        {
+            kind: "every",
+            frequency: { unit: "monthly", by: "on_day", from: "from_end", day: 1 },
+            interval: 2,
+            end: { when: "never" },
+        },
+        {
+            kind: "every",
+            frequency: { unit: "yearly", month: "march", day: { from: "from_start", day: 14 } },
             interval: 1,
             end: { when: "never" },
-        }),
-        "weekdays",
-    );
+        },
+        { kind: "imported", import: "saved-import", uid: "provider-event" },
+    ];
+
+    for (const rule of rules) {
+        const choice = repeatChoiceOf(rule);
+        assert.equal(choice, "custom");
+        assert.deepEqual(buildRecurrence(choice, [], "2026-09-08", 1, rule), rule);
+        assert.deepEqual(buildRecurrence("daily", [], "2026-09-08", 3, rule), {
+            kind: "every",
+            frequency: { unit: "daily" },
+            interval: 3,
+            end: { when: "never" },
+        });
+    }
 });
 
-test("identifies the plain monthly rule derived from a start date", () => {
-    assert.equal(
-        isDerivedMonthlyRule(
-            {
-                kind: "every",
-                frequency: { unit: "monthly", by: "on_day", from: "from_start", day: 8 },
-                interval: 1,
-                end: { when: "never" },
-            },
-            "2026-09-08",
-        ),
-        true,
-    );
-    assert.equal(isDerivedMonthlyRule(secondTuesday, "2026-09-08"), false);
-});
-
-/// The row has no control for when a series stops, so a rebuild must not decide
-/// that it never does. This was the quiet half of the bug: toggling one weekday
-/// turned "every Tuesday, ten times" into "every Tuesday, forever".
-test("rebuilding carries over the end condition the row cannot show", () => {
-    const edited = buildRecurrence("weekly", ["tue", "thu"], "2026-09-08", fortnightly);
-    assert.deepEqual(edited, {
+test("repeat edits use the explicit interval across units and keep the stored end condition", () => {
+    assert.deepEqual(buildRecurrence("weekly", ["tue", "thu"], "2026-09-08", 4, fortnightly), {
         kind: "every",
         frequency: { unit: "weekly", weekdays: ["tue", "thu"] },
-        // Same unit, so the period count survives.
+        interval: 4,
+        end: { when: "after", value: 10 },
+    });
+    assert.deepEqual(buildRecurrence("daily", [], "2026-09-08", 2, fortnightly), {
+        kind: "every",
+        frequency: { unit: "daily" },
         interval: 2,
         end: { when: "after", value: 10 },
     });
-
-    const until: Recurrence = {
+    assert.deepEqual(buildRecurrence("monthly", [], "2026-09-08", 2, fortnightly), {
         kind: "every",
-        frequency: { unit: "daily" },
-        interval: 1,
-        end: { when: "on", value: "2026-12-31T00:00:00Z" },
-    };
-    assert.deepEqual(repeating(buildRecurrence("monthly", [], "2026-09-08", until)).end, {
-        when: "on",
-        value: "2026-12-31T00:00:00Z",
+        frequency: { unit: "monthly", by: "on_day", from: "from_start", day: 8 },
+        interval: 2,
+        end: { when: "after", value: 10 },
     });
 });
 
-/// An interval counts periods, so carrying "2" from weekly to daily would
-/// quietly mean something new. Changing the unit is the one case where losing
-/// it is the honest answer.
-test("the interval survives a same-unit edit and resets when the unit changes", () => {
-    assert.equal(repeating(buildRecurrence("weekdays", [], "2026-09-08", fortnightly)).interval, 2);
-    assert.equal(repeating(buildRecurrence("daily", [], "2026-09-08", fortnightly)).interval, 1);
-    assert.equal(repeating(buildRecurrence("monthly", [], "2026-09-08", fortnightly)).interval, 1);
+test("moving a derived monthly rule moves its day and keeps its interval and end condition", () => {
+    const rule = buildRecurrence("monthly", [], "2026-09-08", 2, fortnightly);
+    assert.equal(isDerivedMonthlyRule(rule, "2026-09-08"), true);
+    assert.equal(isDerivedMonthlyRule(rule, "2026-09-09"), false);
+    assert.equal(isDerivedMonthlyRule(secondTuesday, "2026-09-08"), false);
+    assert.deepEqual(buildRecurrence("monthly", [], "2026-09-09", 2, rule), {
+        kind: "every",
+        frequency: { unit: "monthly", by: "on_day", from: "from_start", day: 9 },
+        interval: 2,
+        end: { when: "after", value: 10 },
+    });
 });
 
-/// Choosing Once is a real instruction and must still clear the rule; and with
-/// nothing stored to carry, the defaults are what they always were.
-test("once clears the rule and a fresh block gets plain defaults", () => {
-    assert.deepEqual(buildRecurrence("once", [], "2026-09-08", fortnightly), { kind: "once" });
-    assert.deepEqual(buildRecurrence("weekly", ["wed"], "2026-09-08", null), {
+test("once clears a stored rule and a new repeating block has no end condition", () => {
+    assert.deepEqual(buildRecurrence("once", [], "2026-09-08", 2, fortnightly), { kind: "once" });
+    assert.deepEqual(buildRecurrence("weekly", ["wed"], "2026-09-08", 1, null), {
         kind: "every",
         frequency: { unit: "weekly", weekdays: ["wed"] },
         interval: 1,
         end: { when: "never" },
     });
-});
-
-/// `custom` is not selectable, so submit() never rebuilds from it. If it ever
-/// did, keeping the stored rule is the only answer that invents nothing.
-test("custom keeps whatever was stored", () => {
-    assert.deepEqual(buildRecurrence("custom", [], "2026-09-08", secondTuesday), secondTuesday);
-    assert.deepEqual(buildRecurrence("custom", [], "2026-09-08", null), { kind: "once" });
 });
