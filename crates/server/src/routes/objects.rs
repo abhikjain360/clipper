@@ -1361,10 +1361,6 @@ pub async fn revise_object(
 
 /// Which kinds revisions may be written for.
 ///
-/// Clipboard is excluded because it expires passively on a TTL and never emits
-/// an `updated` event; collab is excluded because it is versioned through its
-/// own Y-sync route, which has a plaintext row and a session to tear down as
-/// well. The same set gates deletes: only these kinds tombstone and purge.
 fn kind_supports_revisions(kind: ObjectKind) -> bool {
     match kind {
         ObjectKind::File | ObjectKind::Schedule | ObjectKind::AppDocument => true,
@@ -2346,7 +2342,7 @@ pub async fn purge_object(
         ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
-    if !kind_supports_revisions(kind) {
+    if kind != ObjectKind::Clipboard && !kind_supports_revisions(kind) {
         debug!(
             object_id = %object_uuid,
             kind = kind.as_ref(),
@@ -2354,11 +2350,11 @@ pub async fn purge_object(
         );
         return Err(ApiError::from_code_with_message(
             ApiErrorCode::ObjectDeleteUnsupported,
-            "Only file and schedule objects can be deleted",
+            "This object kind cannot be purged",
         ));
     }
 
-    if deleted_at.is_none() {
+    if kind != ObjectKind::Clipboard && deleted_at.is_none() {
         debug!(
             object_id = %object_uuid,
             user_id = %auth.user_id,
@@ -2476,6 +2472,25 @@ pub async fn purge_object(
         ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
+    let inserted_event = if kind == ObjectKind::Clipboard {
+        let now = Utc::now().to_rfc3339();
+        let seq = state.next_event_seq();
+        Some(
+            insert_object_event(
+                &txn,
+                auth.user_id,
+                kind,
+                object_uuid,
+                &now,
+                seq,
+                ObjectEventType::Deleted,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     txn.commit().await.map_err(|e| {
         error!(
             object_id = %object_uuid,
@@ -2487,17 +2502,29 @@ pub async fn purge_object(
 
     remove_paths(paths).await;
 
-    // No event and no broadcast. Every client already dropped this object when
-    // the tombstone revision landed, so a second `deleted` would tell them
-    // nothing and would burn a seq. The returned seq is the one the deletion
-    // was published at.
-    let deleted_seq = published_seq.ok_or_else(|| {
-        error!(
-            object_id = %object_uuid,
-            "Tombstoned object has no published seq",
-        );
-        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-    })?;
+    if let Some(event) = &inserted_event {
+        state.broadcast_ws_event(WsBroadcast {
+            user_id: auth.user_id,
+            source_device_id: auth.device_id,
+            seq: event.seq,
+            event_type: ObjectEventType::Deleted,
+            object_kind: kind,
+            object_id: object_uuid.into(),
+            created_at: event.created_at.clone(),
+            envelope: None,
+            source_device_signing_public_key: None,
+        });
+    }
+    let deleted_seq = inserted_event
+        .map(|event| event.seq)
+        .or(published_seq)
+        .ok_or_else(|| {
+            error!(
+                object_id = %object_uuid,
+                "Tombstoned object has no published seq",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
     info!(
         device_id = %auth.device_id,
         object_id = %object_uuid,
@@ -7066,11 +7093,8 @@ mod tests {
         assert_eq!(row.event_type, ObjectEventType::Deleted.to_string());
     }
 
-    /// Clipboard expires passively on a TTL and never emits a delete; collab is
-    /// deleted through its own route, which has a plaintext row and a Y-sync
-    /// session to tear down. Neither belongs on this path.
     #[tokio::test]
-    async fn clipboard_objects_are_still_not_deletable_here() {
+    async fn clipboard_purges_remove_the_object_and_emit_a_scoped_delete() {
         let (state, _data_dir) = test_state().await;
         let user_id = insert_user(&state).await;
         let device_id = Uuid::now_v7();
@@ -7105,13 +7129,53 @@ mod tests {
         .expect_err("clipboard tombstones must be refused");
         assert_eq!(error.body().code, ApiErrorCode::ObjectDeleteUnsupported);
 
+        let other_user = insert_user(&state).await;
         let error = purge_object(
             State(state.clone()),
-            Extension(auth(user_id, device_id)),
-            Path(object_id),
+            Extension(auth(other_user, Uuid::now_v7())),
+            Path(object_id.clone()),
         )
         .await
-        .expect_err("clipboard purges must be refused");
-        assert_eq!(error.body().code, ApiErrorCode::ObjectDeleteUnsupported);
+        .expect_err("another user cannot purge");
+        assert_eq!(error.body().code, ApiErrorCode::ObjectNotFound);
+
+        let mut events = state.subscribe_ws_broadcasts(user_id);
+        let Postcard(deleted) = purge_object(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Path(object_id.clone()),
+        )
+        .await
+        .expect("clipboard purge");
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.seq, deleted.deleted_seq);
+        assert_eq!(event.event_type, ObjectEventType::Deleted);
+        assert_eq!(event.object_kind, ObjectKind::Clipboard);
+        assert_eq!(event.source_device_id, device_id);
+        assert!(event.envelope.is_none());
+        let id = Uuid::parse_str(&object_id).unwrap();
+        assert!(
+            objects::Entity::find_by_id(id)
+                .one(state.db())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            object_revisions::Entity::find()
+                .filter(object_revisions::Column::ObjectId.eq(id))
+                .all(state.db())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            object_payloads::Entity::find()
+                .filter(object_payloads::Column::ObjectId.eq(id))
+                .all(state.db())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

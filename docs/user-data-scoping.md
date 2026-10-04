@@ -71,7 +71,7 @@ Every object read and write filters on `objects::Column::UserId`:
   both the object id and `UserId.eq(user_id)`.
 - `purge_object` locks and reads the object with `UserId.eq(auth.user_id)`
   before it deletes the row, inside one transaction. It accepts only a
-  tombstoned file or schedule object.
+  clipboard object, or a tombstoned file, schedule object or app document.
 - `object_list_items` resolves each revision's source-device signing key with
   `devices::Column::UserId.eq(user_id)`, so it never returns another user's
   device key. A revision whose `source_device_id` is NULL, because its device

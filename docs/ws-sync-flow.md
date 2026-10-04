@@ -20,8 +20,9 @@ counts as applied only after the matching local write succeeds.
 Clipboard history is retention-bounded. A clipboard item leaves sync when it
 falls outside the server's clipboard retention window: older than the TTL, or
 outside the newest `clipboard.max_items`. Clients then remove their local copy.
-The user cannot delete a clipboard item, so clipboard items never produce
-delete events.
+The user can permanently delete a clipboard item. Purge removes its server
+object, revisions and payloads and emits a delete event. Each device removes
+its local copy immediately during live sync or at the next successful snapshot.
 
 Files, schedule objects and app documents stay until the user deletes them.
 They do not disappear because old event history was pruned; each reconnect
@@ -209,10 +210,11 @@ If the fetch fails:
 The server sends a `deleted` event when a tombstone revision is published for a
 file, schedule object or app document, and when a collab doc is deleted. Purging an object
 that is already tombstoned sends no event, because every client dropped it when
-the tombstone arrived. Clipboard items never produce delete events.
+the tombstone arrived. Purging a clipboard item sends a `deleted` event without
+a tombstone. HTTP DELETE removes its object, all revisions and all payloads.
 
 When the client receives a `deleted` event for a file, schedule object, app
-document or collab doc:
+document, clipboard item or collab doc:
 
 1. If the local record has a later sequence number, ignore the event. With the
    same sequence number, only a tombstone for an object already stored as gone
@@ -227,6 +229,21 @@ document or collab doc:
 4. Later snapshot or fetch results with an earlier sequence number than the
    delete are ignored. Sweeps never remove a gone record, so this holds across
    reconnects.
+
+For clipboard items, the delete keeps an Absent anchor and removes cached
+payloads and visible entries. An open clipboard viewer closes when its item
+disappears. The Mac daemon clears an installed or captured pasteboard entry
+only while its change count still matches the recorded copy. The phone clears
+an installed or captured Android clipboard entry only while its timestamp
+still matches. Ownership survives app restart. Mac ownership also records the
+boot time, so a reused change count after reboot cannot clear a new copy.
+A later copy is kept, even if its content is the same.
+The Mac watcher checks the change count before capture and does not upload
+the cleared entry.
+
+Android restricts clipboard reads and clears while an app is in the
+background. The phone keeps the ownership record when access is unavailable
+and retries clearing when the app becomes active.
 
 A `deleted` event for any other kind is logged and ignored.
 
@@ -290,8 +307,9 @@ clipboard items up to the stream start.
 8. Objects after the stream start are left alone, because the WebSocket covers
    them.
 
-An item missing from the retained listing is outside the retention window, so
-the client removes its local copy at the sweep.
+An item missing from the retained listing has expired or been purged, so the
+client removes its local copy and cached payload at the sweep. The same
+clipboard ownership checks apply when reconciliation removes an item.
 
 If the clipboard snapshot fails, the client does not sweep clipboard state.
 

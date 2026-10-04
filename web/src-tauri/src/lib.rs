@@ -18,6 +18,8 @@ use std::{
 use clipper_app_types::{
     ActualView, AppState, CollabItem, DeviceInfo, IngestReport, LogoutOutcome, OccurrenceView,
 };
+#[cfg(target_os = "macos")]
+use clipper_daemon_types::CopyToLocalParams;
 use clipper_daemon_types::{
     ActualsBetweenParams, AddCalendarSourceParams, ClipboardPayloadParams, ClipboardPayloadResult,
     CreateScheduleItemParams, DaemonCommand, DeleteCollabDocParams, DeleteFileParams,
@@ -33,6 +35,7 @@ use daemon_client::{DaemonClient, DaemonClientError};
 use rand::RngExt;
 use serde::{Deserialize, Serialize, Serializer};
 use tauri::{Manager, State};
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tokio::io::AsyncWriteExt;
@@ -57,6 +60,7 @@ enum CommandError {
     #[error("native file dialog failed: {0}")]
     NativeFileDialog(String),
     #[error("native clipboard failed: {0}")]
+    #[cfg(not(target_os = "macos"))]
     NativeClipboard(String),
 }
 
@@ -75,6 +79,7 @@ impl Serialize for CommandError {
             code: match self {
                 Self::Client(_) => "client",
                 Self::NativeFileDialog(_) => "native_file_dialog",
+                #[cfg(not(target_os = "macos"))]
                 Self::NativeClipboard(_) => "native_clipboard",
             },
             message: self.to_string(),
@@ -165,6 +170,7 @@ pub fn run() {
             download_file_to_dialog,
             download_file_bytes,
             delete_file,
+            delete_clipboard,
             create_collab_doc,
             delete_collab_doc,
             create_schedule_item,
@@ -366,25 +372,12 @@ async fn send_clipboard_text(
 
 #[tauri::command]
 async fn send_current_clipboard_text(
-    window: tauri::Window,
     backend: State<'_, DesktopBackend>,
 ) -> CommandResult<Option<String>> {
-    let Some(text) = read_current_clipboard_text(&window)? else {
-        return Ok(None);
-    };
-    if text.is_empty() {
-        return Ok(None);
-    }
-    let result = backend
+    Ok(backend
         .daemon
-        .send_result::<SendItemResult>(DaemonCommand::SendClipboardPayload(
-            SendClipboardPayloadParams {
-                mime_type: TEXT_CLIPBOARD_MIME_TYPE.to_string(),
-                bytes: text.into_bytes(),
-            },
-        ))
-        .await?;
-    Ok(Some(result.id))
+        .send_result::<Option<String>>(DaemonCommand::SendCurrentClipboard)
+        .await?)
 }
 
 #[tauri::command]
@@ -422,20 +415,34 @@ async fn write_clipboard_item_text(
     backend: State<'_, DesktopBackend>,
     id: String,
 ) -> CommandResult<()> {
-    let result = backend
-        .daemon
-        .send_result::<ClipboardPayloadResult>(DaemonCommand::ClipboardPayload(
-            ClipboardPayloadParams { item_id: id },
-        ))
-        .await?;
-    let text = result
-        .text
-        .unwrap_or_else(|| String::from_utf8_lossy(&result.bytes).into_owned());
-    window
-        .clipboard()
-        .write_text(text)
-        .map_err(|e| CommandError::NativeClipboard(e.to_string()))?;
-    Ok(())
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window;
+        backend
+            .daemon
+            .send_result::<clipper_daemon_types::CopyToLocalResult>(DaemonCommand::CopyToLocal(
+                CopyToLocalParams { item_id: id },
+            ))
+            .await?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let result = backend
+            .daemon
+            .send_result::<ClipboardPayloadResult>(DaemonCommand::ClipboardPayload(
+                ClipboardPayloadParams { item_id: id },
+            ))
+            .await?;
+        let text = result
+            .text
+            .unwrap_or_else(|| String::from_utf8_lossy(&result.bytes).into_owned());
+        window
+            .clipboard()
+            .write_text(text)
+            .map_err(|e| CommandError::NativeClipboard(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -547,6 +554,17 @@ async fn delete_file(backend: State<'_, DesktopBackend>, file_id: String) -> Com
     backend
         .daemon
         .send_ok(DaemonCommand::DeleteFile(DeleteFileParams { file_id }))
+        .await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_clipboard(backend: State<'_, DesktopBackend>, id: String) -> CommandResult<()> {
+    backend
+        .daemon
+        .send_ok(DaemonCommand::DeleteClipboard(ClipboardPayloadParams {
+            item_id: id,
+        }))
         .await?;
     Ok(())
 }
@@ -809,24 +827,6 @@ async fn remove_device(backend: State<'_, DesktopBackend>, device_id: String) ->
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-#[cfg(target_os = "macos")]
-fn read_current_clipboard_text(_window: &tauri::Window) -> CommandResult<Option<String>> {
-    Ok(clipper_client::clipboard_watcher::read_current_unconcealed_clipboard_text())
-}
-
-#[cfg(target_os = "linux")]
-fn read_current_clipboard_text(_window: &tauri::Window) -> CommandResult<Option<String>> {
-    clipper_client::clipboard_watcher::read_current_unconcealed_clipboard_text()
-        .map_err(CommandError::NativeClipboard)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn read_current_clipboard_text(window: &tauri::Window) -> CommandResult<Option<String>> {
-    Ok(Some(window.clipboard().read_text().map_err(|e| {
-        CommandError::NativeClipboard(e.to_string())
-    })?))
-}
 
 fn dialog_path_to_path(path: tauri_plugin_dialog::FilePath) -> CommandResult<PathBuf> {
     path.into_path()

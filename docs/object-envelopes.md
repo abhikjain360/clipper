@@ -121,7 +121,9 @@ revision's payload bytes and metadata ciphertext bytes count toward the user's
 storage-byte quota; additional
 revisions do not consume additional object-count quota. Orphan cleanup may
 remove incomplete revisions and releases only their reserved bytes. Completed
-history remains until the whole tombstoned object is purged.
+history remains until the whole tombstoned object is purged. Clipboard items
+have only a creation revision and can be purged directly. Their purge keeps no
+tombstone revision and emits a delete event without an envelope.
 
 ## Client verification and rollback limits
 

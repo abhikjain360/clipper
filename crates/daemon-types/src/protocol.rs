@@ -20,7 +20,7 @@ use zeroize::Zeroizing;
 /// incompatibly — the desktop app and the daemon are separate binaries, and an
 /// old daemon can outlive an app update (it is reparented to PID 1, so it keeps
 /// running until killed).
-pub const IPC_AUTH_VERSION: u32 = 12;
+pub const IPC_AUTH_VERSION: u32 = 13;
 pub const IPC_AUTH_NONCE_BYTES: usize = 32;
 pub const IPC_AUTH_TAG_BYTES: usize = 32;
 
@@ -71,9 +71,11 @@ pub enum DaemonCommand {
     Logout(Option<LogoutParams>),
     GetState,
     SendClipboard(SendClipboardParams),
+    SendCurrentClipboard,
     SendClipboardPayload(SendClipboardPayloadParams),
     CopyToLocal(CopyToLocalParams),
     ClipboardPayload(ClipboardPayloadParams),
+    DeleteClipboard(ClipboardPayloadParams),
     UploadFile(UploadFileParams),
     DownloadFile(DownloadFileParams),
     DeleteFile(DeleteFileParams),

@@ -6,6 +6,7 @@ import { CryptoDigestAlgorithm, digestStringAsync } from "expo-crypto";
 import * as Sharing from "expo-sharing";
 import { createMobileBackend } from "@clipper/mobile-bridge/adapter";
 import { readWithDeadline } from "./secureRead";
+import { itemClipboard } from "../modules/clipper-clipboard";
 
 const nativeBackend = createMobileBackend({
   dataDir: resolveDataDir(),
@@ -17,6 +18,11 @@ export const backend = {
   ...nativeBackend,
   getState: async () => {
     const state = await nativeBackend.getState();
+    if (state.session)
+      itemClipboard?.clearMissing(
+        state.clipboard_items.map((item) => item.id),
+        state.session.device_id,
+      );
     if (state.session) resumedSession = true;
     if (resumedSession && !state.session) {
       resumedSession = false;
@@ -59,6 +65,29 @@ export async function readClipboardText(): Promise<string> {
 
 export async function writeClipboardText(text: string): Promise<void> {
   await Clipboard.setStringAsync(text);
+}
+
+export async function captureClipboardItem(): Promise<string | null> {
+  const session = (await nativeBackend.getState()).session;
+  if (!session) throw new Error("Not logged in");
+  const captured = itemClipboard?.read();
+  const text = captured?.text ?? (await readClipboardText());
+  if (!text) return null;
+  const id = await nativeBackend.sendClipboardText(text);
+  if (captured) itemClipboard?.claim(id, captured.timestamp, session.device_id);
+  await backend.getState();
+  return id;
+}
+
+export async function copyClipboardItem(id: string): Promise<void> {
+  const session = (await nativeBackend.getState()).session;
+  if (!session) throw new Error("Not logged in");
+  const payload = await nativeBackend.clipboardPayload(id);
+  if (payload.text == null)
+    throw new Error(`Cannot copy ${payload.mimeType} to the text clipboard`);
+  if (itemClipboard) itemClipboard.install(id, payload.text, session.device_id);
+  else await writeClipboardText(payload.text);
+  await backend.getState();
 }
 
 export async function pickUploadFile(): Promise<{

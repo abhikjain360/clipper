@@ -23,8 +23,13 @@ use crate::{
 static WATCHER_STARTED: AtomicBool = AtomicBool::new(false);
 
 struct ClipboardRead {
+    count: isize,
     mime_type: &'static str,
     bytes: Vec<u8>,
+}
+
+pub(crate) fn read_current_payload() -> Option<(isize, &'static str, Vec<u8>)> {
+    read_clipboard(&mut -1).map(|payload| (payload.count, payload.mime_type, payload.bytes))
 }
 
 /// Start watching the macOS clipboard in a background task.
@@ -81,7 +86,11 @@ fn run_clipboard_watcher(rt: tokio::runtime::Handle, engine: Arc<SyncEngine>) {
                 let engine = engine.clone();
                 rt.block_on(async {
                     match engine
-                        .capture_clipboard_payload(payload.mime_type, &payload.bytes)
+                        .capture_macos_clipboard_payload(
+                            payload.count,
+                            payload.mime_type,
+                            &payload.bytes,
+                        )
                         .await
                     {
                         Ok(id) => info!(clipboard_id = %id, "Uploaded macOS clipboard change"),
@@ -98,6 +107,13 @@ fn run_clipboard_watcher(rt: tokio::runtime::Handle, engine: Arc<SyncEngine>) {
 /// Returns Some(payload) if clipboard changed, None if no change.
 fn read_clipboard(last_change_count: &mut isize) -> Option<ClipboardRead> {
     let pasteboard = NSPasteboard::generalPasteboard();
+    read_pasteboard(&pasteboard, last_change_count)
+}
+
+fn read_pasteboard(
+    pasteboard: &NSPasteboard,
+    last_change_count: &mut isize,
+) -> Option<ClipboardRead> {
     let current_count = pasteboard.changeCount();
 
     if current_count == *last_change_count {
@@ -105,12 +121,12 @@ fn read_clipboard(last_change_count: &mut isize) -> Option<ClipboardRead> {
     }
     *last_change_count = current_count;
 
-    if pasteboard_has_private_marker(&pasteboard) {
+    if pasteboard_has_private_marker(pasteboard) {
         debug!("Ignoring macOS clipboard payload with private pasteboard marker");
         return None;
     }
 
-    let candidate = read_clipboard_candidate(&pasteboard)?;
+    let candidate = read_clipboard_candidate(pasteboard)?;
 
     // Re-validate after reading the payload: the marker check and the payload
     // read are separate, non-atomic ObjC calls, so a concealed write that lands
@@ -124,7 +140,7 @@ fn read_clipboard(last_change_count: &mut isize) -> Option<ClipboardRead> {
         debug!("Discarding macOS clipboard payload that changed mid-read");
         return None;
     }
-    if pasteboard_has_private_marker(&pasteboard) {
+    if pasteboard_has_private_marker(pasteboard) {
         debug!("Discarding macOS clipboard payload concealed after read");
         return None;
     }
@@ -147,6 +163,7 @@ fn read_clipboard_candidate(pasteboard: &NSPasteboard) -> Option<ClipboardRead> 
             return None;
         }
         return Some(ClipboardRead {
+            count: pasteboard.changeCount(),
             mime_type: "image/png",
             bytes: data.to_vec(),
         });
@@ -161,6 +178,7 @@ fn read_clipboard_candidate(pasteboard: &NSPasteboard) -> Option<ClipboardRead> 
             return None;
         }
         return Some(ClipboardRead {
+            count: pasteboard.changeCount(),
             mime_type: "text/plain",
             bytes: content.into_bytes(),
         });
@@ -197,4 +215,98 @@ fn pasteboard_has_private_marker(pasteboard: &NSPasteboard) -> bool {
             clipboard_privacy::is_macos_private_pasteboard_type(&pasteboard_type.to_string())
         })
     })
+}
+
+pub(crate) fn change_count() -> isize {
+    NSPasteboard::generalPasteboard().changeCount()
+}
+
+#[cfg(not(test))]
+pub(crate) fn clear_if_unchanged(count: isize, boot: i64) {
+    clear_pasteboard_if_unchanged(&NSPasteboard::generalPasteboard(), count, boot);
+}
+
+fn clear_pasteboard_if_unchanged(pasteboard: &NSPasteboard, count: isize, boot: i64) {
+    if boot_time() != Some(boot) {
+        return;
+    }
+    if pasteboard.changeCount() == count {
+        pasteboard.clearContents();
+    }
+}
+
+pub(crate) fn boot_time() -> Option<i64> {
+    let mut boot = std::mem::MaybeUninit::<libc::timeval>::uninit();
+    let mut size = std::mem::size_of::<libc::timeval>();
+    let status = unsafe {
+        libc::sysctlbyname(
+            c"kern.boottime".as_ptr(),
+            boot.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (status == 0 && size == std::mem::size_of::<libc::timeval>())
+        .then(|| unsafe { boot.assume_init() }.tv_sec)
+}
+
+#[cfg(not(test))]
+pub(crate) fn write_text(text: &str) -> Option<isize> {
+    let pasteboard = NSPasteboard::generalPasteboard();
+    write_pasteboard_text(&pasteboard, text)
+}
+
+fn write_pasteboard_text(pasteboard: &NSPasteboard, text: &str) -> Option<isize> {
+    pasteboard.clearContents();
+    let written =
+        pasteboard.setString_forType(&NSString::from_str(text), unsafe { NSPasteboardTypeString });
+    written.then(|| pasteboard.changeCount())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_purge_clears_owned_text_and_the_watcher_cannot_capture_it_again() {
+        let name = NSString::from_str(&format!("clipper-test-{}", uuid::Uuid::now_v7()));
+        let pasteboard = NSPasteboard::pasteboardWithName(&name);
+        let count = write_pasteboard_text(&pasteboard, "mistake").unwrap();
+        let mut seen = -1;
+        assert_eq!(
+            read_pasteboard(&pasteboard, &mut seen).unwrap().bytes,
+            b"mistake"
+        );
+        clear_pasteboard_if_unchanged(&pasteboard, count, boot_time().unwrap());
+        assert!(read_pasteboard_text(&pasteboard).is_none());
+        assert!(read_pasteboard(&pasteboard, &mut seen).is_none());
+        pasteboard.clearContents();
+    }
+
+    #[test]
+    fn clipboard_purge_keeps_a_later_copy_even_when_the_text_is_identical() {
+        let name = NSString::from_str(&format!("clipper-test-{}", uuid::Uuid::now_v7()));
+        let pasteboard = NSPasteboard::pasteboardWithName(&name);
+        for later in ["new text", "mistake"] {
+            let count = write_pasteboard_text(&pasteboard, "mistake").unwrap();
+            write_pasteboard_text(&pasteboard, later).unwrap();
+            clear_pasteboard_if_unchanged(&pasteboard, count, boot_time().unwrap());
+            assert_eq!(read_pasteboard_text(&pasteboard).as_deref(), Some(later));
+        }
+        pasteboard.clearContents();
+    }
+
+    #[test]
+    fn clipboard_ownership_from_an_earlier_boot_cannot_clear_a_new_copy() {
+        let name = NSString::from_str(&format!("clipper-test-{}", uuid::Uuid::now_v7()));
+        let pasteboard = NSPasteboard::pasteboardWithName(&name);
+        let count = write_pasteboard_text(&pasteboard, "new text").unwrap();
+        clear_pasteboard_if_unchanged(&pasteboard, count, boot_time().unwrap() - 1);
+        assert_eq!(
+            read_pasteboard_text(&pasteboard).as_deref(),
+            Some("new text")
+        );
+        pasteboard.clearContents();
+    }
 }

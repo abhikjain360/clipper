@@ -507,6 +507,38 @@ impl LocalStore {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) async fn clipboard_ownership(
+        &self,
+    ) -> Result<Option<(String, isize, i64)>, LocalStoreError> {
+        self.with_database(|connection| {
+            use rusqlite::OptionalExtension;
+            Ok(connection.query_row(
+                "SELECT object_id, change_count, boot_time FROM clipboard_ownership WHERE id = 1",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).optional()?)
+        })
+        .await
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) async fn save_clipboard_ownership(
+        &self,
+        held: Option<&(String, isize, i64)>,
+    ) -> Result<(), LocalStoreError> {
+        self.with_database(|connection| {
+            if let Some((id, count, boot)) = held {
+                connection.execute(
+                    "INSERT OR REPLACE INTO clipboard_ownership (id, object_id, change_count, boot_time) VALUES (1, ?1, ?2, ?3)",
+                    rusqlite::params![id, count, boot],
+                )?;
+            } else {
+                connection.execute("DELETE FROM clipboard_ownership", [])?;
+            }
+            Ok(())
+        }).await
+    }
+
     async fn read_calendar_checks(
         &self,
     ) -> Result<HashMap<String, chrono::DateTime<chrono::Utc>>, LocalStoreError> {
@@ -4488,6 +4520,29 @@ mod tests {
             .expect("payload")
             .expect("payload bytes");
         assert_eq!(payload, b"newer");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn clipboard_ownership_survives_restart_and_stays_in_its_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let held = (uuid::Uuid::now_v7().to_string(), 42, 1234);
+        let store = LocalStore::new(directory.path());
+        store.set_profile("first".into());
+        store.save_clipboard_ownership(Some(&held)).await.unwrap();
+        drop(store);
+        let store = LocalStore::new(directory.path());
+        store.set_profile("first".into());
+        assert_eq!(
+            store.clipboard_ownership().await.unwrap(),
+            Some(held.clone())
+        );
+        store.set_profile("second".into());
+        assert!(store.clipboard_ownership().await.unwrap().is_none());
+        store.set_profile("first".into());
+        assert_eq!(store.clipboard_ownership().await.unwrap(), Some(held));
+        store.save_clipboard_ownership(None).await.unwrap();
+        assert!(store.clipboard_ownership().await.unwrap().is_none());
     }
 
     #[tokio::test]

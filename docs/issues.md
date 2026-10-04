@@ -1919,11 +1919,12 @@ Each entry has:
 
 ### 103. Clipboard items cannot be deleted
 
-- **Status:** open; checked in code (`ObjectDeleteUnsupported` for clipboard)
+- **Status:** fixed, uncommitted
 - **Where:** `crates/server/src/routes/objects.rs`.
-- **What happens:** clipboard items leave only by the 7-day expiry or the
-  100-item cap, so a secret copied by mistake stays synced until then.
-- **Decision:**
+- **What happened:** a secret copied by mistake stayed synced until expiry.
+- **Fix:** confirmed deletion purges all server revisions and payloads. Live
+  delete events and reconciliation remove device caches. OS clipboard clearing
+  checks the recorded change count or timestamp and preserves later copies.
 
 ### 104. Peer-to-peer sync and a downloaded-file cache
 
@@ -2445,6 +2446,24 @@ Each entry has:
 - **Fix:** Progress includes archived exercises in its exercise list. Only
   choices for new exercises exclude them. Archiving workouts or exercises
   preserves historical names, progress, fatigue and open sessions.
+
+### 192. Android cannot clear the clipboard while access is unavailable
+
+- **Status:** platform limit; foreground retry implemented, uncommitted
+- **Where:** `mobile/modules/clipper-clipboard` and `mobile/src/backend.ts`.
+- **What happens:** Android restricts clipboard access while Clipper is in the
+  background. A synced purge removes local item data immediately, but clearing
+  the OS clipboard waits for access.
+- **Handling:** keep ownership while access is unavailable. Retry on foreground
+  entry and clear only the matching timestamp and installation token.
+
+### 193. Clipboard and file cards did not open their viewers
+
+- **Status:** fixed, uncommitted
+- **Where:** `web/src/App.tsx` and `mobile/src/App.tsx`.
+- **Fix:** cards open their viewer. Desktop cards also support Enter. Card
+  buttons run their own actions. Phone cards no longer have eye buttons.
+  Clipboard viewers show full text, images or binary bytes and close on deletion.
 
 ## Docs
 

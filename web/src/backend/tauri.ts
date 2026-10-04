@@ -65,6 +65,7 @@ export function tauriBackend(): ClipperBackend {
         downloadFileToDialog: (fileId, defaultFilename) =>
             invoke<boolean>("download_file_to_dialog", { fileId, defaultFilename }),
         deleteFile: (fileId) => invoke<void>("delete_file", { fileId }),
+        deleteClipboard: (id) => invoke<void>("delete_clipboard", { id }),
         startActual: (planContext) =>
             invoke<string>("start_actual", {
                 planContext: planContext ?? null,

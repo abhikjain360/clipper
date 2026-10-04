@@ -289,10 +289,12 @@ undone, and any staged inline payload files are removed on drop).
 `storage_quota::release_user_storage` decrements both counters (guarded so they
 never go negative) and is called whenever an object's bytes leave the system:
 
-- **Object purge** (`DELETE /api/objects/{id}`): after a signed tombstone has
-  made the file or schedule object non-live, the purge transaction locks the
-  object, removes its entire revision chain, and releases `object_count: 1`
-  plus every revision's payload and metadata bytes.
+- **Object purge** (`DELETE /api/objects/{id}`): accepts clipboard objects
+  directly and other encrypted kinds after a signed tombstone. The transaction
+  locks the object, removes its entire revision chain, and releases
+  `object_count: 1` plus every revision's payload and metadata bytes. Clipboard
+  purge inserts a delete event while holding the write lock and broadcasts it
+  after commit.
 - **Clipboard trim** (`cleanup::trim_user_clipboard`, spawned after each
   clipboard init/complete and also run by the periodic cleanup loop): deletes
   clipboard objects beyond `clipboard.max_items` and releases their usage.

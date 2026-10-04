@@ -2715,6 +2715,105 @@ async fn register_proxy_engine(url: &str, data: &Path) -> Arc<SyncEngine> {
     engine
 }
 
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_clipboard_purge_removes_payloads_online_and_after_reconciliation() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let url = format!("http://{address}");
+    let first = register_proxy_engine(&url, &temp.path().join("first")).await;
+    let second = SyncEngine::new_with_data_dir(&url, temp.path().join("second"));
+    second
+        .login_with_platform("local-test-passphrase", "recovery-test", "Second", "test")
+        .await
+        .unwrap();
+    wait_for(&second, |state| {
+        state.connection_status == ConnectionStatus::Connected
+    })
+    .await;
+    let id = first
+        .send_clipboard_payload("text/plain", b"copied by mistake")
+        .await
+        .unwrap();
+    wait_for(&second, |state| {
+        state.clipboard_items.iter().any(|item| item.id == id)
+    })
+    .await;
+    let item = first.api.get_object(&id).await.unwrap();
+    let generation = second.local_store.current_generation().await;
+    let offline = copy_session(&second, &url, &temp.path().join("offline")).await;
+    let offline_generation = offline.local_store.start_generation().await;
+    offline
+        .snapshot_clipboard(offline_generation, item.created_seq)
+        .await
+        .unwrap();
+    first.delete_clipboard(&id).await.unwrap();
+    wait_for(&second, |state| {
+        !state.clipboard_items.iter().any(|item| item.id == id)
+    })
+    .await;
+    for engine in [&*first, &second] {
+        assert!(engine.clipboard_payload(&id).await.is_err());
+        let key = engine.current_encryption_key().await.unwrap();
+        assert!(
+            engine
+                .local_store
+                .clipboard_payload(&id, &key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert!(is_not_found_error(
+        &first.api.get_object(&id).await.unwrap_err()
+    ));
+    assert!(is_not_found_error(
+        &first.api.get_object_revision(&id, 1).await.unwrap_err()
+    ));
+    assert!(
+        first
+            .api
+            .list_objects(Some(ObjectKind::Clipboard), None, None, None)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(is_not_found_error(
+        &first
+            .api
+            .download_object_payload(
+                &id,
+                &item.payloads[0].id.to_string(),
+                item.payloads[0].ciphertext_size
+            )
+            .await
+            .unwrap_err()
+    ));
+    assert_eq!(generation, second.local_store.current_generation().await);
+    assert_eq!(offline.get_state().await.clipboard_items.len(), 1);
+    let seq = Utc::now().timestamp_micros();
+    let offline_generation = offline.local_store.start_generation().await;
+    offline
+        .snapshot_clipboard(offline_generation, seq)
+        .await
+        .unwrap();
+    assert!(offline.get_state().await.clipboard_items.is_empty());
+    let key = offline.current_encryption_key().await.unwrap();
+    assert!(
+        offline
+            .local_store
+            .clipboard_payload(&id, &key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    first.stop_session_work().await;
+    second.stop_session_work().await;
+    offline.stop_session_work().await;
+}
+
 async fn copy_session(engine: &SyncEngine, url: &str, data: &Path) -> Arc<SyncEngine> {
     let copy = SyncEngine::new_with_data_dir(url, data);
     copy.api.restore_token(engine.api.token().unwrap());

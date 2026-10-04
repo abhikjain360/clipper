@@ -394,6 +394,11 @@ impl MobileClipperClient {
         Ok(())
     }
 
+    pub async fn delete_clipboard(&self, id: String) -> Result<(), MobileError> {
+        self.engine.delete_clipboard(&id).await?;
+        Ok(())
+    }
+
     pub async fn list_devices(&self) -> Result<Vec<DeviceInfo>, MobileError> {
         Ok(self.engine.list_devices().await?)
     }

@@ -120,6 +120,15 @@ pub(super) fn open(path: &Path) -> Result<Connection, LocalStoreError> {
     ) STRICT;",
     )?;
     connection.execute_batch(super::app_data::SCHEMA)?;
+    #[cfg(target_os = "macos")]
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard_ownership (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            object_id TEXT NOT NULL,
+            change_count INTEGER NOT NULL,
+            boot_time INTEGER NOT NULL
+        ) STRICT;",
+    )?;
     Ok(connection)
 }
 

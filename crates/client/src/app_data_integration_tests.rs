@@ -86,7 +86,7 @@ async fn gym_writes_finish_while_upload_is_held() {
             &exercise,
             clipper_gym::SetKind::Working,
             1,
-            values.clone(),
+            values,
         ),
     )
     .await
@@ -104,7 +104,7 @@ async fn gym_writes_finish_while_upload_is_held() {
                 &exercise,
                 clipper_gym::SetKind::Working,
                 1,
-                values.clone()
+                values
             )
             .await
             .is_err()

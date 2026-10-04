@@ -321,6 +321,7 @@ export type ClipperBackend = {
   downloadFileBytes: (fileId: string) => Promise<Uint8Array>;
   downloadFileToDialog?: (fileId: string, defaultFilename: string) => Promise<boolean>;
   deleteFile: (fileId: string) => Promise<void>;
+  deleteClipboard: (id: string) => Promise<void>;
   // Start the timer. Omit the plan context for unplanned work.
   startActual: (planContext?: string) => Promise<string>;
   stopActual: (objectId: string) => Promise<string>;

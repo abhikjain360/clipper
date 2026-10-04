@@ -449,6 +449,12 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 DaemonCommand::SendClipboard(params) => {
                     cmd_send_clipboard(id, params.text, &engine).await
                 }
+                DaemonCommand::SendCurrentClipboard => {
+                    match engine.send_current_clipboard().await {
+                        Ok(item_id) => json_success(id, item_id),
+                        Err(error) => client_error(id, error),
+                    }
+                }
                 DaemonCommand::SendClipboardPayload(params) => {
                     cmd_send_clipboard_payload(id, params.mime_type, params.bytes, &engine).await
                 }
@@ -457,6 +463,12 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 }
                 DaemonCommand::ClipboardPayload(params) => {
                     cmd_clipboard_payload(id, params.item_id, &engine).await
+                }
+                DaemonCommand::DeleteClipboard(params) => {
+                    match engine.delete_clipboard(&params.item_id).await {
+                        Ok(()) => DaemonResponse::success(id, None),
+                        Err(error) => client_error(id, error),
+                    }
                 }
                 DaemonCommand::UploadFile(params) => {
                     cmd_upload_file(id, params.file_path, &engine).await

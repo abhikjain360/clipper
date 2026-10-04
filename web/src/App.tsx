@@ -23,6 +23,8 @@ import {
     Trash2,
     X,
 } from "lucide-react";
+import { clipboardImage, clipboardBytes } from "../../packages/shared/src/clipboard";
+import { cardEvents } from "./card-events";
 import {
     Suspense,
     lazy,
@@ -593,6 +595,56 @@ function ClipboardPanel({
 }) {
     const [busy, setBusy] = useState(false);
     const nativeRuntime = isTauriRuntime();
+    const deleteDialog = useRef<HTMLDialogElement>(null);
+    const [deleting, setDeleting] = useState<ClipboardItem | null>(null);
+    const [deleteBusy, setDeleteBusy] = useState(false);
+    const [deleteError, setDeleteError] = useState<string | null>(null);
+    const [viewing, setViewing] = useState<{
+        id: string;
+        content: string;
+        image: string | null;
+    } | null>(null);
+
+    useEffect(() => {
+        if (viewing && !items.some((item) => item.id === viewing.id)) setViewing(null);
+    }, [items, viewing]);
+
+    useEffect(() => {
+        if (deleting) deleteDialog.current?.showModal();
+        else deleteDialog.current?.close();
+    }, [deleting]);
+
+    async function viewItem(item: ClipboardItem) {
+        onError(null);
+        try {
+            const payload = await (await clipperBackend()).clipboardPayload(item.id);
+            const image = clipboardImage(payload.mimeType, payload.bytes);
+            setViewing({
+                id: item.id,
+                content: payload.text ?? (image ? "" : clipboardBytes(payload.bytes)),
+                image,
+            });
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        }
+    }
+
+    async function deleteItem(item: ClipboardItem) {
+        if (deleteBusy) return;
+        setDeleteBusy(true);
+        setDeleteError(null);
+        onError(null);
+        try {
+            const backend = await clipperBackend();
+            await backend.deleteClipboard(item.id);
+            onState(await backend.getState());
+            setDeleting(null);
+        } catch (caught) {
+            setDeleteError(formatBackendError(caught));
+        } finally {
+            setDeleteBusy(false);
+        }
+    }
 
     async function addClipboardText() {
         setBusy(true);
@@ -648,6 +700,48 @@ function ClipboardPanel({
 
     return (
         <YStack gap="$3" flex={1}>
+            <dialog
+                ref={deleteDialog}
+                aria-label="Delete clipboard item"
+                onCancel={(event) => {
+                    if (deleteBusy) event.preventDefault();
+                    else setDeleting(null);
+                }}
+                style={{
+                    background: palette.cardFill,
+                    color: palette.text,
+                    border: "none",
+                    borderRadius: 12,
+                    padding: 24,
+                }}
+            >
+                <YStack gap="$3">
+                    <Paragraph>Delete permanently? This cannot be undone.</Paragraph>
+                    {deleteError && <Paragraph color={palette.danger}>{deleteError}</Paragraph>}
+                    <XStack justify="flex-end" gap="$2">
+                        <Button disabled={deleteBusy} onPress={() => setDeleting(null)}>
+                            Cancel
+                        </Button>
+                        <Button
+                            disabled={deleteBusy}
+                            icon={deleteBusy ? <Spinner /> : <Trash2 size={16} />}
+                            onPress={() => {
+                                if (deleting) void deleteItem(deleting);
+                            }}
+                        >
+                            Delete
+                        </Button>
+                    </XStack>
+                </YStack>
+            </dialog>
+            {viewing && (
+                <FileViewerOverlay
+                    filename="Clipboard"
+                    content={viewing.content}
+                    image={viewing.image}
+                    onClose={() => setViewing(null)}
+                />
+            )}
             <XStack justify="space-between" items="center" gap="$2" flexWrap="wrap">
                 <H2 size="$6">Clipboard</H2>
                 <Button
@@ -664,7 +758,7 @@ function ClipboardPanel({
             ) : (
                 <div className="library-grid">
                     {items.map((item) => (
-                        <ListCard key={item.id}>
+                        <ListCard key={item.id} onOpen={() => void viewItem(item)}>
                             <XStack items="center" justify="space-between" gap="$3">
                                 <YStack flex={1} gap="$1">
                                     <Text
@@ -681,13 +775,28 @@ function ClipboardPanel({
                                         {item.mime_type} - {formatRelativeTime(item.created_at)}
                                     </Paragraph>
                                 </YStack>
-                                <Button
-                                    size="$3"
-                                    aria-label="Copy clipboard item"
-                                    icon={<Copy size={16} />}
-                                    disabled={!isTextMimeType(item.mime_type)}
-                                    onPress={() => void copyItem(item)}
-                                />
+                                <XStack gap="$1" onPress={(event) => event.stopPropagation()}>
+                                    <Button
+                                        size="$3"
+                                        aria-label="Copy clipboard item"
+                                        icon={<Copy size={16} />}
+                                        disabled={!isTextMimeType(item.mime_type)}
+                                        onPress={(event) => {
+                                            event.stopPropagation();
+                                            void copyItem(item);
+                                        }}
+                                    />
+                                    <Button
+                                        size="$3"
+                                        aria-label="Delete clipboard item"
+                                        icon={<Trash2 size={16} color={palette.danger} />}
+                                        onPress={(event) => {
+                                            event.stopPropagation();
+                                            setDeleteError(null);
+                                            setDeleting(item);
+                                        }}
+                                    />
+                                </XStack>
                             </XStack>
                         </ListCard>
                     ))}
@@ -833,7 +942,7 @@ function FilesPanel({
                 ) : (
                     <div className="library-grid">
                         {files.map((file) => (
-                            <ListCard key={file.id}>
+                            <ListCard key={file.id} onOpen={() => void openViewer(file)}>
                                 <XStack items="center" justify="space-between" gap="$3">
                                     <XStack items="center" gap="$3" flex={1}>
                                         <Files size={22} color={palette.accent} />
@@ -851,20 +960,29 @@ function FilesPanel({
                                                 size="$3"
                                                 aria-label={`Preview ${file.filename}`}
                                                 icon={<Eye size={16} />}
-                                                onPress={() => void openViewer(file)}
+                                                onPress={(event) => {
+                                                    event.stopPropagation();
+                                                    void openViewer(file);
+                                                }}
                                             />
                                         )}
                                         <Button
                                             size="$3"
                                             aria-label={`Download ${file.filename}`}
                                             icon={<Download size={16} />}
-                                            onPress={() => void downloadFile(file)}
+                                            onPress={(event) => {
+                                                event.stopPropagation();
+                                                void downloadFile(file);
+                                            }}
                                         />
                                         <Button
                                             size="$3"
                                             aria-label={`Delete ${file.filename}`}
                                             icon={<Trash2 size={16} color={palette.danger} />}
-                                            onPress={() => void deleteFile(file)}
+                                            onPress={(event) => {
+                                                event.stopPropagation();
+                                                void deleteFile(file);
+                                            }}
                                         />
                                     </XStack>
                                 </XStack>
@@ -880,10 +998,12 @@ function FilesPanel({
 function FileViewerOverlay({
     filename,
     content,
+    image,
     onClose,
 }: {
     filename: string;
     content: string;
+    image?: string | null;
     onClose: () => void;
 }) {
     useEffect(() => {
@@ -933,11 +1053,19 @@ function FileViewerOverlay({
                 <Button size="$3" icon={<X size={16} />} onPress={onClose} />
             </div>
             <div style={{ flex: 1, minHeight: 0 }}>
-                <ErrorBoundary fallback={renderEditorError}>
-                    <Suspense fallback={codeEditorFallback}>
-                        <CodeEditor content={content} lang={filename} />
-                    </Suspense>
-                </ErrorBoundary>
+                {image ? (
+                    <img
+                        src={image}
+                        alt={filename}
+                        style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                    />
+                ) : (
+                    <ErrorBoundary fallback={renderEditorError}>
+                        <Suspense fallback={codeEditorFallback}>
+                            <CodeEditor content={content} lang={filename} />
+                        </Suspense>
+                    </ErrorBoundary>
+                )}
             </div>
         </div>
     );
@@ -1477,9 +1605,18 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
     );
 }
 
-function ListCard({ children }: { children: ReactNode }) {
+function ListCard({ children, onOpen }: { children: ReactNode; onOpen?: () => void }) {
+    const events = onOpen ? cardEvents(onOpen) : undefined;
     return (
-        <Card className="library-card" p="$3" bg={palette.cardFill}>
+        <Card
+            className="library-card"
+            p="$3"
+            bg={palette.cardFill}
+            role={onOpen ? "button" : undefined}
+            tabIndex={onOpen ? 0 : undefined}
+            onPress={events?.onClick}
+            onKeyDown={events?.onKeyDown}
+        >
             {children}
         </Card>
     );

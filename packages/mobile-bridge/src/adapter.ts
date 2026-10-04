@@ -101,6 +101,7 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): M
     defaultServerUrl: () => client.defaultServerUrl(),
     deleteCollabDoc: async (objectId) => client.deleteCollabDoc(objectId),
     deleteFile: async (fileId) => client.deleteFile(fileId),
+    deleteClipboard: async (id) => client.deleteClipboard(id),
     downloadFileBytes: async (fileId) => new Uint8Array(await client.downloadFileBytes(fileId)),
     getCollabDocMeta: async (objectId) => mapCollabItem(await client.getCollabDocMeta(objectId)),
     getState: async () => mapAppState(await client.getState()),

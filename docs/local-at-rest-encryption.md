@@ -193,6 +193,13 @@ on-disk record, and the caller-supplied preview text is _not_ trusted (the
 payload bytes are only ever decrypted transiently for the operation that needs
 them (e.g. `clipboard_payload`, copy-to-clipboard, file download).
 
+Mac clipboard ownership stores only the object id, pasteboard change count and
+boot time in the profile's `clipboard_ownership` table. Android stores the
+object id, device id, clipboard timestamp and an installation token in private
+preferences. Neither record contains clipboard content. These records let a
+purge or reconciliation clear the same OS clipboard entry after app restart
+while preserving a later copy.
+
 ### Device signing identity
 
 Each client device has an Ed25519 signing secret used to sign object envelopes

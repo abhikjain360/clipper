@@ -415,6 +415,17 @@ pub fn delete_file(file_id: String) -> Promise {
     })
 }
 
+#[wasm_bindgen(js_name = deleteClipboard)]
+pub fn delete_clipboard(id: String) -> Promise {
+    ok_promise(async move {
+        engine_or_error()?
+            .delete_clipboard(&id)
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::UNDEFINED)
+    })
+}
+
 /// Create a schedule series from its JSON form.
 ///
 /// The item crosses as JSON, not as flattened arguments: a recurrence rule

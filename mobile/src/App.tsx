@@ -14,7 +14,6 @@ import {
   Copy,
   Dumbbell,
   Download,
-  Eye,
   FileCode,
   FilePlus,
   FileText,
@@ -31,6 +30,7 @@ import {
   X,
 } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { clipboardImage, clipboardBytes } from "../../packages/shared/src/clipboard";
 import {
   alarmsSupported,
   areNotificationsEnabled,
@@ -48,6 +48,7 @@ import {
 import {
   AppState as NativeAppState,
   Alert,
+  Image,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -90,7 +91,8 @@ import {
   formatBackendError,
   isResumeRejected,
   pickUploadFile,
-  readClipboardText,
+  captureClipboardItem,
+  copyClipboardItem,
   resumeSession,
   saveCredentials,
   saveSessionConfirmation,
@@ -124,7 +126,12 @@ const navItems = [
   { value: "gym", label: "Gym", Icon: Dumbbell },
   { value: "kitchen", label: "Kitchen", Icon: CookingPot },
 ] as const satisfies readonly { value: TabName; label: string; Icon: typeof Clipboard }[];
-type ViewerContent = { title: string; content: string };
+type ViewerContent = {
+  title: string;
+  content: string;
+  image?: string | null;
+  clipboardId?: string;
+};
 
 // Android renders code with the platform "monospace" family; iOS has no such
 // alias, so fall back to Menlo there.
@@ -262,6 +269,7 @@ function ClipperApp() {
     const subscription = NativeAppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
         setAlarmRefreshGeneration((generation) => generation + 1);
+        void backend.getState().catch(() => {});
       }
     });
     return () => subscription.remove();
@@ -1363,16 +1371,20 @@ function ClipboardPanel({
 
   const [viewing, setViewing] = useState<ViewerContent | null>(null);
 
+  useEffect(() => {
+    if (viewing?.clipboardId && !items.some((item) => item.id === viewing.clipboardId))
+      setViewing(null);
+  }, [items, viewing]);
+
   async function addClipboardText() {
     setBusy(true);
     onError(null);
     try {
-      const text = await readClipboardText();
-      if (!text) {
+      const id = await captureClipboardItem();
+      if (!id) {
         onError("Clipboard is empty or unavailable");
         return;
       }
-      await backend.sendClipboardText(text);
       onState(await backend.getState());
     } catch (caught) {
       onError(formatBackendError(caught));
@@ -1384,12 +1396,7 @@ function ClipboardPanel({
   async function copyItem(item: ClipboardItem) {
     onError(null);
     try {
-      const payload = await backend.clipboardPayload(item.id);
-      if (payload.text === null) {
-        onError(`Cannot copy ${payload.mimeType} to the text clipboard`);
-        return;
-      }
-      await writeClipboardText(payload.text);
+      await copyClipboardItem(item.id);
     } catch (caught) {
       onError(formatBackendError(caught));
     }
@@ -1399,11 +1406,30 @@ function ClipboardPanel({
     onError(null);
     try {
       const payload = await backend.clipboardPayload(item.id);
-      if (payload.text === null) {
-        onError(`Cannot view ${payload.mimeType} as text`);
-        return;
-      }
-      setViewing({ title: item.mime_type, content: payload.text });
+      const image = clipboardImage(payload.mimeType, payload.bytes);
+      setViewing({
+        title: item.mime_type,
+        content: payload.text ?? (image ? "" : clipboardBytes(payload.bytes)),
+        image,
+        clipboardId: item.id,
+      });
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }
+
+  function confirmDelete(item: ClipboardItem) {
+    Alert.alert("Delete permanently?", "This cannot be undone.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: () => void deleteItem(item) },
+    ]);
+  }
+
+  async function deleteItem(item: ClipboardItem) {
+    onError(null);
+    try {
+      await backend.deleteClipboard(item.id);
+      onState(await backend.getState());
     } catch (caught) {
       onError(formatBackendError(caught));
     }
@@ -1431,7 +1457,7 @@ function ClipboardPanel({
         <ScrollView>
           <YStack gap="$2" pb="$4">
             {items.map((item) => (
-              <ListCard key={item.id}>
+              <ListCard key={item.id} onOpen={() => void viewItem(item)}>
                 <XStack items="center" justify="space-between" gap="$3">
                   <YStack flex={1} gap="$1">
                     <Text numberOfLines={3}>{item.text}</Text>
@@ -1442,13 +1468,21 @@ function ClipboardPanel({
                   <XStack gap="$1">
                     <Button
                       size="$3"
-                      icon={<Eye size={16} />}
-                      onPress={() => void viewItem(item)}
+                      accessibilityLabel="Delete clipboard item"
+                      icon={<Trash2 size={16} color={palette.danger} />}
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        confirmDelete(item);
+                      }}
                     />
                     <Button
                       size="$3"
                       icon={<Copy size={16} />}
-                      onPress={() => void copyItem(item)}
+                      accessibilityLabel="Copy clipboard item"
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        void copyItem(item);
+                      }}
                     />
                   </XStack>
                 </XStack>
@@ -1540,7 +1574,7 @@ function FilesPanel({
         <ScrollView>
           <YStack gap="$2" pb="$4">
             {files.map((file) => (
-              <ListCard key={file.id}>
+              <ListCard key={file.id} onOpen={() => void viewFile(file)}>
                 <XStack items="center" justify="space-between" gap="$3">
                   <XStack items="center" gap="$3" flex={1}>
                     <Files size={22} color={palette.accent} />
@@ -1552,22 +1586,21 @@ function FilesPanel({
                     </YStack>
                   </XStack>
                   <XStack gap="$1">
-                    {isViewableText(file.mime_type, file.filename) && (
-                      <Button
-                        size="$3"
-                        icon={<Eye size={16} />}
-                        onPress={() => void viewFile(file)}
-                      />
-                    )}
                     <Button
                       size="$3"
                       icon={<Download size={16} />}
-                      onPress={() => void downloadFile(file)}
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        void downloadFile(file);
+                      }}
                     />
                     <Button
                       size="$3"
                       icon={<Trash2 size={16} color={palette.danger} />}
-                      onPress={() => void deleteFile(file)}
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        void deleteFile(file);
+                      }}
                     />
                   </XStack>
                 </XStack>
@@ -1985,9 +2018,16 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function ListCard({ children }: { children: ReactNode }) {
+function ListCard({ children, onOpen }: { children: ReactNode; onOpen?: () => void }) {
   return (
-    <Card p="$3" bg={palette.cardFill} borderWidth={0}>
+    <Card
+      p="$3"
+      bg={palette.cardFill}
+      borderWidth={0}
+      onPress={onOpen}
+      accessible={!!onOpen}
+      accessibilityRole={onOpen ? "button" : undefined}
+    >
       {children}
     </Card>
   );
@@ -2251,7 +2291,8 @@ function ContentViewer({
   async function copyAll() {
     if (!viewing) return;
     try {
-      await writeClipboardText(viewing.content);
+      if (viewing.clipboardId) await copyClipboardItem(viewing.clipboardId);
+      else await writeClipboardText(viewing.content);
     } catch (caught) {
       onError(formatBackendError(caught));
     }
@@ -2264,41 +2305,33 @@ function ContentViewer({
           <Text flex={1} numberOfLines={1} fontWeight="600" color={palette.text}>
             {viewing?.title ?? ""}
           </Text>
-          <Button size="$3" icon={<Copy size={16} />} onPress={() => void copyAll()} />
+          {!viewing?.image && (
+            <Button size="$3" icon={<Copy size={16} />} onPress={() => void copyAll()} />
+          )}
           <Button size="$3" icon={<X size={16} />} onPress={onClose} />
         </XStack>
-        <TextInput
-          value={viewing?.content ?? ""}
-          editable={false}
-          multiline
-          scrollEnabled
-          style={{
-            flex: 1,
-            color: palette.text,
-            backgroundColor: palette.pageFill,
-            fontFamily: MONOSPACE_FONT,
-            fontSize: 13,
-            lineHeight: 18,
-            padding: 12,
-            textAlignVertical: "top",
-          }}
-        />
+        {viewing?.image ? (
+          <Image source={{ uri: viewing.image }} resizeMode="contain" style={{ flex: 1 }} />
+        ) : (
+          <TextInput
+            value={viewing?.content ?? ""}
+            editable={false}
+            multiline
+            scrollEnabled
+            style={{
+              flex: 1,
+              color: palette.text,
+              backgroundColor: palette.pageFill,
+              fontFamily: MONOSPACE_FONT,
+              fontSize: 13,
+              lineHeight: 18,
+              padding: 12,
+              textAlignVertical: "top",
+            }}
+          />
+        )}
       </SafeAreaView>
     </Modal>
-  );
-}
-
-// Whether a file looks like UTF-8 text worth showing in the viewer. Errs toward
-// showing for unknown types; genuinely binary content just renders as mojibake,
-// which is acceptable for a simple viewer.
-function isViewableText(mimeType: string, filename: string): boolean {
-  const mime = mimeType.toLowerCase();
-  if (mime.startsWith("text/")) return true;
-  if (/^application\/(json|xml|javascript|x-yaml|yaml|toml|x-sh|x-shellscript)\b/.test(mime)) {
-    return true;
-  }
-  return /\.(txt|md|markdown|json|ya?ml|toml|rs|tsx?|jsx?|py|css|html?|xml|sh|c|h|cc|cpp|hpp|go|java|kt|kts|rb|php|sql|log|ini|cfg|conf|env|lock)$/i.test(
-    filename,
   );
 }
 

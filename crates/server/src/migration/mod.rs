@@ -7,6 +7,7 @@ mod m20260908_000004_schedule_objects;
 mod m20260908_000005_object_revisions;
 mod m20261007_000006_app_data;
 mod m20261007_000007_app_documents;
+mod m20261009_000008_clipboard_deletes;
 
 pub struct Migrator;
 
@@ -21,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260908_000005_object_revisions::Migration),
             Box::new(m20261007_000006_app_data::Migration),
             Box::new(m20261007_000007_app_documents::Migration),
+            Box::new(m20261009_000008_clipboard_deletes::Migration),
         ]
     }
 }
