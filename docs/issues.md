@@ -720,6 +720,16 @@ Each entry has:
   work, waits until it has stopped, then signs out. Background sync is always
   cancelled without asking. Quitting the app is not a logout.
 
+### 124. The calendar value cap misses semicolon-separated values
+
+- **Status:** fixing
+- **Severity:** medium. Entry 9 was incomplete.
+- **Where:** `crates/schedule/src/ingest.rs`, `validate_value_count`.
+- **What happens:** the parser also splits values on `;` for `X-` properties,
+  `GEO` and `REQUEST-STATUS`, and each `;NAME` in the parameters becomes a
+  parameter. An 8 MiB feed of semicolons peaks near 700 MB and is accepted.
+- **Decision:** fix (Claude): count every separator the parser splits on.
+
 ## Bugs
 
 ### 12. Migration 5 broke collab docs on servers upgraded from main
@@ -1051,6 +1061,64 @@ Each entry has:
   `net::ERR_ABORTED` although the server handled both.
 - **Recommendation:** read the body, or use `keepalive`.
 - **Decision:**
+
+### 119. A revise fails with a 500 while another connection writes
+
+- **Status:** fixing
+- **Severity:** medium. Introduced by the head check in `0c7d68c`.
+- **Where:** `crates/server/src/routes/objects.rs`, `revise_object`.
+- **What happens:** the revise transaction reads before it writes, so SQLite
+  refuses its first write at once when another connection holds the write
+  lock, instead of waiting. A timer stop, edit or delete fails whenever another
+  device writes at the same moment.
+- **Decision:** fix (Claude): take the write lock before the first read.
+
+### 120. The desktop IPC connection can hang for good
+
+- **Status:** fixing
+- **Severity:** medium-low. Partly on main (the serial loop had the same hang
+  with one slot).
+- **Where:** `crates/daemon/src/handler.rs`; `web/src-tauri/src/daemon_client.rs`.
+- **What happens:** with all eight request slots busy, the daemon stops
+  reading; the desktop app stops reading while it writes a large request; the
+  daemon's state broadcast then blocks, the running requests cannot reply, and
+  nothing frees. A Logout also waits behind eight slow requests. When the
+  daemon's read loop exits, the socket stays half open.
+- **Decision:** fix (Claude): the desktop app reads while it writes, Logout
+  skips the slot limit, and the daemon closes the socket when its read loop
+  ends.
+
+### 121. Lost replies to deletes, and gateway errors, skip recovery
+
+- **Status:** fixing
+- **Severity:** low-medium. Not on main.
+- **Where:** `crates/client/src/engine.rs`, `write_schedule_record_for_session`
+  recovery and `write_tombstone`.
+- **What happens:** recovery from a lost reply ran only on a dropped
+  connection or a 409. A reply lost behind the Cloudflare tunnel arrives as a
+  502-527, and a retried timer start then made a second timer. A lost delete
+  reply left every retry failing with 409 until Refresh.
+- **Decision:** fix (Claude): treat gateway errors as ambiguous and give
+  deletes the same re-read recovery.
+
+### 122. Calendar feed copies left behind
+
+- **Status:** fixing for an upload whose source save never reached the
+  server; open for a sync cancelled by logout between the upload and the save.
+- **Severity:** low. Not on main.
+- **Where:** `crates/client/src/calendar_import.rs`, `sync_calendar_source`.
+- **What happens:** the raw feed upload stays in Files and counts toward quota
+  when the source save never commits.
+- **Decision:**
+
+### 123. A series ending on 9999-12-31 never expands
+
+- **Status:** fixing
+- **Severity:** low. Not on main.
+- **Where:** `crates/schedule/src/recurrence.rs`, `until_scan_bound`.
+- **What happens:** the scan bound adds a day and reaches year 10000, which the
+  recurrence library refuses.
+- **Decision:** fix (Claude): clamp the bound to the end of year 9999.
 
 ## Product decisions
 
