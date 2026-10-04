@@ -135,7 +135,9 @@ async fn serve(listener: tokio::net::TcpListener, state: Arc<std::sync::Mutex<Se
         let body = {
             let mut state = state.lock().unwrap();
             state.requests.push(target.into());
-            if url.path() == "/api/objects" {
+            if url.path() == "/api/clipboard-deletes" {
+                postcard::to_allocvec(&Vec::<ClipboardDelete>::new()).unwrap()
+            } else if url.path() == "/api/objects" {
                 let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
                 let limit: usize = query["limit"].parse().unwrap();
                 assert_eq!(limit, 500);
@@ -222,7 +224,8 @@ async fn reconnect_snapshots_of_held_objects_request_only_list_pages() {
         }));
         let server = tokio::spawn(serve(listener, state.clone()));
         snapshot(&engine, kind, 501).await;
-        assert_eq!(state.lock().unwrap().requests.len(), 503);
+        let deletes = usize::from(kind == ObjectKind::Clipboard);
+        assert_eq!(state.lock().unwrap().requests.len(), 503 + deletes);
         state.lock().unwrap().requests.clear();
         let restarted = SyncEngine::new_with_data_dir(&url, directory.path());
         activate(&restarted, "profile", KEY).await;
@@ -235,7 +238,7 @@ async fn reconnect_snapshots_of_held_objects_request_only_list_pages() {
         let payload_reads = restarted.local_store.payload_read_count();
         let generation = snapshot(&restarted, kind, 501).await;
         assert_eq!(restarted.local_store.payload_read_count(), payload_reads);
-        assert_eq!(state.lock().unwrap().requests.len(), 2);
+        assert_eq!(state.lock().unwrap().requests.len(), 2 + deletes);
         let item = state.lock().unwrap().objects[0].0.clone();
         assert!(
             restarted
@@ -337,7 +340,7 @@ async fn clipboard_reconnect_finishes_when_database_reads_wait() {
         .unwrap();
         assert_eq!(
             state.lock().unwrap().requests.len(),
-            if legacy { 4 } else { 2 }
+            if legacy { 5 } else { 3 }
         );
         let objects = state.lock().unwrap().objects.clone();
         for (item, _) in &objects {
@@ -390,7 +393,7 @@ async fn a_reconnect_with_large_held_clipboard_payloads_does_not_read_the_cached
     assert_eq!(restarted.local_store.payload_read_count(), 2);
     state.lock().unwrap().requests.clear();
     snapshot(&restarted, ObjectKind::Clipboard, 2).await;
-    assert_eq!(state.lock().unwrap().requests.len(), 1);
+    assert_eq!(state.lock().unwrap().requests.len(), 2);
     assert_eq!(restarted.local_store.payload_read_count(), 2);
     assert_eq!(restarted.local_store.cache_check_count(), 2);
     server.abort();
@@ -470,7 +473,10 @@ async fn missing_native_payloads_are_downloaded_even_with_a_present_record_and_p
             } else {
                 snapshot(&engine, kind, 1).await;
             }
-            assert_eq!(state.lock().unwrap().requests.len(), 2);
+            assert_eq!(
+                state.lock().unwrap().requests.len(),
+                2 + usize::from(!live && kind == ObjectKind::Clipboard)
+            );
             assert_eq!(
                 state
                     .lock()

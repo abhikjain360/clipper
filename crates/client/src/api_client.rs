@@ -702,6 +702,26 @@ impl ApiClient {
         Self::postcard_response(resp).await
     }
 
+    pub async fn clipboard_deletes(
+        &self,
+        after_seq: i64,
+        up_to_seq: i64,
+    ) -> Result<Vec<ClipboardDelete>, ClientError> {
+        let mut url = self.api_url(&["clipboard-deletes"])?;
+        url.query_pairs_mut()
+            .append_pair("after_seq", &after_seq.to_string())
+            .append_pair("up_to_seq", &up_to_seq.to_string());
+        let resp = self
+            .deadline_get(url)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .send()
+            .await?;
+        Self::postcard_response(resp).await
+    }
+
     pub async fn get_object(&self, object_id: &str) -> Result<ObjectListItem, ClientError> {
         let url = self.api_url(&["objects", object_id])?;
         let resp = self

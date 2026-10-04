@@ -10,11 +10,11 @@ use chrono::{Duration, Utc};
 use clipper_core::{
     crypto::{self, SHA256_BYTES},
     models::{
-        ApiErrorCode, OBJECT_ENVELOPE_VERSION, ObjectCompleteRequest, ObjectCompleteResponse,
-        ObjectDeleteResponse, ObjectEnvelopeOperation, ObjectEventType, ObjectId,
-        ObjectInitRequest, ObjectInitResponse, ObjectKind, ObjectListCursor, ObjectListItem,
-        ObjectListResponse, ObjectPayloadDescriptor, ObjectPayloadInit, ObjectPayloadUpload,
-        ObjectReviseRequest, OkResponse,
+        ApiErrorCode, ClipboardDelete, OBJECT_ENVELOPE_VERSION, ObjectCompleteRequest,
+        ObjectCompleteResponse, ObjectDeleteResponse, ObjectEnvelopeOperation, ObjectEventType,
+        ObjectId, ObjectInitRequest, ObjectInitResponse, ObjectKind, ObjectListCursor,
+        ObjectListItem, ObjectListResponse, ObjectPayloadDescriptor, ObjectPayloadInit,
+        ObjectPayloadUpload, ObjectReviseRequest, OkResponse,
     },
 };
 use clipper_fs_txn::FsTransaction;
@@ -1788,6 +1788,41 @@ pub async fn list_objects(
     );
 
     Ok(Postcard(ObjectListResponse { items, next_after }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct ClipboardDeleteQuery {
+    pub after_seq: i64,
+    pub up_to_seq: i64,
+}
+
+pub async fn list_clipboard_deletes(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
+    Query(query): Query<ClipboardDeleteQuery>,
+) -> Result<Postcard<Vec<ClipboardDelete>>, ApiError> {
+    let rows = event_log::Entity::find()
+        .filter(event_log::Column::UserId.eq(auth.user_id))
+        .filter(event_log::Column::ObjectKind.eq("clipboard"))
+        .filter(event_log::Column::EventType.eq("deleted"))
+        .filter(event_log::Column::Seq.gt(query.after_seq))
+        .filter(event_log::Column::Seq.lte(query.up_to_seq))
+        .order_by_asc(event_log::Column::Seq)
+        .limit(100)
+        .all(state.db())
+        .await
+        .map_err(|error| {
+            error!(%error, user_id = %auth.user_id, "Failed to list clipboard deletes");
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?;
+    Ok(Postcard(
+        rows.into_iter()
+            .map(|row| ClipboardDelete {
+                id: row.object_id.into(),
+                seq: row.seq,
+            })
+            .collect(),
+    ))
 }
 
 pub async fn get_object(
@@ -7154,6 +7189,41 @@ mod tests {
         assert_eq!(event.source_device_id, device_id);
         assert!(event.envelope.is_none());
         let id = Uuid::parse_str(&object_id).unwrap();
+        let query = || {
+            Query(ClipboardDeleteQuery {
+                after_seq: 0,
+                up_to_seq: deleted.deleted_seq,
+            })
+        };
+        let Postcard(deletes) = list_clipboard_deletes(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            query(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0].id.into_uuid(), id);
+        assert_eq!(deletes[0].seq, deleted.deleted_seq);
+        let Postcard(deletes) = list_clipboard_deletes(
+            State(state.clone()),
+            Extension(auth(other_user, Uuid::now_v7())),
+            query(),
+        )
+        .await
+        .unwrap();
+        assert!(deletes.is_empty());
+        let Postcard(deletes) = list_clipboard_deletes(
+            State(state.clone()),
+            Extension(auth(user_id, device_id)),
+            Query(ClipboardDeleteQuery {
+                after_seq: deleted.deleted_seq,
+                up_to_seq: deleted.deleted_seq,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(deletes.is_empty());
         assert!(
             objects::Entity::find_by_id(id)
                 .one(state.db())

@@ -60,11 +60,8 @@ fn run_clipboard_watcher(rt: tokio::runtime::Handle, engine: Arc<SyncEngine>) {
         std::thread::sleep(Duration::from_millis(500));
 
         // Check if still logged in
-        let logged_in = rt.block_on(async {
-            let state = engine.get_state().await;
-            state.is_logged_in()
-        });
-        if !logged_in {
+        let capture = rt.block_on(engine.clipboard_capture_state());
+        let Some(capture) = capture else {
             // Stay alive but idle rather than stopping. The watcher thread runs
             // for the lifetime of the process and is login-gated, which removes a
             // start/stop race on WATCHER_STARTED: a login landing between this
@@ -73,6 +70,11 @@ fn run_clipboard_watcher(rt: tokio::runtime::Handle, engine: Arc<SyncEngine>) {
             // clear it — leaving the user logged in with no watcher. Reset the
             // change counter so a later login re-reads the pasteboard fresh.
             last_change_count = -1;
+            continue;
+        };
+
+        let pasteboard = NSPasteboard::generalPasteboard();
+        if skip_captured_pasteboard(&pasteboard, capture, &mut last_change_count) {
             continue;
         }
 
@@ -101,6 +103,21 @@ fn run_clipboard_watcher(rt: tokio::runtime::Handle, engine: Arc<SyncEngine>) {
             _ => {}
         }
     }
+}
+
+fn skip_captured_pasteboard(
+    pasteboard: &NSPasteboard,
+    capture: Option<(isize, i64)>,
+    last_change_count: &mut isize,
+) -> bool {
+    if let Some((count, boot)) = capture
+        && pasteboard.changeCount() == count
+        && boot_time() == Some(boot)
+    {
+        *last_change_count = count;
+        return true;
+    }
+    false
 }
 
 /// Read the clipboard payload if it has changed since last check.
@@ -267,6 +284,51 @@ fn write_pasteboard_text(pasteboard: &NSPasteboard, text: &str) -> Option<isize>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn watcher_does_not_recapture_a_deleted_item_after_restart_or_logout() {
+        use clipper_core::models::ObjectKind;
+
+        use crate::local_store::LocalStore;
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalStore::new(directory.path());
+        store.set_profile("owner".into());
+        let name = NSString::from_str(&format!("clipper-test-{}", uuid::Uuid::now_v7()));
+        let pasteboard = NSPasteboard::pasteboardWithName(&name);
+        let id = uuid::Uuid::now_v7().to_string();
+        let count = write_pasteboard_text(&pasteboard, "mistake").unwrap();
+        let boot = boot_time().unwrap();
+        store.save_clipboard_capture(count, boot).await.unwrap();
+        store
+            .save_clipboard_ownership(Some(&(id.clone(), count, boot)))
+            .await
+            .unwrap();
+        store
+            .apply_local_delete(ObjectKind::Clipboard, &id, 10, 100)
+            .await
+            .unwrap();
+        store.save_clipboard_ownership(None).await.unwrap();
+        drop(store);
+
+        let restarted = LocalStore::new(directory.path());
+        restarted.set_profile("other-account".into());
+        let capture = restarted.clipboard_capture().await.unwrap();
+        let mut seen = -1;
+        assert!(skip_captured_pasteboard(&pasteboard, capture, &mut seen));
+        assert!(read_pasteboard(&pasteboard, &mut seen).is_none());
+        assert_eq!(
+            read_pasteboard_text(&pasteboard).as_deref(),
+            Some("mistake")
+        );
+        write_pasteboard_text(&pasteboard, "mistake").unwrap();
+        assert!(!skip_captured_pasteboard(&pasteboard, capture, &mut seen));
+        assert_eq!(
+            read_pasteboard(&pasteboard, &mut seen).unwrap().bytes,
+            b"mistake"
+        );
+        pasteboard.clearContents();
+    }
 
     #[test]
     fn clipboard_purge_clears_owned_text_and_the_watcher_cannot_capture_it_again() {

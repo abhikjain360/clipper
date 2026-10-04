@@ -235,11 +235,16 @@ payloads and visible entries. An open clipboard viewer closes when its item
 disappears. The Mac daemon clears an installed or captured pasteboard entry
 only while its change count still matches the recorded copy. The phone clears
 an installed or captured Android clipboard entry only while its timestamp
-still matches. Ownership survives app restart. Mac ownership also records the
+still matches. Android 7 uses a unique clipboard token for captured and
+installed entries. Ownership is scoped to the account and survives app restart;
+logout drops ownership without clearing the clipboard. Mac ownership also records the
 boot time, so a reused change count after reboot cannot clear a new copy.
 A later copy is kept, even if its content is the same.
-The Mac watcher checks the change count before capture and does not upload
-the cleared entry.
+The Mac watcher persists the last captured or installed change count and boot
+time separately from ownership. It skips that pasteboard entry after restart
+or login and waits for the profile cache and ownership to load before polling.
+Only a local purge or an explicit delete received live or during reconciliation
+clears an owned OS clipboard entry. TTL expiry and the newest-100 limit do not.
 
 Android restricts clipboard reads and clears while an app is in the
 background. The phone keeps the ownership record when access is unavailable
@@ -290,6 +295,11 @@ later generation.
 After receiving the stream start, the client lists the server's retained
 clipboard items up to the stream start.
 
+First it reads `GET /api/clipboard-deletes` in pages of 100, with `after_seq`
+and `up_to_seq` bounding the cursor and stream start. These are the authenticated
+user's retained clipboard delete events, containing only object ids and sequences.
+Each delete removes the local payload and entry and clears matching OS ownership.
+
 1. The client asks for retained clipboard pages of up to 500 items, bounded by
    the stream start.
 2. The server returns only clipboard items inside the retention window.
@@ -308,8 +318,8 @@ clipboard items up to the stream start.
    them.
 
 An item missing from the retained listing has expired or been purged, so the
-client removes its local copy and cached payload at the sweep. The same
-clipboard ownership checks apply when reconciliation removes an item.
+client removes its local copy and cached payload at the sweep. The sweep does
+not clear the OS clipboard; only the explicit delete events do.
 
 If the clipboard snapshot fails, the client does not sweep clipboard state.
 

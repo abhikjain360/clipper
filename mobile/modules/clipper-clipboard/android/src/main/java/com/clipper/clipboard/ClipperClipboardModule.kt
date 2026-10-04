@@ -13,16 +13,20 @@ class ClipperClipboardModule : Module() {
             owner.read()
         }
 
-        Function("claim") { id: String, timestamp: Double, scope: String ->
-            owner.claim(id, timestamp, scope)
+        Function("claim") { id: String, timestamp: Double, scope: String, token: String ->
+            owner.claim(id, timestamp, scope, token)
         }
 
         Function("install") { id: String, text: String, scope: String ->
             owner.install(id, text, scope)
         }
 
-        Function("clearMissing") { ids: List<String>, scope: String ->
-            owner.clearMissing(ids, scope)
+        Function("clearDeleted") { ids: List<String>, scope: String ->
+            owner.clearDeleted(ids, scope)
+        }
+
+        Function("reset") {
+            owner.reset()
         }
     }
 }

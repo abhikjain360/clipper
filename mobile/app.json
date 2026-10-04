@@ -15,6 +15,6 @@
         "backgroundImage": "../assets/icon/android-background.png"
       }
     },
-    "plugins": ["expo-secure-store", "expo-sharing"]
+    "plugins": ["expo-secure-store", "expo-sharing", "./plugins/clipboard-lint.cjs"]
   }
 }

@@ -31,6 +31,7 @@ import {
 } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { clipboardImage, clipboardBytes } from "../../packages/shared/src/clipboard";
+import { filePreview } from "../../packages/shared/src/file-preview";
 import {
   alarmsSupported,
   areNotificationsEnabled,
@@ -131,6 +132,8 @@ type ViewerContent = {
   content: string;
   image?: string | null;
   clipboardId?: string;
+  file?: FileItem;
+  details?: boolean;
 };
 
 // Android renders code with the platform "monospace" family; iOS has no such
@@ -1538,8 +1541,16 @@ function FilesPanel({
   async function viewFile(file: FileItem) {
     onError(null);
     try {
-      const bytes = await backend.downloadFileBytes(file.id);
-      setViewing({ title: file.filename, content: decodeUtf8(bytes) });
+      const preview = await filePreview(file, () => backend.downloadFileBytes(file.id), decodeUtf8);
+      setViewing({
+        title: file.filename,
+        file,
+        details: !preview,
+        content:
+          preview?.content ??
+          `${file.mime_type}\n${formatByteSize(file.blob_size)}\n${formatRelativeTime(file.created_at)}`,
+        image: preview?.image,
+      });
     } catch (caught) {
       onError(formatBackendError(caught));
     }
@@ -2288,6 +2299,17 @@ function ContentViewer({
   onClose: () => void;
   onError: (error: string | null) => void;
 }) {
+  async function download() {
+    if (!viewing?.file) return;
+    try {
+      const file = viewing.file;
+      const bytes = await backend.downloadFileBytes(file.id);
+      await shareDownloadedFile(file.filename, file.mime_type, bytes);
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    }
+  }
+
   async function copyAll() {
     if (!viewing) return;
     try {
@@ -2305,7 +2327,12 @@ function ContentViewer({
           <Text flex={1} numberOfLines={1} fontWeight="600" color={palette.text}>
             {viewing?.title ?? ""}
           </Text>
-          {!viewing?.image && (
+          {viewing?.file && (
+            <Button size="$3" icon={<Download size={16} />} onPress={() => void download()}>
+              Download
+            </Button>
+          )}
+          {!viewing?.image && !viewing?.details && (
             <Button size="$3" icon={<Copy size={16} />} onPress={() => void copyAll()} />
           )}
           <Button size="$3" icon={<X size={16} />} onPress={onClose} />

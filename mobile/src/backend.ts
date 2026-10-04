@@ -19,12 +19,10 @@ export const backend = {
   getState: async () => {
     const state = await nativeBackend.getState();
     if (state.session)
-      itemClipboard?.clearMissing(
-        state.clipboard_items.map((item) => item.id),
-        state.session.device_id,
-      );
+      itemClipboard?.clearDeleted(state.deleted_clipboard_ids, clipboardScope(state.session));
     if (state.session) resumedSession = true;
     if (resumedSession && !state.session) {
+      itemClipboard?.reset();
       resumedSession = false;
       await clearCredentials();
     }
@@ -32,10 +30,17 @@ export const backend = {
   },
   logout: async (cancelRunningWork: boolean) => {
     const outcome = await nativeBackend.logout(cancelRunningWork);
-    if (outcome.status === "signed_out") await clearCredentials();
+    if (outcome.status === "signed_out") {
+      itemClipboard?.reset();
+      await clearCredentials();
+    }
     return outcome;
   },
 };
+
+function clipboardScope(session: { server_url: string; username: string }): string {
+  return JSON.stringify([session.server_url, session.username]);
+}
 
 // The native engine persists its SQLite store and blobs under this path.
 // expo-file-system reports locations as `file://` URIs, but the Rust side
@@ -74,7 +79,8 @@ export async function captureClipboardItem(): Promise<string | null> {
   const text = captured?.text ?? (await readClipboardText());
   if (!text) return null;
   const id = await nativeBackend.sendClipboardText(text);
-  if (captured) itemClipboard?.claim(id, captured.timestamp, session.device_id);
+  if (captured)
+    itemClipboard?.claim(id, captured.timestamp, clipboardScope(session), captured.token);
   await backend.getState();
   return id;
 }
@@ -85,7 +91,7 @@ export async function copyClipboardItem(id: string): Promise<void> {
   const payload = await nativeBackend.clipboardPayload(id);
   if (payload.text == null)
     throw new Error(`Cannot copy ${payload.mimeType} to the text clipboard`);
-  if (itemClipboard) itemClipboard.install(id, payload.text, session.device_id);
+  if (itemClipboard) itemClipboard.install(id, payload.text, clipboardScope(session));
   else await writeClipboardText(payload.text);
   await backend.getState();
 }

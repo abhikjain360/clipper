@@ -2748,11 +2748,17 @@ async fn live_clipboard_purge_removes_payloads_online_and_after_reconciliation()
         .snapshot_clipboard(offline_generation, item.created_seq)
         .await
         .unwrap();
+    first.clipboard_payload(&id).await.unwrap();
+    second.clipboard_payload(&id).await.unwrap();
     first.delete_clipboard(&id).await.unwrap();
     wait_for(&second, |state| {
         !state.clipboard_items.iter().any(|item| item.id == id)
     })
     .await;
+    for engine in [&*first, &second] {
+        assert!(engine.get_state().await.deleted_clipboard_ids.contains(&id));
+        assert!(engine.suppressed_payload.read().await.is_none());
+    }
     for engine in [&*first, &second] {
         assert!(engine.clipboard_payload(&id).await.is_err());
         let key = engine.current_encryption_key().await.unwrap();
@@ -2800,6 +2806,13 @@ async fn live_clipboard_purge_removes_payloads_online_and_after_reconciliation()
         .await
         .unwrap();
     assert!(offline.get_state().await.clipboard_items.is_empty());
+    assert!(
+        offline
+            .get_state()
+            .await
+            .deleted_clipboard_ids
+            .contains(&id)
+    );
     let key = offline.current_encryption_key().await.unwrap();
     assert!(
         offline
@@ -2809,6 +2822,15 @@ async fn live_clipboard_purge_removes_payloads_online_and_after_reconciliation()
             .unwrap()
             .is_none()
     );
+    let new_id = first
+        .send_clipboard_payload("text/plain", b"copied by mistake")
+        .await
+        .unwrap();
+    assert_ne!(new_id, id);
+    wait_for(&second, |state| {
+        state.clipboard_items.iter().any(|item| item.id == new_id)
+    })
+    .await;
     first.stop_session_work().await;
     second.stop_session_work().await;
     offline.stop_session_work().await;

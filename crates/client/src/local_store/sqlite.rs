@@ -36,6 +36,20 @@ use super::{
 /// taking this path.
 const SCHEMA_VERSION: i32 = 1;
 
+#[cfg(target_os = "macos")]
+pub(super) fn open_clipboard(path: &Path) -> Result<Connection, LocalStoreError> {
+    create_private_file_if_missing(path)?;
+    let connection = Connection::open(path)?;
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS clipboard_capture (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        change_count INTEGER NOT NULL,
+        boot_time INTEGER NOT NULL
+    ) STRICT;",
+    )?;
+    Ok(connection)
+}
+
 const SCHEMA: &str = "
 CREATE TABLE objects (
     id              TEXT    PRIMARY KEY NOT NULL,

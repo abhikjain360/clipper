@@ -508,6 +508,35 @@ impl LocalStore {
     }
 
     #[cfg(target_os = "macos")]
+    pub(crate) async fn clipboard_capture(&self) -> Result<Option<(isize, i64)>, LocalStoreError> {
+        use rusqlite::OptionalExtension;
+        ensure_private_dir(&self.base_dir).await?;
+        let connection = sqlite::open_clipboard(&self.base_dir.join("clipboard.sqlite3"))?;
+        Ok(connection
+            .query_row(
+                "SELECT change_count, boot_time FROM clipboard_capture WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) async fn save_clipboard_capture(
+        &self,
+        count: isize,
+        boot: i64,
+    ) -> Result<(), LocalStoreError> {
+        ensure_private_dir(&self.base_dir).await?;
+        let connection = sqlite::open_clipboard(&self.base_dir.join("clipboard.sqlite3"))?;
+        connection.execute(
+            "INSERT OR REPLACE INTO clipboard_capture VALUES (1, ?1, ?2)",
+            rusqlite::params![count, boot],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
     pub(crate) async fn clipboard_ownership(
         &self,
     ) -> Result<Option<(String, isize, i64)>, LocalStoreError> {

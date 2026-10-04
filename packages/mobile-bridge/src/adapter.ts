@@ -252,6 +252,7 @@ function mapLogoutOutcome(outcome: NativeLogoutOutcome): LogoutOutcome {
 function mapAppState(state: NativeAppState): AppState {
   return {
     clipboard_items: state.clipboardItems.map(mapClipboardItem),
+    deleted_clipboard_ids: state.deletedClipboardIds,
     collab_docs: state.collabDocs.map(mapCollabItem),
     connection_status: mapConnectionStatus(state.connectionStatus),
     offline: state.offline,

@@ -172,10 +172,14 @@ pub struct SyncEngine {
     state_version: std::sync::atomic::AtomicU64,
     ws_restart_tx: watch::Sender<u64>,
     ws_restart_rx: watch::Receiver<u64>,
-    suppressed_payload: RwLock<Option<([u8; 32], web_time::Instant)>>,
+    suppressed_payload: RwLock<Option<(String, [u8; 32], web_time::Instant)>>,
     clipboard_write: Mutex<()>,
     #[cfg(target_os = "macos")]
     macos_clipboard: Mutex<Option<(String, isize, i64)>>,
+    #[cfg(target_os = "macos")]
+    macos_capture: Mutex<Option<(isize, i64)>>,
+    #[cfg(target_os = "macos")]
+    clipboard_ready: std::sync::atomic::AtomicBool,
     /// Serialize this device's timer commands across UI/IPC callers.
     actual_write: Mutex<()>,
     calendar_write: Mutex<()>,
@@ -240,6 +244,10 @@ impl SyncEngine {
             clipboard_write: Mutex::new(()),
             #[cfg(target_os = "macos")]
             macos_clipboard: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            macos_capture: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            clipboard_ready: std::sync::atomic::AtomicBool::new(false),
             actual_write: Mutex::new(()),
             calendar_write: Mutex::new(()),
             session_change: Mutex::new(()),
@@ -656,6 +664,10 @@ impl SyncEngine {
         signing_identity: DeviceSigningIdentity,
     ) -> Result<(), ClientError> {
         let cache_key = *encryption_key;
+        #[cfg(target_os = "macos")]
+        let _clipboard = self.clipboard_write.lock().await;
+        #[cfg(target_os = "macos")]
+        self.clipboard_ready.store(false, Ordering::SeqCst);
         let mut active_key = self.encryption_key.write().await;
         let epoch = {
             let epoch = self.history_epoch.fetch_add(1, Ordering::SeqCst) + 1;
@@ -695,6 +707,7 @@ impl SyncEngine {
             state.connection_status = ConnectionStatus::Connecting;
             state.offline = self.offline.load(Ordering::SeqCst);
             state.error = None;
+            state.deleted_clipboard_ids.clear();
         }
         *self.session_work.lock().unwrap() = (epoch, crate::session_work::SessionWork::new());
         drop(active_key);
@@ -872,6 +885,21 @@ impl SyncEngine {
     }
 
     #[cfg(target_os = "macos")]
+    pub(crate) async fn clipboard_capture_state(&self) -> Option<Option<(isize, i64)>> {
+        if !self.clipboard_ready.load(Ordering::SeqCst) || !self.state.read().await.is_logged_in() {
+            return None;
+        }
+        Some(*self.macos_capture.lock().await)
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn remember_clipboard_capture(&self, count: isize, boot: i64) -> Result<(), ClientError> {
+        *self.macos_capture.lock().await = Some((count, boot));
+        self.local_store.save_clipboard_capture(count, boot).await?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
     pub(crate) async fn capture_macos_clipboard_payload(
         &self,
         count: isize,
@@ -880,24 +908,27 @@ impl SyncEngine {
     ) -> Result<String, ClientError> {
         let _write = self.clipboard_write.lock().await;
         let epoch = self.history_epoch.load(Ordering::SeqCst);
+        if !self.clipboard_ready.load(Ordering::SeqCst) {
+            return Err(ClientError::Other("Clipboard cache is loading".into()));
+        }
         if crate::clipboard_watcher::change_count() != count {
             return Err(ClientError::Other(
                 "Clipboard changed before capture".into(),
             ));
         }
+        let boot = crate::clipboard_watcher::boot_time()
+            .ok_or_else(|| ClientError::Other("Clipboard boot time is unavailable".into()))?;
+        if *self.macos_capture.lock().await == Some((count, boot)) {
+            return Err(ClientError::Other("Clipboard already captured".into()));
+        }
+        self.remember_clipboard_capture(count, boot).await?;
         let id = self.capture_clipboard_payload(mime_type, data).await?;
         let _active = self.hold_session_for_write(epoch).await?;
         let mut held = self.macos_clipboard.lock().await;
-        *held = Some((
-            id.clone(),
-            count,
-            crate::clipboard_watcher::boot_time().unwrap_or_default(),
-        ));
+        *held = Some((id.clone(), count, boot));
         self.local_store
             .save_clipboard_ownership(held.as_ref())
             .await?;
-        self.clear_missing_macos_clipboard(&mut held, &self.state.read().await.clipboard_items)
-            .await;
         Ok(id)
     }
 
@@ -937,24 +968,43 @@ impl SyncEngine {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    async fn clear_missing_macos_clipboard(
-        &self,
-        held: &mut Option<(String, isize, i64)>,
-        items: &[DecryptedClipboardItem],
-    ) {
-        if let Some((id, count, boot)) = held.as_ref()
-            && !items.iter().any(|item| item.id == *id)
+    async fn note_clipboard_delete(&self, deleted_id: &str) {
         {
-            #[cfg(not(test))]
-            crate::clipboard_watcher::clear_if_unchanged(*count, *boot);
-            #[cfg(test)]
-            let _ = (count, boot);
-            *held = None;
-            if let Err(error) = self.local_store.save_clipboard_ownership(None).await {
-                warn!(%error, "Failed to clear clipboard ownership");
+            let mut suppressed = self.suppressed_payload.write().await;
+            if suppressed
+                .as_ref()
+                .is_some_and(|(id, _, _)| id == deleted_id)
+            {
+                *suppressed = None;
             }
         }
+        {
+            let mut state = self.state.write().await;
+            if !state
+                .deleted_clipboard_ids
+                .iter()
+                .any(|id| id == deleted_id)
+            {
+                state.deleted_clipboard_ids.push(deleted_id.into());
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut held = self.macos_clipboard.lock().await;
+            if let Some((id, count, boot)) = held.as_ref()
+                && id == deleted_id
+            {
+                #[cfg(not(test))]
+                crate::clipboard_watcher::clear_if_unchanged(*count, *boot);
+                #[cfg(test)]
+                let _ = (count, boot);
+                *held = None;
+                if let Err(error) = self.local_store.save_clipboard_ownership(None).await {
+                    warn!(%error, "Failed to clear clipboard ownership");
+                }
+            }
+        }
+        self.bump_version();
     }
 
     pub async fn logout(&self, cancel_running_work: bool) -> Result<LogoutOutcome, ClientError> {
@@ -986,7 +1036,10 @@ impl SyncEngine {
     async fn clear_local_session(&self) {
         self.stop_session_work().await;
         #[cfg(target_os = "macos")]
-        self.macos_clipboard.lock().await.take();
+        {
+            self.clipboard_ready.store(false, Ordering::SeqCst);
+            self.macos_clipboard.lock().await.take();
+        }
         let mut active_key = self.encryption_key.write().await;
         self.api.clear_token();
         self.last_confirmed_at.store(0, Ordering::SeqCst);
@@ -1007,6 +1060,10 @@ impl SyncEngine {
         *self.device_identity_wrapping_key.write().await = None;
         if let Err(error) = self.local_store.clear_calendar_checks().await {
             warn!(%error, "Failed to clear local calendar check times");
+        }
+        #[cfg(target_os = "macos")]
+        if let Err(error) = self.local_store.save_clipboard_ownership(None).await {
+            warn!(%error, "Failed to clear clipboard ownership");
         }
         self.local_store.fence_and_clear_memory().await;
         *self.state.write().await = AppState::default();
@@ -1277,15 +1334,17 @@ impl SyncEngine {
         let payload_digest = clipboard_payload_digest(mime_type, data);
         {
             let suppressed = self.suppressed_payload.read().await;
-            if let Some((digest, at)) = *suppressed
-                && digest == payload_digest
+            if let Some((_, digest, at)) = suppressed.as_ref()
+                && *digest == payload_digest
                 && at.elapsed() < Duration::from_secs(5)
             {
                 debug!("Suppressed duplicate clipboard upload");
-                return self
+                if let Some(id) = self
                     .latest_clipboard_item_id_for_digest(&payload_digest, &encryption_key)
                     .await
-                    .ok_or_else(|| ClientError::Other("Suppressed clipboard item missing".into()));
+                {
+                    return Ok(id);
+                }
             }
         }
 
@@ -1480,6 +1539,7 @@ impl SyncEngine {
         };
 
         *self.suppressed_payload.write().await = Some((
+            id.into(),
             clipboard_payload_digest(&item.mime_type, &bytes),
             web_time::Instant::now(),
         ));
@@ -1525,6 +1585,7 @@ impl SyncEngine {
             .map_err(|e| ClientError::Other(format!("clipboard text utf8: {e}")))?;
 
         *self.suppressed_payload.write().await = Some((
+            id.into(),
             clipboard_payload_digest(&item.mime_type, &bytes),
             web_time::Instant::now(),
         ));
@@ -1532,12 +1593,11 @@ impl SyncEngine {
         {
             let count = crate::clipboard_watcher::write_text(&text)
                 .ok_or_else(|| ClientError::Other("Clipboard write failed".into()))?;
+            let boot = crate::clipboard_watcher::boot_time()
+                .ok_or_else(|| ClientError::Other("Clipboard boot time is unavailable".into()))?;
+            self.remember_clipboard_capture(count, boot).await?;
             let mut held = self.macos_clipboard.lock().await;
-            *held = Some((
-                id.into(),
-                count,
-                crate::clipboard_watcher::boot_time().unwrap_or_default(),
-            ));
+            *held = Some((id.into(), count, boot));
             self.local_store
                 .save_clipboard_ownership(held.as_ref())
                 .await?;
@@ -1569,6 +1629,7 @@ impl SyncEngine {
         }
         let deleted = api.delete_object(id).await?;
         let _active = self.hold_session_for_write(epoch).await?;
+        self.note_clipboard_delete(id).await;
         let visible = self
             .local_store
             .apply_local_delete(
@@ -3722,17 +3783,37 @@ impl SyncEngine {
 
     async fn show_cached_state(&self, visible: Result<LocalVisibleState, LocalStoreError>) {
         #[cfg(target_os = "macos")]
-        match self.local_store.clipboard_ownership().await {
-            Ok(held) => *self.macos_clipboard.lock().await = held,
-            Err(error) => warn!(%error, "Failed to load clipboard ownership"),
-        }
+        let clipboard_loaded = match (
+            self.local_store.clipboard_capture().await,
+            self.local_store.clipboard_ownership().await,
+        ) {
+            (Ok(capture), Ok(held)) => {
+                let capture =
+                    capture.or_else(|| held.as_ref().map(|(_, count, boot)| (*count, *boot)));
+                *self.macos_capture.lock().await = capture;
+                *self.macos_clipboard.lock().await = held;
+                if let Some((count, boot)) = capture {
+                    self.remember_clipboard_capture(count, boot).await.is_ok()
+                } else {
+                    true
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                warn!(%error, "Failed to load clipboard ownership");
+                false
+            }
+        };
+        #[cfg(target_os = "macos")]
+        let cache_loaded = visible.is_ok();
         #[cfg(not(target_family = "wasm"))]
         self.show_held_app_documents().await;
-        self.bump_version();
         match visible {
             Ok(visible) => self.publish_visible_state(visible).await,
             Err(error) => warn!("Failed to hydrate local ciphertext cache: {}", error),
         }
+        #[cfg(target_os = "macos")]
+        self.clipboard_ready
+            .store(clipboard_loaded && cache_loaded, Ordering::SeqCst);
     }
 
     async fn publish_visible_state(&self, mut visible: LocalVisibleState) {
@@ -3754,8 +3835,6 @@ impl SyncEngine {
         }
         #[cfg(not(target_family = "wasm"))]
         let (stamp, documents) = (visible.stamp, std::mem::take(&mut visible.app_documents));
-        #[cfg(target_os = "macos")]
-        let mut held = self.macos_clipboard.lock().await;
         {
             let mut state = self.state.write().await;
             // Nothing to show without a session, and a straggling snapshot from
@@ -3771,9 +3850,6 @@ impl SyncEngine {
             }
             self.published_stamp.store(visible.stamp, Ordering::SeqCst);
             state.clipboard_items = visible.clipboard_items;
-            #[cfg(target_os = "macos")]
-            self.clear_missing_macos_clipboard(&mut held, &state.clipboard_items)
-                .await;
             state.files = visible.files;
             state.collab_docs = visible.collab_docs;
             state.schedule_items = visible.schedule_items;
@@ -4101,6 +4177,28 @@ impl SyncEngine {
         stream_start_seq: i64,
     ) -> Result<(), ClientError> {
         let (api, encryption_key) = self.credentials_for_generation(generation).await?;
+        let mut after_seq = 0;
+        loop {
+            let deletes = api.clipboard_deletes(after_seq, stream_start_seq).await?;
+            if deletes.is_empty() {
+                break;
+            }
+            for deleted in deletes {
+                if deleted.seq <= after_seq || deleted.seq > stream_start_seq {
+                    return Err(ClientError::Other("Invalid clipboard delete cursor".into()));
+                }
+                after_seq = deleted.seq;
+                self.handle_deleted_event(
+                    generation,
+                    ObjectKind::Clipboard,
+                    deleted.id,
+                    deleted.seq,
+                    None,
+                    None,
+                )
+                .await?;
+            }
+        }
         let api = &api;
         // Capture a shared borrow so the per-item `async move` blocks copy the
         // reference, not the key material.
@@ -4488,6 +4586,9 @@ impl SyncEngine {
             )
             .await?
         {
+            if kind == ObjectKind::Clipboard {
+                self.note_clipboard_delete(&object_id.to_string()).await;
+            }
             self.publish_visible_state(visible).await;
         }
         Ok(())
@@ -6249,7 +6350,9 @@ mod tests {
                 loop {
                     let (mut socket, _) = listener.accept().await.unwrap();
                     let (headers, _) = request(&mut socket).await;
-                    let body = if headers.contains("/payloads/") {
+                    let body = if headers.contains("/clipboard-deletes") {
+                        postcard::to_allocvec(&Vec::<ClipboardDelete>::new()).unwrap()
+                    } else if headers.contains("/payloads/") {
                         payload.clone()
                     } else {
                         postcard::to_allocvec(&ObjectListResponse {
@@ -6990,6 +7093,94 @@ mod tests {
             device_name: "test".into(),
             server_url: "http://127.0.0.1:8787".into(),
         });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn clipboard_ownership_survives_aging_out_of_the_newest_100_and_startup() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", temp.path());
+        activate(&engine, "owner", KEY).await;
+        let first = visible_state(1, "owned");
+        let held = (first.clipboard_items[0].id.clone(), 42, 100);
+        *engine.macos_clipboard.lock().await = Some(held.clone());
+        engine
+            .local_store
+            .save_clipboard_ownership(Some(&held))
+            .await
+            .unwrap();
+        engine.publish_visible_state(first).await;
+        let mut newer = visible_state(2, "newer");
+        newer.clipboard_items = (0..100)
+            .map(|_| {
+                let mut item = newer.clipboard_items[0].clone();
+                item.id = uuid::Uuid::now_v7().to_string();
+                item
+            })
+            .collect();
+        engine.publish_visible_state(newer).await;
+        let mut empty = visible_state(3, "empty");
+        empty.clipboard_items.clear();
+        engine.publish_visible_state(empty).await;
+        assert_eq!(*engine.macos_clipboard.lock().await, Some(held.clone()));
+        assert_eq!(
+            engine.local_store.clipboard_ownership().await.unwrap(),
+            Some(held)
+        );
+        assert!(engine.get_state().await.deleted_clipboard_ids.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn logout_and_account_switch_drop_ownership_without_a_clipboard_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", temp.path());
+        activate(&engine, "owner", KEY).await;
+        let held = (uuid::Uuid::now_v7().to_string(), 42, 100);
+        *engine.macos_clipboard.lock().await = Some(held.clone());
+        engine
+            .local_store
+            .save_clipboard_ownership(Some(&held))
+            .await
+            .unwrap();
+        engine.remember_clipboard_capture(42, 100).await.unwrap();
+        assert!(engine.clipboard_capture_state().await.is_none());
+        engine.clipboard_ready.store(true, Ordering::SeqCst);
+        assert_eq!(
+            engine.clipboard_capture_state().await,
+            Some(Some((42, 100)))
+        );
+        engine.clear_local_session().await;
+        assert!(engine.macos_clipboard.lock().await.is_none());
+        assert!(
+            engine
+                .local_store
+                .clipboard_ownership()
+                .await
+                .unwrap()
+                .is_none()
+        );
+        activate(&engine, "other-account", [8; 32]).await;
+        let visible = engine
+            .local_store
+            .hydrate_ciphertext_cache(&[8; 32], 100)
+            .await;
+        engine.show_cached_state(visible).await;
+        assert!(engine.macos_clipboard.lock().await.is_none());
+        assert!(engine.get_state().await.deleted_clipboard_ids.is_empty());
+        assert_eq!(
+            engine.local_store.clipboard_capture().await.unwrap(),
+            Some((42, 100))
+        );
+        engine.local_store.set_profile("owner".into());
+        assert!(
+            engine
+                .local_store
+                .clipboard_ownership()
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[cfg(not(target_family = "wasm"))]

@@ -652,6 +652,12 @@ pub struct ObjectListResponse {
     pub next_after: Option<ObjectListCursor>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipboardDelete {
+    pub id: ObjectId,
+    pub seq: i64,
+}
+
 pub const MAX_APP_DATA_BATCH_CHANGES: usize = 200;
 pub const MAX_APP_DATA_PAGE_CHANGES: u64 = 500;
 

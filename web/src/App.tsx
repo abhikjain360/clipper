@@ -24,6 +24,7 @@ import {
     X,
 } from "lucide-react";
 import { clipboardImage, clipboardBytes } from "../../packages/shared/src/clipboard";
+import { filePreview, filePreviewType } from "../../packages/shared/src/file-preview";
 import { cardEvents } from "./card-events";
 import {
     Suspense,
@@ -817,9 +818,12 @@ function FilesPanel({
 }) {
     const fileInputRef = useRef<HTMLInputElement | null>(null);
     const [busy, setBusy] = useState(false);
-    const [viewerFile, setViewerFile] = useState<{ filename: string; content: string } | null>(
-        null,
-    );
+    const [viewerFile, setViewerFile] = useState<{
+        file: FileItem;
+        content: string;
+        image?: string | null;
+        details: boolean;
+    } | null>(null);
     const nativeRuntime = isTauriRuntime();
 
     async function uploadFile(file: File) {
@@ -884,10 +888,19 @@ function FilesPanel({
     async function openViewer(file: FileItem) {
         onError(null);
         try {
-            const backend = await clipperBackend();
-            const bytes = await backend.downloadFileBytes(file.id);
-            const content = new TextDecoder().decode(bytes);
-            setViewerFile({ filename: file.filename, content });
+            const preview = await filePreview(
+                file,
+                async () => (await clipperBackend()).downloadFileBytes(file.id),
+                (bytes) => new TextDecoder().decode(bytes),
+            );
+            setViewerFile({
+                file,
+                details: !preview,
+                content:
+                    preview?.content ??
+                    `${file.mime_type}\n${formatByteSize(file.blob_size)}\n${formatRelativeTime(file.created_at)}`,
+                image: preview?.image,
+            });
         } catch (caught) {
             onError(formatBackendError(caught));
         }
@@ -908,8 +921,11 @@ function FilesPanel({
         <>
             {viewerFile && (
                 <FileViewerOverlay
-                    filename={viewerFile.filename}
+                    filename={viewerFile.file.filename}
                     content={viewerFile.content}
+                    image={viewerFile.image}
+                    details={viewerFile.details}
+                    onDownload={() => void downloadFile(viewerFile.file)}
                     onClose={() => setViewerFile(null)}
                 />
             )}
@@ -955,7 +971,7 @@ function FilesPanel({
                                         </YStack>
                                     </XStack>
                                     <XStack gap="$1">
-                                        {isTextMimeType(file.mime_type) && (
+                                        {filePreviewType(file) && (
                                             <Button
                                                 size="$3"
                                                 aria-label={`Preview ${file.filename}`}
@@ -999,11 +1015,15 @@ function FileViewerOverlay({
     filename,
     content,
     image,
+    details,
+    onDownload,
     onClose,
 }: {
     filename: string;
     content: string;
     image?: string | null;
+    details?: boolean;
+    onDownload?: () => void;
     onClose: () => void;
 }) {
     useEffect(() => {
@@ -1050,10 +1070,21 @@ function FileViewerOverlay({
                 >
                     {filename}
                 </span>
-                <Button size="$3" icon={<X size={16} />} onPress={onClose} />
+                <XStack gap="$2">
+                    {onDownload && (
+                        <Button size="$3" icon={<Download size={16} />} onPress={onDownload}>
+                            Download
+                        </Button>
+                    )}
+                    <Button size="$3" icon={<X size={16} />} onPress={onClose} />
+                </XStack>
             </div>
             <div style={{ flex: 1, minHeight: 0 }}>
-                {image ? (
+                {details ? (
+                    <Paragraph p="$4" whiteSpace="pre-wrap">
+                        {content}
+                    </Paragraph>
+                ) : image ? (
                     <img
                         src={image}
                         alt={filename}

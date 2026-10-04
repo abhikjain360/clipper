@@ -194,9 +194,13 @@ payload bytes are only ever decrypted transiently for the operation that needs
 them (e.g. `clipboard_payload`, copy-to-clipboard, file download).
 
 Mac clipboard ownership stores only the object id, pasteboard change count and
-boot time in the profile's `clipboard_ownership` table. Android stores the
-object id, device id, clipboard timestamp and an installation token in private
-preferences. Neither record contains clipboard content. These records let a
+boot time in the profile's `clipboard_ownership` table. A separate private
+`clipboard.sqlite3` stores the last captured or installed count and boot time
+across logout and account changes, without an object id or account identity.
+Android stores the object id, server and username scope, clipboard timestamp
+and an installation token in private preferences. Android 7 stamps captured
+entries with a token because clipboard timestamps require Android 8.
+These records contain no clipboard content. They let a
 purge or reconciliation clear the same OS clipboard entry after app restart
 while preserving a later copy.
 

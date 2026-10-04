@@ -339,6 +339,10 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
         )
         .route("/api/objects", get(routes::objects::list_objects))
         .route(
+            "/api/clipboard-deletes",
+            get(routes::objects::list_clipboard_deletes),
+        )
+        .route(
             "/api/collab-docs",
             get(routes::collab::list_collab_docs).post(routes::collab::create_collab_doc),
         )

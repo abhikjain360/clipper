@@ -13,37 +13,47 @@ class ClipboardOwner(context: Context) {
 
     fun read(): Map<String, Any> {
         val clip = clipboard.primaryClip
+        val token = if (clip != null && Build.VERSION.SDK_INT < Build.VERSION_CODES.O) mark(clip) else ""
         return mapOf(
             "text" to (clip?.getItemAt(0)?.text?.toString() ?: ""),
-            "timestamp" to (clip?.description?.timestamp ?: -1L).toDouble(),
+            "timestamp" to timestamp().toDouble(),
+            "token" to token,
         )
     }
 
-    fun claim(id: String, timestamp: Double, scope: String) {
-        if (clipboard.primaryClipDescription?.timestamp == timestamp.toLong()) {
-            save(id, timestamp.toLong(), scope, null)
+    fun claim(id: String, timestamp: Double, scope: String, token: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (clipboard.primaryClipDescription?.timestamp == timestamp.toLong()) {
+                save(id, timestamp.toLong(), scope, null)
+            }
+        } else if (token.isNotEmpty() && clipboard.primaryClipDescription?.extras?.getString("clipper_copy") == token) {
+            save(id, -1L, scope, token)
         }
     }
 
     fun install(id: String, text: String, scope: String) {
-        val token = UUID.randomUUID().toString()
         val clip = ClipData.newPlainText("Clipper", text)
-        clip.description.extras = PersistableBundle().apply { putString("clipper_copy", token) }
-        clipboard.setPrimaryClip(clip)
+        val token = mark(clip)
         val current = clipboard.primaryClipDescription
         if (current?.extras?.getString("clipper_copy") == token) {
-            save(id, current.timestamp, scope, token)
+            save(id, timestamp(), scope, token)
         }
     }
 
-    fun clearMissing(ids: List<String>, scope: String) {
-        if (preferences.getString("scope", null) != scope) return
+    fun clearDeleted(ids: List<String>, scope: String) {
+        if (preferences.getString("scope", null) != scope) {
+            reset()
+            return
+        }
         val id = preferences.getString("id", null) ?: return
-        if (id in ids) return
+        if (id !in ids) return
         val timestamp = preferences.getLong("timestamp", -1L)
         val current = clipboard.primaryClipDescription ?: return
         val token = preferences.getString("token", null)
-        if (current.timestamp == timestamp && (token == null || current.extras?.getString("clipper_copy") == token)) {
+        val same = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            current.timestamp == timestamp && (token == null || current.extras?.getString("clipper_copy") == token)
+        } else token != null && current.extras?.getString("clipper_copy") == token
+        if (same) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 clipboard.clearPrimaryClip()
             } else {
@@ -51,6 +61,23 @@ class ClipboardOwner(context: Context) {
             }
         }
         preferences.edit().clear().apply()
+    }
+
+    fun reset() {
+        preferences.edit().clear().apply()
+    }
+
+    private fun timestamp(): Long {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) clipboard.primaryClipDescription?.timestamp ?: -1L else -1L
+    }
+
+    private fun mark(clip: ClipData): String {
+        val token = UUID.randomUUID().toString()
+        val extras = clip.description.extras ?: PersistableBundle()
+        extras.putString("clipper_copy", token)
+        clip.description.extras = extras
+        clipboard.setPrimaryClip(clip)
+        return token
     }
 
     private fun save(id: String, timestamp: Long, scope: String, token: String?) {

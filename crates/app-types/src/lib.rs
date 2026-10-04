@@ -279,6 +279,7 @@ pub struct AppState {
     pub connection_status: ConnectionStatus,
     pub offline: bool,
     pub clipboard_items: Vec<DecryptedClipboardItem>,
+    pub deleted_clipboard_ids: Vec<String>,
     pub files: Vec<DecryptedFileItem>,
     pub collab_docs: Vec<CollabItem>,
     /// Series definitions. Occurrences are not here: they depend on which

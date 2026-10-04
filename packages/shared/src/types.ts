@@ -262,6 +262,7 @@ export type AppState = {
   connection_status: ConnectionStatus;
   offline: boolean;
   clipboard_items: ClipboardItem[];
+  deleted_clipboard_ids: string[];
   files: FileItem[];
   collab_docs: CollabItem[];
   // Series definitions only. Occurrences depend on the window being shown, so

@@ -17,7 +17,7 @@ export function setReplies(list, item, payload) {
         const path = url.pathname;
         const isPayload = path.includes('/payloads/');
         if (isPayload) payloadRequests++;
-        const bytes = replies[isPayload ? 2 : path.endsWith('/api/objects') ? 0 : 1];
+        const bytes = path.endsWith('/api/clipboard-deletes') ? new Uint8Array([0]) : replies[isPayload ? 2 : path.endsWith('/api/objects') ? 0 : 1];
         const response = new Response(bytes, {headers: {'Content-Type': 'application/vnd.clipper.postcard', 'Content-Length': String(bytes.length)}});
         Object.defineProperty(response, 'url', {value: url.href});
         return response;

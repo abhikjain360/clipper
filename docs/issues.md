@@ -2465,6 +2465,26 @@ Each entry has:
   buttons run their own actions. Phone cards no longer have eye buttons.
   Clipboard viewers show full text, images or binary bytes and close on deletion.
 
+### 194. Clipboard purge review regressions
+
+- **Status:** fixed, uncommitted
+- **Where:** clipboard watchers and ownership, migration 8, file viewers, and Android clipboard module.
+- **Fix:** persist Mac capture counts across restart and logout and gate capture on hydration;
+  rebuild the event table atomically and recover a partial rebuild; preview only small
+  text and supported image files; clear OS ownership only for explicit deletes;
+  scope ownership to the account and reset it on logout; guard Android timestamps
+  on API 24/25 and enforce NewApi in release lint; drop purge suppression so a
+  later identical copy is captured.
+
+### 195. Android lint crashes during dependency analysis
+
+- **Status:** worked around, uncommitted
+- **Where:** `mobile/plugins/clipboard-lint.cjs` and the Android release lint gate.
+- **What happens:** the pinned lint tool's component analysis fails on a dependency
+  with `Cannot find a KaModule for the VirtualFile`.
+- **Handling:** disable component analysis. Release builds require the clipboard
+  module's release lint, with NewApi fatal and errors aborting the build.
+
 ## Docs
 
 ### 29. Doc claims the code did not satisfy
