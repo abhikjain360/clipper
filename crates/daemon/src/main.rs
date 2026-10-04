@@ -3,6 +3,8 @@
 //! Runs as a per-user background service and exposes a Unix socket for app
 //! control.
 
+#![recursion_limit = "256"]
+
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn main() {
     std::process::exit(1);

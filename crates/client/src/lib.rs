@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod api_client;
 mod clipboard_privacy;
 pub mod engine;
