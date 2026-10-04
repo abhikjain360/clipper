@@ -121,14 +121,14 @@ type TabName =
   | "kitchen";
 
 const navItems = [
-  { value: "clipboard", label: "Clipboard", Icon: Clipboard },
-  { value: "files", label: "Files", Icon: Folder },
-  { value: "devices", label: "Devices", Icon: Smartphone },
-  { value: "collab", label: "Collab", Icon: FileCode },
   { value: "schedule", label: "Schedule", Icon: Calendar },
   { value: "alarms", label: "Alarms", Icon: AlarmClock },
   { value: "gym", label: "Gym", Icon: Dumbbell },
   { value: "kitchen", label: "Kitchen", Icon: CookingPot },
+  { value: "collab", label: "Collab", Icon: FileCode },
+  { value: "files", label: "Files", Icon: Folder },
+  { value: "clipboard", label: "Clipboard", Icon: Clipboard },
+  { value: "devices", label: "Devices", Icon: Smartphone },
 ] as const satisfies readonly { value: TabName; label: string; Icon: typeof Clipboard }[];
 type ViewerContent = {
   title: string;
@@ -498,7 +498,7 @@ function LoginScreen({
 }
 
 function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppState) => void }) {
-  const [tab, setTab] = useState<TabName>("clipboard");
+  const [tab, setTab] = useState<TabName>("schedule");
   const [openRecipeId, setOpenRecipeId] = useState<string | null>(null);
 
   useEffect(() => {
