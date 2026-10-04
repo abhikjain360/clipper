@@ -29,11 +29,25 @@ fn recipe(title: &str) -> Value {
 async fn write_recipe(
     engine: &SyncEngine,
     id: Option<&str>,
+    read_revision: Option<u64>,
     value: Value,
 ) -> Result<String, ClientError> {
     engine
-        .write_app_data("kitchen.recipes", id, AppDataWrite::Value(value))
+        .write_app_document(
+            "kitchen.recipes",
+            id,
+            read_revision,
+            AppDataWrite::Value(value),
+        )
         .await
+}
+
+async fn held_recipe(engine: &SyncEngine) -> Value {
+    query(
+        engine,
+        "SELECT revision, json_extract(value, '$.title') AS title FROM kitchen.recipes",
+    )
+    .await
 }
 
 #[tokio::test]
@@ -50,7 +64,7 @@ async fn live_documents_sync_beside_rows_and_keep_their_history() {
 
     let mut invalid = recipe("Soft onions");
     invalid["steps"][1]["text"] = json!("Add the {garlic}.");
-    let refused = write_recipe(&first, None, invalid).await.unwrap_err();
+    let refused = write_recipe(&first, None, None, invalid).await.unwrap_err();
     assert!(
         refused
             .to_string()
@@ -58,10 +72,10 @@ async fn live_documents_sync_beside_rows_and_keep_their_history() {
         "{refused}"
     );
 
-    let id = write_recipe(&first, None, recipe("Soft onions"))
+    let id = write_recipe(&first, None, None, recipe("Soft onions"))
         .await
         .unwrap();
-    write_recipe(&first, Some(&id), recipe("Golden onions"))
+    write_recipe(&first, Some(&id), Some(1), recipe("Golden onions"))
         .await
         .unwrap();
     second
@@ -122,7 +136,7 @@ async fn live_documents_sync_beside_rows_and_keep_their_history() {
     );
 
     first
-        .write_app_data("kitchen.recipes", Some(&id), AppDataWrite::Delete)
+        .write_app_document("kitchen.recipes", Some(&id), Some(2), AppDataWrite::Delete)
         .await
         .unwrap();
     eventually("the second device drops the deleted recipe", async || {
@@ -159,7 +173,7 @@ async fn live_document_writes_fail_offline_while_the_local_copy_stays_readable()
     let data = temp.path();
     let (_server, address) = start_server(data).await;
     let phone = signed_in(&format!("http://{address}"), data, "phone", true).await;
-    let id = write_recipe(&phone, None, recipe("Soft onions"))
+    let id = write_recipe(&phone, None, None, recipe("Soft onions"))
         .await
         .unwrap();
     let material = phone.session_resume_material().await.unwrap();
@@ -183,12 +197,72 @@ async fn live_document_writes_fail_offline_while_the_local_copy_stays_readable()
         json!([{"id": id, "title": "Soft onions"}])
     );
     assert!(matches!(
-        write_recipe(&offline, Some(&id), recipe("Golden onions")).await,
+        write_recipe(&offline, Some(&id), Some(1), recipe("Golden onions")).await,
         Err(ClientError::Offline)
     ));
     assert!(matches!(
-        write_recipe(&offline, None, recipe("Raw onions")).await,
+        write_recipe(&offline, None, None, recipe("Raw onions")).await,
         Err(ClientError::Offline)
     ));
     offline.stop_session_work().await;
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_a_document_saved_from_an_older_revision_is_refused() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path();
+    let (_server, address) = start_server(data).await;
+    let url = format!("http://{address}");
+    let first = signed_in(&url, data, "first", true).await;
+    let second = signed_in(&url, data, "second", false).await;
+
+    let id = write_recipe(&first, None, None, recipe("Soft onions"))
+        .await
+        .unwrap();
+    eventually("the second device holds revision 1", async || {
+        held_recipe(&second).await == json!([{"revision": 1, "title": "Soft onions"}])
+    })
+    .await;
+    write_recipe(&first, Some(&id), Some(1), recipe("Golden onions"))
+        .await
+        .unwrap();
+    eventually("the second device holds revision 2", async || {
+        held_recipe(&second).await == json!([{"revision": 2, "title": "Golden onions"}])
+    })
+    .await;
+
+    let stale = write_recipe(&second, Some(&id), Some(1), recipe("Raw onions"))
+        .await
+        .unwrap_err();
+    assert!(
+        stale
+            .to_string()
+            .contains("read it again and reapply the change"),
+        "{stale}"
+    );
+    let unread = write_recipe(&second, Some(&id), None, recipe("Raw onions"))
+        .await
+        .unwrap_err();
+    assert!(
+        unread
+            .to_string()
+            .contains("needs the revision it was read at"),
+        "{unread}"
+    );
+    assert_eq!(
+        held_recipe(&second).await,
+        json!([{"revision": 2, "title": "Golden onions"}])
+    );
+
+    write_recipe(&second, Some(&id), Some(2), recipe("Caramelised onions"))
+        .await
+        .unwrap();
+    eventually("the first device receives revision 3", async || {
+        held_recipe(&first).await == json!([{"revision": 3, "title": "Caramelised onions"}])
+    })
+    .await;
+    first.stop_session_work().await;
+    second.stop_session_work().await;
 }

@@ -357,6 +357,12 @@ export type ClipperBackend = {
   sessionResumeMaterial: () => Promise<SessionResumeMaterial | null>;
   queryAppData?: (sql: string) => Promise<AppDataRow[]>;
   writeAppData?: (collection: string, rowId: string | null, write: AppDataWrite) => Promise<string>;
+  writeAppDocument?: (
+    collection: string,
+    id: string | null,
+    revision: number | null,
+    write: AppDataWrite,
+  ) => Promise<string>;
   appDataStatus?: () => Promise<AppDataStatus>;
   appDocumentHistory?: (collection: string, id: string) => Promise<AppDocumentRevision[]>;
   appDocumentRevision?: (collection: string, id: string, revision: number) => Promise<unknown>;

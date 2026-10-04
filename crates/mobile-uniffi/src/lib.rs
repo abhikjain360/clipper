@@ -65,6 +65,16 @@ pub enum MobileAppDataWrite {
     Delete,
 }
 
+fn app_data_write(write: MobileAppDataWrite) -> Result<AppDataWrite, MobileError> {
+    Ok(match write {
+        MobileAppDataWrite::Value { json } => AppDataWrite::Value(
+            serde_json::from_str(&json)
+                .map_err(|error| MobileError::Client(format!("invalid value JSON: {error}")))?,
+        ),
+        MobileAppDataWrite::Delete => AppDataWrite::Delete,
+    })
+}
+
 impl From<ClientError> for MobileError {
     fn from(error: ClientError) -> Self {
         Self::Client(error.to_string())
@@ -313,6 +323,11 @@ impl MobileClipperClient {
         Ok(())
     }
 
+    pub async fn reconnect_now(&self) -> Result<(), MobileError> {
+        self.engine.reconnect_now().await?;
+        Ok(())
+    }
+
     pub async fn send_clipboard_text(&self, text: String) -> Result<String, MobileError> {
         Ok(self
             .engine
@@ -397,16 +412,22 @@ impl MobileClipperClient {
         row_id: Option<String>,
         write: MobileAppDataWrite,
     ) -> Result<String, MobileError> {
-        let write = match write {
-            MobileAppDataWrite::Value { json } => AppDataWrite::Value(
-                serde_json::from_str(&json)
-                    .map_err(|error| MobileError::Client(format!("invalid value JSON: {error}")))?,
-            ),
-            MobileAppDataWrite::Delete => AppDataWrite::Delete,
-        };
         Ok(self
             .engine
-            .write_app_data(&collection, row_id.as_deref(), write)
+            .write_app_data(&collection, row_id.as_deref(), app_data_write(write)?)
+            .await?)
+    }
+
+    pub async fn write_app_document(
+        &self,
+        collection: String,
+        id: Option<String>,
+        revision: Option<u64>,
+        write: MobileAppDataWrite,
+    ) -> Result<String, MobileError> {
+        Ok(self
+            .engine
+            .write_app_document(&collection, id.as_deref(), revision, app_data_write(write)?)
             .await?)
     }
 

@@ -121,7 +121,10 @@ relies on the envelope's authenticated encryption.
 
 A device that is offline keeps its pending changes across restarts and sends
 them when it reconnects. While online it sends them after each write, on
-reconnect, and every 30 seconds while any are waiting. One sending pass
+reconnect, and every 30 seconds while any are waiting. When the Android app
+returns to the foreground, the device confirms its session over HTTP, sends
+its pending changes at once and reconnects its WebSocket without waiting for
+the reconnect backoff. One sending pass
 sends each pending change once, and sends a change that won a conflict at
 most once more; a change still pending after that waits for the next pass,
 and the device fetches received changes between passes.
@@ -287,9 +290,14 @@ does not decode is refused first, offline too. The stored value is chosen as
 for rows, in "Writing a row".
 
 - A write without an id creates a document with a new UUIDv7.
-- A write with an id revises the document this device holds, naming the
-  revision it holds as the parent. If the device holds no document with that
-  id, the write creates one.
+- A write that changes or deletes a document carries the revision the writer
+  read. The device refuses it unless that is the revision it holds, so a
+  change made from an older revision cannot replace a newer one that sync
+  delivered in the meantime; the writer reads the document again and
+  reapplies its change. The new revision names the held revision as its
+  parent.
+- A write with an id this device does not hold, and no revision, creates the
+  document with that id.
 - A revision whose parent is no longer the head fails with a revision conflict.
   The device then fetches the head, so a read after the failure shows the
   other write.
@@ -396,8 +404,8 @@ authenticated socket (see [local-ipc-security.md](local-ipc-security.md)):
 - `app_document_history` lists a document's revisions, and
   `app_document_revision` returns the value of one of them.
 
-`write_app_data` writes a document when the collection is a document
-collection, with the rules in "Document collections".
+`write_app_data` also writes documents, with the rules in "Document
+collections", and takes the revision the value was read at.
 
 The `clipper` command-line client exposes these as `clipper data query`,
 `clipper data write` and `clipper data status`, and lists a document's earlier
@@ -468,9 +476,10 @@ and is never stored:
 - The plan is split into blocks: an exercise that forms a superset with the
   one before it joins that exercise's block. An exercise is open while it is
   not skipped and has fewer warm-up or working sets than planned.
-- When the user chose an exercise to do now and it is still open, the
-  current exercise is in that exercise's block. Otherwise it is in the first
-  block with an open exercise. Within the block it is the open exercise with
+- When the user chose an exercise to do now and its block still has an open
+  exercise, the current exercise is in that block, so a chosen superset stays
+  current until every partner is done. Otherwise it is in the first block
+  with an open exercise. Within the block it is the open exercise with
   the fewest working sets, the earlier one on a tie, so a superset alternates.
   Its next set is a warm-up while planned warm-ups remain, and a working set
   after that. Choosing an exercise does not change the plan, so an exercise

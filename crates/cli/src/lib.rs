@@ -62,6 +62,12 @@ pub enum DataCommand {
         #[arg(
             long,
             requires = "id",
+            help = "The document revision the change was made from; required to change or delete an existing document"
+        )]
+        revision: Option<u64>,
+        #[arg(
+            long,
+            requires = "id",
             help = "Delete the row or document instead of reading a value"
         )]
         delete: bool,
@@ -226,6 +232,7 @@ impl Command {
                     DataCommand::Write {
                         collection,
                         id,
+                        revision,
                         delete,
                     },
             } => {
@@ -240,6 +247,7 @@ impl Command {
                     DaemonCommand::WriteAppData(WriteAppDataParams {
                         collection,
                         row_id: id.map(|id| id.to_string()),
+                        revision,
                         write,
                     }),
                     Output::Result,

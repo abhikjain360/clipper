@@ -318,3 +318,32 @@ fn switching_to_a_new_exercise_keeps_the_list_in_training_order() {
     assert_eq!(current(&back), Some((id(SQUAT), SetKind::Working)));
     assert_eq!(names(&back), [id(SQUAT), id(CRUNCH)]);
 }
+
+#[test]
+fn a_chosen_superset_stays_current_until_every_partner_is_done() {
+    let mut session = session(vec![
+        planned(SQUAT, 0, 3, 180, false),
+        planned(BENCH, 0, 3, 120, false),
+        planned(ROW, 0, 3, 90, true),
+    ]);
+    session.switch_to(id(BENCH)).unwrap();
+    let mut sets = vec![logged(10, SQUAT, 1, SetKind::Working, 0)];
+    for (offset, exercise) in [BENCH, ROW, BENCH, ROW, BENCH].into_iter().enumerate() {
+        let order = 2 + offset as u32;
+        sets.push(logged(
+            20 + offset as u128,
+            exercise,
+            order,
+            SetKind::Working,
+            60 * i64::from(order),
+        ));
+    }
+    let state = progress(&session, &sets);
+    assert_eq!(current(&state), Some((id(ROW), SetKind::Working)));
+    assert_eq!(state.rest, None);
+
+    sets.push(logged(30, ROW, 7, SetKind::Working, 420));
+    let done = progress(&session, &sets);
+    assert_eq!(current(&done), Some((id(SQUAT), SetKind::Working)));
+    assert_eq!(done.rest.map(|rest| rest.ends_at), Some(time(420 + 90)));
+}

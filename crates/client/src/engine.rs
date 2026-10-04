@@ -163,6 +163,7 @@ pub struct SyncEngine {
     state_version: std::sync::atomic::AtomicU64,
     ws_restart_tx: watch::Sender<u64>,
     ws_restart_rx: watch::Receiver<u64>,
+    ws_wake: tokio::sync::Notify,
     suppressed_payload: RwLock<Option<([u8; 32], web_time::Instant)>>,
     /// Serialize this device's timer commands across UI/IPC callers.
     actual_write: Mutex<()>,
@@ -219,6 +220,7 @@ impl SyncEngine {
             state_version: std::sync::atomic::AtomicU64::new(0),
             ws_restart_tx,
             ws_restart_rx,
+            ws_wake: tokio::sync::Notify::new(),
             suppressed_payload: RwLock::new(None),
             actual_write: Mutex::new(()),
             calendar_write: Mutex::new(()),
@@ -3420,6 +3422,19 @@ impl SyncEngine {
         Ok(())
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn reconnect_now(&self) -> Result<(), ClientError> {
+        if !self.state.read().await.is_logged_in() {
+            return Ok(());
+        }
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
+        self.ws_restart_tx.send_modify(|requested| *requested += 1);
+        self.ws_wake.notify_one();
+        let confirmed = self.confirm_session(epoch).await;
+        self.app_data.request_push();
+        confirmed
+    }
+
     /// A restart receiver that only reports refreshes requested from now on.
     ///
     /// Cloning a `watch::Receiver` copies the seen version of the receiver it
@@ -4401,8 +4416,14 @@ impl SyncEngine {
             }
 
             let jitter = Duration::from_millis(rand::random_range(0..1000));
-            tokio::time::sleep(backoff + jitter).await;
-            backoff = (backoff * 2).min(max_backoff);
+            tokio::select! {
+                () = tokio::time::sleep(backoff + jitter) => {
+                    backoff = (backoff * 2).min(max_backoff);
+                }
+                () = self.ws_wake.notified() => {
+                    backoff = Duration::from_secs(1);
+                }
+            }
         }
     }
 

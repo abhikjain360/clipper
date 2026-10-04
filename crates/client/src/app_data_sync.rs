@@ -39,19 +39,12 @@ impl SyncEngine {
         let entry = collections::collection(collection).ok_or_else(|| {
             ClientError::InvalidArgument(format!("unknown app-data collection {collection}"))
         })?;
-        let write = match write {
-            AppDataWrite::Value(value) => {
-                AppDataWrite::Value((entry.checked_value)(value).map_err(|error| {
-                    ClientError::InvalidArgument(format!("invalid {collection} value: {error}"))
-                })?)
-            }
-            AppDataWrite::Delete => AppDataWrite::Delete,
-        };
         if entry.storage == Storage::Documents {
             return self
-                .run_work(None, self.write_app_document(collection, row_id, write))
+                .write_app_document(collection, row_id, None, write)
                 .await;
         }
+        let write = checked_write(entry, write)?;
         self.run_work(None, self.write_app_data_inner(collection, row_id, write))
             .await
     }
@@ -710,6 +703,20 @@ fn open_session(
         .as_mut()
         .filter(|session| session.epoch == epoch)
         .ok_or(ClientError::NotAuthenticated)
+}
+
+pub(super) fn checked_write(
+    collection: &Collection,
+    write: AppDataWrite,
+) -> Result<AppDataWrite, ClientError> {
+    match write {
+        AppDataWrite::Value(value) => (collection.checked_value)(value)
+            .map(AppDataWrite::Value)
+            .map_err(|error| {
+                ClientError::InvalidArgument(format!("invalid {} value: {error}", collection.name))
+            }),
+        AppDataWrite::Delete => Ok(AppDataWrite::Delete),
+    }
 }
 
 fn derived_row_id(

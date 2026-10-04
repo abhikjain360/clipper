@@ -266,12 +266,15 @@ fn current_exercise(
     blocks: &[usize],
     chosen: Option<Uuid>,
 ) -> Option<usize> {
-    if let Some(chosen) = chosen.and_then(|id| {
-        exercises.iter().position(|progress| {
-            progress.planned && progress.plan.exercise_id == id && progress.is_open()
+    if let Some(next) = chosen
+        .and_then(|id| {
+            exercises
+                .iter()
+                .position(|progress| progress.planned && progress.plan.exercise_id == id)
         })
-    }) {
-        return open_in_block(exercises, blocks, blocks[chosen]);
+        .and_then(|chosen| open_in_block(exercises, blocks, blocks[chosen]))
+    {
+        return Some(next);
     }
     let mut start = 0;
     while start < exercises.len() {

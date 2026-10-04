@@ -197,6 +197,13 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): M
     queryAppData: async (sql) => JSON.parse(await client.queryAppData(sql)) as AppDataRow[],
     writeAppData: async (collection, rowId, write) =>
       client.writeAppData(collection, rowId ?? undefined, mapAppDataWrite(write)),
+    writeAppDocument: async (collection, id, revision, write) =>
+      client.writeAppDocument(
+        collection,
+        id ?? undefined,
+        revision === null ? undefined : BigInt(revision),
+        mapAppDataWrite(write),
+      ),
     appDataStatus: async () => {
       const status = await client.appDataStatus();
       return {

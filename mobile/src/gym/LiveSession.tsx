@@ -194,11 +194,12 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
       .filter((exercise) => exercise.planned && !exercise.skipped)
       .map((exercise) => exercise.exerciseId),
   );
-  const upcoming = session.exercises.filter(
-    (exercise) =>
-      exercise.planIndex !== undefined &&
-      exercise.sets.length === 0 &&
-      exercise.exerciseId !== session.currentExerciseId,
+  const inPlanOrder: GymSessionExercise[] = [];
+  for (const exercise of session.exercises) {
+    if (exercise.planIndex !== undefined) inPlanOrder[exercise.planIndex] = exercise;
+  }
+  const unfinished = inPlanOrder.filter(
+    (exercise) => !exercise.done && exercise.exerciseId !== session.currentExerciseId,
   );
 
   return (
@@ -325,14 +326,14 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
             </Button>
           </XStack>
           {session.exercises.map((exercise) => {
-            const position = upcoming.indexOf(exercise);
+            const position = unfinished.indexOf(exercise);
             return (
               <PlanRow
                 key={exercise.exerciseId}
                 exercise={exercise}
                 isCurrent={exercise.exerciseId === session.currentExerciseId}
-                moveUpTo={position > 0 ? upcoming[position - 1]?.planIndex : undefined}
-                moveDownTo={position >= 0 ? upcoming[position + 1]?.planIndex : undefined}
+                moveUpTo={position > 0 ? unfinished[position - 1]?.planIndex : undefined}
+                moveDownTo={position >= 0 ? unfinished[position + 1]?.planIndex : undefined}
                 canDoNow={
                   exercise.planned &&
                   !exercise.done &&

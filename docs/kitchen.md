@@ -135,8 +135,9 @@ Mac. Writing a recipe also needs the server.
   recipe's sessions and their step times.
 - Writing: `clipper data write` takes a collection, an id and the value on
   stdin, or a delete. Without an id it creates a record and prints the new id.
-  To change a recipe, Claude queries its value into a scratch file, edits it
-  and writes it back under the same id.
+  To change a recipe, Claude queries its value and revision, edits the value
+  in a scratch file and writes it back under the same id with
+  `--revision` set to the revision it read.
 - A refused value comes back with the field path and the rule, for example
   `steps[3].text: {onion} does not match any ingredient id`. List indexes in a
   path count from 0. Claude fixes it and writes again.

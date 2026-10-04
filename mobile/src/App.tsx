@@ -501,6 +501,17 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
   const sessionId = state.session?.device_id;
 
   useEffect(() => {
+    const subscription = NativeAppState.addEventListener("change", (nextState) => {
+      if (nextState === "active")
+        void backend
+          .nativeClient()
+          .reconnectNow()
+          .catch(() => {});
+    });
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     async function refreshCalendars() {
       const previous = calendarRefresh.current;

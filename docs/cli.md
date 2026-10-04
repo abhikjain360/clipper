@@ -29,7 +29,8 @@ clipper data query "SELECT id, value FROM gym.sets ORDER BY written_at DESC LIMI
 clipper data write gym.body_weight < weighing.json
 clipper data write gym.exercises --id <row-id> < exercise.json
 clipper data write gym.sets --id <row-id> --delete
-clipper data write kitchen.recipes --id <document-id> < recipe.json
+clipper data write kitchen.recipes < recipe.json
+clipper data write kitchen.recipes --id <document-id> --revision 3 < recipe.json
 clipper data history kitchen.recipes <document-id>
 clipper data history kitchen.recipes <document-id> --revision 2
 clipper data status
@@ -70,9 +71,11 @@ the same way.
 - `data write <collection> --id <row-id> --delete` deletes a row and reads
   nothing from stdin. A deleted row cannot be written again.
 - For a document collection, `data write` saves to the server at once and
-  fails while offline. `--id` revises the document this device holds. If
-  another write revised it first, the write fails; query the document again
-  and reapply the change.
+  fails while offline. Without `--id` it creates a document. Changing or
+  deleting a document needs `--id` and `--revision`, the `revision` the
+  document had when it was read. If the document has moved on since, because
+  another device or another write changed it, the write fails; query the
+  document again and reapply the change.
 - A refused value prints its field path and the rule, for example
   `steps[3].text: {onion} does not match any ingredient id`.
 - `data history <collection> <document-id>` returns an array of

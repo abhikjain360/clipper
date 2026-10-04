@@ -532,10 +532,28 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                     }
                 }
                 DaemonCommand::WriteAppData(params) => {
-                    match engine
-                        .write_app_data(&params.collection, params.row_id.as_deref(), params.write)
-                        .await
-                    {
+                    let written = match params.revision {
+                        Some(revision) => {
+                            engine
+                                .write_app_document(
+                                    &params.collection,
+                                    params.row_id.as_deref(),
+                                    Some(revision),
+                                    params.write,
+                                )
+                                .await
+                        }
+                        None => {
+                            engine
+                                .write_app_data(
+                                    &params.collection,
+                                    params.row_id.as_deref(),
+                                    params.write,
+                                )
+                                .await
+                        }
+                    };
+                    match written {
                         Ok(row_id) => json_success(id, WriteAppDataResult { id: row_id }),
                         Err(error) => client_error(id, error),
                     }

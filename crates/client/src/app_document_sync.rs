@@ -1,7 +1,7 @@
 use clipper_app_types::AppDocumentRevision;
 use serde_json::Value;
 
-use super::*;
+use super::{app_data_sync::checked_write, *};
 use crate::{
     app_data::{
         collections::{self, Collection, Storage},
@@ -14,13 +14,29 @@ const MAX_DOCUMENT_CIPHERTEXT_BYTES: i64 = 256 * 1024;
 const HISTORY_FETCH_CONCURRENCY: usize = 8;
 
 impl SyncEngine {
-    pub(super) async fn write_app_document(
+    pub async fn write_app_document(
         &self,
-        collection_name: &str,
+        collection: &str,
         document_id: Option<&str>,
+        read_revision: Option<u64>,
         write: AppDataWrite,
     ) -> Result<String, ClientError> {
-        let collection = document_collection(collection_name)?;
+        let collection = document_collection(collection)?;
+        let write = checked_write(collection, write)?;
+        self.run_work(
+            None,
+            self.write_app_document_inner(collection, document_id, read_revision, write),
+        )
+        .await
+    }
+
+    async fn write_app_document_inner(
+        &self,
+        collection: &'static Collection,
+        document_id: Option<&str>,
+        read_revision: Option<u64>,
+        write: AppDataWrite,
+    ) -> Result<String, ClientError> {
         let requested = document_id.map(parse_document_id).transpose()?;
         let value = match write {
             AppDataWrite::Value(value) => Some(value),
@@ -58,6 +74,20 @@ impl SyncEngine {
             }
             None => None,
         };
+        let head = match (head, read_revision) {
+            (Some(head), Some(read)) if read == head.revision => Some(head),
+            (Some(_), Some(_)) => {
+                return Err(changed_by_another_write(collection, &object_id_text));
+            }
+            (Some(_), None) => {
+                return Err(ClientError::InvalidArgument(format!(
+                    "{} document {object_id} exists; changing it needs the revision it was read at",
+                    collection.name
+                )));
+            }
+            (None, Some(_)) => return Err(ClientError::ItemNotFound { id: object_id_text }),
+            (None, None) => None,
+        };
         let written = match (value, head) {
             (Some(value), head) => {
                 let placement = head.map_or(EnvelopePlacement::Create, EnvelopePlacement::Revise);
@@ -94,10 +124,7 @@ impl SyncEngine {
             _ => false,
         };
         if overtaken {
-            return ClientError::InvalidArgument(format!(
-                "{} document {object_id} was changed by another write; read it again and reapply the change",
-                collection.name
-            ));
+            return changed_by_another_write(collection, object_id);
         }
         match error {
             ClientError::Http(error) if error.is_connect() => ClientError::Offline,
@@ -620,6 +647,13 @@ impl SyncEngine {
             Err(error) => warn!("Failed to read the held documents: {error}"),
         }
     }
+}
+
+fn changed_by_another_write(collection: &Collection, object_id: &str) -> ClientError {
+    ClientError::InvalidArgument(format!(
+        "{} document {object_id} was changed by another write; read it again and reapply the change",
+        collection.name
+    ))
 }
 
 fn document_collection(name: &str) -> Result<&'static Collection, ClientError> {

@@ -891,3 +891,54 @@ async fn live_gym_conflicts_keep_a_session_end_and_settle_one_set_per_order() {
     first.stop_session_work().await;
     second.stop_session_work().await;
 }
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_returning_to_the_foreground_reconnects_and_sends_pending_changes_at_once() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data = temp.path();
+    let (_server, address) = start_server(data).await;
+    let url = format!("http://{address}");
+    let proxy = TestProxy::start(address).await;
+    let first = signed_in(&url, data, "first", true).await;
+    let second = signed_in(&proxy.url, data, "second", false).await;
+
+    proxy.go_offline(&second).await;
+    let weighed = write(
+        &second,
+        "gym.body_weight",
+        None,
+        json!({"time": "2026-10-07T07:00:00Z", "kg": 80.5}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert_eq!(pending(&second).await, 1);
+    assert!(second.get_state().await.offline);
+
+    proxy.go_online();
+    second
+        .reconnect_now()
+        .await
+        .expect("the session is confirmed");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let state = second.get_state().await;
+            if pending(&second).await == 0
+                && !state.offline
+                && matches!(state.connection_status, ConnectionStatus::Connected)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the device reconnects and sends its change within seconds");
+    eventually("the other device receives the change", async || {
+        field(&first, "gym.body_weight", &weighed, "kg").await == json!(80.5)
+    })
+    .await;
+    first.stop_session_work().await;
+    second.stop_session_work().await;
+}
