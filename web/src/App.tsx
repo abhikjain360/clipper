@@ -7,6 +7,7 @@ import {
     CookingPot,
     Copy,
     Download,
+    Dumbbell,
     Eye,
     FileCode,
     FilePlus,
@@ -57,6 +58,7 @@ import type {
 } from "@clipper/shared";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { SchedulePanel } from "./SchedulePanel";
+import { GymPanel } from "./gym/GymPanel";
 import { KitchenPanel } from "./kitchen/KitchenPanel";
 
 // Lazy-loaded so the heavy CodeMirror dependency (editor core, vim mode, and the
@@ -404,6 +406,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
         { path: "/collab", label: "Collab Docs", icon: FileText },
         { path: "/schedule", label: "Schedule", icon: CalendarClock },
         { path: "/kitchen", label: "Kitchen", icon: CookingPot },
+        { path: "/gym", label: "Gym", icon: Dumbbell },
         { path: "/devices", label: "Devices", icon: Smartphone },
     ];
     const navigation = (expanded: boolean, mobile = false) => (
@@ -574,6 +577,9 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                         </Route>
                         <Route path="/kitchen">
                             <KitchenPanel state={state} onError={setError} />
+                        </Route>
+                        <Route path="/gym">
+                            <GymPanel state={state} onError={setError} />
                         </Route>
                         <Route path="/devices">
                             <DevicesPanel onError={setError} />

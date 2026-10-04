@@ -12,6 +12,50 @@ export {
   createDarkThemes,
 } from "./palette";
 
+export {
+  deviceZone,
+  formatClock,
+  formatDay,
+  formatKg,
+  formatMinutes,
+  formatRestSeconds,
+  formatSetLabel,
+  formatSetValues,
+  formatShortDate,
+  formatTime,
+  localDate,
+  parseCount,
+  parseWeight,
+  restEndNotice,
+  restSecondsLeft,
+} from "./gym";
+
+export type {
+  GymBackend,
+  GymBodyWeight,
+  GymChange,
+  GymExercise,
+  GymExerciseInput,
+  GymFatigueBand,
+  GymMuscle,
+  GymMuscleFatigue,
+  GymMuscleGroup,
+  GymMuscleInfo,
+  GymMuscleShare,
+  GymOneRepMax,
+  GymPlannedExercise,
+  GymRest,
+  GymSession,
+  GymSessionExercise,
+  GymSessionSummary,
+  GymSet,
+  GymSetKind,
+  GymSetValues,
+  GymStarterLibrary,
+  GymTemplate,
+  GymWeeklyBodyWeight,
+} from "./gym";
+
 export type {
   KitchenBackend,
   KitchenBlock,

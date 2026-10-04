@@ -1941,7 +1941,7 @@ Each entry has:
 
 - **Status:** fixed in `e8870d3`.
 - **Where:** `crates/gym/src/starter.rs`,
-  `crates/mobile-uniffi/src/gym.rs` (`gym_seed_starter_library`),
+  `crates/client/src/gym.rs` (`gym_seed_starter_library`),
   `crates/client/src/app_data_sync.rs` (`app_data_downloaded`).
 - **What happened:** a newly signed-in device that opened the gym before its
   first app-data download saw empty tables and wrote the starter library
@@ -2329,6 +2329,31 @@ Each entry has:
   device-user relations with relations through app-data rows.
 - **Decision:** preserve direct relations in the generator's post-processing.
   Regenerate entities instead of editing their relation implementations.
+
+### 185. The per-user API rate limit test fails on a busy machine
+
+- **Status:** open
+- **Severity:** low; a test fails without a code fault.
+- **Where:** `crates/server/src/rate_limit.rs`
+  (`api_user_limiter_is_keyed_by_user_id`).
+- **What happens:** the default limit allows 1200 API requests a minute, so
+  one request is refilled every 50 ms. The test makes 1200 checks and then
+  expects the next one to be refused. When the checks take longer than 50 ms,
+  a refilled request is allowed and the test fails. It passes when run again.
+
+### 186. Selected blue buttons show the page colour instead of the accent
+
+- **Status:** open
+- **Severity:** low; selected buttons are hard to tell apart.
+- **Where:** `packages/shared/src/palette.ts` (`createDarkThemes`), as used by
+  the web Tamagui config.
+- **What happens:** the dark blue button theme has the same values as other
+  accent themes, so Tamagui writes them in one early CSS rule. The dark blue
+  theme comes later with the page background, and both classes sit on the
+  same element, so a `theme="blue"` button gets the page background. Green,
+  red and yellow buttons keep their fill because their button rules come
+  after their colour rules. Selected section buttons in the schedule, the
+  kitchen and the gym are affected.
 
 ## Docs
 

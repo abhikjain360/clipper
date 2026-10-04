@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { restSecondsLeft } from "../mobile/src/gym/restCountdown.ts";
+import { restSecondsLeft } from "../packages/shared/src/gym.ts";
 
 test("a rest shows its full target at the moment of completion and then counts down", () => {
   const completedAt = 1_000_000;

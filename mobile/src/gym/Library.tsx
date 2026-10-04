@@ -12,8 +12,9 @@ import {
   type GymPlannedExercise,
   type GymTemplate,
 } from "@clipper/mobile-bridge";
+import { formatRestSeconds } from "@clipper/shared";
 import { formatBackendError } from "../backend";
-import { formatRestSeconds, gym } from "./gymClient";
+import { gym } from "./gymClient";
 import { colors, ExercisePicker, GymCard, Muted, SheetModal, Stepper } from "./GymUi";
 
 type ExerciseDraft = {

@@ -4,17 +4,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Keyboard } from "react-native";
 import { H2, ScrollView, Text, XStack, YStack } from "tamagui";
 import type { GymBodyWeight, GymWeeklyBodyWeight } from "@clipper/mobile-bridge";
-import { formatBackendError } from "../backend";
 import {
   deviceZone,
   formatDay,
   formatKg,
   formatShortDate,
   formatTime,
-  gym,
   localDate,
   parseWeight,
-} from "./gymClient";
+} from "@clipper/shared";
+import { formatBackendError } from "../backend";
+import { gym } from "./gymClient";
 import { colors, GymCard, LineChart, Muted, NumberEntry } from "./GymUi";
 
 export function BodyWeight({ onError }: { onError: (error: string | null) => void }) {

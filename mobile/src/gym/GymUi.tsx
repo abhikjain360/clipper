@@ -6,8 +6,8 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import Svg, { Circle, Line, Polyline, Text as SvgText } from "react-native-svg";
 import { Card, H2, Input, Paragraph, ScrollView, Text, XStack, YStack } from "tamagui";
 import type { GymExercise, GymSet, GymSetValues } from "@clipper/mobile-bridge";
-import { formatKg, parseCount, parseWeight, setLabel } from "./gymClient";
-import { palette, fatigueColors } from "@clipper/shared";
+import { fatigueColors, formatKg, palette, parseCount, parseWeight } from "@clipper/shared";
+import { setLabel } from "./gymClient";
 
 export const colors = {
   background: palette.page,

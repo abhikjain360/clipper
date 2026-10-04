@@ -7,6 +7,17 @@ import type {
     ClipperBackend,
     CollabItem,
     DeviceInfo,
+    GymBodyWeight,
+    GymExercise,
+    GymMuscleFatigue,
+    GymMuscleInfo,
+    GymOneRepMax,
+    GymPlannedExercise,
+    GymSession,
+    GymSessionSummary,
+    GymStarterLibrary,
+    GymTemplate,
+    GymWeeklyBodyWeight,
     IngestReport,
     KitchenPantry,
     KitchenPlan,
@@ -100,6 +111,27 @@ export function tauriBackend(): ClipperBackend {
             changePantry: (change) => invoke<void>("kitchen_change_pantry", { change }),
             plans: () => invoke<KitchenPlan[]>("kitchen_plans"),
             keepDisplayAwake: (on) => invoke<void>("keep_display_awake", { on }),
+        },
+        gym: {
+            muscles: () => invoke<GymMuscleInfo[]>("gym_muscles"),
+            moveTemplateExercise: (exercises, from, to) =>
+                invoke<GymPlannedExercise[]>("gym_move_template_exercise", { exercises, from, to }),
+            seedStarterLibrary: () => invoke<GymStarterLibrary>("gym_seed_starter_library"),
+            exercises: () => invoke<GymExercise[]>("gym_exercises"),
+            templates: () => invoke<GymTemplate[]>("gym_templates"),
+            openSession: () => invoke<GymSession | null>("gym_open_session"),
+            session: (sessionId) => invoke<GymSession>("gym_session", { sessionId }),
+            sessions: () => invoke<GymSessionSummary[]>("gym_sessions"),
+            bodyWeights: () => invoke<GymBodyWeight[]>("gym_body_weights"),
+            weeklyBodyWeight: (zone) =>
+                invoke<GymWeeklyBodyWeight[]>("gym_weekly_body_weight", { zone }),
+            oneRepMaxProgress: (exerciseId) =>
+                invoke<GymOneRepMax[]>("gym_one_rep_max_progress", { exerciseId }),
+            fatigue: () => invoke<GymMuscleFatigue[]>("gym_fatigue"),
+            change: (change) => invoke<void>("gym_change", { change }),
+            scheduleRestEnd: (endsAtMillis, title, body) =>
+                invoke<void>("gym_schedule_rest_end", { endsAtMillis, title, body }),
+            cancelRestEnd: () => invoke<void>("gym_cancel_rest_end"),
         },
         // Browser-only session resume. The desktop daemon owns credentials and
         // survives webview reloads, so these are never invoked under Tauri; they

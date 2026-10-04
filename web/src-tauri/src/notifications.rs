@@ -4,12 +4,14 @@ use objc2::{
     rc::{Retained, autoreleasepool},
     runtime::{Bool, ProtocolObject},
 };
-use objc2_foundation::{NSBundle, NSError, NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{NSArray, NSBundle, NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
     UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationSound,
-    UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+    UNTimeIntervalNotificationTrigger, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
+
+const REST_END_IDENTIFIER: &str = "clipper-gym-rest-end";
 
 define_class!(
     #[unsafe(super = NSObject)]
@@ -73,6 +75,35 @@ pub fn show_alarm(alarm: &clipper_app_types::AlarmView) {
         alarm.item_id, alarm.occurrence_key, alarm.fire_at_millis
     );
     post(&identifier, &alarm.label, true);
+}
+
+pub fn schedule_rest_end(after_seconds: f64, title: &str, body: &str) {
+    autoreleasepool(|_| {
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(title));
+        content.setBody(&NSString::from_str(body));
+        content.setSound(Some(&UNNotificationSound::defaultSound()));
+        let trigger = UNTimeIntervalNotificationTrigger::triggerWithTimeInterval_repeats(
+            after_seconds,
+            false,
+        );
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &NSString::from_str(REST_END_IDENTIFIER),
+            &content,
+            Some(&trigger),
+        );
+        UNUserNotificationCenter::currentNotificationCenter()
+            .addNotificationRequest_withCompletionHandler(&request, None);
+    });
+}
+
+pub fn cancel_rest_end() {
+    autoreleasepool(|_| {
+        UNUserNotificationCenter::currentNotificationCenter()
+            .removePendingNotificationRequestsWithIdentifiers(&NSArray::from_retained_slice(&[
+                NSString::from_str(REST_END_IDENTIFIER),
+            ]));
+    });
 }
 
 fn post(identifier: &str, message: &str, sound: bool) {

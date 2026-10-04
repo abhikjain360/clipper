@@ -1,3 +1,4 @@
+import type { GymBackend } from "./gym";
 import type { KitchenBackend } from "./kitchen";
 
 export type ConnectionStatus = "Disconnected" | "Connecting" | "Connected" | "DaemonNotRunning";
@@ -374,6 +375,7 @@ export type ClipperBackend = {
   appDataStatus?: () => Promise<AppDataStatus>;
   appDocumentHistory?: (collection: string, id: string) => Promise<AppDocumentRevision[]>;
   kitchen?: KitchenBackend;
+  gym?: GymBackend;
   appDocumentRevision?: (collection: string, id: string, revision: number) => Promise<unknown>;
 };
 

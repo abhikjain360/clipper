@@ -27,10 +27,10 @@ use crate::{
     protocol::{
         ActualsBetweenParams, AddCalendarSourceParams, AuthChallenge, AuthenticateResult,
         ClipboardPayloadResult, CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest,
-        DaemonResponse, DeviceListResult, ExpandScheduleParams, IPC_AUTH_NONCE_BYTES,
-        IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams, RegisterParams, RegisterResult,
-        StartActualParams, UpdateScheduleItemParams, UploadFileResult, WriteAppDataResult,
-        ipc_client_auth_message, ipc_daemon_auth_message,
+        DaemonResponse, DeviceListResult, ExpandScheduleParams, GymOpenSessionResult,
+        IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams, RegisterParams,
+        RegisterResult, StartActualParams, UpdateScheduleItemParams, UploadFileResult,
+        WriteAppDataResult, ipc_client_auth_message, ipc_daemon_auth_message,
     },
 };
 
@@ -685,6 +685,69 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 }
                 DaemonCommand::KitchenPlans => match engine.kitchen_plans().await {
                     Ok(plans) => json_success(id, plans),
+                    Err(error) => client_error(id, error),
+                },
+                DaemonCommand::GymMuscles => json_success(id, engine.gym_muscles()),
+                DaemonCommand::GymMoveTemplateExercise(params) => {
+                    match engine.gym_move_template_exercise(
+                        params.exercises,
+                        params.from,
+                        params.to,
+                    ) {
+                        Ok(exercises) => json_success(id, exercises),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::GymSeedStarterLibrary => {
+                    match engine.gym_seed_starter_library().await {
+                        Ok(outcome) => json_success(id, outcome),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::GymExercises => match engine.gym_exercises().await {
+                    Ok(exercises) => json_success(id, exercises),
+                    Err(error) => client_error(id, error),
+                },
+                DaemonCommand::GymTemplates => match engine.gym_templates().await {
+                    Ok(templates) => json_success(id, templates),
+                    Err(error) => client_error(id, error),
+                },
+                DaemonCommand::GymOpenSession => match engine.gym_open_session().await {
+                    Ok(session) => json_success(id, GymOpenSessionResult { session }),
+                    Err(error) => client_error(id, error),
+                },
+                DaemonCommand::GymSession(params) => {
+                    match engine.gym_session(&params.session_id).await {
+                        Ok(session) => json_success(id, session),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::GymSessions => match engine.gym_sessions().await {
+                    Ok(sessions) => json_success(id, sessions),
+                    Err(error) => client_error(id, error),
+                },
+                DaemonCommand::GymBodyWeights => match engine.gym_body_weights().await {
+                    Ok(entries) => json_success(id, entries),
+                    Err(error) => client_error(id, error),
+                },
+                DaemonCommand::GymWeeklyBodyWeight(params) => {
+                    match engine.gym_weekly_body_weight(&params.zone).await {
+                        Ok(weeks) => json_success(id, weeks),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::GymOneRepMaxProgress(params) => {
+                    match engine.gym_one_rep_max_progress(&params.exercise_id).await {
+                        Ok(progress) => json_success(id, progress),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::GymFatigue => match engine.gym_fatigue().await {
+                    Ok(muscles) => json_success(id, muscles),
+                    Err(error) => client_error(id, error),
+                },
+                DaemonCommand::GymChange(change) => match engine.gym_change(change).await {
+                    Ok(()) => DaemonResponse::success(id, None),
                     Err(error) => client_error(id, error),
                 },
                 DaemonCommand::AppDocumentRevision(params) => {

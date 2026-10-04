@@ -10,16 +10,9 @@ import {
   type GymSessionSummary,
   type GymSet,
 } from "@clipper/mobile-bridge";
+import { formatClock, formatDay, formatKg, formatTime } from "@clipper/shared";
 import { formatBackendError } from "../backend";
-import {
-  formatClock,
-  formatDay,
-  formatKg,
-  formatSet,
-  formatTime,
-  gym,
-  setLabel,
-} from "./gymClient";
+import { formatSet, gym, setLabel } from "./gymClient";
 import { colors, GymCard, Muted, SetEditor } from "./GymUi";
 import { confirmDeleteSet } from "./LiveSession";
 import { stopRestEnd } from "./restAlarm";

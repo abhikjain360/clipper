@@ -2,8 +2,9 @@ import { Button } from "../tamagui.config";
 import { useEffect, useRef, useState } from "react";
 import { H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
 import type { GymExercise, GymOneRepMax } from "@clipper/mobile-bridge";
+import { formatDay, formatKg } from "@clipper/shared";
 import { formatBackendError } from "../backend";
-import { formatDay, formatKg, gym } from "./gymClient";
+import { gym } from "./gymClient";
 import { colors, ExercisePicker, GymCard, LineChart, Muted } from "./GymUi";
 
 export function Progress({ onError }: { onError: (error: string | null) => void }) {

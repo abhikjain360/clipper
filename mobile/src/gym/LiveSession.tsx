@@ -12,19 +12,18 @@ import {
   type GymSet,
   type GymTemplate,
 } from "@clipper/mobile-bridge";
-import { formatBackendError } from "../backend";
 import {
   formatClock,
   formatKg,
   formatMinutes,
   formatRestSeconds,
-  formatSet,
-  gym,
+  formatTime,
   parseCount,
   parseWeight,
-  formatTime,
-  setLabel,
-} from "./gymClient";
+  restSecondsLeft,
+} from "@clipper/shared";
+import { formatBackendError } from "../backend";
+import { formatSet, gym, setLabel } from "./gymClient";
 import {
   colors,
   ExercisePicker,
@@ -35,7 +34,6 @@ import {
   SetEditor,
 } from "./GymUi";
 import { armRestEnd, askToNotifyRestEnd, stopRestEnd } from "./restAlarm";
-import { restSecondsLeft } from "./restCountdown";
 
 export function LiveSession({ onError }: { onError: (error: string | null) => void }) {
   const [view, setView] = useState<GymSession | null | undefined>(undefined);

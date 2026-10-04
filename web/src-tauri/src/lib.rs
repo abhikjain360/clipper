@@ -5,6 +5,7 @@ mod app_data;
 mod break_reminders;
 mod daemon_client;
 mod daemon_spawn;
+mod gym;
 mod kitchen;
 #[cfg(target_os = "macos")]
 mod notifications;
@@ -193,6 +194,21 @@ pub fn run() {
             kitchen::kitchen_change_pantry,
             kitchen::kitchen_plans,
             kitchen::keep_display_awake,
+            gym::gym_muscles,
+            gym::gym_move_template_exercise,
+            gym::gym_seed_starter_library,
+            gym::gym_exercises,
+            gym::gym_templates,
+            gym::gym_open_session,
+            gym::gym_session,
+            gym::gym_sessions,
+            gym::gym_body_weights,
+            gym::gym_weekly_body_weight,
+            gym::gym_one_rep_max_progress,
+            gym::gym_fatigue,
+            gym::gym_change,
+            gym::gym_schedule_rest_end,
+            gym::gym_cancel_rest_end,
         ])
         .on_window_event(|window, event| {
             #[cfg(target_os = "macos")]

@@ -8,7 +8,8 @@
 
 use clipper_api_types::{ApiErrorCode, ErrorResponse};
 use clipper_app_types::{
-    AppDataWrite, AppState, DeviceInfo, KitchenPantryChange, KitchenSessionChange,
+    AppDataWrite, AppState, DeviceInfo, GymChange, GymPlannedExercise, GymSession,
+    KitchenPantryChange, KitchenSessionChange,
 };
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -19,7 +20,7 @@ use zeroize::Zeroizing;
 /// incompatibly — the desktop app and the daemon are separate binaries, and an
 /// old daemon can outlive an app update (it is reparented to PID 1, so it keeps
 /// running until killed).
-pub const IPC_AUTH_VERSION: u32 = 11;
+pub const IPC_AUTH_VERSION: u32 = 12;
 pub const IPC_AUTH_NONCE_BYTES: usize = 32;
 pub const IPC_AUTH_TAG_BYTES: usize = 32;
 
@@ -116,6 +117,19 @@ pub enum DaemonCommand {
     KitchenPantry,
     KitchenChangePantry(KitchenPantryChange),
     KitchenPlans,
+    GymMuscles,
+    GymMoveTemplateExercise(GymMoveTemplateExerciseParams),
+    GymSeedStarterLibrary,
+    GymExercises,
+    GymTemplates,
+    GymOpenSession,
+    GymSession(GymSessionParams),
+    GymSessions,
+    GymBodyWeights,
+    GymWeeklyBodyWeight(GymWeeklyBodyWeightParams),
+    GymOneRepMaxProgress(GymOneRepMaxProgressParams),
+    GymFatigue,
+    GymChange(GymChange),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -395,6 +409,33 @@ pub struct KitchenChangeSessionParams {
     pub revision: u64,
     pub servings: u32,
     pub change: KitchenSessionChange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GymMoveTemplateExerciseParams {
+    pub exercises: Vec<GymPlannedExercise>,
+    pub from: u32,
+    pub to: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GymSessionParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GymWeeklyBodyWeightParams {
+    pub zone: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GymOneRepMaxProgressParams {
+    pub exercise_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GymOpenSessionResult {
+    pub session: Option<GymSession>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

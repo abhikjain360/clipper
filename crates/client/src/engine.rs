@@ -52,6 +52,9 @@ mod app_document_sync;
 #[path = "calendar_import.rs"]
 mod calendar_import;
 #[cfg(not(target_family = "wasm"))]
+#[path = "gym.rs"]
+mod gym;
+#[cfg(not(target_family = "wasm"))]
 #[path = "kitchen.rs"]
 mod kitchen;
 #[path = "schedule_changes.rs"]
@@ -5754,6 +5757,10 @@ mod app_data_integration_tests;
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "app_document_integration_tests.rs"]
 mod app_document_integration_tests;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "gym_integration_tests.rs"]
+mod gym_integration_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "kitchen_integration_tests.rs"]

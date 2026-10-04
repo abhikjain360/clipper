@@ -1,7 +1,8 @@
 import { PermissionsAndroid, Platform } from "react-native";
-import type { GymSession } from "@clipper/mobile-bridge";
+import { SetKind, type GymSession } from "@clipper/mobile-bridge";
+import { restEndNotice } from "@clipper/shared";
 import { cancelRestEnd, scheduleRestEnd } from "../../modules/clipper-alarm";
-import { gym, setLabel } from "./gymClient";
+import { gym } from "./gymClient";
 
 let notificationsAsked = false;
 
@@ -46,7 +47,13 @@ function nextSetNotice(session: GymSession): string {
     (exercise) => exercise.exerciseId === session.currentExerciseId,
   );
   const kind = session.nextSetKind;
-  if (!current || kind === undefined) return "Time for the next set";
-  const number = current.sets.filter((set) => set.kind === kind).length + 1;
-  return `Next: ${current.name}, ${setLabel(kind, number).toLowerCase()}`;
+  return restEndNotice(
+    current && kind !== undefined
+      ? {
+          name: current.name,
+          warmUp: kind === SetKind.WarmUp,
+          number: current.sets.filter((set) => set.kind === kind).length + 1,
+        }
+      : null,
+  );
 }

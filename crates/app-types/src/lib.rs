@@ -365,6 +365,8 @@ pub struct AppDocumentRevision {
     pub deleted: bool,
 }
 
+mod gym;
+pub use gym::*;
 mod kitchen;
 pub use kitchen::*;
 

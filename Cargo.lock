@@ -1075,6 +1075,7 @@ dependencies = [
 name = "clipper-app-types"
 version = "0.1.0"
 dependencies = [
+ "clipper-gym",
  "postcard",
  "serde",
  "serde_json",
@@ -1300,19 +1301,14 @@ name = "clipper-mobile-uniffi"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
- "chrono",
- "chrono-tz",
  "clipper-app-types",
  "clipper-client",
- "clipper-gym",
  "dirs",
- "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "uniffi",
- "uuid",
  "zeroize",
 ]
 
