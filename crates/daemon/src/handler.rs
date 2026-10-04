@@ -15,7 +15,7 @@ use sha2::Sha256;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::unix::{OwnedReadHalf, OwnedWriteHalf},
-    sync::Mutex,
+    sync::{Mutex, Semaphore},
 };
 use tracing::{debug, warn};
 use zeroize::Zeroize;
@@ -35,6 +35,7 @@ use crate::{
 };
 
 const MAX_IPC_REQUEST_LINE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_IPC_REQUESTS_IN_FLIGHT: usize = 8;
 
 /// Bound on the HMAC handshake. Mirrors WS_HELLO_TIMEOUT in
 /// crates/server/src/ws.rs. A peer that never answers must not hold a slot.
@@ -80,6 +81,7 @@ pub async fn handle_connection(
     }
 
     let writer_for_broadcast = Arc::clone(&writer);
+    let requests_in_flight = Arc::new(Semaphore::new(MAX_IPC_REQUESTS_IN_FLIGHT));
 
     // Run read loop and broadcast loop concurrently
     tokio::select! {
@@ -92,19 +94,29 @@ pub async fn handle_connection(
                         if trimmed.is_empty() {
                             continue;
                         }
-                        let response = match serde_json::from_str::<DaemonRequest>(&trimmed) {
-                            Ok(req) => dispatch_command(req, &engine_manager).await,
-                            Err(e) => DaemonResponse::error_message(
-                                String::new(),
-                                format!("Invalid request: {}", e),
-                            ),
-                        };
+                        let parsed = serde_json::from_str::<DaemonRequest>(&trimmed);
                         trimmed.zeroize();
-                        if let Ok(json) = serde_json::to_string(&response) {
-                            let mut w = writer.lock().await;
-                            let resp_line = format!("{}\n", json);
-                            if w.write_all(resp_line.as_bytes()).await.is_err() {
-                                break;
+                        match parsed {
+                            Ok(req) => {
+                                let Ok(permit) = Arc::clone(&requests_in_flight).acquire_owned().await else {
+                                    break;
+                                };
+                                let engine_manager = Arc::clone(&engine_manager);
+                                let writer = Arc::clone(&writer);
+                                tokio::spawn(async move {
+                                    let response = dispatch_command(req, &engine_manager).await;
+                                    _ = write_response(&writer, response).await;
+                                    drop(permit);
+                                });
+                            }
+                            Err(e) => {
+                                let response = DaemonResponse::error_message(
+                                    String::new(),
+                                    format!("Invalid request: {}", e),
+                                );
+                                if !write_response(&writer, response).await {
+                                    break;
+                                }
                             }
                         }
                     }

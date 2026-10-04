@@ -178,7 +178,7 @@ mod inner {
         writer: &mut OwnedWriteHalf,
         data_dir: &Path,
     ) -> Result<(), String> {
-        let line = read_line(reader)
+        let line = read_line(reader, &mut Vec::new())
             .await
             .map_err(|e| format!("auth read: {e}"))?;
         let DaemonEvent::AuthChallenge {
@@ -222,7 +222,7 @@ mod inner {
         .await
         .map_err(|e| format!("auth write: {e}"))?;
 
-        let line = read_line(reader)
+        let line = read_line(reader, &mut Vec::new())
             .await
             .map_err(|e| format!("auth result read: {e}"))?;
         match serde_json::from_str::<DaemonResponse>(&line)
@@ -261,6 +261,7 @@ mod inner {
             oneshot::Sender<Result<Option<serde_json::Value>, DaemonClientError>>,
         > = HashMap::new();
         let mut next_id: u64 = 1;
+        let mut partial_line = Vec::new();
 
         loop {
             tokio::select! {
@@ -273,7 +274,7 @@ mod inner {
                     write_line(writer, &json).await.map_err(|e| format!("write: {e}"))?;
                     in_flight.insert(id, pending.reply_tx);
                 }
-                line = read_line(reader) => {
+                line = read_line(reader, &mut partial_line) => {
                     let line = line.map_err(|e| format!("read: {e}"))?;
                     if line.is_empty() { continue; }
                     match serde_json::from_str::<DaemonLine>(&line) {
@@ -303,8 +304,10 @@ mod inner {
         }
     }
 
-    async fn read_line(reader: &mut BufReader<OwnedReadHalf>) -> Result<String, String> {
-        let mut buf = Vec::new();
+    async fn read_line(
+        reader: &mut BufReader<OwnedReadHalf>,
+        buf: &mut Vec<u8>,
+    ) -> Result<String, String> {
         loop {
             let available = reader.fill_buf().await.map_err(|e| format!("read: {e}"))?;
             if available.is_empty() {
@@ -323,7 +326,7 @@ mod inner {
                 break;
             }
         }
-        String::from_utf8(buf)
+        String::from_utf8(std::mem::take(buf))
             .map(|s| s.trim().to_owned())
             .map_err(|e| format!("utf8: {e}"))
     }
@@ -336,6 +339,39 @@ mod inner {
         let mut mac = HmacSha256::new_from_slice(secret).map_err(|e| format!("HMAC init: {e}"))?;
         mac.update(message);
         Ok(mac.finalize().into_bytes().to_vec())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use tokio::{
+            io::{AsyncWriteExt, BufReader},
+            net::UnixStream,
+            time::{Duration, timeout},
+        };
+
+        use super::read_line;
+
+        #[tokio::test]
+        async fn a_read_cancelled_mid_line_keeps_the_bytes_it_already_read() {
+            let (client, mut daemon) = UnixStream::pair().expect("socket pair");
+            let (read_half, _write_half) = client.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut partial_line = Vec::new();
+
+            daemon.write_all(br#"{"id":"#).await.expect("first half");
+            let cancelled = timeout(
+                Duration::from_millis(50),
+                read_line(&mut reader, &mut partial_line),
+            )
+            .await;
+            assert!(cancelled.is_err());
+
+            daemon.write_all(b"\"7\"}\n").await.expect("second half");
+            let line = read_line(&mut reader, &mut partial_line)
+                .await
+                .expect("whole line");
+            assert_eq!(line, r#"{"id":"7"}"#);
+        }
     }
 }
 
