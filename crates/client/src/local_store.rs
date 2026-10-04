@@ -421,6 +421,21 @@ impl LocalStore {
         self.session_epoch.load(atomic::Ordering::SeqCst)
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) async fn erase_profile_data(&self) -> Result<(), LocalStoreError> {
+        let _sync = self.sync.lock().await;
+        if self.profile_id.read().expect("profile lock").is_none() {
+            return Ok(());
+        }
+        self.with_database(|connection| {
+            let transaction = connection.transaction()?;
+            transaction.execute_batch("DELETE FROM object_payloads; DELETE FROM objects; DELETE FROM calendar_checks; DELETE FROM app_data_pending; DELETE FROM app_data_rows; DELETE FROM app_data_sync;")?;
+            transaction.commit()?;
+            connection.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+            Ok(())
+        }).await
+    }
+
     pub(crate) async fn record_calendar_check(
         &self,
         id: &str,

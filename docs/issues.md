@@ -737,7 +737,7 @@ Each entry has:
 
 ### 143. Android startup hangs when the fingerprint prompt cannot start
 
-- **Status:** open; seen on the owner's phone on 2026-10-07.
+- **Status:** fixed; device QA pending.
 - **Where:** `mobile/src/backend.ts`, the resume read of the stored
   credentials through `expo-secure-store` with `requireAuthentication`.
 - **What happens:** opening the app while the phone is locked, for example
@@ -745,7 +745,50 @@ Each entry has:
   ("Unable to start authentication. Called after onSaveInstanceState()"). The
   credential read then never settles, and the app stays on "Starting Clipper"
   until it is removed from recent apps and opened again.
-- **Decision:**
+- **Decision:** refuse the prompt when the activity is not resumed or its
+  state is saved. Cancel a prompt after 25 seconds and bound the credential
+  read at 30 seconds. Show the startup error with retry and sign-in actions.
+
+### 145. A refused native session kept its encrypted local data
+
+- **Status:** fixed.
+- **Where:** `crates/client/src/engine.rs`, session rejection;
+  `crates/client/src/local_store.rs`, native profile storage.
+- **What happened:** rejection cleared keys and display state, but left
+  cached objects and app-data rows on disk, including pending changes.
+- **Fix:** erase cached objects, payloads, app-data rows, pending changes and
+  sync cursors before clearing the rejected session. Keep revision anchors
+  and the wrapped device identity for rollback checks and later sign-in.
+
+### 146. Offline session confirmation accepted unrelated successful replies
+
+- **Status:** fixed.
+- **Where:** `crates/client/src/api_client.rs`, session validation;
+  `crates/server/src/routes/auth.rs`, validate response.
+- **What happened:** any successful HTTP status refreshed the offline limit,
+  including a captive portal's HTML page.
+- **Fix:** parse the validation response and match its username and device
+  against the saved session before recording a confirmation.
+
+### 147. Session rejection and HTTP recovery depended on the WebSocket
+
+- **Status:** fixed.
+- **Where:** `crates/client/src/engine.rs`, confirmation and reconnect;
+  `crates/client/src/app_data_sync.rs`, sync availability.
+- **What happened:** 403 did not erase local data, and HTTP recovery could
+  not enable writes or pending pushes until the WebSocket connected.
+- **Fix:** treat 401 and 403 as rejection everywhere. Track HTTP availability
+  separately and enable HTTP writes and app-data sync after confirmation.
+
+### 148. Concurrent calendar import cleanup can fail intermittently
+
+- **Status:** open; reproduction pending.
+- **Where:** `crates/client/src/schedule_integration_tests.rs`,
+  `live_calendar_unchanged_feeds_and_newer_fetches`.
+- **What happened:** one server-backed run left older import cleanup pending
+  because revision 1 of its object was refused as a rollback of the retained
+  revision anchor. The isolated rerun and the next full run passed.
+- **Next:** reproduce the cleanup race before changing the revision checks.
 
 ### 12. Migration 5 broke collab docs on servers upgraded from main
 
@@ -1394,6 +1437,22 @@ Each entry has:
     again shows a warning: the server keeps what it has seen.
   - No in-app chat. Agents work through desktop Claude Code or Codex, or
     through the hosted MCP endpoint on visible collections.
+
+### 150. The gym starter library is written by the first device that opens the gym
+
+- **Status:** decided; implemented in the working tree.
+- **Where:** `crates/gym/src/starter.rs`,
+  `crates/mobile-uniffi/src/gym.rs` (`gym_seed_starter_library`).
+- **What happens:** the Android gym area writes 22 starter exercises and two
+  workouts when the device has no exercises, workouts, sessions or sets. The
+  rows use fixed ids, so two devices that both write the library produce the
+  same rows. A newly signed-in device that opens the gym before its first
+  app-data download finishes still sees empty tables and writes the library
+  again. Last write wins then replaces the user's later edits to a starter
+  exercise or workout with the starter values. Logged sets are not affected.
+- **Decision:** accept for now. Seeding only after a completed first download
+  needs the engine to report that download, which the app-data status does not
+  do yet.
 
 ## Code and features
 

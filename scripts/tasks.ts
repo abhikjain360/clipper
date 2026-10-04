@@ -217,6 +217,10 @@ async function runMobileCheck(
       env: suppressNodeWarnings(env),
     });
   }
+  await runCommand(pnpm, ["--dir", "mobile", "run", "test"], {
+    cwd: repoRoot,
+    env: suppressNodeWarnings(env),
+  });
 }
 
 async function generateMobileBindings(repoRoot: string, env: Env): Promise<void> {

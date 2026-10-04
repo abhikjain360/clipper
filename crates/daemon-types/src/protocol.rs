@@ -487,7 +487,7 @@ mod tests {
         assert!(v.get("event").is_none());
 
         // An event has "event" but no "id"
-        let event_json = r#"{"event":"state_changed","state":{"connection_status":"Disconnected","clipboard_items":[],"files":[],"collab_docs":[],"error":null}}"#;
+        let event_json = r#"{"event":"state_changed","state":{"connection_status":"Disconnected","offline":false,"clipboard_items":[],"files":[],"collab_docs":[],"error":null}}"#;
         let v: serde_json::Value = serde_json::from_str(event_json).unwrap();
         assert!(v.get("id").is_none());
         assert_eq!(v["event"], "state_changed");

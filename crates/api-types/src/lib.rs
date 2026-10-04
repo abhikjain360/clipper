@@ -254,6 +254,12 @@ pub struct LoginResponse {
     pub server: ServerInfo,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionValidationResponse {
+    pub username: String,
+    pub device_id: DeviceId,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ServerInfo {}
 

@@ -2,16 +2,28 @@ import * as Clipboard from "expo-clipboard";
 import * as DocumentPicker from "expo-document-picker";
 import { Directory, File, Paths } from "expo-file-system";
 import * as SecureStore from "expo-secure-store";
+import { CryptoDigestAlgorithm, digestStringAsync } from "expo-crypto";
 import * as Sharing from "expo-sharing";
 import { createMobileBackend } from "@clipper/mobile-bridge/adapter";
+import { readWithDeadline } from "./secureRead";
 
 const nativeBackend = createMobileBackend({
   dataDir: resolveDataDir(),
   serverUrl: devDefaultServerUrl(),
 });
+let resumedSession = false;
 
 export const backend = {
   ...nativeBackend,
+  getState: async () => {
+    const state = await nativeBackend.getState();
+    if (state.session) resumedSession = true;
+    if (resumedSession && !state.session) {
+      resumedSession = false;
+      await clearCredentials();
+    }
+    return state;
+  },
   logout: async (cancelRunningWork: boolean) => {
     const outcome = await nativeBackend.logout(cancelRunningWork);
     if (outcome.status === "signed_out") await clearCredentials();
@@ -110,11 +122,14 @@ function safeCacheFilename(filename: string): string {
   return safe.replaceAll(/[^A-Za-z0-9._-]/g, "_");
 }
 
-// Session persistence uses a revocable bearer and derived keys, never the
-// passphrase. SecureStore gates access behind device authentication. Revoking
-// the session prevents resume; data-key rotation remains a separate concern.
 const CREDENTIALS_KEY = "clipper.session.v2";
 const CREDENTIALS_FLAG_KEY = "clipper.session.present.v2";
+const CONFIRMATION_KEY = "clipper.session.confirmation.v1";
+const CONFIRMATION_OPTIONS: SecureStore.SecureStoreOptions = {
+  keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+};
+let credentialGeneration = 0;
+let confirmationWrite = Promise.resolve();
 const SECURE_AUTH_OPTIONS: SecureStore.SecureStoreOptions = {
   requireAuthentication: true,
   authenticationPrompt: "Unlock Clipper",
@@ -152,12 +167,15 @@ export async function saveCredentials(): Promise<void> {
       return;
     }
     const saved: StoredSession = {
-      ...material,
+      token: material.token,
+      dataKey: material.dataKey,
+      wrappingKey: material.wrappingKey,
       username: session.username,
       deviceName: session.device_name,
       serverUrl: session.server_url,
     };
     await SecureStore.setItemAsync(CREDENTIALS_KEY, JSON.stringify(saved), SECURE_AUTH_OPTIONS);
+    await saveSessionConfirmation();
     await SecureStore.setItemAsync(CREDENTIALS_FLAG_KEY, "1");
   } catch {
     await clearCredentials();
@@ -165,9 +183,52 @@ export async function saveCredentials(): Promise<void> {
 }
 
 export async function clearCredentials(): Promise<void> {
+  resumedSession = false;
+  credentialGeneration += 1;
+  await confirmationWrite.catch(() => {});
   await removeLegacyCredentials();
   await SecureStore.deleteItemAsync(CREDENTIALS_KEY, SECURE_AUTH_OPTIONS).catch(() => {});
   await SecureStore.deleteItemAsync(CREDENTIALS_FLAG_KEY).catch(() => {});
+  await SecureStore.deleteItemAsync(CONFIRMATION_KEY).catch(() => {});
+}
+
+export async function saveSessionConfirmation(): Promise<void> {
+  const generation = credentialGeneration;
+  const write = confirmationWrite.then(async () => {
+    const material = await backend.sessionResumeMaterial();
+    if (!material?.lastConfirmedAt || generation !== credentialGeneration) return;
+    const sessionHash = await digestStringAsync(CryptoDigestAlgorithm.SHA256, material.token);
+    if (generation !== credentialGeneration) return;
+    if ((await lastSessionConfirmation(material.token)) === material.lastConfirmedAt) return;
+    if (generation !== credentialGeneration) return;
+    await SecureStore.setItemAsync(
+      CONFIRMATION_KEY,
+      JSON.stringify({ sessionHash, lastConfirmedAt: material.lastConfirmedAt }),
+      CONFIRMATION_OPTIONS,
+    );
+  });
+  confirmationWrite = write.catch(() => {});
+  await write;
+}
+
+async function lastSessionConfirmation(token: string): Promise<number> {
+  try {
+    const raw = await SecureStore.getItemAsync(CONFIRMATION_KEY);
+    if (!raw) return 0;
+    const saved = JSON.parse(raw) as { sessionHash?: unknown; lastConfirmedAt?: unknown };
+    const sessionHash = await digestStringAsync(CryptoDigestAlgorithm.SHA256, token);
+    return saved.sessionHash === sessionHash &&
+      typeof saved.lastConfirmedAt === "number" &&
+      Number.isSafeInteger(saved.lastConfirmedAt)
+      ? saved.lastConfirmedAt
+      : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function readResumeCredentials(): Promise<string | null> {
+  return readWithDeadline(() => SecureStore.getItemAsync(CREDENTIALS_KEY, SECURE_AUTH_OPTIONS));
 }
 
 function isStoredSession(value: unknown): value is StoredSession {
@@ -188,18 +249,11 @@ export function isResumeRejected(error: unknown): boolean {
   );
 }
 
-// A fresh process prompts once. Cancellation falls back to manual login; it
-// never replays OPAQUE with a stored passphrase or registers another device.
 export async function resumeSession(): Promise<boolean> {
   await removeLegacyCredentials();
   const flag = await SecureStore.getItemAsync(CREDENTIALS_FLAG_KEY).catch(() => null);
   if (flag !== "1") return false;
-  let raw: string | null;
-  try {
-    raw = await SecureStore.getItemAsync(CREDENTIALS_KEY, SECURE_AUTH_OPTIONS);
-  } catch {
-    return false;
-  }
+  const raw = await readResumeCredentials();
   if (!raw) return false;
   let saved: unknown;
   try {
@@ -220,7 +274,11 @@ export async function resumeSession(): Promise<boolean> {
       saved.username,
       saved.deviceName,
       saved.serverUrl,
+      await lastSessionConfirmation(saved.token),
     );
+    resumedSession = true;
+    if (!(await backend.getState()).session) return false;
+    await saveSessionConfirmation();
   } catch (error) {
     if (isResumeRejected(error)) {
       await clearCredentials();

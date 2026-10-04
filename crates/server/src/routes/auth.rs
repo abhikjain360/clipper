@@ -11,7 +11,7 @@ use clipper_core::{
         DEVICE_LOGIN_PROOF_VERSION, DeviceListItem, DeviceListResponse, DeviceLoginProofBodyV1,
         LoginChallengeRequest, LoginChallengeResponse, LoginRequest, LoginResponse, OkResponse,
         RegisterFinishRequest, RegisterFinishResponse, RegisterStartRequest, RegisterStartResponse,
-        ServerInfo,
+        ServerInfo, SessionValidationResponse,
     },
 };
 use sea_orm::{
@@ -510,16 +510,23 @@ pub async fn logout(
     Ok(Json(OkResponse {}))
 }
 
-/// `GET /api/auth/validate` — confirm the caller's bearer token is still live.
-///
-/// Reaching this handler means `auth_middleware` already verified the session
-/// token (it exists and has not expired) and refreshed `last_seen_at`. The web
-/// client calls this before resuming a session from persisted key material, so a
-/// revoked or expired token falls back cleanly to the login screen instead of
-/// booting into a broken, unauthenticated session. It returns no private data.
-pub async fn validate(Extension(auth): Extension<AuthInfo>) -> Json<OkResponse> {
+pub async fn validate(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
+) -> Result<Json<SessionValidationResponse>, ApiError> {
+    let user = users::Entity::find_by_id(auth.user_id)
+        .one(state.db())
+        .await
+        .map_err(|error| {
+            error!(%error, "Failed to look up the validated user");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })?
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "Unauthorized"))?;
     debug!(device_id = %auth.device_id, "Validated session token for resume");
-    Json(OkResponse {})
+    Ok(Json(SessionValidationResponse {
+        username: user.username,
+        device_id: auth.device_id.into(),
+    }))
 }
 
 /// `GET /api/auth/devices` — list the authenticated user's registered devices,

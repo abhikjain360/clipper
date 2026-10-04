@@ -7,9 +7,11 @@ use clipper_app_types::{
 };
 use clipper_client::{
     api_client::ClientError,
-    engine::{SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
+    engine::{SessionResumeMaterial, SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
 };
 use zeroize::Zeroizing;
+
+mod gym;
 
 uniffi::setup_scaffolding!();
 clipper_app_types::uniffi_reexport_scaffolding!();
@@ -41,6 +43,7 @@ pub struct MobileSessionResumeMaterial {
     pub token: String,
     pub data_key: String,
     pub wrapping_key: String,
+    pub last_confirmed_at: i64,
 }
 
 fn decode_resume_key(value: &str) -> Result<Zeroizing<[u8; 32]>, MobileError> {
@@ -171,28 +174,31 @@ impl MobileClipperClient {
                 token: material.token,
                 data_key: STANDARD.encode(material.data_key.as_slice()),
                 wrapping_key: STANDARD.encode(material.device_identity_wrapping_key.as_slice()),
+                last_confirmed_at: material.last_confirmed_at,
             })
     }
 
     pub async fn resume(
         &self,
-        token: String,
-        data_key: String,
-        wrapping_key: String,
+        material: MobileSessionResumeMaterial,
         username: String,
         device_name: String,
         server_url: String,
     ) -> Result<(), MobileError> {
         self.ensure_requested_base_url(&server_url)?;
-        let data_key = Zeroizing::new(data_key);
-        let wrapping_key = Zeroizing::new(wrapping_key);
+        let data_key = Zeroizing::new(material.data_key);
+        let wrapping_key = Zeroizing::new(material.wrapping_key);
         self.engine
-            .resume_with_platform(
-                token,
-                decode_resume_key(&data_key)?,
-                decode_resume_key(&wrapping_key)?,
+            .resume_saved_session(
+                SessionResumeMaterial {
+                    token: material.token,
+                    data_key: decode_resume_key(&data_key)?,
+                    device_identity_wrapping_key: decode_resume_key(&wrapping_key)?,
+                    last_confirmed_at: material.last_confirmed_at,
+                },
                 &username,
                 &self.device_name(device_name),
+                true,
             )
             .await
             .map_err(|error| match error {

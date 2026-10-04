@@ -263,6 +263,7 @@ pub struct AppState {
     #[serde(default)]
     pub saved_profile: Option<SavedProfile>,
     pub connection_status: ConnectionStatus,
+    pub offline: bool,
     pub clipboard_items: Vec<DecryptedClipboardItem>,
     pub files: Vec<DecryptedFileItem>,
     pub collab_docs: Vec<CollabItem>,

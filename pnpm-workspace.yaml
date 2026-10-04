@@ -61,3 +61,5 @@ peerDependencyRules:
     # pinned by the Expo SDK, so allow the mismatches.
     react-native: 0.87.1
     react: 19.2.3
+patchedDependencies:
+  expo-secure-store@57.0.4: patches/expo-secure-store@57.0.4.patch

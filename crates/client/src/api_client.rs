@@ -490,20 +490,26 @@ impl ApiClient {
         Ok(())
     }
 
-    /// Confirm the server still accepts the current bearer token (it exists and
-    /// has not expired or been revoked). Returns `Ok(())` for a live session and
-    /// a `ClientError::Api` (401) once the token is no longer valid, so a resume
-    /// attempt can fall back to the login screen.
-    pub async fn validate_session(&self) -> Result<(), ClientError> {
+    pub async fn validate_session(
+        &self,
+        username: &str,
+        device_id: DeviceId,
+    ) -> Result<(), ClientError> {
         let resp = self
             .deadline_get(self.api_url(&["auth", "validate"])?)
+            .timeout(std::time::Duration::from_secs(10))
             .header(
                 "Authorization",
                 self.auth_header().ok_or(ClientError::NotAuthenticated)?,
             )
             .send()
             .await?;
-        Self::checked_response(resp).await?;
+        let response: SessionValidationResponse = Self::json_response(resp).await?;
+        if response.username != username || response.device_id != device_id {
+            return Err(ClientError::UnexpectedResponse(
+                "Session confirmation identifies a different user or device".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1297,6 +1303,10 @@ pub enum CalendarImportError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
+    #[error("Offline; this action needs a server connection")]
+    Offline,
+    #[error("Offline unlock expired; connect to the server and retry")]
+    OfflineUnlockExpired,
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
     #[error("API error {status} ({code}): {message}", code = error.code, message = error.message)]
@@ -1452,6 +1462,9 @@ mod crypto_tests {
 impl ClientError {
     pub fn error_response(&self) -> ErrorResponse {
         match self {
+            Self::Offline | Self::OfflineUnlockExpired => {
+                ErrorResponse::new(ApiErrorCode::Unknown, self.to_string())
+            }
             Self::Api { error, .. } => error.clone(),
             Self::CalendarFeed(_) | Self::CalendarImport(_) => {
                 ErrorResponse::new(ApiErrorCode::BadRequest, self.to_string())

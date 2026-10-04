@@ -59,7 +59,11 @@ export interface CreateMobileBackendOptions {
   client?: MobileClipperClientLike;
 }
 
-export function createMobileBackend(options: CreateMobileBackendOptions = {}): ClipperBackend {
+export type MobileBackend = ClipperBackend & {
+  nativeClient: () => MobileClipperClientLike;
+};
+
+export function createMobileBackend(options: CreateMobileBackendOptions = {}): MobileBackend {
   // Empty strings let the Rust constructor apply its own defaults (server URL,
   // device name) via `non_empty_or_default`; `dataDir` must be a real absolute
   // path on Android.
@@ -91,6 +95,7 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
   // shape caused ANRs on slow/hostile servers).
   return {
     clipboardPayload: async (id) => mapClipboardPayload(await client.clipboardPayload(id)),
+    nativeClient: () => client,
     connect: async () => client.connect(),
     createCollabDoc: async () => mapCollabItem(await client.createCollabDoc()),
     defaultServerUrl: () => client.defaultServerUrl(),
@@ -138,12 +143,18 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     deleteScheduleObject: async (objectId) => client.deleteScheduleObject(objectId),
     expandSchedule: async (from, to, observerZone) =>
       (await client.expandSchedule(from, to, observerZone)).map(mapOccurrenceView),
-    resume: async (token, dataKey, wrappingKey, username, deviceName, serverUrl) => {
+    resume: async (
+      token,
+      dataKey,
+      wrappingKey,
+      username,
+      deviceName,
+      serverUrl,
+      lastConfirmedAt,
+    ) => {
       try {
         await clientFor(serverUrl).resume(
-          token,
-          dataKey,
-          wrappingKey,
+          { token, dataKey, wrappingKey, lastConfirmedAt: BigInt(lastConfirmedAt ?? 0) },
           username,
           deviceName,
           serverUrl,
@@ -166,7 +177,12 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     sessionResumeMaterial: async () => {
       const material = await client.sessionResumeMaterial();
       return material
-        ? { token: material.token, dataKey: material.dataKey, wrappingKey: material.wrappingKey }
+        ? {
+            token: material.token,
+            dataKey: material.dataKey,
+            wrappingKey: material.wrappingKey,
+            lastConfirmedAt: Number(material.lastConfirmedAt),
+          }
         : null;
     },
     stateVersion: () => client.stateVersion(),
@@ -217,6 +233,7 @@ function mapAppState(state: NativeAppState): AppState {
     clipboard_items: state.clipboardItems.map(mapClipboardItem),
     collab_docs: state.collabDocs.map(mapCollabItem),
     connection_status: mapConnectionStatus(state.connectionStatus),
+    offline: state.offline,
     error: state.error ?? null,
     files: state.files.map(mapFileItem),
     calendar_sources: state.calendarSources.map(mapCalendarSourceView),

@@ -1,0 +1,75 @@
+diff --git a/android/src/main/java/expo/modules/securestore/AuthenticationHelper.kt b/android/src/main/java/expo/modules/securestore/AuthenticationHelper.kt
+index a281b88ec7d9d19870c8707347251cac2137b4c5..20c53d0a47d18c2bb827f7574d82849f47b74ac9 100644
+--- a/android/src/main/java/expo/modules/securestore/AuthenticationHelper.kt
++++ b/android/src/main/java/expo/modules/securestore/AuthenticationHelper.kt
+@@ -7,10 +7,12 @@ import android.os.Build
+ import androidx.biometric.BiometricManager
+ import androidx.biometric.BiometricPrompt
+ import androidx.fragment.app.FragmentActivity
++import androidx.lifecycle.Lifecycle
+ import expo.modules.core.ModuleRegistry
+ import expo.modules.core.interfaces.ActivityProvider
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
++import kotlinx.coroutines.withTimeoutOrNull
+ import javax.crypto.Cipher
+ 
+ class AuthenticationHelper(
+@@ -48,7 +50,11 @@ class AuthenticationHelper(
+       val authenticationPrompt = AuthenticationPrompt(fragmentActivity, context, title)
+ 
+       return withContext(Dispatchers.Main.immediate) {
+-        return@withContext authenticationPrompt.authenticate(cipher)
++        if (fragmentActivity.supportFragmentManager.isStateSaved ||
++          !fragmentActivity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
++          throw AuthenticationException("Unlock the phone and bring Clipper to the foreground, then retry")
++        }
++        return@withContext withTimeoutOrNull(25_000) { authenticationPrompt.authenticate(cipher) }
+           ?: throw AuthenticationException("Couldn't get the authentication result")
+       }
+     } finally {
+diff --git a/android/src/main/java/expo/modules/securestore/AuthenticationPrompt.kt b/android/src/main/java/expo/modules/securestore/AuthenticationPrompt.kt
+index 7437374f164c7c7a47b7cb78fffb374cf52b6905..0b7775014f2eb9ae480a824f0a8f1e61dd78ca2a 100644
+--- a/android/src/main/java/expo/modules/securestore/AuthenticationPrompt.kt
++++ b/android/src/main/java/expo/modules/securestore/AuthenticationPrompt.kt
+@@ -9,7 +9,7 @@ import java.util.concurrent.Executor
+ import javax.crypto.Cipher
+ import kotlin.coroutines.resume
+ import kotlin.coroutines.resumeWithException
+-import kotlin.coroutines.suspendCoroutine
++import kotlinx.coroutines.suspendCancellableCoroutine
+ 
+ class AuthenticationPrompt(private val currentActivity: FragmentActivity, context: Context, title: String) {
+   private var executor: Executor = ContextCompat.getMainExecutor(context)
+@@ -19,8 +19,8 @@ class AuthenticationPrompt(private val currentActivity: FragmentActivity, contex
+     .build()
+ 
+   suspend fun authenticate(cipher: Cipher): BiometricPrompt.AuthenticationResult? =
+-    suspendCoroutine { continuation ->
+-      BiometricPrompt(
++    suspendCancellableCoroutine { continuation ->
++      val prompt = BiometricPrompt(
+         currentActivity,
+         executor,
+         object : BiometricPrompt.AuthenticationCallback() {
+@@ -29,15 +29,17 @@ class AuthenticationPrompt(private val currentActivity: FragmentActivity, contex
+ 
+             val errorType = convertErrorCode(errorCode)
+             val message = "$errorType. $errString"
+-            continuation.resumeWithException(AuthenticationException(message))
++            if (continuation.isActive) continuation.resumeWithException(AuthenticationException(message))
+           }
+ 
+           override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+             super.onAuthenticationSucceeded(result)
+-            continuation.resume(result)
++            if (continuation.isActive) continuation.resume(result)
+           }
+         }
+-      ).authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))
++      )
++      continuation.invokeOnCancellation { executor.execute { prompt.cancelAuthentication() } }
++      prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))
+     }
+ 
+   private fun convertErrorCode(code: Int): String {

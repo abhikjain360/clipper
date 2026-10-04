@@ -9,3 +9,6 @@ chrono.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 uuid = { workspace = true, features = ["serde", "v5"] }
+
+[dev-dependencies]
+serde_json.workspace = true

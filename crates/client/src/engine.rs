@@ -172,6 +172,8 @@ pub struct SyncEngine {
     /// The stamp of the newest view published to `state`, so an older view
     /// arriving late is dropped rather than shown.
     published_stamp: std::sync::atomic::AtomicU64,
+    last_confirmed_at: std::sync::atomic::AtomicI64,
+    offline: std::sync::atomic::AtomicBool,
     #[cfg(not(target_family = "wasm"))]
     app_data: crate::app_data::AppDataHandle,
 }
@@ -189,6 +191,7 @@ pub struct SessionResumeMaterial {
     pub token: String,
     pub data_key: Zeroizing<[u8; 32]>,
     pub device_identity_wrapping_key: Zeroizing<[u8; 32]>,
+    pub last_confirmed_at: i64,
 }
 
 impl SyncEngine {
@@ -221,6 +224,8 @@ impl SyncEngine {
             schedule_history: Mutex::new(HashMap::new()),
             history_epoch: std::sync::atomic::AtomicU64::new(0),
             published_stamp: std::sync::atomic::AtomicU64::new(0),
+            last_confirmed_at: std::sync::atomic::AtomicI64::new(0),
+            offline: std::sync::atomic::AtomicBool::new(false),
             import_rules: Mutex::new(std::collections::VecDeque::new()),
             #[cfg(not(target_family = "wasm"))]
             app_data: Default::default(),
@@ -324,6 +329,7 @@ impl SyncEngine {
             )
             .await?;
 
+        self.record_session_confirmation().await;
         self.finish_auth(
             device_name,
             login_resp.username.clone(),
@@ -389,6 +395,7 @@ impl SyncEngine {
             )
             .await?;
 
+        self.record_session_confirmation().await;
         self.finish_auth(
             device_name,
             register_resp.username.clone(),
@@ -426,19 +433,40 @@ impl SyncEngine {
         username: &str,
         device_name: &str,
     ) -> Result<(), ClientError> {
+        self.resume_saved_session(
+            SessionResumeMaterial {
+                token,
+                data_key,
+                device_identity_wrapping_key,
+                last_confirmed_at: 0,
+            },
+            username,
+            device_name,
+            false,
+        )
+        .await
+    }
+
+    pub async fn resume_saved_session(
+        self: &Arc<Self>,
+        material: SessionResumeMaterial,
+        username: &str,
+        device_name: &str,
+        allow_offline: bool,
+    ) -> Result<(), ClientError> {
+        let SessionResumeMaterial {
+            token,
+            data_key,
+            device_identity_wrapping_key,
+            last_confirmed_at,
+        } = material;
         let _change = self.session_change.lock().await;
         self.stop_session_work().await;
         let _calendar = self.calendar_write.lock().await;
         self.clear_local_session().await;
+        self.local_store
+            .set_profile(profile_id_from_encryption_key(&data_key));
         self.api.restore_token(token);
-        if let Err(error) = self.api.validate_session().await {
-            // Never leave a dead token resident; force a clean re-login instead.
-            if !self.end_refused_session(&error).await {
-                self.api.clear_token();
-            }
-            return Err(error);
-        }
-
         let profile_id = profile_id_from_encryption_key(&data_key);
         let signing_identity = self
             .local_store
@@ -449,6 +477,35 @@ impl SyncEngine {
             .device_id
             .clone()
             .ok_or(ClientError::NoResumableDeviceIdentity)?;
+        let typed_device_id = device_id.parse().map_err(|source| ClientError::InvalidId {
+            kind: "device id",
+            source,
+        })?;
+        match self.api.validate_session(username, typed_device_id).await {
+            Ok(()) => self.record_session_confirmation().await,
+            Err(ClientError::Http(error))
+                if allow_offline
+                    && (error.is_timeout() || error.is_request() || error.is_body()) =>
+            {
+                let now = chrono::Utc::now().timestamp_millis();
+                if last_confirmed_at <= 0
+                    || now < last_confirmed_at
+                    || now - last_confirmed_at > 3 * 24 * 60 * 60 * 1000
+                {
+                    self.api.clear_token();
+                    return Err(ClientError::OfflineUnlockExpired);
+                }
+                self.last_confirmed_at
+                    .store(last_confirmed_at, Ordering::SeqCst);
+                self.offline.store(true, Ordering::SeqCst);
+            }
+            Err(error) => {
+                if !self.end_refused_session(&error).await {
+                    self.api.clear_token();
+                }
+                return Err(error);
+            }
+        }
 
         self.finish_auth(
             device_name,
@@ -485,7 +542,71 @@ impl SyncEngine {
             token,
             data_key,
             device_identity_wrapping_key,
+            last_confirmed_at: self.last_confirmed_at.load(Ordering::SeqCst),
         })
+    }
+
+    async fn record_session_confirmation(&self) {
+        self.last_confirmed_at
+            .store(chrono::Utc::now().timestamp_millis(), Ordering::SeqCst);
+        let was_offline = self.offline.swap(false, Ordering::SeqCst);
+        self.state.write().await.offline = false;
+        if was_offline {
+            #[cfg(not(target_family = "wasm"))]
+            self.app_data.request_pull();
+        }
+        self.bump_version();
+    }
+
+    async fn confirm_session(&self, epoch: u64) -> Result<(), ClientError> {
+        let (api, session) = {
+            let _active_key = self.hold_session_for_write(epoch).await?;
+            let session = self
+                .state
+                .read()
+                .await
+                .session
+                .clone()
+                .ok_or(ClientError::NotAuthenticated)?;
+            (self.api.with_current_token()?, session)
+        };
+        let device_id = session
+            .device_id
+            .parse()
+            .map_err(|source| ClientError::InvalidId {
+                kind: "device id",
+                source,
+            })?;
+        let confirmed = api.validate_session(&session.username, device_id).await;
+        let _active_key = self.hold_session_for_write(epoch).await?;
+        match &confirmed {
+            Ok(()) => self.record_session_confirmation().await,
+            Err(_) => {
+                self.offline.store(true, Ordering::SeqCst);
+                self.state.write().await.offline = true;
+                self.bump_version();
+            }
+        }
+        drop(_active_key);
+        if let Err(error) = &confirmed {
+            self.end_refused_session_for_epoch(epoch, error).await;
+        }
+        confirmed
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    async fn session_confirmation_loop(self: Arc<Self>, epoch: u64) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            match self.confirm_session(epoch).await {
+                Ok(()) => {}
+                Err(error) => {
+                    if self.end_refused_session_for_epoch(epoch, &error).await {
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     async fn finish_auth(
@@ -530,6 +651,7 @@ impl SyncEngine {
                 device_name: device_name.to_string(),
             });
             state.connection_status = ConnectionStatus::Connecting;
+            state.offline = self.offline.load(Ordering::SeqCst);
             state.error = None;
         }
         *self.session_work.lock().unwrap() = (epoch, crate::session_work::SessionWork::new());
@@ -552,6 +674,8 @@ impl SyncEngine {
             }
             let engine = Arc::clone(self);
             self.spawn_session_work(epoch, engine.app_data_sync_loop(epoch));
+            let engine = Arc::clone(self);
+            self.spawn_session_work(epoch, engine.session_confirmation_loop(epoch));
         }
 
         {
@@ -739,6 +863,8 @@ impl SyncEngine {
         self.stop_session_work().await;
         let mut active_key = self.encryption_key.write().await;
         self.api.clear_token();
+        self.last_confirmed_at.store(0, Ordering::SeqCst);
+        self.offline.store(false, Ordering::SeqCst);
         {
             self.history_epoch.fetch_add(1, Ordering::SeqCst);
             *active_key = None;
@@ -758,16 +884,12 @@ impl SyncEngine {
         self.bump_version();
     }
 
-    /// End a session the server has refused.
-    ///
-    /// Only a 401 counts. A dropped WebSocket or a network error is a reason to
-    /// retry, and tearing the session down for one would log the user out every
-    /// time their connection blinked.
     async fn end_refused_session(&self, error: &ClientError) -> bool {
         if !session_refused(error) {
             return false;
         }
         warn!("The server refused this session; signing out");
+        self.erase_refused_local_copy().await;
         self.clear_local_session().await;
         true
     }
@@ -784,6 +906,7 @@ impl SyncEngine {
         warn!("The server refused this session; signing out");
         self.stop_session_work().await;
         let _calendar = self.calendar_write.lock().await;
+        self.erase_refused_local_copy().await;
         self.clear_local_session().await;
         true
     }
@@ -800,8 +923,16 @@ impl SyncEngine {
         warn!("The server refused this session; signing out");
         self.stop_session_work().await;
         let _calendar = self.calendar_write.lock().await;
+        self.erase_refused_local_copy().await;
         self.clear_local_session().await;
         true
+    }
+
+    async fn erase_refused_local_copy(&self) {
+        #[cfg(not(target_family = "wasm"))]
+        if let Err(error) = self.local_store.erase_profile_data().await {
+            warn!(%error, "Failed to erase refused local data");
+        }
     }
 
     /// Whether the session `epoch` names is still the installed one.
@@ -856,6 +987,9 @@ impl SyncEngine {
 
     async fn credentials_for_session(&self, epoch: u64) -> Result<SessionCredentials, ClientError> {
         let active_key = self.hold_session_for_write(epoch).await?;
+        if self.offline.load(Ordering::SeqCst) {
+            return Err(ClientError::Offline);
+        }
         let encryption_key = active_key
             .as_ref()
             .cloned()
@@ -4133,8 +4267,6 @@ impl SyncEngine {
 
     // ── WebSocket ──
 
-    /// Keep a WebSocket up for the session `epoch` names.
-    ///
     #[cfg(not(target_family = "wasm"))]
     async fn ws_loop(self: &Arc<Self>, epoch: u64) {
         let mut backoff = Duration::from_secs(1);
@@ -4158,16 +4290,17 @@ impl SyncEngine {
             }
             self.bump_version();
 
-            match self.ws_connect(epoch).await {
+            match async {
+                self.confirm_session(epoch).await?;
+                self.ws_connect(epoch).await
+            }
+            .await
+            {
                 Ok(()) => {
                     backoff = Duration::from_secs(1);
                 }
                 Err(e) => {
                     warn!("WebSocket error: {}", e);
-                    // A 401 here is the server saying this device's token is
-                    // gone: removed from another device, or expired. Retrying
-                    // would keep the account's keys and decrypted records
-                    // resident until the process restarts.
                     if self.end_refused_session_for_epoch(epoch, &e).await {
                         return;
                     }
@@ -4355,8 +4488,6 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// Keep a WebSocket up for the session `epoch` names.
-    ///
     #[cfg(target_family = "wasm")]
     async fn ws_loop(self: &Arc<Self>, epoch: u64) {
         let mut backoff = Duration::from_secs(1);
@@ -4380,16 +4511,17 @@ impl SyncEngine {
             }
             self.bump_version();
 
-            match self.ws_connect(epoch).await {
+            match async {
+                self.confirm_session(epoch).await?;
+                self.ws_connect(epoch).await
+            }
+            .await
+            {
                 Ok(()) => {
                     backoff = Duration::from_secs(1);
                 }
                 Err(e) => {
                     warn!("WebSocket error: {}", e);
-                    // A 401 here is the server saying this device's token is
-                    // gone: removed from another device, or expired. Retrying
-                    // would keep the account's keys and decrypted records
-                    // resident until the process restarts.
                     if self.end_refused_session_for_epoch(epoch, &e).await {
                         return;
                     }
@@ -5250,11 +5382,14 @@ fn is_not_found_error(error: &ClientError) -> bool {
     matches!(error, ClientError::Api { status, .. } if *status == 404)
 }
 
-/// The server refused this session's token. Only an HTTP 401 says that: a
-/// transport error, a closed WebSocket, or any other status is a reason to
-/// retry, not to sign out.
 fn session_refused(error: &ClientError) -> bool {
-    matches!(error, ClientError::Api { status, .. } if *status == 401)
+    matches!(
+        error,
+        ClientError::Api {
+            status: 401 | 403,
+            ..
+        }
+    )
 }
 
 /// Turn a WebSocket handshake failure into the error the rest of the client
@@ -5321,6 +5456,10 @@ mod schedule_integration_tests;
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "app_data_integration_tests.rs"]
 mod app_data_integration_tests;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "offline_resume_tests.rs"]
+mod offline_resume_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "logout_tests.rs"]
@@ -5849,12 +5988,13 @@ mod tests {
         *engine.encryption_key.write().await = Some(Zeroizing::new([7; 32]));
         engine.api.restore_token("token-a".into());
         let generation = engine.local_store.start_generation().await;
+        let resume_device_id = uuid::Uuid::now_v7();
         engine
             .local_store
             .persist_device_signing_identity(
                 &profile_id_from_encryption_key(&[8; 32]),
                 &DeviceSigningIdentity {
-                    device_id: Some(uuid::Uuid::now_v7().to_string()),
+                    device_id: Some(resume_device_id.to_string()),
                     signing_secret_key: crypto::generate_device_signing_secret_key().into(),
                 },
                 &[9; 32],
@@ -5895,10 +6035,13 @@ mod tests {
                 socket.write_all(&listing).await.unwrap();
                 wait_release.await.unwrap();
             }
-            validate
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .await
-                .unwrap();
+            let confirmed = serde_json::to_vec(&SessionValidationResponse {
+                username: "b".into(),
+                device_id: resume_device_id.into(),
+            })
+            .unwrap();
+            validate.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", confirmed.len()).as_bytes()).await.unwrap();
+            validate.write_all(&confirmed).await.unwrap();
         });
         let resume = {
             let engine = Arc::clone(&engine);
@@ -7158,8 +7301,7 @@ mod tests {
             status: 401,
             error: ErrorResponse::new(ApiErrorCode::Unauthorized, "expired"),
         }));
-        // Everything else is a reason to retry, not to sign out.
-        assert!(!session_refused(&ClientError::Api {
+        assert!(session_refused(&ClientError::Api {
             status: 403,
             error: ErrorResponse::new(ApiErrorCode::Unknown, "forbidden"),
         }));

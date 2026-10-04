@@ -32,6 +32,8 @@ type ClipperAlarmNative = {
   plannedCount: () => number;
   ringNow: (label: string) => void;
   dismiss: () => void;
+  scheduleRestEnd: (atMillis: number, title: string, text: string) => void;
+  cancelRestEnd: () => void;
 };
 
 const native: ClipperAlarmNative | null =
@@ -107,4 +109,12 @@ export function ringNow(label: string): void {
 
 export function dismissAlarm(): void {
   native?.dismiss();
+}
+
+export function scheduleRestEnd(atMillis: number, title: string, text: string): void {
+  native?.scheduleRestEnd(atMillis, title, text);
+}
+
+export function cancelRestEnd(): void {
+  native?.cancelRestEnd();
 }

@@ -319,6 +319,21 @@ it. The limit is kept by the client itself. A modified client, or anyone who
 can read the device's storage, is not bound by it. A lost phone is protected
 by its screen lock and by the biometric gate on the stored resume key.
 
+The 3 days are 72 hours measured from the device time at confirmation. The
+phone stores the confirmation time in SecureStore beside the biometric-gated
+credentials, bound to their token's hash. Updating this time needs no
+fingerprint prompt. The client confirms on reconnect and once a minute while
+running. A confirmation request times out after 10 seconds. HTTP errors do
+not allow offline opening; only a network failure or timeout does.
+
+A connection failure or TLS certificate error, including a captive portal's
+certificate, allows local opening within the same saved limit. It does not
+extend the limit. A successful confirmation must identify the saved user and
+device; an HTML page or a reply for another session is not a confirmation.
+Both 401 and 403 sign the client out and erase its local data. A valid HTTP
+confirmation ends offline mode and lets pending changes push even while the
+WebSocket connection is still retrying.
+
 Removing a device from the account deletes its sessions on the server, so the
 server refuses every read and write from it from then on. The keys it holds
 decrypt only the copy already on the device and cannot start a new session;
@@ -365,11 +380,19 @@ The gym logger is the first app on app data. Its collections:
 - `gym.exercises` (last write wins): name, the muscles it trains with a share
   for each, and whether it is archived.
 - `gym.workouts` (last write wins): a named template, with an ordered list of
-  exercises and the target sets, reps, reps in reserve and rest for each.
+  exercises and, for each, the warm-up sets, the target working sets, reps,
+  reps in reserve and rest, and whether it forms a superset with the exercise
+  before it. An exercise appears at most once.
 - `gym.sessions` (last write wins): one visit to the gym, with its start and
-  end time, the template it started from if any, and notes.
+  end time, the template it started from if any, notes and its exercise plan.
+  The plan is copied from the template when the session starts and has the
+  same fields per exercise, plus whether the exercise was skipped. Adding an
+  exercise, adding a set, reordering and skipping during the session change
+  the plan.
 - `gym.sets` (append-only): one set, with its session, exercise, order, kind
   (warm-up or working), weight, reps, reps in reserve and completion time.
+  `order` is one more than the highest order among the session's sets when
+  the set is logged, so sets sort by order and then completion time.
 - `gym.body_weight` (append-only): one weighing, with its time and weight in
   kilograms.
 - `gym.recovery` (last write wins): the user's own recovery time for one
@@ -381,6 +404,29 @@ The gym logger is the first app on app data. Its collections:
 The list of muscles and their default recovery times is part of the app, not a
 collection. Muscle fatigue is calculated on the device from recent working
 sets and is never stored.
+
+The state of a session in progress is calculated from its plan and its sets
+and is never stored:
+
+- The plan is split into blocks: an exercise that forms a superset with the
+  one before it joins that exercise's block. An exercise is open while it is
+  not skipped and has fewer warm-up or working sets than planned.
+- The current exercise is in the first block with an open exercise. Within
+  the block it is the open exercise with the fewest working sets, the earlier
+  one on a tie, so a superset alternates. Its next set is a warm-up while
+  planned warm-ups remain, and a working set after that.
+- The rest timer starts at the completion time of the session's last set and
+  lasts that exercise's rest. Moving forward to the next exercise of the same
+  superset has no rest, and a session with no current exercise has no rest
+  timer.
+- A set is logged only if the session's next order and current exercise are
+  still the ones the screen showed, so a stale or repeated tap cannot log a
+  set out of order.
+
+On first use, when the device has no exercises, workouts, sessions or sets,
+the app writes a starter library of common barbell, dumbbell and machine
+exercises and two workouts. Their row ids are fixed in `crates/gym`, so two
+devices that both write it produce the same rows.
 
 ## Outside this document
 

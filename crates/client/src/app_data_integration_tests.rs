@@ -33,6 +33,7 @@ type HeldSends = tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender
 struct TestProxy {
     url: String,
     online: Arc<AtomicBool>,
+    block_websocket: Arc<AtomicBool>,
     held_sends: Arc<std::sync::Mutex<Option<HeldSends>>>,
     requests: Arc<std::sync::Mutex<Vec<&'static str>>>,
     connections: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
@@ -44,6 +45,7 @@ impl TestProxy {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let online = Arc::new(AtomicBool::new(true));
+        let block_websocket = Arc::new(AtomicBool::new(false));
         let held_sends = Arc::new(std::sync::Mutex::new(None::<HeldSends>));
         let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
         let connections = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -51,6 +53,7 @@ impl TestProxy {
         let holding = Arc::clone(&held_sends);
         let logging = Arc::clone(&requests);
         let tracked = Arc::clone(&connections);
+        let blocking = Arc::clone(&block_websocket);
         let listener = tokio::spawn(async move {
             loop {
                 let Ok((client, _)) = listener.accept().await else {
@@ -61,6 +64,7 @@ impl TestProxy {
                 }
                 let holding = Arc::clone(&holding);
                 let logging = Arc::clone(&logging);
+                let blocking = Arc::clone(&blocking);
                 let connection = tokio::spawn(async move {
                     let Ok(server) = TcpStream::connect(upstream).await else {
                         return;
@@ -77,6 +81,9 @@ impl TestProxy {
                             Ok(read) => read,
                         };
                         let chunk = &buffer[..read];
+                        if blocking.load(Ordering::SeqCst) && chunk.starts_with(b"GET /api/ws ") {
+                            break;
+                        }
                         if chunk.starts_with(b"POST /api/app-data/changes") {
                             logging.lock().unwrap().push("send");
                             let held = holding.lock().unwrap().clone();
@@ -101,6 +108,7 @@ impl TestProxy {
         Self {
             url,
             online,
+            block_websocket,
             held_sends,
             requests,
             connections,
@@ -256,6 +264,135 @@ fn set(session_id: Uuid, exercise_id: &str, reps: u32) -> Value {
 
 fn exercise(name: &str) -> Value {
     json!({"name": name, "muscles": [{"muscle": "quadriceps", "share": 1.0}], "archived": false})
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_offline_resume_syncs_pending_writes_and_erases_a_revoked_session() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path();
+    let (_server, address) = start_server(data).await;
+    let url = format!("http://{address}");
+    let proxy = TestProxy::start(address).await;
+    let first = signed_in(&url, data, "first", true).await;
+    let phone = signed_in(&proxy.url, data, "phone", false).await;
+    let now = chrono::Utc::now();
+    let item = ScheduleItem {
+        id: clipper_schedule::ScheduleItemId::new(),
+        title: "Offline alarm".into(),
+        span: ScheduleSpan::Timed {
+            start: clipper_schedule::TimedStart::Floating(
+                (now + chrono::Duration::hours(1)).naive_utc(),
+            ),
+            duration: clipper_schedule::BlockDuration::from_minutes(30).unwrap(),
+        },
+        recurrence: clipper_schedule::Recurrence::Once,
+        reference: None,
+        alarm: Some(clipper_schedule::AlarmPolicy {
+            minutes_before: 0,
+            target_device: None,
+        }),
+        break_reminders: false,
+    };
+    let schedule_id = phone.create_schedule_item(item.clone()).await.unwrap();
+    let row = write(&phone, "gym.exercises", None, exercise("Offline squat")).await;
+    eventually("the first device receives the row", async || {
+        field(&first, "gym.exercises", &row, "name").await == json!("Offline squat")
+    })
+    .await;
+    let material = phone.session_resume_material().await.unwrap();
+    let confirmed_at = material.last_confirmed_at;
+    proxy.go_offline(&phone).await;
+    phone.clear_local_session().await;
+    let offline = SyncEngine::new_with_data_dir(&proxy.url, data.join("phone"));
+    offline
+        .resume_saved_session(material, "app-data-test", "phone", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        offline
+            .session_resume_material()
+            .await
+            .unwrap()
+            .last_confirmed_at,
+        confirmed_at
+    );
+    assert_eq!(
+        field(&offline, "gym.exercises", &row, "name").await,
+        json!("Offline squat")
+    );
+    assert_eq!(offline.get_state().await.schedule_items[0].id, schedule_id);
+    assert_eq!(
+        offline.next_alarms(24, "UTC").await.unwrap()[0].label,
+        "Offline alarm"
+    );
+    assert!(matches!(
+        offline.update_schedule_item(&schedule_id, item, 1).await,
+        Err(ClientError::Offline)
+    ));
+    let pending_id = write(&offline, "gym.exercises", None, exercise("Pending squat")).await;
+    assert_eq!(pending(&offline).await, 1);
+    proxy.block_websocket.store(true, Ordering::SeqCst);
+    proxy.go_online();
+    eventually("pending changes sync on reconnect", async || {
+        pending(&offline).await == 0
+            && field(&first, "gym.exercises", &pending_id, "name").await == json!("Pending squat")
+    })
+    .await;
+    assert!(!offline.get_state().await.offline);
+    assert_ne!(
+        offline.get_state().await.connection_status,
+        ConnectionStatus::Connected
+    );
+    assert!(
+        offline
+            .send_clipboard_payload(TEXT_CLIPBOARD_MIME_TYPE, b"HTTP works without a WebSocket")
+            .await
+            .is_ok()
+    );
+    let refreshed = offline.session_resume_material().await.unwrap();
+    assert!(refreshed.last_confirmed_at > confirmed_at);
+    let device_id = offline.get_state().await.session.unwrap().device_id;
+    proxy.go_offline(&offline).await;
+    offline.clear_local_session().await;
+    first.remove_device(&device_id).await.unwrap();
+    let revoked = SyncEngine::new_with_data_dir(&proxy.url, data.join("phone"));
+    revoked
+        .resume_saved_session(refreshed, "app-data-test", "phone", true)
+        .await
+        .unwrap();
+    write(&revoked, "gym.exercises", None, exercise("Must be erased")).await;
+    proxy.go_online();
+    eventually("the revoked phone signs out", async || {
+        revoked.get_state().await.session.is_none()
+    })
+    .await;
+    assert!(revoked.session_resume_material().await.is_none());
+    assert!(
+        revoked
+            .query_app_data("SELECT id FROM gym.exercises")
+            .await
+            .is_err()
+    );
+    assert!(
+        revoked
+            .local_store
+            .app_data_rows()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        revoked
+            .local_store
+            .app_data_pending_counts()
+            .await
+            .unwrap()
+            .pending,
+        0
+    );
+    first.stop_session_work().await;
 }
 
 #[tokio::test]

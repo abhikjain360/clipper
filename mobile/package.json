@@ -10,7 +10,8 @@
     "fmt:check": "oxfmt --check .",
     "lint": "oxlint .",
     "preandroid": "pnpm --dir ../packages/mobile-bridge run ubrn:android",
-    "start": "expo start"
+    "start": "expo start",
+    "test": "node --experimental-strip-types --test ../scripts/mobile-resume.test.mjs"
   },
   "dependencies": {
     "@clipper/mobile-bridge": "workspace:*",
@@ -48,6 +49,13 @@
   },
   "packageManager": "pnpm@11.28.2",
   "expo": {
+    "autolinking": {
+      "android": {
+        "buildFromSource": [
+          "expo-secure-store"
+        ]
+      }
+    },
     "install": {
       "exclude": [
         "typescript",

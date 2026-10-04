@@ -12,7 +12,7 @@ use clipper_gym::ConflictRule;
 use tracing::warn;
 use uuid::Uuid;
 
-use super::{ConnectionStatus, Ordering, SyncEngine};
+use super::{Ordering, SyncEngine};
 use crate::{
     api_client::ClientError,
     app_data::{
@@ -199,10 +199,7 @@ impl SyncEngine {
             if !self.session_is_current(epoch) {
                 return;
             }
-            let connected = matches!(
-                self.state.read().await.connection_status,
-                ConnectionStatus::Connected
-            );
+            let connected = !self.offline.load(Ordering::SeqCst);
             let mut failed = false;
             if connected && self.app_data.take_pull_request() {
                 let pulled = self.pull_app_data(epoch).await;

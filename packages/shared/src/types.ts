@@ -253,6 +253,7 @@ export type AppState = {
   session?: AuthenticatedSession | null;
   saved_profile?: SavedProfile | null;
   connection_status: ConnectionStatus;
+  offline: boolean;
   clipboard_items: ClipboardItem[];
   files: FileItem[];
   collab_docs: CollabItem[];
@@ -276,6 +277,7 @@ export type SessionResumeMaterial = {
   token: string;
   dataKey: string;
   wrappingKey: string;
+  lastConfirmedAt?: number;
 };
 
 export type ClipperBackend = {
@@ -350,6 +352,7 @@ export type ClipperBackend = {
     username: string,
     deviceName: string,
     serverUrl: string,
+    lastConfirmedAt?: number,
   ) => Promise<void>;
   sessionResumeMaterial: () => Promise<SessionResumeMaterial | null>;
   queryAppData?: (sql: string) => Promise<AppDataRow[]>;

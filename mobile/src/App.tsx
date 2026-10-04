@@ -3,6 +3,7 @@ import {
   Calendar,
   Clipboard,
   Copy,
+  Dumbbell,
   Download,
   Eye,
   FileCode,
@@ -84,13 +85,15 @@ import {
   readClipboardText,
   resumeSession,
   saveCredentials,
+  saveSessionConfirmation,
   shareDownloadedFile,
   writeClipboardText,
 } from "./backend";
 import { subscribeToCollabDoc, type CollabDocStatus } from "./collabDoc";
+import { GymPanel, hasOpenGymSession } from "./gym/GymPanel";
 import tamaguiConfig from "./tamagui.config";
 
-type TabName = "clipboard" | "files" | "devices" | "collab" | "schedule" | "alarms";
+type TabName = "clipboard" | "files" | "devices" | "collab" | "schedule" | "alarms" | "gym";
 
 const navItems = [
   { value: "clipboard", label: "Clipboard", Icon: Clipboard },
@@ -99,6 +102,7 @@ const navItems = [
   { value: "collab", label: "Collab", Icon: FileCode },
   { value: "schedule", label: "Schedule", Icon: Calendar },
   { value: "alarms", label: "Alarms", Icon: AlarmClock },
+  { value: "gym", label: "Gym", Icon: Dumbbell },
 ] as const satisfies readonly { value: TabName; label: string; Icon: typeof Clipboard }[];
 type ViewerContent = { title: string; content: string };
 
@@ -153,8 +157,7 @@ export default function App() {
 function ClipperApp() {
   const [state, setState] = useState<AppState | null>(null);
   const [startupError, setStartupError] = useState<string | null>(null);
-  // Guards the one-time cold-start unlock below. Starts true so we never flash
-  // the login screen before the resume attempt settles.
+  const [resumeAttempt, setResumeAttempt] = useState(0);
   const [resuming, setResuming] = useState(true);
   // Restart the state-watch loop when the session changes: a production login can
   // re-point the backend at a new server (a fresh native client), so the loop
@@ -164,10 +167,6 @@ function ClipperApp() {
   currentSessionKey.current = sessionKey;
   const previousSessionKey = useRef<string | null>(null);
 
-  // Cold-start session resume. Empty deps + the component staying mounted across
-  // background/refocus mean this runs exactly once per process launch: bringing a
-  // still-alive app back into focus never re-prompts for the fingerprint. Only a
-  // fresh launch (process killed/evicted) re-runs it.
   useEffect(() => {
     let cancelled = false;
 
@@ -176,9 +175,8 @@ function ClipperApp() {
         await backend.connect();
         await resumeSession();
       } catch (caught) {
-        // Nothing stored, biometric cancelled, or auto-login failed — fall
-        // through to the manual login screen.
         if (isResumeRejected(caught)) clearAlarms();
+        if (!cancelled) setStartupError(formatBackendError(caught));
       } finally {
         if (!cancelled) setResuming(false);
       }
@@ -189,7 +187,7 @@ function ClipperApp() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [resumeAttempt]);
 
   // State-watch loop. Held until the resume attempt settles so it reads the
   // post-resume session, then re-subscribes whenever the session changes.
@@ -236,6 +234,10 @@ function ClipperApp() {
   }, [sessionKey]);
 
   useEffect(() => {
+    if (sessionKey) void saveSessionConfirmation().catch(() => {});
+  }, [state, sessionKey]);
+
+  useEffect(() => {
     const subscription = NativeAppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
         setAlarmRefreshGeneration((generation) => generation + 1);
@@ -276,7 +278,30 @@ function ClipperApp() {
   }, [alarmRefreshGeneration, state, sessionKey]);
 
   if (startupError) {
-    return <CenteredStatus title="Cannot start Clipper" message={startupError} />;
+    return (
+      <YStack flex={1}>
+        <CenteredStatus title="Cannot start Clipper" message={startupError} />
+        <XStack justify="center" gap="$3" p="$4">
+          <Button
+            onPress={() => {
+              setStartupError(null);
+              setResuming(true);
+              setResumeAttempt((attempt) => attempt + 1);
+            }}
+          >
+            Retry unlock
+          </Button>
+          <Button
+            onPress={() => {
+              setStartupError(null);
+              setResuming(false);
+            }}
+          >
+            Sign in
+          </Button>
+        </XStack>
+      </YStack>
+    );
   }
 
   if (resuming || !state) return <CenteredStatus title="Starting Clipper" loading />;
@@ -285,7 +310,42 @@ function ClipperApp() {
     return <LoginScreen initialUsername={state.saved_profile?.username ?? ""} onState={setState} />;
   }
 
-  return <HomeScreen state={state} onState={setState} />;
+  return (
+    <YStack flex={1}>
+      <ConnectionBanner state={state} />
+      <HomeScreen state={state} onState={setState} />
+    </YStack>
+  );
+}
+
+function ConnectionBanner({ state }: { state: AppState }) {
+  const [pending, setPending] = useState(0);
+  const sessionId = state.session?.device_id;
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh() {
+      try {
+        const status = await backend.appDataStatus?.();
+        if (!cancelled) setPending(status?.pending_changes ?? 0);
+      } catch {}
+    }
+    void refresh();
+    const timer = setInterval(() => void refresh(), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [sessionId]);
+  const offline = state.offline;
+  if (!offline && pending === 0) return null;
+  return (
+    <XStack px="$3" py="$2" bg="#352b16">
+      <Text color="#ffbc42">
+        {offline ? "Offline · " : ""}
+        {pending} pending changes
+      </Text>
+    </XStack>
+  );
 }
 
 function LoginScreen({
@@ -419,6 +479,16 @@ function LoginScreen({
 
 function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppState) => void }) {
   const [tab, setTab] = useState<TabName>("clipboard");
+
+  useEffect(() => {
+    let cancelled = false;
+    void hasOpenGymSession().then((open) => {
+      if (open && !cancelled) setTab("gym");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [navExpanded, setNavExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -617,6 +687,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
         )}
         {tab === "schedule" && <SchedulePanel state={state} onState={onState} onError={setError} />}
         {tab === "alarms" && alarmsSupported && <AlarmsPanel onError={setError} />}
+        {tab === "gym" && <GymPanel onError={setError} />}
       </YStack>
 
       {navExpanded && (

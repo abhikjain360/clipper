@@ -51,6 +51,7 @@ fn session(started_at: DateTime<Utc>) -> Session {
         ended_at: Some(started_at + TimeDelta::hours(1)),
         template_id: None,
         notes: String::new(),
+        exercises: Vec::new(),
     }
 }
 

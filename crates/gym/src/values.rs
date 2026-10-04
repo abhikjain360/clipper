@@ -70,29 +70,29 @@ impl WorkoutTemplate {
         for exercise in &self.exercises {
             exercise.validate()?;
         }
-        Ok(())
+        validate_distinct_exercises(self.exercises.iter().map(|exercise| exercise.exercise_id))
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkoutExercise {
     pub exercise_id: Uuid,
+    pub warm_up_sets: u32,
     pub target_sets: u32,
     pub target_reps: u32,
     pub target_reps_in_reserve: Option<u8>,
     pub rest_seconds: u32,
+    pub superset_with_previous: bool,
 }
 
 impl WorkoutExercise {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        validate_exercise_id(self.exercise_id)?;
-        if self.target_sets == 0 {
-            return Err(ValidationError::ZeroTargetSets);
-        }
-        if self.target_reps == 0 {
-            return Err(ValidationError::ZeroTargetReps);
-        }
-        validate_reps_in_reserve(self.target_reps_in_reserve)
+        validate_targets(
+            self.exercise_id,
+            self.target_sets,
+            self.target_reps,
+            self.target_reps_in_reserve,
+        )
     }
 }
 
@@ -102,6 +102,45 @@ pub struct Session {
     pub ended_at: Option<DateTime<Utc>>,
     pub template_id: Option<Uuid>,
     pub notes: String,
+    pub exercises: Vec<SessionExercise>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionExercise {
+    pub exercise_id: Uuid,
+    pub warm_up_sets: u32,
+    pub target_sets: u32,
+    pub target_reps: u32,
+    pub target_reps_in_reserve: Option<u8>,
+    pub rest_seconds: u32,
+    pub superset_with_previous: bool,
+    pub skipped: bool,
+}
+
+impl SessionExercise {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        validate_targets(
+            self.exercise_id,
+            self.target_sets,
+            self.target_reps,
+            self.target_reps_in_reserve,
+        )
+    }
+}
+
+impl From<WorkoutExercise> for SessionExercise {
+    fn from(planned: WorkoutExercise) -> Self {
+        Self {
+            exercise_id: planned.exercise_id,
+            warm_up_sets: planned.warm_up_sets,
+            target_sets: planned.target_sets,
+            target_reps: planned.target_reps,
+            target_reps_in_reserve: planned.target_reps_in_reserve,
+            rest_seconds: planned.rest_seconds,
+            superset_with_previous: planned.superset_with_previous,
+            skipped: false,
+        }
+    }
 }
 
 impl Session {
@@ -117,7 +156,10 @@ impl Session {
         {
             return Err(ValidationError::InvalidTemplateId(id));
         }
-        Ok(())
+        for exercise in &self.exercises {
+            exercise.validate()?;
+        }
+        validate_distinct_exercises(self.exercises.iter().map(|exercise| exercise.exercise_id))
     }
 }
 
@@ -222,11 +264,39 @@ pub enum ValidationError {
     InvalidTemplateId(Uuid),
     #[error("week start is outside the supported date range")]
     WeekStartOutOfRange,
+    #[error("exercise {0} appears more than once")]
+    DuplicateExercise(Uuid),
 }
 
 fn validate_name(name: &str) -> Result<(), ValidationError> {
     if name.trim().is_empty() {
         return Err(ValidationError::EmptyName);
+    }
+    Ok(())
+}
+
+fn validate_targets(
+    exercise_id: Uuid,
+    target_sets: u32,
+    target_reps: u32,
+    target_reps_in_reserve: Option<u8>,
+) -> Result<(), ValidationError> {
+    validate_exercise_id(exercise_id)?;
+    if target_sets == 0 {
+        return Err(ValidationError::ZeroTargetSets);
+    }
+    if target_reps == 0 {
+        return Err(ValidationError::ZeroTargetReps);
+    }
+    validate_reps_in_reserve(target_reps_in_reserve)
+}
+
+fn validate_distinct_exercises(ids: impl Iterator<Item = Uuid>) -> Result<(), ValidationError> {
+    let mut seen = BTreeSet::new();
+    for id in ids {
+        if !seen.insert(id) {
+            return Err(ValidationError::DuplicateExercise(id));
+        }
     }
     Ok(())
 }
