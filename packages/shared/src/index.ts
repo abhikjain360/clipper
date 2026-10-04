@@ -120,3 +120,4 @@ export type {
   TimedStart,
   Weekday,
 } from "./types";
+export { createPressGuard } from "./press";

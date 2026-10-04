@@ -1,7 +1,7 @@
 import { Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Spinner, Text, XStack, YStack } from "tamagui";
-import { Button } from "../tamagui.config";
+import { Button } from "./Button";
 import {
     deviceZone,
     formatDay,
@@ -77,7 +77,8 @@ export function BodyWeight({
                     <XStack>
                         <Button
                             tone="success"
-                            disabled={busy || kg === undefined}
+                            busy={busy}
+                            disabled={kg === undefined}
                             onPress={logWeight}
                         >
                             Log weight now
@@ -108,7 +109,7 @@ export function BodyWeight({
                                     chromeless
                                     aria-label={`Delete the weigh-in of ${formatDay(entry.time_millis)}`}
                                     icon={<Trash2 size={14} />}
-                                    disabled={busy}
+                                    busy={busy}
                                     onPress={() => setDeleting(entry)}
                                 />
                             </XStack>
@@ -213,11 +214,10 @@ export function BodyWeight({
                 onCancel={() => setDeleting(null)}
                 onConfirm={() => {
                     const entry = deleting;
-                    setDeleting(null);
                     if (entry)
                         void run(() =>
                             backend.change({ change: "delete_body_weight", id: entry.id }),
-                        );
+                        ).then((deleted) => deleted && setDeleting(null));
                 }}
             />
         </Columns>

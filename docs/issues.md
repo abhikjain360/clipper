@@ -2403,6 +2403,39 @@ Each entry has:
 - **Safe use today:** add missed sets on the Mac after the phone has synced
   the workout.
 
+### 190. Gym writes had missing feedback and allowed repeats before refresh
+
+- **Status:** fixed, uncommitted
+- **Where:** `mobile/src/gym` and `web/src/gym`.
+- **What happened:** mobile History, Library and recovery writes used a ref
+  lock without a visible busy state. Web buttons became available before the
+  updated screen loaded. Fast completed writes could accept a second tap as
+  the next set. Dialogs closed before a write succeeded and hid its error.
+- **Fix:** gym buttons show a spinner and pressed opacity. Writes keep the
+  buttons disabled through refresh. A 400 ms guard blocks rapid repeats even
+  after a fast local write. Failed dialogs stay open and display the error.
+  Native writes keep the keyboard open instead of moving the layout.
+  Keyboard avoidance on the native gym screen and dialogs lets the scroll
+  area bring lower buttons above the keyboard. Android's edge-to-edge window
+  stayed full height despite `adjustResize`, leaving buttons covered before.
+- **Checked:** emulator-5554 used an isolated server and test account. Focused
+  Workout and History inputs saved their typed values on the first press.
+  A focused complete-set double tap made one write. Mac web Workout, exercise
+  search and History add-set dialogs accepted focused-input presses; double
+  clicks saved one set and a failed add-set kept its values and error visible.
+  No missing ancestor tap setting, blur commit or input-based button key was
+  found; the owner's lost first press was not reproduced at HEAD.
+  After keyboard avoidance, Complete set and Add exercise were reachable with
+  the keyboard open. Complete saved 80 kg × 15 reps on one press; the picker
+  accepted its first press with search focused.
+- **Timing:** held-upload integration test: complete-set 3.78 ms before and
+  1.15 ms after; add-set 2.53 ms before and 0.80 ms after. Other measured local
+  writes took 0.86–3.65 ms. The backend is unchanged: writes already commit to
+  the pending queue and return while the upload is held. Emulator native calls
+  took 1.7–63.7 ms before and 1.5–52.9 ms after without touch input; focused
+  completion took 217 ms before and 118 ms after. These are debug QA samples,
+  not a backend speedup claim.
+
 ## Docs
 
 ### 29. Doc claims the code did not satisfy

@@ -1,4 +1,4 @@
-import { Button } from "../tamagui.config";
+import { Button } from "./Button";
 import { useEffect, useRef, useState } from "react";
 import { H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
 import type { GymExercise, GymOneRepMax } from "@clipper/mobile-bridge";

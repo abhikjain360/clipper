@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { H2, Paragraph, Spinner, XStack, YStack } from "tamagui";
-import { Button } from "../tamagui.config";
+import { Button } from "./Button";
 import { palette, type GymBackend } from "@clipper/shared";
 import { clipperBackend, formatBackendError } from "../backend";
 import { BodyWeight } from "./BodyWeight";
@@ -10,6 +10,7 @@ import { History } from "./History";
 import { Library } from "./Library";
 import { Progress } from "./Progress";
 import { Workout } from "./Workout";
+import { GymError } from "./errors";
 
 type Section = "workout" | "history" | "weight" | "progress" | "fatigue" | "library";
 
@@ -28,6 +29,14 @@ export function GymPanel({ state, onError }: { state: unknown; onError: ErrorHan
     const [error, setError] = useState<string | null>(null);
     const [version, setVersion] = useState(0);
     const [libraryWritten, setLibraryWritten] = useState(0);
+    const [actionError, setActionError] = useState<string | null>(null);
+    const reportError = useCallback(
+        (message: string | null) => {
+            setActionError(message);
+            onError(message);
+        },
+        [onError],
+    );
 
     useEffect(() => {
         let cancelled = false;
@@ -82,40 +91,42 @@ export function GymPanel({ state, onError }: { state: unknown; onError: ErrorHan
     if (backend === null)
         return <Paragraph>Gym needs the Clipper app on a phone or Mac.</Paragraph>;
     return (
-        <YStack gap="$4" maxW={1200} width="100%" self="center">
-            <H2>Gym</H2>
-            <XStack gap="$2" flexWrap="wrap" role="group" aria-label="Gym sections">
-                {sections.map(({ value, label }) => (
-                    <Button
-                        key={value}
-                        aria-pressed={section === value}
-                        selected={section === value}
-                        onPress={() => setSection(value)}
-                    >
-                        {label}
-                    </Button>
-                ))}
-            </XStack>
-            <YStack key={libraryWritten}>
-                {section === "workout" && (
-                    <Workout backend={backend} state={state} onError={onError} />
-                )}
-                {section === "history" && (
-                    <History backend={backend} state={state} onError={onError} />
-                )}
-                {section === "weight" && (
-                    <BodyWeight backend={backend} state={state} onError={onError} />
-                )}
-                {section === "progress" && (
-                    <Progress backend={backend} state={state} onError={onError} />
-                )}
-                {section === "fatigue" && (
-                    <Fatigue backend={backend} state={state} onError={onError} />
-                )}
-                {section === "library" && (
-                    <Library backend={backend} state={state} onError={onError} />
-                )}
+        <GymError.Provider value={actionError}>
+            <YStack gap="$4" maxW={1200} width="100%" self="center">
+                <H2>Gym</H2>
+                <XStack gap="$2" flexWrap="wrap" role="group" aria-label="Gym sections">
+                    {sections.map(({ value, label }) => (
+                        <Button
+                            key={value}
+                            aria-pressed={section === value}
+                            selected={section === value}
+                            onPress={() => setSection(value)}
+                        >
+                            {label}
+                        </Button>
+                    ))}
+                </XStack>
+                <YStack key={libraryWritten}>
+                    {section === "workout" && (
+                        <Workout backend={backend} state={state} onError={reportError} />
+                    )}
+                    {section === "history" && (
+                        <History backend={backend} state={state} onError={reportError} />
+                    )}
+                    {section === "weight" && (
+                        <BodyWeight backend={backend} state={state} onError={reportError} />
+                    )}
+                    {section === "progress" && (
+                        <Progress backend={backend} state={state} onError={reportError} />
+                    )}
+                    {section === "fatigue" && (
+                        <Fatigue backend={backend} state={state} onError={reportError} />
+                    )}
+                    {section === "library" && (
+                        <Library backend={backend} state={state} onError={reportError} />
+                    )}
+                </YStack>
             </YStack>
-        </YStack>
+        </GymError.Provider>
     );
 }

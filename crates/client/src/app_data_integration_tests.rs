@@ -30,6 +30,115 @@ const TABLES: [&str; 6] = [
 
 #[tokio::test]
 #[ignore = "build clipper-server first; starts an isolated local server"]
+async fn gym_writes_finish_while_upload_is_held() {
+    crate::ensure_crypto_provider();
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let directory = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(directory.path()).await;
+    let proxy = TestProxy::start(address).await;
+    let engine = signed_in(&proxy.url, directory.path(), "lifter", true).await;
+    let mut held = proxy.hold_sends();
+    let started = std::time::Instant::now();
+    let exercise = engine
+        .gym_save_exercise(
+            None,
+            clipper_app_types::GymExerciseInput {
+                name: "Bench".into(),
+                muscles: vec![clipper_app_types::GymMuscleShare {
+                    muscle: Muscle::Chest,
+                    share: 1.0,
+                }],
+                archived: false,
+            },
+        )
+        .await
+        .unwrap();
+    tracing::info!(
+        elapsed_us = started.elapsed().as_micros(),
+        action = "save_exercise"
+    );
+    let upload = tokio::time::timeout(Duration::from_secs(5), held.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let session = engine.gym_start_session(None).await.unwrap();
+    tracing::info!(
+        elapsed_us = started.elapsed().as_micros(),
+        action = "start_session"
+    );
+    let started = std::time::Instant::now();
+    engine.gym_add_exercise(&session, &exercise).await.unwrap();
+    tracing::info!(
+        elapsed_us = started.elapsed().as_micros(),
+        action = "add_exercise"
+    );
+    let values = clipper_app_types::GymSetValues {
+        weight_kg: Some(62.5),
+        reps: Some(8),
+        reps_in_reserve: Some(2),
+    };
+    let started = std::time::Instant::now();
+    let view = tokio::time::timeout(
+        Duration::from_secs(1),
+        engine.gym_complete_set(
+            &session,
+            &exercise,
+            clipper_gym::SetKind::Working,
+            1,
+            values.clone(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tracing::info!(
+        elapsed_us = started.elapsed().as_micros(),
+        action = "complete_set"
+    );
+    assert_eq!(view.exercises[0].sets.len(), 1);
+    assert!(
+        engine
+            .gym_complete_set(
+                &session,
+                &exercise,
+                clipper_gym::SetKind::Working,
+                1,
+                values.clone()
+            )
+            .await
+            .is_err()
+    );
+    let started = std::time::Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        engine.gym_add_set(&session, &exercise, clipper_gym::SetKind::Working, values),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tracing::info!(
+        elapsed_us = started.elapsed().as_micros(),
+        action = "add_set"
+    );
+    assert_eq!(
+        engine.gym_session(&session).await.unwrap().exercises[0]
+            .sets
+            .len(),
+        2
+    );
+    assert!(pending(&engine).await >= 4);
+    proxy.stop_holding_sends();
+    upload.send(()).unwrap();
+    eventually("gym writes upload after release", async || {
+        pending(&engine).await == 0
+    })
+    .await;
+    engine.stop_session_work().await;
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
 async fn schedule_done_marks_sync_and_undo_wins_an_offline_conflict() {
     crate::ensure_crypto_provider();
     let temp = tempfile::tempdir().expect("tempdir");

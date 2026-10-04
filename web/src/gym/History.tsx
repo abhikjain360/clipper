@@ -1,7 +1,7 @@
 import { Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
-import { Button } from "../tamagui.config";
+import { Button } from "./Button";
 import {
     formatClock,
     formatDay,
@@ -13,7 +13,6 @@ import {
     type GymSetKind,
     type GymSetValues,
 } from "@clipper/shared";
-import { formatBackendError } from "../backend";
 import {
     CardTitle,
     Column,
@@ -161,7 +160,7 @@ function SessionDetail({
     backend: GymBackend;
     state: unknown;
     onError: ErrorHandler;
-    onChanged: () => void;
+    onChanged: () => Promise<void>;
     onDeleted: () => void;
 }) {
     const load = useCallback(
@@ -169,9 +168,8 @@ function SessionDetail({
         [backend, sessionId],
     );
     const { value, failed, reload } = useGymData(load, state, onError);
-    const changed = useCallback(() => {
-        reload();
-        onChanged();
+    const changed = useCallback(async () => {
+        await Promise.all([reload(), onChanged()]);
     }, [reload, onChanged]);
     const { busy, run } = useGymChange(changed, onError);
     const [editing, setEditing] = useState<{
@@ -189,15 +187,12 @@ function SessionDetail({
     const [session, exercises] = value;
 
     async function deleteWorkout() {
-        setDeletingSession(false);
-        onError(null);
-        try {
+        const saved = await run(async () => {
             await backend.change({ change: "delete_session", session_id: session.id });
             if (session.ended_at_millis === null) await backend.cancelRestEnd();
             onDeleted();
-        } catch (caught) {
-            onError(formatBackendError(caught));
-        }
+        }, false);
+        if (saved) setDeletingSession(false);
     }
 
     const shown = session.exercises.filter(
@@ -219,7 +214,7 @@ function SessionDetail({
                     <XStack gap="$2">
                         <Button
                             icon={<Plus size={16} />}
-                            disabled={busy}
+                            busy={busy}
                             onPress={() => setPicking(true)}
                         >
                             Add exercise
@@ -227,7 +222,7 @@ function SessionDetail({
                         <Button
                             tone="danger"
                             icon={<Trash2 size={16} />}
-                            disabled={busy}
+                            busy={busy}
                             onPress={() => setDeletingSession(true)}
                         >
                             Delete workout
@@ -244,7 +239,7 @@ function SessionDetail({
                         <Button
                             size="$3"
                             icon={<Plus size={14} />}
-                            disabled={busy}
+                            busy={busy}
                             onPress={() => {
                                 const last = exercise.sets[exercise.sets.length - 1];
                                 setAdding({
@@ -289,7 +284,6 @@ function SessionDetail({
                 onClose={() => setAdding(null)}
                 onAdd={(kind, values) => {
                     const target = adding;
-                    setAdding(null);
                     if (target)
                         void run(() =>
                             backend.change({
@@ -299,7 +293,9 @@ function SessionDetail({
                                 kind,
                                 values,
                             }),
-                        );
+                        ).then((saved) => {
+                            if (saved) setAdding(null);
+                        });
                 }}
             />
             <SetEditor
@@ -308,11 +304,12 @@ function SessionDetail({
                 onClose={() => setEditing(null)}
                 onSave={(values) => {
                     const set = editing?.set;
-                    setEditing(null);
                     if (set)
                         void run(() =>
                             backend.change({ change: "edit_set", set_id: set.id, values }),
-                        );
+                        ).then((saved) => {
+                            if (saved) setEditing(null);
+                        });
                 }}
                 onDelete={() => {
                     setDeletingSet(editing?.set ?? null);
@@ -328,9 +325,12 @@ function SessionDetail({
                 onCancel={() => setDeletingSet(null)}
                 onConfirm={() => {
                     const set = deletingSet;
-                    setDeletingSet(null);
                     if (set)
-                        void run(() => backend.change({ change: "delete_set", set_id: set.id }));
+                        void run(() =>
+                            backend.change({ change: "delete_set", set_id: set.id }),
+                        ).then((saved) => {
+                            if (saved) setDeletingSet(null);
+                        });
                 }}
             />
             <ConfirmDialog
@@ -393,10 +393,10 @@ function AddSetDialog({
                 onSubmit={() => onAdd(kind, setValues(draft))}
             />
             <XStack gap="$2" justify="flex-end">
-                <Button disabled={busy} onPress={onClose}>
+                <Button busy={busy} onPress={onClose}>
                     Cancel
                 </Button>
-                <Button tone="accent" disabled={busy} onPress={() => onAdd(kind, setValues(draft))}>
+                <Button tone="accent" busy={busy} onPress={() => onAdd(kind, setValues(draft))}>
                     Add set
                 </Button>
             </XStack>

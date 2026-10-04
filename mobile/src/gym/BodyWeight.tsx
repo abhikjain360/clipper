@@ -1,7 +1,8 @@
-import { Button } from "../tamagui.config";
+import { useGymChange } from "./actions";
+import { Button } from "./Button";
 import { Trash2 } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Keyboard } from "react-native";
+import { Alert } from "react-native";
 import { H2, ScrollView, Text, XStack, YStack } from "tamagui";
 import type { GymBodyWeight, GymWeeklyBodyWeight } from "@clipper/mobile-bridge";
 import {
@@ -21,8 +22,6 @@ export function BodyWeight({ onError }: { onError: (error: string | null) => voi
   const [entries, setEntries] = useState<GymBodyWeight[]>([]);
   const [weeks, setWeeks] = useState<GymWeeklyBodyWeight[]>([]);
   const [weight, setWeight] = useState("");
-  const [busy, setBusy] = useState(false);
-  const busyRef = useRef(false);
   const seeded = useRef(false);
 
   const load = useCallback(async () => {
@@ -47,22 +46,7 @@ export function BodyWeight({ onError }: { onError: (error: string | null) => voi
     void load();
   }, [load]);
 
-  async function run(action: () => Promise<unknown>) {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    setBusy(true);
-    onError(null);
-    Keyboard.dismiss();
-    try {
-      await action();
-    } catch (caught) {
-      onError(formatBackendError(caught));
-    } finally {
-      await load();
-      busyRef.current = false;
-      setBusy(false);
-    }
-  }
+  const { busy, run } = useGymChange(load, onError);
 
   const kg = parseWeight(weight);
 
@@ -82,7 +66,8 @@ export function BodyWeight({ onError }: { onError: (error: string | null) => voi
             <Button
               tone="success"
               size="$5"
-              disabled={busy || kg === undefined}
+              busy={busy}
+              disabled={kg === undefined}
               onPress={() => kg !== undefined && void run(() => gym().gymAddBodyWeight(kg))}
             >
               Log weight now
@@ -145,7 +130,7 @@ export function BodyWeight({ onError }: { onError: (error: string | null) => voi
                 size="$3"
                 aria-label="Delete weigh-in"
                 icon={<Trash2 size={16} color={colors.bad} />}
-                disabled={busy}
+                busy={busy}
                 onPress={() =>
                   Alert.alert("Delete this weigh-in?", undefined, [
                     { text: "Cancel", style: "cancel" },

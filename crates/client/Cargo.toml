@@ -82,3 +82,4 @@ wl-clipboard-rs.workspace = true
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 tempfile.workspace = true
+tracing-subscriber.workspace = true

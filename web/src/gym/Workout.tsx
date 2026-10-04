@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronUp, Play, Plus, RotateCcw, SkipForward } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { H2, Spinner, Text, XStack, YStack } from "tamagui";
-import { Button } from "../tamagui.config";
+import { Button } from "./Button";
 import {
     fatigueColors,
     formatClock,
@@ -165,14 +165,10 @@ export function Workout({
                     </Muted>
                 </YStack>
                 <XStack gap="$2">
-                    <Button
-                        icon={<Plus size={16} />}
-                        disabled={busy}
-                        onPress={() => setPicking(true)}
-                    >
+                    <Button icon={<Plus size={16} />} busy={busy} onPress={() => setPicking(true)}>
                         Add exercise
                     </Button>
-                    <Button disabled={busy} onPress={() => setFinishing(true)}>
+                    <Button busy={busy} onPress={() => setFinishing(true)}>
                         Finish workout
                     </Button>
                 </XStack>
@@ -220,7 +216,7 @@ export function Workout({
                             <XStack gap="$2" flexWrap="wrap">
                                 <Button
                                     tone="success"
-                                    disabled={busy}
+                                    busy={busy}
                                     icon={busy ? <Spinner /> : undefined}
                                     onPress={completeSet}
                                 >
@@ -228,7 +224,7 @@ export function Workout({
                                 </Button>
                                 {countOfKind(current.sets, "working") === 0 && (
                                     <Button
-                                        disabled={busy}
+                                        busy={busy}
                                         onPress={() =>
                                             void run(() =>
                                                 backend.change({
@@ -243,7 +239,7 @@ export function Workout({
                                     </Button>
                                 )}
                                 <Button
-                                    disabled={busy}
+                                    busy={busy}
                                     onPress={() =>
                                         void run(() =>
                                             backend.change({
@@ -257,7 +253,7 @@ export function Workout({
                                     Add set
                                 </Button>
                                 <Button
-                                    disabled={busy}
+                                    busy={busy}
                                     onPress={() =>
                                         void run(() =>
                                             backend.change({
@@ -327,19 +323,21 @@ export function Workout({
                 </Column>
             </Columns>
             <ExercisePicker
+                busy={busy}
                 open={picking}
                 exercises={exercises}
                 excluded={planIds}
                 onClose={() => setPicking(false)}
                 onPick={(exercise) => {
-                    setPicking(false);
                     void run(() =>
                         backend.change({
                             change: "add_exercise",
                             session_id: open.id,
                             exercise_id: exercise.id,
                         }),
-                    );
+                    ).then((saved) => {
+                        if (saved) setPicking(false);
+                    });
                 }}
             />
             <SetEditor
@@ -348,11 +346,12 @@ export function Workout({
                 onClose={() => setEditing(null)}
                 onSave={(values) => {
                     const set = editing?.set;
-                    setEditing(null);
                     if (set)
                         void run(() =>
                             backend.change({ change: "edit_set", set_id: set.id, values }),
-                        );
+                        ).then((saved) => {
+                            if (saved) setEditing(null);
+                        });
                 }}
                 onDelete={() => {
                     setDeleting(editing?.set ?? null);
@@ -368,9 +367,12 @@ export function Workout({
                 onCancel={() => setDeleting(null)}
                 onConfirm={() => {
                     const set = deleting;
-                    setDeleting(null);
                     if (set)
-                        void run(() => backend.change({ change: "delete_set", set_id: set.id }));
+                        void run(() =>
+                            backend.change({ change: "delete_set", set_id: set.id }),
+                        ).then((saved) => {
+                            if (saved) setDeleting(null);
+                        });
                 }}
             />
             <ConfirmDialog
@@ -382,10 +384,11 @@ export function Workout({
                 busy={busy}
                 onCancel={() => setFinishing(false)}
                 onConfirm={() => {
-                    setFinishing(false);
                     void run(async () => {
                         await backend.change({ change: "finish_session", session_id: open.id });
                         await backend.cancelRestEnd();
+                    }).then((saved) => {
+                        if (saved) setFinishing(false);
                     });
                 }}
             />
@@ -409,7 +412,7 @@ function StartWorkout({
         <YStack gap="$4">
             <XStack items="center" justify="space-between" gap="$3" flexWrap="wrap">
                 <H2 size="$6">Start a workout</H2>
-                <Button disabled={busy} onPress={() => onStart(null)}>
+                <Button busy={busy} onPress={() => onStart(null)}>
                     Start an empty workout
                 </Button>
             </XStack>
@@ -439,7 +442,7 @@ function StartWorkout({
                             <Button
                                 tone="accent"
                                 icon={<Play size={16} />}
-                                disabled={busy}
+                                busy={busy}
                                 onPress={() => onStart(template.id)}
                             >
                                 {`Start ${template.name}`}
@@ -621,7 +624,7 @@ function PlanRow({
                         size="$2"
                         aria-label={`Move ${exercise.name} up`}
                         icon={<ChevronUp size={16} />}
-                        disabled={busy}
+                        busy={busy}
                         onPress={() =>
                             onChange({ change: "move_exercise", ...target, to_index: moveUpTo })
                         }
@@ -632,7 +635,7 @@ function PlanRow({
                         size="$2"
                         aria-label={`Move ${exercise.name} down`}
                         icon={<ChevronDown size={16} />}
-                        disabled={busy}
+                        busy={busy}
                         onPress={() =>
                             onChange({ change: "move_exercise", ...target, to_index: moveDownTo })
                         }
@@ -666,7 +669,7 @@ function PlanRow({
                         <Button
                             size="$2"
                             icon={<Play size={12} />}
-                            disabled={busy}
+                            busy={busy}
                             onPress={() => onChange({ change: "switch_exercise", ...target })}
                         >
                             Do now
@@ -675,7 +678,7 @@ function PlanRow({
                     <Button
                         size="$2"
                         icon={<Plus size={12} />}
-                        disabled={busy}
+                        busy={busy}
                         onPress={() => onChange({ change: "add_working_set", ...target })}
                     >
                         Add set
@@ -690,7 +693,7 @@ function PlanRow({
                                     <SkipForward size={12} />
                                 )
                             }
-                            disabled={busy}
+                            busy={busy}
                             onPress={() =>
                                 onChange({
                                     change: "skip_exercise",

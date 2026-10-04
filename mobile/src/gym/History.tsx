@@ -1,7 +1,8 @@
-import { Button } from "../tamagui.config";
+import { useGymChange } from "./actions";
+import { Button } from "./Button";
 import { palette } from "@clipper/shared";
 import { ArrowLeft, Trash2 } from "lucide-react-native";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Alert } from "react-native";
 import { H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
 import {
@@ -107,7 +108,6 @@ function SessionDetail({
 }) {
   const [session, setSession] = useState<GymSession | null>(null);
   const [editing, setEditing] = useState<{ set: GymSet; number: number } | null>(null);
-  const busyRef = useRef(false);
 
   const load = useCallback(async () => {
     try {
@@ -122,19 +122,7 @@ function SessionDetail({
     void load();
   }, [load]);
 
-  async function run(action: () => Promise<unknown>) {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    onError(null);
-    try {
-      await action();
-    } catch (caught) {
-      onError(formatBackendError(caught));
-    } finally {
-      busyRef.current = false;
-      await load();
-    }
-  }
+  const { busy, run } = useGymChange(load, onError);
 
   function deleteWorkout(target: GymSession) {
     Alert.alert("Delete this workout?", "Its sets are deleted on every device.", [
@@ -143,15 +131,11 @@ function SessionDetail({
         text: "Delete",
         style: "destructive",
         onPress: () =>
-          void (async () => {
-            try {
-              await gym().gymDeleteSession(target.id);
-              stopRestEnd(target.id);
-              onBack();
-            } catch (caught) {
-              onError(formatBackendError(caught));
-            }
-          })(),
+          void run(async () => {
+            await gym().gymDeleteSession(target.id);
+            stopRestEnd(target.id);
+            onBack();
+          }, false),
       },
     ]);
   }
@@ -188,6 +172,7 @@ function SessionDetail({
           <Button
             size="$3"
             aria-label="Delete workout"
+            busy={busy}
             icon={<Trash2 size={16} color={colors.bad} />}
             onPress={() => deleteWorkout(session)}
           />
@@ -235,13 +220,16 @@ function SessionDetail({
           })}
       </YStack>
       <SetEditor
+        busy={busy}
         set={editing?.set ?? null}
         number={editing?.number ?? 0}
         onClose={() => setEditing(null)}
         onSave={(values) => {
           const set = editing?.set;
-          setEditing(null);
-          if (set) void run(() => gym().gymEditSet(set.id, values));
+          if (set)
+            void run(() => gym().gymEditSet(set.id, values)).then((saved) => {
+              if (saved) setEditing(null);
+            });
         }}
         onDelete={() => {
           const set = editing?.set;

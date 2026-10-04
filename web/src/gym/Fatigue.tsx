@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { H2, Spinner, Text, XStack, YStack } from "tamagui";
-import { Button } from "../tamagui.config";
+import { Button } from "./Button";
 import {
     fatigueColors,
     palette,
@@ -128,6 +128,7 @@ export function Fatigue({
                                             <XStack items="center" gap="$2">
                                                 <YStack flex={1}>
                                                     <Stepper
+                                                        busy={busy}
                                                         label={`Recovery days${muscle.recovery_days === muscle.default_recovery_days ? " (default)" : ""}`}
                                                         value={muscle.recovery_days}
                                                         step={0.5}
@@ -141,7 +142,7 @@ export function Fatigue({
                                                     muscle.default_recovery_days && (
                                                     <Button
                                                         size="$2"
-                                                        disabled={busy}
+                                                        busy={busy}
                                                         onPress={() =>
                                                             setDays(
                                                                 muscle,

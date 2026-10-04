@@ -1,5 +1,5 @@
 import { Minus, Plus, Search } from "lucide-react";
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useContext, useEffect, useId, useState, type ReactNode } from "react";
 import { Card, Dialog, H2, Label, Paragraph, ScrollView, Text, XStack, YStack } from "tamagui";
 import {
     fatigueColors,
@@ -15,8 +15,10 @@ import {
     type GymSetKind,
     type GymSetValues,
 } from "@clipper/shared";
-import { Button, Input } from "../tamagui.config";
-import { formatBackendError } from "../backend";
+import { Input } from "../tamagui.config";
+import { Button } from "./Button";
+export { useGymData, useGymChange } from "../gym-actions";
+import { GymError } from "./errors";
 
 export type ErrorHandler = (error: string | null) => void;
 
@@ -46,58 +48,6 @@ export function numberedSets(sets: GymSet[]): { set: GymSet; number: number }[] 
         numbers.set(set.kind, number);
         return { set, number };
     });
-}
-
-export function useGymData<T>(load: () => Promise<T>, state: unknown, onError: ErrorHandler) {
-    const [value, setValue] = useState<T | undefined>(undefined);
-    const [failed, setFailed] = useState(false);
-    const [version, setVersion] = useState(0);
-    const reload = useCallback(() => setVersion((current) => current + 1), []);
-    useEffect(() => {
-        let cancelled = false;
-        load().then(
-            (result) => {
-                if (cancelled) return;
-                setValue(result);
-                setFailed(false);
-            },
-            (caught: unknown) => {
-                if (cancelled) return;
-                setFailed(true);
-                onError(formatBackendError(caught));
-            },
-        );
-        return () => {
-            cancelled = true;
-        };
-    }, [load, state, version, onError]);
-    return { value, failed, reload };
-}
-
-export function useGymChange(reload: () => void, onError: ErrorHandler) {
-    const [busy, setBusy] = useState(false);
-    const busyRef = useRef(false);
-    const run = useCallback(
-        async (action: () => Promise<unknown>): Promise<boolean> => {
-            if (busyRef.current) return false;
-            busyRef.current = true;
-            setBusy(true);
-            onError(null);
-            try {
-                await action();
-                return true;
-            } catch (caught) {
-                onError(formatBackendError(caught));
-                return false;
-            } finally {
-                busyRef.current = false;
-                setBusy(false);
-                reload();
-            }
-        },
-        [reload, onError],
-    );
-    return { busy, run };
 }
 
 export function GymCard({
@@ -171,6 +121,7 @@ export function GymDialog({
     busy?: boolean;
     width?: number;
 }) {
+    const error = useContext(GymError);
     return (
         <Dialog
             modal
@@ -193,6 +144,11 @@ export function GymDialog({
                     style={{ overflowY: "auto" }}
                 >
                     <Dialog.Title size="$7">{title}</Dialog.Title>
+                    {error && (
+                        <Paragraph role="alert" color={palette.danger}>
+                            {error}
+                        </Paragraph>
+                    )}
                     {children}
                 </Dialog.Content>
             </Dialog.Portal>
@@ -223,14 +179,10 @@ export function ConfirmDialog({
         <GymDialog open={open} title={title} onClose={onCancel} busy={busy} width={440}>
             <Paragraph>{description}</Paragraph>
             <XStack gap="$2" justify="flex-end">
-                <Button disabled={busy} onPress={onCancel}>
+                <Button busy={busy} onPress={onCancel}>
                     Cancel
                 </Button>
-                <Button
-                    tone={destructive ? "danger" : "accent"}
-                    disabled={busy}
-                    onPress={onConfirm}
-                >
+                <Button tone={destructive ? "danger" : "accent"} busy={busy} onPress={onConfirm}>
                     {confirmLabel}
                 </Button>
             </XStack>
@@ -329,6 +281,7 @@ export function ReserveChips({
 }
 
 export function Stepper({
+    busy = false,
     label,
     value,
     onChange,
@@ -337,6 +290,7 @@ export function Stepper({
     max,
     format,
 }: {
+    busy?: boolean;
     label: string;
     value: number;
     onChange: (value: number) => void;
@@ -359,6 +313,7 @@ export function Stepper({
                 <Button
                     size="$2"
                     aria-label={`Less ${label}`}
+                    busy={busy}
                     icon={<Minus size={14} />}
                     onPress={() => change(-1)}
                 />
@@ -368,6 +323,7 @@ export function Stepper({
                 <Button
                     size="$2"
                     aria-label={`More ${label}`}
+                    busy={busy}
                     icon={<Plus size={14} />}
                     onPress={() => change(1)}
                 />
@@ -468,14 +424,14 @@ export function SetEditor({
                 onSubmit={() => onSave(setValues(draft))}
             />
             <XStack gap="$2" justify="space-between" flexWrap="wrap">
-                <Button tone="danger" disabled={busy} onPress={onDelete}>
+                <Button tone="danger" busy={busy} onPress={onDelete}>
                     Delete set
                 </Button>
                 <XStack gap="$2">
-                    <Button disabled={busy} onPress={onClose}>
+                    <Button busy={busy} onPress={onClose}>
                         Cancel
                     </Button>
-                    <Button tone="accent" disabled={busy} onPress={() => onSave(setValues(draft))}>
+                    <Button tone="accent" busy={busy} onPress={() => onSave(setValues(draft))}>
                         Save set
                     </Button>
                 </XStack>
@@ -485,12 +441,14 @@ export function SetEditor({
 }
 
 export function ExercisePicker({
+    busy = false,
     open,
     exercises,
     excluded,
     onPick,
     onClose,
 }: {
+    busy?: boolean;
     open: boolean;
     exercises: GymExercise[];
     excluded?: ReadonlySet<string>;
@@ -509,7 +467,7 @@ export function ExercisePicker({
             exercise.name.toLowerCase().includes(query),
     );
     return (
-        <GymDialog open={open} title="Pick an exercise" onClose={onClose}>
+        <GymDialog open={open} title="Pick an exercise" onClose={onClose} busy={busy}>
             <XStack items="center" gap="$2">
                 <Search size={18} />
                 <Input
@@ -530,6 +488,7 @@ export function ExercisePicker({
                             justify="flex-start"
                             chromeless
                             onPress={() => onPick(exercise)}
+                            busy={busy}
                         >
                             {exercise.name}
                         </Button>

@@ -1,12 +1,13 @@
-import { Button } from "../tamagui.config";
+import { Button } from "./Button";
 import { palette, fatigueColors } from "@clipper/shared";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AppState as NativeAppState } from "react-native";
 import { H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
 import { FatigueBand, MuscleGroup, type GymMuscleFatigue } from "@clipper/mobile-bridge";
 import { formatBackendError } from "../backend";
 import { gym } from "./gymClient";
 import { GymCard, Muted, Stepper } from "./GymUi";
+import { useGymChange } from "./actions";
 
 const bandLabels: Record<FatigueBand, string> = {
   [FatigueBand.Recovered]: "Recovered",
@@ -34,7 +35,6 @@ const groups: { group: MuscleGroup; label: string }[] = [
 export function Fatigue({ onError }: { onError: (error: string | null) => void }) {
   const [muscles, setMuscles] = useState<GymMuscleFatigue[] | null>(null);
   const [editing, setEditing] = useState(false);
-  const busyRef = useRef(false);
 
   const load = useCallback(async () => {
     try {
@@ -58,18 +58,9 @@ export function Fatigue({ onError }: { onError: (error: string | null) => void }
   }, [load]);
 
   async function setDays(muscle: GymMuscleFatigue, days: number) {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    onError(null);
-    try {
-      await gym().gymSetRecoveryDays(muscle.muscle, days);
-    } catch (caught) {
-      onError(formatBackendError(caught));
-    } finally {
-      busyRef.current = false;
-      await load();
-    }
+    await run(() => gym().gymSetRecoveryDays(muscle.muscle, days));
   }
+  const { busy, run } = useGymChange(load, onError);
 
   if (muscles === null) {
     return (
@@ -113,6 +104,7 @@ export function Fatigue({ onError }: { onError: (error: string | null) => void }
                     {editing && (
                       <YStack gap="$1">
                         <Stepper
+                          busy={busy}
                           label={`Recovery days${muscle.recoveryDays === muscle.defaultRecoveryDays ? " (default)" : ""}`}
                           value={muscle.recoveryDays}
                           step={0.5}
@@ -124,6 +116,7 @@ export function Fatigue({ onError }: { onError: (error: string | null) => void }
                         {muscle.recoveryDays !== muscle.defaultRecoveryDays && (
                           <Button
                             size="$2"
+                            busy={busy}
                             self="flex-end"
                             onPress={() => void setDays(muscle, muscle.defaultRecoveryDays)}
                           >

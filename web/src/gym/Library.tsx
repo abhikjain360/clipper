@@ -1,7 +1,8 @@
 import { ChevronDown, ChevronUp, Plus, Trash2 } from "lucide-react";
 import { useCallback, useState, type ReactNode } from "react";
 import { Label, ScrollView, Spinner, Switch, Text, XStack, YStack } from "tamagui";
-import { Button, Input } from "../tamagui.config";
+import { Input } from "../tamagui.config";
+import { Button } from "./Button";
 import {
     formatRestSeconds,
     palette,
@@ -222,10 +223,14 @@ export function Library({
                 onCancel={() => setDeletingTemplate(null)}
                 onConfirm={() => {
                     const id = deletingTemplate?.id;
-                    setDeletingTemplate(null);
                     if (id)
                         void run(() => backend.change({ change: "delete_template", id })).then(
-                            (deleted) => deleted && setTemplateDraft(null),
+                            (deleted) => {
+                                if (deleted) {
+                                    setDeletingTemplate(null);
+                                    setTemplateDraft(null);
+                                }
+                            },
                         );
                 }}
             />
@@ -361,12 +366,13 @@ function ExerciseEditor({
                         </Label>
                     </XStack>
                     <XStack gap="$2" justify="flex-end">
-                        <Button disabled={busy} onPress={onClose}>
+                        <Button busy={busy} onPress={onClose}>
                             Cancel
                         </Button>
                         <Button
                             tone="accent"
-                            disabled={busy || !draft.name.trim()}
+                            busy={busy}
+                            disabled={!draft.name.trim()}
                             onPress={() => onSave(draft)}
                         >
                             Save exercise
@@ -573,21 +579,20 @@ function TemplateEditor({
                     </XStack>
                     <XStack gap="$2" justify="space-between" flexWrap="wrap">
                         {draft.id ? (
-                            <Button tone="danger" disabled={busy} onPress={() => onDelete(draft)}>
+                            <Button tone="danger" busy={busy} onPress={() => onDelete(draft)}>
                                 Delete workout
                             </Button>
                         ) : (
                             <YStack />
                         )}
                         <XStack gap="$2">
-                            <Button disabled={busy} onPress={onClose}>
+                            <Button busy={busy} onPress={onClose}>
                                 Cancel
                             </Button>
                             <Button
                                 tone="accent"
-                                disabled={
-                                    busy || !draft.name.trim() || draft.exercises.length === 0
-                                }
+                                busy={busy}
+                                disabled={!draft.name.trim() || draft.exercises.length === 0}
                                 onPress={() => onSave(draft)}
                             >
                                 Save workout

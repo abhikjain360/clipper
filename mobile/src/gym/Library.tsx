@@ -1,7 +1,9 @@
-import { Button, Input } from "../tamagui.config";
+import { useGymChange } from "./actions";
+import { Input } from "../tamagui.config";
+import { Button } from "./Button";
 import { palette } from "@clipper/shared";
 import { ChevronDown, ChevronUp, Plus, Trash2 } from "lucide-react-native";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Alert } from "react-native";
 import { H2, ScrollView, Switch, Text, XStack, YStack } from "tamagui";
 import {
@@ -38,7 +40,6 @@ export function Library({ onError }: { onError: (error: string | null) => void }
   const [templates, setTemplates] = useState<GymTemplate[]>([]);
   const [exerciseDraft, setExerciseDraft] = useState<ExerciseDraft | null>(null);
   const [templateDraft, setTemplateDraft] = useState<TemplateDraft | null>(null);
-  const busyRef = useRef(false);
 
   const load = useCallback(async () => {
     try {
@@ -57,21 +58,7 @@ export function Library({ onError }: { onError: (error: string | null) => void }
     void load();
   }, [load]);
 
-  async function run(action: () => Promise<unknown>): Promise<boolean> {
-    if (busyRef.current) return false;
-    busyRef.current = true;
-    onError(null);
-    try {
-      await action();
-      return true;
-    } catch (caught) {
-      onError(formatBackendError(caught));
-      return false;
-    } finally {
-      busyRef.current = false;
-      await load();
-    }
-  }
+  const { busy, run } = useGymChange(load, onError);
 
   const names = new Map(exercises.map((exercise) => [exercise.id, exercise.name]));
   const active = exercises.filter((exercise) => !exercise.archived);
@@ -171,6 +158,7 @@ export function Library({ onError }: { onError: (error: string | null) => void }
       </YStack>
 
       <ExerciseEditor
+        busy={busy}
         draft={exerciseDraft}
         onChange={setExerciseDraft}
         onClose={() => setExerciseDraft(null)}
@@ -185,6 +173,7 @@ export function Library({ onError }: { onError: (error: string | null) => void }
         }
       />
       <TemplateEditor
+        busy={busy}
         draft={templateDraft}
         exercises={exercises}
         onChange={setTemplateDraft}
@@ -215,11 +204,13 @@ export function Library({ onError }: { onError: (error: string | null) => void }
 }
 
 function ExerciseEditor({
+  busy,
   draft,
   onChange,
   onClose,
   onSave,
 }: {
+  busy: boolean;
   draft: ExerciseDraft | null;
   onChange: (draft: ExerciseDraft) => void;
   onClose: () => void;
@@ -243,7 +234,12 @@ function ExerciseEditor({
   }
 
   return (
-    <SheetModal visible title={draft.id ? "Edit exercise" : "New exercise"} onClose={onClose}>
+    <SheetModal
+      visible
+      title={draft.id ? "Edit exercise" : "New exercise"}
+      onClose={onClose}
+      busy={busy}
+    >
       <Input
         value={draft.name}
         onChangeText={(name) => onChange({ ...draft, name })}
@@ -283,7 +279,13 @@ function ExerciseEditor({
           <Switch.Thumb activeStyle={{ bg: palette.pageFill }} />
         </Switch>
       </XStack>
-      <Button tone="accent" size="$5" disabled={!draft.name.trim()} onPress={() => onSave(draft)}>
+      <Button
+        tone="accent"
+        size="$5"
+        busy={busy}
+        disabled={!draft.name.trim()}
+        onPress={() => onSave(draft)}
+      >
         Save exercise
       </Button>
     </SheetModal>
@@ -291,6 +293,7 @@ function ExerciseEditor({
 }
 
 function TemplateEditor({
+  busy,
   draft,
   exercises,
   onChange,
@@ -298,6 +301,7 @@ function TemplateEditor({
   onSave,
   onDelete,
 }: {
+  busy: boolean;
   draft: TemplateDraft | null;
   exercises: GymExercise[];
   onChange: (draft: TemplateDraft) => void;
@@ -350,7 +354,12 @@ function TemplateEditor({
   }
 
   return (
-    <SheetModal visible title={draft.id ? "Edit workout" : "New workout"} onClose={onClose}>
+    <SheetModal
+      visible
+      title={draft.id ? "Edit workout" : "New workout"}
+      onClose={onClose}
+      busy={busy}
+    >
       <Input
         value={draft.name}
         onChangeText={(name) => onChange({ ...draft, name })}
@@ -455,13 +464,14 @@ function TemplateEditor({
       <Button
         tone="accent"
         size="$5"
+        busy={busy}
         disabled={!draft.name.trim() || draft.exercises.length === 0}
         onPress={() => onSave(draft)}
       >
         Save workout
       </Button>
       {draft.id && (
-        <Button tone="danger" onPress={() => onDelete(draft)}>
+        <Button tone="danger" busy={busy} onPress={() => onDelete(draft)}>
           Delete workout
         </Button>
       )}

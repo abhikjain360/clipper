@@ -1,8 +1,9 @@
-import { Button } from "../tamagui.config";
+import { useGymChange } from "./actions";
+import { Button } from "./Button";
 import { palette } from "@clipper/shared";
 import { ChevronDown, ChevronUp, Play, Plus, RotateCcw, SkipForward } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Keyboard, AppState as NativeAppState } from "react-native";
+import { Alert, AppState as NativeAppState } from "react-native";
 import { H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
 import {
   SetKind,
@@ -41,13 +42,11 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
   const [templates, setTemplates] = useState<GymTemplate[]>([]);
   const [exercises, setExercises] = useState<GymExercise[]>([]);
   const [now, setNow] = useState(Date.now);
-  const [busy, setBusy] = useState(false);
   const [picking, setPicking] = useState(false);
   const [editing, setEditing] = useState<{ set: GymSet; number: number } | null>(null);
   const [weight, setWeight] = useState("");
   const [reps, setReps] = useState("");
   const [reserve, setReserve] = useState<number | undefined>(undefined);
-  const busyRef = useRef(false);
   const loadGeneration = useRef(0);
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -112,22 +111,7 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
     if (view !== undefined) armRestEnd(view);
   }, [view]);
 
-  async function run(action: () => Promise<unknown>) {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    setBusy(true);
-    onError(null);
-    Keyboard.dismiss();
-    try {
-      await action();
-    } catch (caught) {
-      onError(formatBackendError(caught));
-    } finally {
-      await load();
-      busyRef.current = false;
-      setBusy(false);
-    }
-  }
+  const { busy, run } = useGymChange(load, onError);
 
   function completeSet() {
     if (!view || !current || nextKind === undefined) return;
@@ -212,7 +196,7 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
             </H2>
             <Muted>{`Started ${formatTime(session.startedAtMillis)} · ${formatMinutes(now - session.startedAtMillis)}`}</Muted>
           </YStack>
-          <Button disabled={busy} onPress={() => finish(session)}>
+          <Button busy={busy} onPress={() => finish(session)}>
             Finish
           </Button>
         </XStack>
@@ -258,7 +242,7 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
               <Button
                 tone="success"
                 size="$6"
-                disabled={busy}
+                busy={busy}
                 icon={busy ? <Spinner /> : undefined}
                 onPress={completeSet}
               >
@@ -268,7 +252,7 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
                 {countOfKind(current.sets, SetKind.Working) === 0 && (
                   <Button
                     size="$3"
-                    disabled={busy}
+                    busy={busy}
                     onPress={() =>
                       void run(() => gym().gymAddWarmUpSet(session.id, current.exerciseId))
                     }
@@ -278,7 +262,7 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
                 )}
                 <Button
                   size="$3"
-                  disabled={busy}
+                  busy={busy}
                   onPress={() =>
                     void run(() => gym().gymAddWorkingSet(session.id, current.exerciseId))
                   }
@@ -287,7 +271,7 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
                 </Button>
                 <Button
                   size="$3"
-                  disabled={busy}
+                  busy={busy}
                   onPress={() =>
                     void run(() => gym().gymSkipExercise(session.id, current.exerciseId, true))
                   }
@@ -319,7 +303,7 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
             <Button
               size="$3"
               icon={<Plus size={16} />}
-              disabled={busy}
+              busy={busy}
               onPress={() => setPicking(true)}
             >
               Add exercise
@@ -361,22 +345,27 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
 
       <ExercisePicker
         visible={picking}
+        busy={busy}
         exercises={exercises}
         excluded={planIds}
         onClose={() => setPicking(false)}
         onPick={(exercise) => {
-          setPicking(false);
-          void run(() => gym().gymAddExercise(session.id, exercise.id));
+          void run(() => gym().gymAddExercise(session.id, exercise.id)).then((saved) => {
+            if (saved) setPicking(false);
+          });
         }}
       />
       <SetEditor
+        busy={busy}
         set={editing?.set ?? null}
         number={editing?.number ?? 0}
         onClose={() => setEditing(null)}
         onSave={(values) => {
           const set = editing?.set;
-          setEditing(null);
-          if (set) void run(() => gym().gymEditSet(set.id, values));
+          if (set)
+            void run(() => gym().gymEditSet(set.id, values)).then((saved) => {
+              if (saved) setEditing(null);
+            });
         }}
         onDelete={() => {
           const set = editing?.set;
@@ -427,7 +416,7 @@ function StartWorkout({
                 tone="accent"
                 size="$5"
                 icon={<Play size={18} />}
-                disabled={busy}
+                busy={busy}
                 onPress={() => onStart(template.id)}
               >
                 {`Start ${template.name}`}
@@ -435,7 +424,7 @@ function StartWorkout({
             </YStack>
           </GymCard>
         ))}
-        <Button size="$5" disabled={busy} onPress={() => onStart(undefined)}>
+        <Button size="$5" busy={busy} onPress={() => onStart(undefined)}>
           Start an empty workout
         </Button>
       </YStack>
@@ -624,7 +613,7 @@ function PlanRow({
               size="$3"
               aria-label={`Move ${exercise.name} up`}
               icon={<ChevronUp size={18} />}
-              disabled={busy}
+              busy={busy}
               onPress={() => onMove(moveUpTo)}
             />
           )}
@@ -633,7 +622,7 @@ function PlanRow({
               size="$3"
               aria-label={`Move ${exercise.name} down`}
               icon={<ChevronDown size={18} />}
-              disabled={busy}
+              busy={busy}
               onPress={() => onMove(moveDownTo)}
             />
           )}
@@ -650,18 +639,18 @@ function PlanRow({
             {exercise.planned && (
               <XStack gap="$2" flexWrap="wrap">
                 {canDoNow && (
-                  <Button size="$3" icon={<Play size={14} />} disabled={busy} onPress={onDoNow}>
+                  <Button size="$3" icon={<Play size={14} />} busy={busy} onPress={onDoNow}>
                     Do now
                   </Button>
                 )}
-                <Button size="$3" icon={<Plus size={14} />} disabled={busy} onPress={onAddSet}>
+                <Button size="$3" icon={<Plus size={14} />} busy={busy} onPress={onAddSet}>
                   Add set
                 </Button>
                 {(exercise.skipped || !exercise.done) && (
                   <Button
                     size="$3"
                     icon={exercise.skipped ? <RotateCcw size={14} /> : <SkipForward size={14} />}
-                    disabled={busy}
+                    busy={busy}
                     onPress={() => onSkip(!exercise.skipped)}
                   >
                     {exercise.skipped ? "Unskip" : "Skip"}

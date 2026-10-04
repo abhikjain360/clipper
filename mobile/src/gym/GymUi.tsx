@@ -1,13 +1,15 @@
-import { Button, Input } from "../tamagui.config";
+import { Input } from "../tamagui.config";
+import { Button } from "./Button";
 import { Minus, Plus, Search, X } from "lucide-react-native";
-import { useEffect, useState, type ReactNode } from "react";
-import { Modal, TextInput } from "react-native";
+import { useContext, useEffect, useState, type ReactNode } from "react";
+import { KeyboardAvoidingView, Modal, TextInput } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Svg, { Circle, Line, Polyline, Text as SvgText } from "react-native-svg";
 import { Card, H2, Paragraph, ScrollView, Text, XStack, YStack } from "tamagui";
 import type { GymExercise, GymSet, GymSetValues } from "@clipper/mobile-bridge";
 import { fatigueColors, formatKg, palette, parseCount, parseWeight } from "@clipper/shared";
 import { setLabel } from "./gymClient";
+import { GymError } from "./errors";
 
 export const colors = {
   background: palette.pageFill,
@@ -140,6 +142,7 @@ export function ReserveChips({
 }
 
 export function Stepper({
+  busy = false,
   label,
   value,
   onChange,
@@ -148,6 +151,7 @@ export function Stepper({
   max,
   format,
 }: {
+  busy?: boolean;
   label: string;
   value: number;
   onChange: (value: number) => void;
@@ -169,6 +173,7 @@ export function Stepper({
       <XStack items="center" gap="$2">
         <Button
           size="$3"
+          busy={busy}
           aria-label={`Less ${label}`}
           icon={<Minus size={16} />}
           onPress={() => change(-1)}
@@ -178,6 +183,7 @@ export function Stepper({
         </Text>
         <Button
           size="$3"
+          busy={busy}
           aria-label={`More ${label}`}
           icon={<Plus size={16} />}
           onPress={() => change(1)}
@@ -192,26 +198,48 @@ export function SheetModal({
   title,
   onClose,
   children,
+  busy = false,
 }: {
   visible: boolean;
   title: string;
   onClose: () => void;
   children: ReactNode;
+  busy?: boolean;
 }) {
+  const error = useContext(GymError);
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+    <Modal
+      visible={visible}
+      animationType="slide"
+      onRequestClose={() => {
+        if (!busy) onClose();
+      }}
+    >
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
         <XStack items="center" justify="space-between" gap="$2" px="$3" py="$2" borderWidth={0}>
           <H2 size="$5" flex={1} numberOfLines={1}>
             {title}
           </H2>
-          <Button size="$3" aria-label="Close" icon={<X size={16} />} onPress={onClose} />
+          <Button
+            size="$3"
+            aria-label="Close"
+            icon={<X size={16} />}
+            disabled={busy}
+            onPress={onClose}
+          />
         </XStack>
-        <ScrollView flex={1} keyboardShouldPersistTaps="always">
-          <YStack gap="$3" p="$3" pb="$8">
-            {children}
-          </YStack>
-        </ScrollView>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
+          <ScrollView flex={1} keyboardShouldPersistTaps="always">
+            <YStack gap="$3" p="$3" pb="$8">
+              {error && (
+                <Paragraph accessibilityRole="alert" color={colors.bad}>
+                  {error}
+                </Paragraph>
+              )}
+              {children}
+            </YStack>
+          </ScrollView>
+        </KeyboardAvoidingView>
       </SafeAreaView>
     </Modal>
   );
@@ -223,12 +251,14 @@ export function ExercisePicker({
   excluded,
   onPick,
   onClose,
+  busy = false,
 }: {
   visible: boolean;
   exercises: GymExercise[];
   excluded?: ReadonlySet<string>;
   onPick: (exercise: GymExercise) => void;
   onClose: () => void;
+  busy?: boolean;
 }) {
   const [search, setSearch] = useState("");
   useEffect(() => {
@@ -242,14 +272,20 @@ export function ExercisePicker({
       exercise.name.toLowerCase().includes(query),
   );
   return (
-    <SheetModal visible={visible} title="Pick an exercise" onClose={onClose}>
+    <SheetModal visible={visible} title="Pick an exercise" onClose={onClose} busy={busy}>
       <XStack items="center" gap="$2">
         <Search size={18} color={colors.muted} />
         <Input flex={1} value={search} onChangeText={setSearch} placeholder="Search" />
       </XStack>
       {shown.length === 0 && <Muted>No matching exercises</Muted>}
       {shown.map((exercise) => (
-        <Button key={exercise.id} justify="flex-start" size="$5" onPress={() => onPick(exercise)}>
+        <Button
+          key={exercise.id}
+          justify="flex-start"
+          size="$5"
+          busy={busy}
+          onPress={() => onPick(exercise)}
+        >
           {exercise.name}
         </Button>
       ))}
@@ -263,12 +299,14 @@ export function SetEditor({
   onSave,
   onDelete,
   onClose,
+  busy = false,
 }: {
   set: GymSet | null;
   number: number;
   onSave: (values: GymSetValues) => void;
   onDelete: () => void;
   onClose: () => void;
+  busy?: boolean;
 }) {
   const [weight, setWeight] = useState("");
   const [reps, setReps] = useState("");
@@ -284,6 +322,7 @@ export function SetEditor({
       visible={set !== null}
       title={set ? `Edit ${setLabel(set.kind, number).toLowerCase()}` : ""}
       onClose={onClose}
+      busy={busy}
     >
       <NumberEntry label="Weight (kg)" value={weight} onChange={setWeight} step={2.5} decimal />
       <NumberEntry label="Reps" value={reps} onChange={setReps} step={1} />
@@ -291,13 +330,14 @@ export function SetEditor({
       <Button
         tone="accent"
         size="$5"
+        busy={busy}
         onPress={() =>
           onSave({ weightKg: parseWeight(weight), reps: parseCount(reps), repsInReserve: reserve })
         }
       >
         Save set
       </Button>
-      <Button tone="danger" size="$4" onPress={onDelete}>
+      <Button tone="danger" size="$4" busy={busy} onPress={onDelete}>
         Delete set
       </Button>
     </SheetModal>
