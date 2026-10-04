@@ -3,9 +3,10 @@
 //! A batch becomes active only once it is complete. Cleanup reclaims imported
 //! data only, never a plan or a recording the user wrote.
 
-use clipper_schedule::ingest::CalendarImport;
+use clipper_schedule::ingest::{CalendarImport, RetiredImport};
 
 use super::*;
+use crate::api_client::CalendarImportError;
 
 type Records = [(String, ScheduleRecord, LocalHead)];
 
@@ -43,10 +44,11 @@ impl SyncEngine {
             parent_hash: crypto::object_envelope_parent_hash(&object.envelope.body)?,
         };
         if head.revision != 1 {
-            return Err(ClientError::InvalidArgument(
+            return Err(CalendarImportError::InvalidFeed(
                 "The original calendar import was modified; refusing to reinterpret its events"
                     .into(),
-            ));
+            )
+            .into());
         }
         {
             let cache = self.import_rules.lock().await;
@@ -93,10 +95,9 @@ impl SyncEngine {
             &object.envelope.body,
             payload.id,
         )?;
-        let text = std::str::from_utf8(&plaintext)
-            .map_err(|_| ClientError::InvalidArgument("Original import is not UTF-8".into()))?;
+        let text = std::str::from_utf8(&plaintext).map_err(|_| CalendarImportError::InvalidText)?;
         let rules = clipper_schedule::parse_imported_recurrence_rules(text, *import)
-            .map_err(|error| ClientError::InvalidArgument(format!("Original import: {error}")))?;
+            .map_err(ClientError::CalendarFeed)?;
         let engine = RecurrenceEngine::with_imported_rules(rules);
         #[cfg(not(target_family = "wasm"))]
         self.local_store
@@ -182,20 +183,9 @@ impl SyncEngine {
             EnvelopePlacement::Revise(head),
         )
         .await?;
-        let (saved, new_head) = self.calendar_source(id).await?;
-        if saved != *source || new_head.revision != head.revision + 1 {
-            return Err(ClientError::InvalidArgument(
-                "Calendar changed concurrently; retry".into(),
-            ));
-        }
-        Ok(new_head)
+        self.local_head(id).await
     }
 
-    /// Replaces the source's entire imported view.
-    ///
-    /// A parse or staging failure leaves the previous view active. Each batch
-    /// gets its own storage ids, so a recording's reference is never pointed
-    /// at a replacement event.
     pub async fn sync_calendar_source(&self, object_id: &str) -> Result<IngestReport, ClientError> {
         self.run_work(
             Some("Syncing a calendar".into()),
@@ -210,120 +200,218 @@ impl SyncEngine {
     ) -> Result<IngestReport, ClientError> {
         self.set_calendar_work_label("Syncing", object_id).await;
         let _write = self.calendar_write.lock().await;
+        self.read_calendar_source(object_id).await?;
         self.cleanup_calendar_imports(object_id).await?;
-        let (mut source, mut head) = self.calendar_source(object_id).await?;
+        let (source, _) = self.calendar_source(object_id).await?;
+        for batch in source.pending_imports {
+            let result = async {
+                let bytes = self
+                    .download_file_bytes(&batch.object_id.to_string())
+                    .await?;
+                let text =
+                    String::from_utf8(bytes).map_err(|_| CalendarImportError::InvalidText)?;
+                self.finish_calendar_import(object_id, &text, &batch).await
+            }
+            .await;
+            if let Err(error) = result {
+                if !matches!(
+                    error,
+                    ClientError::CalendarFeed(_)
+                        | ClientError::CalendarImport(_)
+                        | ClientError::Crypto(_)
+                        | ClientError::PayloadTooLarge { .. }
+                        | ClientError::Api {
+                            status: 404 | 413,
+                            ..
+                        }
+                ) {
+                    return Err(error);
+                }
+                warn!(source_id = %object_id, batch_id = %batch.object_id, %error, "Retiring unreadable calendar import");
+                self.retire_pending_import(object_id, &batch).await?;
+            }
+        }
+        self.cleanup_calendar_imports(object_id).await?;
+        let (source, _) = self.read_calendar_source(object_id).await?;
         let epoch = self.history_epoch.load(Ordering::SeqCst);
-        let text = if let Some(batch) = &source.pending_import {
-            String::from_utf8(
-                self.download_file_bytes(&batch.object_id.to_string())
-                    .await?,
-            )
-            .map_err(|_| ClientError::InvalidArgument("Original import is not UTF-8".into()))?
-        } else {
-            let SourceKind::Ics { url } = &source.kind;
-            fetch_calendar_feed(url).await?
-        };
-        let probe_id: ObjectId = uuid::Uuid::nil().into();
-        let outcome = parse_calendar_feed(&text, source.id, probe_id)?;
-        let mut uids = HashSet::new();
-        if !outcome.events.iter().all(|event| uids.insert(&event.uid)) {
-            return Err(ClientError::InvalidArgument(
-                "Import contains duplicate event UIDs; previous calendar was kept".into(),
-            ));
-        }
-        if !outcome.skipped.is_empty() {
-            return Err(ClientError::InvalidArgument(format!(
-                "Import was not replaced: {} event(s) could not be read. {}",
-                outcome.skipped.len(),
-                outcome
-                    .skipped
-                    .iter()
-                    .take(5)
-                    .map(|entry| entry.reason.as_str())
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )));
-        }
+        let SourceKind::Ics { url } = &source.kind;
+        let text = fetch_calendar_feed(url).await?;
+        let fetched_at = chrono::Utc::now();
+        let visible = self
+            .local_store
+            .record_calendar_check(object_id, fetched_at, RECENT_CLIPBOARD_LIMIT)
+            .await?;
+        self.publish_visible_state(visible).await;
+        let outcome = validated_feed(&text, &source)?;
+        let content_hash = feed_hash(&outcome)?;
+        let (source, _) = self.read_calendar_source(object_id).await?;
         if self.history_epoch.load(Ordering::SeqCst) != epoch {
             return Err(ClientError::NotAuthenticated);
         }
-        if self.calendar_source(object_id).await?.1 != head {
-            return Err(ClientError::InvalidArgument(
-                "Calendar changed during refresh; retry".into(),
-            ));
+        if source
+            .active_import
+            .as_ref()
+            .is_some_and(|batch| batch.content_hash == content_hash)
+            && self
+                .local_store
+                .import_file_object(
+                    &source
+                        .active_import
+                        .as_ref()
+                        .expect("active import")
+                        .object_id
+                        .to_string(),
+                )
+                .await?
+                .is_some()
+        {
+            return Ok(IngestReport {
+                unchanged: outcome.events.len() as u32,
+                feed_unchanged: true,
+                ..Default::default()
+            });
         }
-        // Size-check the event records and the largest source manifest before
-        // uploading anything. A snapshot id is fixed width, so a probe id
-        // gives the same bound as the real one.
+        let batch = self
+            .stage_calendar_import(object_id, &text, fetched_at)
+            .await?;
+        self.finish_calendar_import(object_id, &text, &batch).await
+    }
+
+    async fn retire_pending_import(
+        &self,
+        id: &str,
+        batch: &CalendarImport,
+    ) -> Result<(), ClientError> {
+        loop {
+            let (mut source, head) = self.read_calendar_source(id).await?;
+            if !source
+                .pending_imports
+                .iter()
+                .any(|pending| pending.object_id == batch.object_id)
+            {
+                return Ok(());
+            }
+            source
+                .pending_imports
+                .retain(|pending| pending.object_id != batch.object_id);
+            if source
+                .active_import
+                .as_ref()
+                .is_none_or(|active| active.object_id != batch.object_id)
+                && !source
+                    .retired_imports
+                    .iter()
+                    .any(|retired| retired.object_id == batch.object_id)
+            {
+                source.retired_imports.push(batch.clone().into());
+            }
+            match self.save_calendar_source(id, &source, head).await {
+                Ok(_) => return Ok(()),
+                Err(ClientError::Api { status: 409, .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    pub(super) async fn stage_calendar_import(
+        &self,
+        object_id: &str,
+        text: &str,
+        fetched_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CalendarImport, ClientError> {
+        let (mut source, mut head) = self.read_calendar_source(object_id).await?;
+        let outcome = validated_feed(text, &source)?;
+        let content_hash = feed_hash(&outcome)?;
+        let SourceKind::Ics { url } = &source.kind;
+        source.owner_email = url::Url::parse(url).ok().and_then(|url| owner_email(&url));
+        let probe_id: ObjectId = uuid::Uuid::nil().into();
         for event in &outcome.events {
-            let mut event = event.clone();
-            event.import = Some(probe_id);
-            check_record_size(&ScheduleRecord::Ingested(Box::new(event)))?;
+            check_record_size(&ScheduleRecord::Ingested(Box::new(event.clone())))?;
         }
         let probe = CalendarImport {
             object_id: probe_id,
-            fetched_at: chrono::Utc::now(),
+            fetched_at,
             events: vec![probe_id; outcome.events.len()],
+            content_hash: content_hash.clone(),
         };
         let mut probe_source = source.clone();
-        probe_source.pending_import = Some(probe.clone());
+        probe_source.pending_imports.push(probe.clone());
         check_record_size(&ScheduleRecord::Source(Box::new(probe_source.clone())))?;
+        probe_source.pending_imports.pop();
         if let Some(old) = probe_source.active_import.replace(probe) {
-            probe_source.retired_imports.push(old);
+            probe_source.retired_imports.push(old.into());
         }
-        probe_source.pending_import = None;
         check_record_size(&ScheduleRecord::Source(Box::new(probe_source)))?;
-
-        let batch = if let Some(batch) = source.pending_import.clone() {
-            batch
-        } else {
-            let fetched_at = chrono::Utc::now();
-            let raw_id = self
-                .upload_file_bytes(
-                    &format!(
-                        "calendar-import-{}-{}.ics",
-                        source.id,
-                        fetched_at.timestamp_millis()
-                    ),
-                    Some("text/calendar"),
-                    text.as_bytes(),
-                )
-                .await?;
-            let snapshot_uuid: uuid::Uuid =
-                raw_id.parse().map_err(|source| ClientError::InvalidId {
-                    kind: "import id",
-                    source,
-                })?;
-            let batch = CalendarImport {
-                object_id: snapshot_uuid.into(),
-                fetched_at,
-                events: outcome
-                    .events
-                    .iter()
-                    .map(|event| uuid::Uuid::new_v5(&snapshot_uuid, event.uid.as_bytes()).into())
-                    .collect(),
-            };
-            source.pending_import = Some(batch.clone());
-            match self.save_calendar_source(object_id, &source, head).await {
-                Ok(saved) => head = saved,
-                Err(error) => {
-                    if matches!(error, ClientError::Api { status: 409, .. })
-                        && let Err(cleanup_error) = self
-                            .purge_import_object(
-                                &raw_id,
-                                ObjectKind::File,
-                                source.id,
-                                batch.object_id,
-                            )
-                            .await
-                    {
-                        warn!(object_id = %raw_id, "Failed to remove rejected calendar upload: {cleanup_error}");
-                    }
-                    return Err(error);
-                }
-            }
-            batch
+        let raw_id = self
+            .upload_file_bytes(
+                &format!(
+                    "calendar-import-{}-{}.ics",
+                    source.id,
+                    fetched_at.timestamp_millis()
+                ),
+                Some("text/calendar"),
+                text.as_bytes(),
+            )
+            .await?;
+        let snapshot_uuid: uuid::Uuid =
+            raw_id.parse().map_err(|source| ClientError::InvalidId {
+                kind: "import id",
+                source,
+            })?;
+        let batch = CalendarImport {
+            object_id: snapshot_uuid.into(),
+            fetched_at,
+            events: outcome
+                .events
+                .iter()
+                .map(|event| uuid::Uuid::new_v5(&snapshot_uuid, event.uid.as_bytes()).into())
+                .collect(),
+            content_hash,
         };
+        loop {
+            if source
+                .pending_imports
+                .iter()
+                .any(|pending| pending.object_id == batch.object_id)
+            {
+                break;
+            }
+            let SourceKind::Ics { url } = &source.kind;
+            source.owner_email = url::Url::parse(url).ok().and_then(|url| owner_email(&url));
+            source.pending_imports.push(batch.clone());
+            match self.save_calendar_source(object_id, &source, head).await {
+                Ok(_) => break,
+                Err(ClientError::Api { status: 409, .. }) => {
+                    (source, head) = self.read_calendar_source(object_id).await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(batch)
+    }
+
+    pub(super) async fn finish_calendar_import(
+        &self,
+        object_id: &str,
+        text: &str,
+        batch: &CalendarImport,
+    ) -> Result<IngestReport, ClientError> {
+        let (source, _) = self.read_calendar_source(object_id).await?;
+        if !source
+            .pending_imports
+            .iter()
+            .any(|pending| pending == batch)
+        {
+            return Ok(IngestReport {
+                superseded: source.active_import.as_ref() != Some(batch),
+                ..Default::default()
+            });
+        }
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
+        let outcome = validated_feed(text, &source)?;
+        if feed_hash(&outcome)? != batch.content_hash {
+            return Err(CalendarImportError::FeedChanged.into());
+        }
         let snapshot_id = batch.object_id;
         let snapshot_uuid: uuid::Uuid = snapshot_id.into();
         let events: Vec<_> = outcome
@@ -340,89 +428,186 @@ impl SyncEngine {
             })
             .collect();
         if events.iter().map(|(id, _)| *id).collect::<Vec<_>>() != batch.events {
-            return Err(ClientError::InvalidArgument(
-                "Pending import does not match its original feed".into(),
-            ));
+            return Err(CalendarImportError::FeedChanged.into());
         }
-        let records = self.local_store.schedule_records_with_heads().await?;
         for (id, event) in &events {
+            check_record_size(&ScheduleRecord::Ingested(Box::new(event.clone())))?;
             if self.history_epoch.load(Ordering::SeqCst) != epoch {
                 return Err(ClientError::NotAuthenticated);
             }
-            if let Some((_, record, _)) = records
-                .iter()
-                .find(|(object_id, _, _)| object_id == &id.to_string())
-            {
-                if record.as_ingested() != Some(event) {
-                    return Err(ClientError::InvalidArgument(
-                        "Staged event differs from its original import".into(),
-                    ));
-                }
-                continue;
-            }
-            if let Some(current) = self.load_import_event(&id.to_string()).await? {
-                if current.as_ingested() != Some(event) {
-                    return Err(ClientError::InvalidArgument(
-                        "Staged event differs from its original import".into(),
-                    ));
-                }
-            } else if let Err(error) = self
-                .write_schedule_record(
-                    &id.to_string(),
-                    ScheduleRecord::Ingested(Box::new(event.clone())),
-                    EnvelopePlacement::Create,
-                )
-                .await
-            {
-                // Another device can resume the same batch. Accept its write
-                // only after authenticating the event and finding it
-                // identical.
-                if !matches!(&error, ClientError::Api { status: 409, .. })
-                    || self
-                        .load_import_event(&id.to_string())
-                        .await?
-                        .as_ref()
-                        .and_then(|record| record.as_ingested())
-                        != Some(event)
+            if let Err(error) = self.save_import_event(id, event).await {
+                let (current, _) = self.read_calendar_source(object_id).await?;
+                if current
+                    .pending_imports
+                    .iter()
+                    .any(|pending| pending == batch)
+                    || current.active_import.as_ref() == Some(batch)
                 {
                     return Err(error);
                 }
+                break;
             }
         }
-        if self.history_epoch.load(Ordering::SeqCst) != epoch {
-            return Err(ClientError::NotAuthenticated);
-        }
-        // Cache the snapshot before publishing a batch whose imported rules
-        // need it. One resolver covers the whole batch.
         if let Some((_, event)) = events.iter().find(|(_, event)| {
             matches!(
                 event.recurrence,
                 clipper_schedule::Recurrence::Imported { .. }
             )
-        }) {
-            self.recurrence_engine(&event.recurrence).await?;
+        }) && let Err(error) = self.recurrence_engine(&event.recurrence).await
+        {
+            let (current, _) = self.read_calendar_source(object_id).await?;
+            if current
+                .pending_imports
+                .iter()
+                .any(|pending| pending == batch)
+                || current.active_import.as_ref() == Some(batch)
+            {
+                return Err(error);
+            }
         }
-        source.pending_import = None;
-        let previous = source.active_import.replace(batch);
-        let removed = previous.as_ref().map_or(0, |entry| entry.events.len());
-        if let Some(previous) = previous {
-            source.retired_imports.push(previous);
+        let (mut source, mut head) = self.read_calendar_source(object_id).await?;
+        let mut report;
+        loop {
+            if self.history_epoch.load(Ordering::SeqCst) != epoch {
+                return Err(ClientError::NotAuthenticated);
+            }
+            if !source
+                .pending_imports
+                .iter()
+                .any(|pending| pending == batch)
+            {
+                report = IngestReport {
+                    superseded: source.active_import.as_ref() != Some(batch),
+                    ..Default::default()
+                };
+                if !report.superseded
+                    || source
+                        .retired_imports
+                        .iter()
+                        .any(|retired| retired.object_id == batch.object_id)
+                {
+                    break;
+                }
+                source.retired_imports.push(batch.clone().into());
+            } else {
+                source
+                    .pending_imports
+                    .retain(|pending| pending.object_id != batch.object_id);
+                let latest = chrono::Utc::now() + chrono::TimeDelta::minutes(5);
+                let loses = batch.fetched_at > latest
+                    || source.active_import.as_ref().is_some_and(|active| {
+                        active.fetched_at <= latest
+                            && (active.fetched_at, uuid::Uuid::from(active.object_id))
+                                >= (batch.fetched_at, uuid::Uuid::from(batch.object_id))
+                    });
+                report = IngestReport {
+                    superseded: loses,
+                    ..Default::default()
+                };
+                if loses {
+                    source.retired_imports.push(batch.clone().into());
+                } else {
+                    report.added = events.len() as u32;
+                    if let Some(previous) = source.active_import.replace(batch.clone()) {
+                        report.tombstoned = previous.events.len() as u32;
+                        source.retired_imports.push(previous.into());
+                    }
+                }
+            }
+            match self.save_calendar_source(object_id, &source, head).await {
+                Ok(_) => break,
+                Err(ClientError::Api { status: 409, .. }) => {
+                    (source, head) = self.read_calendar_source(object_id).await?;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        self.save_calendar_source(object_id, &source, head).await?;
-        let mut report = IngestReport {
-            added: events.len() as u32,
-            tombstoned: removed as u32,
-            ..Default::default()
-        };
         if let Err(error) = self.cleanup_calendar_imports(object_id).await {
-            report.skipped.push(format!(
-                "New import is active; previous import cleanup remains pending: {error}"
-            ));
+            report
+                .skipped
+                .push(format!("Calendar import cleanup remains pending: {error}"));
         }
         Ok(report)
     }
 
+    async fn save_import_event(
+        &self,
+        id: &ObjectId,
+        event: &IngestedEvent,
+    ) -> Result<(), ClientError> {
+        if let Some(current) = self.load_import_event(&id.to_string()).await? {
+            if current.as_ingested() != Some(event) {
+                return Err(CalendarImportError::EventChanged.into());
+            }
+        } else if let Err(error) = self
+            .write_schedule_record(
+                &id.to_string(),
+                ScheduleRecord::Ingested(Box::new(event.clone())),
+                EnvelopePlacement::Create,
+            )
+            .await
+        {
+            if matches!(&error, ClientError::Api { status: 409, .. })
+                && let Some(current) = self.load_import_event(&id.to_string()).await?
+            {
+                if current.as_ingested() == Some(event) {
+                    return Ok(());
+                }
+                return Err(CalendarImportError::EventChanged.into());
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn read_calendar_source(
+        &self,
+        id: &str,
+    ) -> Result<(CalendarSource, LocalHead), ClientError> {
+        self.load_calendar_record(id, true)
+            .await?
+            .ok_or_else(|| ClientError::ItemNotFound { id: id.into() })?;
+        self.calendar_source(id).await
+    }
+
+    pub async fn set_calendar_source_alarms(
+        &self,
+        id: &str,
+        alarms_on: bool,
+    ) -> Result<(), ClientError> {
+        self.run_work(None, self.set_calendar_source_alarms_inner(id, alarms_on))
+            .await
+    }
+
+    async fn set_calendar_source_alarms_inner(
+        &self,
+        id: &str,
+        alarms_on: bool,
+    ) -> Result<(), ClientError> {
+        let _write = self.calendar_write.lock().await;
+        loop {
+            let (mut source, head) = self.read_calendar_source(id).await?;
+            if source.alarms_on == alarms_on {
+                return Ok(());
+            }
+            source.alarms_on = alarms_on;
+            match self.save_calendar_source(id, &source, head).await {
+                Ok(_) => return Ok(()),
+                Err(ClientError::Api { status: 409, .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     async fn load_import_event(&self, id: &str) -> Result<Option<ScheduleRecord>, ClientError> {
+        self.load_calendar_record(id, false).await
+    }
+
+    async fn load_calendar_record(
+        &self,
+        id: &str,
+        source: bool,
+    ) -> Result<Option<ScheduleRecord>, ClientError> {
         let item = match self.api.get_object(id).await {
             Ok(item) => item,
             Err(ClientError::Api { status: 404, .. }) => return Ok(None),
@@ -437,9 +622,9 @@ impl SyncEngine {
         let (record, encrypted) = self
             .decrypt_schedule_object_item(&self.api, &item, &key)
             .await?;
-        if record.as_ingested().is_none() {
+        if (source && record.as_source().is_none()) || (!source && record.as_ingested().is_none()) {
             return Err(ClientError::InvalidArgument(
-                "Import target is not an imported event".into(),
+                "Calendar object has the wrong record kind".into(),
             ));
         }
         let visible = self
@@ -483,22 +668,47 @@ impl SyncEngine {
             ));
         }
         if kind == ObjectKind::Schedule {
-            let pin = clipper_schedule::ObjectRevisionRef {
-                object_id: historical.id,
-                revision: 1,
-                body_hash: crypto::object_envelope_parent_hash(&historical.envelope.body)?,
-            };
-            let record = self.schedule_revision(pin).await?;
-            if !record.as_ingested().is_some_and(|event| {
-                event.source == source
-                    && event.import == Some(batch)
-                    && ObjectId::from(uuid::Uuid::new_v5(
-                        &uuid::Uuid::from(batch),
-                        event.uid.as_bytes(),
-                    ))
-                    .to_string()
-                        == id
-            }) {
+            let key = self.current_encryption_key().await?;
+            let meta = decrypt_schedule_meta(
+                &historical.meta_nonce,
+                &historical.meta_ciphertext,
+                &key,
+                &historical.envelope.body,
+            )?;
+            let payload = single_payload(&historical)?;
+            check_payload_ciphertext_size(payload, MAX_SCHEDULE_PAYLOAD_CIPHERTEXT_BYTES)?;
+            let ciphertext = self
+                .api
+                .download_object_revision_payload(
+                    id,
+                    1,
+                    &payload.id.to_string(),
+                    payload.ciphertext_size,
+                )
+                .await?;
+            verify_payload_hash(payload, &ciphertext)?;
+            let aad = crypto::object_payload_aad(&historical.envelope.body, payload.id)?;
+            let plaintext = crypto::decrypt(&key, &payload.nonce, &ciphertext, &aad)?;
+            #[derive(serde::Deserialize)]
+            struct ImportedEvent {
+                record: String,
+                source: SourceId,
+                import: ObjectId,
+                uid: String,
+            }
+            let event: ImportedEvent = serde_json::from_slice(&plaintext)
+                .map_err(|error| ClientError::InvalidArgument(error.to_string()))?;
+            if !(meta.record == ScheduleRecordKind::Ingested
+                && event.record == "ingested"
+                && event.source == source
+                && event.import == batch
+                && ObjectId::from(uuid::Uuid::new_v5(
+                    &uuid::Uuid::from(batch),
+                    event.uid.as_bytes(),
+                ))
+                .to_string()
+                    == id)
+            {
                 return Err(ClientError::InvalidArgument(
                     "Import cleanup target is not an event from this batch".into(),
                 ));
@@ -521,28 +731,58 @@ impl SyncEngine {
                 ));
             }
         }
-        match self.api.get_object(id).await {
-            Ok(item) => {
-                verify_object_list_item_envelope(&item)?;
-                if item.id.to_string() != id || item.kind != kind {
-                    return Err(ClientError::InvalidArgument(
-                        "Import cleanup identity mismatch".into(),
-                    ));
-                }
-                if kind == ObjectKind::Schedule {
-                    self.load_import_event(id).await?;
-                }
-                // Ordinary object sync hydrates file heads. A missing head
-                // defers cleanup rather than inventing a chain position.
-                let (seq, tombstone) = self.write_tombstone(id, kind).await?;
-                let visible = self
-                    .local_store
-                    .apply_local_tombstone(kind, id, seq, &tombstone, RECENT_CLIPBOARD_LIMIT)
-                    .await?;
-                self.publish_visible_state(visible).await;
+        loop {
+            let item = match self.api.get_object(id).await {
+                Ok(item) => item,
+                Err(ClientError::Api { status: 404, .. }) => break,
+                Err(error) => return Err(error),
+            };
+            verify_object_list_item_envelope(&item)?;
+            if item.id.to_string() != id || item.kind != kind {
+                return Err(ClientError::InvalidArgument(
+                    "Import cleanup identity mismatch".into(),
+                ));
             }
-            Err(ClientError::Api { status: 404, .. }) => {}
-            Err(error) => return Err(error),
+            if kind == ObjectKind::Schedule {
+                match self.check_revision_advance(&item).await {
+                    Ok(()) => {}
+                    Err(error @ ClientError::RevisionRejected(_)) => {
+                        let head = match self.api.get_object_head(id).await {
+                            Ok(head) => head,
+                            Err(ClientError::Api { status: 404, .. }) => break,
+                            Err(error) => return Err(error),
+                        };
+                        verify_object_head_envelope(&head)?;
+                        if head.id.to_string() != id
+                            || head.kind != kind
+                            || head.envelope.body.operation != ObjectEnvelopeOperation::Delete
+                        {
+                            return Err(error);
+                        }
+                        self.check_revision_advance(&head).await?;
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            self.check_revision_advance(&item).await?;
+            let head = LocalHead {
+                revision: item.envelope.body.revision,
+                parent_hash: crypto::object_envelope_parent_hash(&item.envelope.body)?,
+            };
+            match self.write_tombstone_at(id, kind, Some(head)).await {
+                Ok((seq, tombstone)) => {
+                    let visible = self
+                        .local_store
+                        .apply_local_tombstone(kind, id, seq, &tombstone, RECENT_CLIPBOARD_LIMIT)
+                        .await?;
+                    self.publish_visible_state(visible).await;
+                    break;
+                }
+                Err(ClientError::Api { status: 409, .. }) => continue,
+                Err(ClientError::Api { status: 404, .. }) => break,
+                Err(error) => return Err(error),
+            }
         }
         match self.api.delete_object(id).await {
             Ok(response) => {
@@ -562,7 +802,78 @@ impl SyncEngine {
         Ok(())
     }
 
+    async fn track_retired_events(&self, id: &str) -> Result<(), ClientError> {
+        let records = self.local_store.schedule_records_with_ids().await;
+        let (mut source, mut head) = self.read_calendar_source(id).await?;
+        loop {
+            let mut changed = false;
+            for (event_id, record) in &records {
+                let Some(event) = record.as_ingested() else {
+                    continue;
+                };
+                let Some(batch_id) = event.import else {
+                    continue;
+                };
+                if event.source != source.id
+                    || source
+                        .active_import
+                        .as_ref()
+                        .is_some_and(|batch| batch.object_id == batch_id)
+                    || source
+                        .pending_imports
+                        .iter()
+                        .any(|batch| batch.object_id == batch_id)
+                    || source.retired_imports.iter().any(|batch| {
+                        batch.object_id == batch_id
+                            && batch
+                                .events
+                                .iter()
+                                .any(|event| event.to_string() == *event_id)
+                    })
+                {
+                    continue;
+                }
+                let expected_id: ObjectId =
+                    uuid::Uuid::new_v5(&uuid::Uuid::from(batch_id), event.uid.as_bytes()).into();
+                if expected_id.to_string() != *event_id {
+                    return Err(ClientError::InvalidArgument(
+                        "Import cleanup event identity mismatch".into(),
+                    ));
+                }
+                match self.api.get_object_revision(event_id, 1).await {
+                    Ok(item) => verify_object_list_item_envelope(&item)?,
+                    Err(ClientError::Api { status: 404, .. }) => continue,
+                    Err(error) => return Err(error),
+                }
+                if let Some(batch) = source
+                    .retired_imports
+                    .iter_mut()
+                    .find(|batch| batch.object_id == batch_id)
+                {
+                    batch.events.push(expected_id);
+                } else {
+                    source.retired_imports.push(RetiredImport {
+                        object_id: batch_id,
+                        events: vec![expected_id],
+                    });
+                }
+                changed = true;
+            }
+            if !changed {
+                return Ok(());
+            }
+            match self.save_calendar_source(id, &source, head).await {
+                Ok(_) => return Ok(()),
+                Err(ClientError::Api { status: 409, .. }) => {
+                    (source, head) = self.read_calendar_source(id).await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     async fn cleanup_calendar_imports(&self, id: &str) -> Result<(), ClientError> {
+        self.track_retired_events(id).await?;
         let (mut source, head) = self.calendar_source(id).await?;
         if source.retired_imports.is_empty() {
             return Ok(());
@@ -573,6 +884,10 @@ impl SyncEngine {
                 .active_import
                 .as_ref()
                 .is_some_and(|active| active.object_id == batch.object_id)
+                || source
+                    .pending_imports
+                    .iter()
+                    .any(|pending| pending.object_id == batch.object_id)
             {
                 return Err(ClientError::InvalidArgument(
                     "Active import cannot also be retired".into(),
@@ -605,8 +920,27 @@ impl SyncEngine {
             )
             .await?;
         }
-        source.retired_imports.clear();
-        self.save_calendar_source(id, &source, head).await?;
+        let cleaned = source.retired_imports.clone();
+        let mut head = head;
+        loop {
+            source
+                .retired_imports
+                .retain(|batch| !cleaned.contains(batch));
+            match self.save_calendar_source(id, &source, head).await {
+                Ok(_) => break,
+                Err(ClientError::Api { status: 409, .. }) => {
+                    (source, head) = self.read_calendar_source(id).await?;
+                    if !source
+                        .retired_imports
+                        .iter()
+                        .any(|batch| cleaned.contains(batch))
+                    {
+                        break;
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(())
     }
 
@@ -619,13 +953,13 @@ impl SyncEngine {
             Err(ClientError::ItemNotFound { .. }) => return Ok(()),
             Err(error) => return Err(error),
         };
-        if source.pending_import.is_some() {
+        if !source.pending_imports.is_empty() {
             return Err(ClientError::InvalidArgument(
                 "Finish the pending calendar import before removing this source".into(),
             ));
         }
         if let Some(batch) = source.active_import.take() {
-            source.retired_imports.push(batch);
+            source.retired_imports.push(batch.into());
             self.save_calendar_source(id, &source, head).await?;
         }
         self.cleanup_calendar_imports(id).await
@@ -642,20 +976,68 @@ impl SyncEngine {
                 source
                     .active_import
                     .iter()
-                    .chain(source.retired_imports.iter())
-                    .any(|batch| batch.object_id.to_string() == id)
+                    .map(|batch| batch.object_id)
+                    .chain(source.retired_imports.iter().map(|batch| batch.object_id))
+                    .any(|batch_id| batch_id.to_string() == id)
             }))
     }
+}
+
+pub(super) fn owner_email(url: &url::Url) -> Option<String> {
+    if !matches!(url.host_str()?, "calendar.google.com" | "www.google.com") {
+        return None;
+    }
+    let path = url.path().strip_prefix("/calendar/ical/")?;
+    let segment = path.split('/').next()?;
+    let encoded = format!("email={}", segment.replace('+', "%2B"));
+    let (_, email) = url::form_urlencoded::parse(encoded.as_bytes()).next()?;
+    email.contains('@').then(|| email.to_ascii_lowercase())
+}
+
+fn validated_feed(
+    text: &str,
+    source: &CalendarSource,
+) -> Result<clipper_schedule::IngestOutcome, ClientError> {
+    let SourceKind::Ics { url } = &source.kind;
+    let owner = url::Url::parse(url).ok().and_then(|url| owner_email(&url));
+    let outcome = parse_calendar_feed(text, source.id, uuid::Uuid::nil().into(), owner.as_deref())?;
+    let mut uids = HashSet::new();
+    if !outcome.events.iter().all(|event| uids.insert(&event.uid)) {
+        return Err(CalendarImportError::InvalidFeed(
+            "Import contains duplicate event UIDs".into(),
+        )
+        .into());
+    }
+    if !outcome.skipped.is_empty() {
+        return Err(CalendarImportError::InvalidFeed(format!(
+            "Import was not replaced: {} event(s) could not be read. {}",
+            outcome.skipped.len(),
+            outcome
+                .skipped
+                .iter()
+                .take(5)
+                .map(|entry| entry.reason.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ))
+        .into());
+    }
+    Ok(outcome)
+}
+
+fn feed_hash(outcome: &clipper_schedule::IngestOutcome) -> Result<Vec<u8>, ClientError> {
+    let mut events: Vec<_> = outcome.events.iter().collect();
+    events.sort_by(|a, b| a.uid.cmp(&b.uid));
+    let bytes = serde_json::to_vec(&(events, &outcome.rules))
+        .map_err(|error| ClientError::InvalidArgument(error.to_string()))?;
+    Ok(crypto::sha256(&bytes).to_vec())
 }
 
 fn check_record_size(record: &ScheduleRecord) -> Result<(), ClientError> {
     let bytes = serde_json::to_vec(record)
         .map_err(|error| ClientError::InvalidArgument(error.to_string()))?;
     if bytes.len() + 128 > MAX_SCHEDULE_PAYLOAD_CIPHERTEXT_BYTES as usize {
-        return Err(ClientError::InvalidArgument(
-            "Import exceeds the schedule record/manifest size limit; previous calendar was kept"
-                .into(),
-        ));
+        return Err(CalendarImportError::RecordTooLarge.into());
     }
     Ok(())
 }

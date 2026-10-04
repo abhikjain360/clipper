@@ -113,6 +113,12 @@ pub(super) fn open(path: &Path) -> Result<Connection, LocalStoreError> {
         connection.execute_batch(SCHEMA)?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS calendar_checks (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        content TEXT NOT NULL
+    ) STRICT;",
+    )?;
     Ok(connection)
 }
 

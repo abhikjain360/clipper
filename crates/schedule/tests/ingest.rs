@@ -13,6 +13,248 @@ use clipper_schedule::{
 };
 
 #[test]
+fn large_recurring_invitations_stay_small_and_use_the_owners_reply() {
+    use chrono::{TimeDelta, TimeZone, Utc};
+    use clipper_schedule::{
+        Expansion, RecurrenceEngine, ScheduleItem, TimeRange, parse_ics_for_owner,
+        plan_imported_alarms,
+    };
+
+    let owner = "owner@example.com";
+    let start = Utc.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap();
+    for reply in ["ACCEPTED", "DECLINED"] {
+        let mut feed = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:large\r\nSUMMARY:Large meeting\r\nDTSTART:20260901T090000Z\r\nRRULE:FREQ=DAILY;COUNT=51\r\nORGANIZER:mailto:other@example.com\r\nATTENDEE;PARTSTAT={reply}:mailto:{owner}\r\n"
+        );
+        for index in 1..200 {
+            feed.push_str(&format!(
+                "ATTENDEE;PARTSTAT=ACCEPTED:mailto:participant-{index}@example.com\r\n"
+            ));
+        }
+        feed.push_str("END:VEVENT\r\n");
+        for index in 1..=50 {
+            let original = start + TimeDelta::days(index);
+            let moved = original + TimeDelta::hours(1);
+            feed.push_str(&format!(
+                "BEGIN:VEVENT\r\nUID:large\r\nRECURRENCE-ID:{}\r\nDTSTART:{}\r\n",
+                original.format("%Y%m%dT%H%M%SZ"),
+                moved.format("%Y%m%dT%H%M%SZ")
+            ));
+            if index <= 2 {
+                let own_reply = if index == 1 { "ACCEPTED" } else { "DECLINED" };
+                feed.push_str(&format!("ATTENDEE;PARTSTAT={own_reply}:mailto:{owner}\r\n"));
+            }
+            feed.push_str("END:VEVENT\r\n");
+        }
+        feed.push_str("END:VCALENDAR\r\n");
+        let outcome = parse_ics_for_owner(
+            &feed,
+            SourceId(uuid_fixture()),
+            import_fixture(),
+            Some(owner),
+        )
+        .unwrap();
+        assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+        let event = &outcome.events[0];
+        assert!(serde_json::to_vec(event).unwrap().len() < 64 * 1024);
+        let item = ScheduleItem {
+            id: clipper_schedule::ScheduleItemId(event.id),
+            title: event.title.clone(),
+            span: event.span.clone(),
+            recurrence: event.recurrence.clone(),
+            reference: None,
+            alarm: None,
+        };
+        let occurrences = RecurrenceEngine::new()
+            .occurrences(
+                &item,
+                &event.overrides,
+                &Expansion {
+                    window: TimeRange::new(start - TimeDelta::days(1), start + TimeDelta::days(52))
+                        .unwrap(),
+                    observer: Tz::UTC,
+                },
+            )
+            .unwrap();
+        let alarms =
+            plan_imported_alarms(event, &occurrences, Some(owner), start - TimeDelta::days(1));
+        assert_eq!(alarms.len(), if reply == "ACCEPTED" { 50 } else { 1 });
+        assert!(
+            alarms
+                .iter()
+                .any(|alarm| alarm.fire_at == start + TimeDelta::days(1) + TimeDelta::minutes(55))
+        );
+        assert!(!alarms.iter().any(
+            |alarm| alarm.occurrence_start == start + TimeDelta::days(2) + TimeDelta::hours(1)
+        ));
+    }
+}
+
+#[test]
+fn imported_invitations_ring_at_their_lead_times_and_moved_starts() {
+    use chrono::{TimeDelta, TimeZone, Utc};
+    use clipper_schedule::{
+        Expansion, RecurrenceEngine, ScheduleItem, ScheduleItemId, TimeRange, plan_imported_alarms,
+    };
+
+    let owner = "me@gmail.com";
+    let invited = |status: &str| format!("ATTENDEE;PARTSTAT={status}:mailto:ME@gmail.com\r\n");
+    let cases = [
+        ("solo", String::new(), true, true),
+        ("solo-tentative", "STATUS:TENTATIVE\r\n".into(), true, true),
+        ("accepted", invited("ACCEPTED"), true, true),
+        ("declined", invited("DECLINED"), false, true),
+        ("tentative", invited("TENTATIVE"), false, true),
+        ("needs-action", invited("NEEDS-ACTION"), false, true),
+        (
+            "missing-partstat",
+            "ATTENDEE:mailto:me@gmail.com\r\n".into(),
+            false,
+            true,
+        ),
+        (
+            "absent-owner",
+            "ATTENDEE;PARTSTAT=ACCEPTED:mailto:other@example.com\r\n".into(),
+            false,
+            true,
+        ),
+        (
+            "organizer",
+            format!("ORGANIZER:mailto:ME@gmail.com\r\n{}", invited("DECLINED")),
+            true,
+            true,
+        ),
+        (
+            "tentative-status",
+            format!("STATUS:TENTATIVE\r\n{}", invited("ACCEPTED")),
+            true,
+            false,
+        ),
+        (
+            "cancelled",
+            format!("STATUS:CANCELLED\r\n{}", invited("ACCEPTED")),
+            false,
+            false,
+        ),
+    ];
+    let event = |uid: &str, fields: &str| {
+        format!(
+            "BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:{uid}\r\nDTSTART:20260908T090000Z\r\nDTEND:20260908T100000Z\r\n{fields}END:VEVENT\r\n"
+        )
+    };
+    let alarm = |action, trigger| {
+        format!("BEGIN:VALARM\r\nACTION:{action}\r\nTRIGGER{trigger}\r\nEND:VALARM\r\n")
+    };
+    let ignored = format!(
+        "{}{}{}{}",
+        alarm("EMAIL", ":-PT20M"),
+        alarm("DISPLAY", ";RELATED=END:-PT10M"),
+        alarm("AUDIO", ":PT5M"),
+        alarm("DISPLAY", ";VALUE=DATE-TIME:20260908T080000Z")
+    );
+    let mut feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n".to_string();
+    for (uid, fields, _, _) in &cases {
+        feed.push_str(&event(uid, fields));
+    }
+    feed.push_str(&event(
+        "multiple",
+        &format!(
+            "{}{}{}{}{}",
+            alarm("DISPLAY", ":-PT10M"),
+            alarm("AUDIO", ":-PT10M"),
+            alarm("AUDIO", ":-PT30S"),
+            alarm("DISPLAY", ":PT0S"),
+            ignored
+        ),
+    ));
+    feed.push_str(&event("fallback", &ignored));
+    feed.push_str("BEGIN:VEVENT\r\nUID:all-day\r\nSUMMARY:all-day\r\nDTSTART;VALUE=DATE:20260908\r\nEND:VEVENT\r\n");
+    feed.push_str(&event("series", "RRULE:FREQ=DAILY;COUNT=3\r\n"));
+    feed.push_str("BEGIN:VEVENT\r\nUID:series\r\nRECURRENCE-ID:20260909T090000Z\r\nSTATUS:CANCELLED\r\nEND:VEVENT\r\n");
+    feed.push_str(&format!("BEGIN:VEVENT\r\nUID:series\r\nRECURRENCE-ID:20260910T090000Z\r\nDTSTART:20260908T120000Z\r\n{}END:VEVENT\r\n", alarm("AUDIO", ":-PT15M")));
+    feed.push_str("END:VCALENDAR\r\n");
+    let parsed = clipper_schedule::parse_ics_for_owner(
+        &feed,
+        SourceId(uuid_fixture()),
+        import_fixture(),
+        Some(owner),
+    )
+    .unwrap();
+    assert!(parsed.skipped.is_empty(), "{:?}", parsed.skipped);
+    let now = Utc.with_ymd_and_hms(2026, 9, 8, 0, 0, 0).unwrap();
+    let start = now + TimeDelta::hours(9);
+    let expansion = Expansion {
+        window: TimeRange::new(now, now + TimeDelta::days(4)).unwrap(),
+        observer: Tz::UTC,
+    };
+    let mut known = Vec::new();
+    let mut unknown = Vec::new();
+    for event in &parsed.events {
+        let item = ScheduleItem {
+            id: ScheduleItemId(event.id),
+            title: event.title.clone(),
+            span: event.span.clone(),
+            recurrence: event.recurrence.clone(),
+            reference: None,
+            alarm: None,
+        };
+        let occurrences = RecurrenceEngine::new()
+            .occurrences(&item, &event.overrides, &expansion)
+            .unwrap();
+        known.extend(plan_imported_alarms(event, &occurrences, Some(owner), now));
+        unknown.extend(plan_imported_alarms(event, &occurrences, None, now));
+    }
+    for (uid, _, rings_known, rings_unknown) in cases {
+        for (alarms, rings) in [(&known, rings_known), (&unknown, rings_unknown)] {
+            let alarms: Vec<_> = alarms.iter().filter(|alarm| alarm.label == uid).collect();
+            assert_eq!(alarms.len(), usize::from(rings), "{uid}");
+            if rings {
+                assert_eq!(alarms[0].fire_at, start - TimeDelta::minutes(5));
+            }
+        }
+    }
+    assert!(
+        !known
+            .iter()
+            .chain(&unknown)
+            .any(|alarm| alarm.label == "all-day")
+    );
+    let multiple: Vec<_> = known
+        .iter()
+        .filter(|alarm| alarm.label == "multiple")
+        .map(|alarm| alarm.fire_at)
+        .collect();
+    assert_eq!(
+        multiple,
+        [
+            start - TimeDelta::minutes(10),
+            start - TimeDelta::seconds(30),
+            start
+        ]
+    );
+    assert_eq!(
+        known
+            .iter()
+            .find(|alarm| alarm.label == "fallback")
+            .unwrap()
+            .fire_at,
+        start - TimeDelta::minutes(5)
+    );
+    let series: Vec<_> = known
+        .iter()
+        .filter(|alarm| alarm.label == "series")
+        .map(|alarm| alarm.fire_at)
+        .collect();
+    assert_eq!(
+        series,
+        [
+            start - TimeDelta::minutes(5),
+            now + TimeDelta::hours(12) - TimeDelta::minutes(15)
+        ]
+    );
+}
+
+#[test]
 fn a_feed_with_two_calendar_blocks_keeps_the_events_of_both() {
     let block = |uid| {
         format!(
@@ -1123,4 +1365,47 @@ fn ten_thousand_exdate_values_parse() {
         .expect("10,000 overrides fit the cap");
     assert_eq!(outcome.events.len(), 1);
     assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+}
+
+#[test]
+fn calendars_saved_before_imported_alarms_still_load_and_stay_silent_until_refreshed() {
+    let source: clipper_schedule::CalendarSource = serde_json::from_value(serde_json::json!({
+        "id": uuid_fixture(),
+        "name": "Work",
+        "kind": { "protocol": "ics", "url": "https://calendar.google.com/calendar/ical/me%40example.com/private-key/basic.ics" },
+        "enabled": true,
+        "active_import": {
+            "object_id": import_fixture(),
+            "fetched_at": "2026-10-01T10:00:00Z",
+            "events": [uuid::Uuid::from_u128(1)]
+        },
+        "pending_import": {
+            "object_id": uuid::Uuid::from_u128(2),
+            "fetched_at": "2026-10-01T11:00:00Z",
+            "events": []
+        },
+        "retired_imports": [{
+            "object_id": uuid::Uuid::from_u128(3),
+            "fetched_at": "2026-09-30T10:00:00Z",
+            "events": [uuid::Uuid::from_u128(4)]
+        }]
+    }))
+    .expect("a source saved by the previous version loads");
+    assert!(source.alarms_on);
+    assert_eq!(source.owner_email, None);
+    assert_eq!(source.pending_imports.len(), 1);
+    assert_eq!(source.retired_imports.len(), 1);
+
+    let mut saved = serde_json::to_value(event("standup@example.com")).unwrap();
+    for field in [
+        "organizer",
+        "attendance",
+        "alarm_seconds_before",
+        "alarm_overrides",
+    ] {
+        saved.as_object_mut().unwrap().remove(field);
+    }
+    let old: clipper_schedule::IngestedEvent =
+        serde_json::from_value(saved).expect("an event saved by the previous version loads");
+    assert!(old.alarm_seconds_before.is_empty());
 }

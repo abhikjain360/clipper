@@ -728,6 +728,9 @@ impl SyncEngine {
         }
         *self.device_signing_key.write().await = None;
         *self.device_identity_wrapping_key.write().await = None;
+        if let Err(error) = self.local_store.clear_calendar_checks().await {
+            warn!(%error, "Failed to clear local calendar check times");
+        }
         self.local_store.fence_and_clear_memory().await;
         *self.state.write().await = AppState::default();
         drop(active_key);
@@ -1675,9 +1678,9 @@ impl SyncEngine {
             .filter_map(|(_, record)| record.as_source())
             .any(|source| {
                 source
-                    .pending_import
-                    .as_ref()
-                    .is_some_and(|batch| batch.object_id.to_string() == file_id)
+                    .pending_imports
+                    .iter()
+                    .any(|batch| batch.object_id.to_string() == file_id)
             })
         {
             return Err(ClientError::InvalidArgument(
@@ -2025,6 +2028,15 @@ impl SyncEngine {
         object_id: &str,
         kind: ObjectKind,
     ) -> Result<(i64, ObjectEnvelopeBody), ClientError> {
+        self.write_tombstone_at(object_id, kind, None).await
+    }
+
+    async fn write_tombstone_at(
+        &self,
+        object_id: &str,
+        kind: ObjectKind,
+        head: Option<LocalHead>,
+    ) -> Result<(i64, ObjectEnvelopeBody), ClientError> {
         let epoch = self.history_epoch.load(Ordering::SeqCst);
         let SessionCredentials {
             api,
@@ -2039,7 +2051,10 @@ impl SyncEngine {
                 source,
             })?;
         let object_id_typed: ObjectId = object_uuid.into();
-        let placement = EnvelopePlacement::Delete(self.local_head(object_id).await?);
+        let placement = EnvelopePlacement::Delete(match head {
+            Some(head) => head,
+            None => self.local_head(object_id).await?,
+        });
         let created_at = chrono::Utc::now().to_rfc3339();
 
         let aad_body = object_envelope_body_for_aad(
@@ -2709,9 +2724,6 @@ impl SyncEngine {
     ///
     /// The platform registers each as a one-shot exact alarm and never expands
     /// a recurrence itself, so there is only one implementation of a rule.
-    ///
-    /// An ingested event never rings on its own. Importing a calendar is not
-    /// permission to ring on this device.
     pub async fn next_alarms(
         &self,
         within_hours: u32,
@@ -2729,19 +2741,41 @@ impl SyncEngine {
         let now = chrono::Utc::now();
         if within_hours > 24 * 366 {
             return Err(ClientError::InvalidArgument(
-                "alarm horizon cannot exceed one year".into(),
+                "alarm window cannot exceed one year".into(),
             ));
         }
         let until = now + chrono::TimeDelta::hours(i64::from(within_hours.max(1)));
 
         let records = self.local_store.schedule_records_with_heads().await?;
+        let sources: HashMap<_, _> = records
+            .iter()
+            .filter_map(|(_, record, _)| record.as_source())
+            .map(|source| (source.id, source))
+            .collect();
+        let ready_sources = calendar_import::ready_sources(&records);
         let mut alarms = Vec::new();
         for (object_id, record, head) in &records {
-            let Some(item) = record.as_item() else {
+            let Some(item) = schedule_context::series(record) else {
                 continue;
             };
-            let Some(policy) = item.alarm else {
-                continue;
+            let offsets = match record {
+                ScheduleRecord::Item(item) => match item.alarm {
+                    Some(policy) => vec![u64::from(policy.minutes_before) * 60],
+                    None => continue,
+                },
+                ScheduleRecord::Ingested(event) => {
+                    let Some(source) = sources.get(&event.source) else {
+                        continue;
+                    };
+                    if !source.alarms_on
+                        || !ready_sources.contains(&event.source)
+                        || !source.contains_event(object_id, event)
+                    {
+                        continue;
+                    }
+                    event.alarm_offsets()
+                }
+                _ => continue,
             };
             let engine = match self.recurrence_engine(&item.recurrence).await {
                 Ok(engine) => engine,
@@ -2750,16 +2784,8 @@ impl SyncEngine {
                     continue;
                 }
             };
-            // Bound the window by fire time, not event time. For a two-hour
-            // lead, tomorrow's 01:00 event must be included in today's alarms.
-            let lead = chrono::TimeDelta::minutes(i64::from(policy.minutes_before));
-            let expansion = Expansion {
-                window: TimeRange::new(now + lead, until + lead)
-                    .map_err(|error| ClientError::InvalidArgument(error.to_string()))?,
-                observer: zone_or_utc(observer_zone),
-            };
             let effective = match self
-                .effective_overrides(item, revision_ref(object_id, *head)?, record, &records)
+                .effective_overrides(&item, revision_ref(object_id, *head)?, record, &records)
                 .await
             {
                 Ok(entries) => entries,
@@ -2769,24 +2795,58 @@ impl SyncEngine {
                 }
             };
             let overrides: Vec<_> = effective.into_iter().map(|(entry, _)| entry).collect();
-            match engine.occurrences(item, &overrides, &expansion) {
-                // Every occurrence starts before `until + lead`, so every fire
-                // time is already before `until`.
-                Ok(occurrences) => alarms.extend(
-                    clipper_schedule::plan_alarms(item, &occurrences, now)
-                        .iter()
-                        .map(|planned| AlarmView {
-                            item_id: planned.item.to_string(),
-                            occurrence_key: occurrence_key(&planned.recurrence_id),
-                            label: planned.label.clone(),
-                            fire_at_millis: planned.fire_at.timestamp_millis(),
-                            occurrence_start_millis: planned.occurrence_start.timestamp_millis(),
-                        }),
-                ),
-                // A series that will not expand must not silence every other
-                // alarm on the device.
-                Err(error) => warn!(item = %item.id, "Failed to plan alarms: {}", error),
+            let mut found = std::collections::BTreeMap::new();
+            for offset in offsets {
+                let Some(lead) = i64::try_from(offset)
+                    .ok()
+                    .and_then(chrono::TimeDelta::try_seconds)
+                else {
+                    continue;
+                };
+                let Some(start) = now.checked_add_signed(lead) else {
+                    continue;
+                };
+                let Some(end) = until.checked_add_signed(lead) else {
+                    continue;
+                };
+                let expansion = Expansion {
+                    window: TimeRange::new(start, end)
+                        .map_err(|error| ClientError::InvalidArgument(error.to_string()))?,
+                    observer: zone_or_utc(observer_zone),
+                };
+                match engine.occurrences(&item, &overrides, &expansion) {
+                    Ok(occurrences) => {
+                        for occurrence in occurrences {
+                            found.insert(occurrence.recurrence_id, occurrence);
+                        }
+                    }
+                    Err(error) => warn!(item = %item.id, "Failed to plan alarms: {}", error),
+                }
             }
+            let occurrences: Vec<_> = found.into_values().collect();
+            let planned = match record {
+                ScheduleRecord::Ingested(event) => clipper_schedule::plan_imported_alarms(
+                    event,
+                    &occurrences,
+                    sources
+                        .get(&event.source)
+                        .and_then(|source| source.owner_email.as_deref()),
+                    now,
+                ),
+                _ => clipper_schedule::plan_alarms(&item, &occurrences, now),
+            };
+            alarms.extend(
+                planned
+                    .iter()
+                    .filter(|planned| planned.fire_at < until)
+                    .map(|planned| AlarmView {
+                        item_id: planned.item.to_string(),
+                        occurrence_key: occurrence_key(&planned.recurrence_id),
+                        label: planned.label.clone(),
+                        fire_at_millis: planned.fire_at.timestamp_millis(),
+                        occurrence_start_millis: planned.occurrence_start.timestamp_millis(),
+                    }),
+            );
         }
         alarms.sort_by_key(|alarm| alarm.fire_at_millis);
         Ok(alarms)
@@ -2836,8 +2896,10 @@ impl SyncEngine {
                 url: parsed.to_string(),
             },
             enabled: true,
+            owner_email: calendar_import::owner_email(&parsed),
+            alarms_on: true,
             active_import: None,
-            pending_import: None,
+            pending_imports: Vec::new(),
             retired_imports: Vec::new(),
         })))
         .await
@@ -4589,9 +4651,10 @@ fn parse_calendar_feed(
     text: &str,
     source: clipper_schedule::SourceId,
     import: ObjectId,
+    owner: Option<&str>,
 ) -> Result<clipper_schedule::IngestOutcome, ClientError> {
-    clipper_schedule::parse_ics(text, source, import)
-        .map_err(|error| ClientError::Other(format!("calendar feed: {error}")))
+    clipper_schedule::parse_ics_for_owner(text, source, import, owner)
+        .map_err(ClientError::CalendarFeed)
 }
 
 /// Largest calendar feed the client will read. A feed is a remote document
@@ -7085,8 +7148,10 @@ mod adversarial_history_tests {
                 url: "https://example.invalid/calendar".into(),
             },
             enabled: true,
+            owner_email: None,
+            alarms_on: true,
             active_import: None,
-            pending_import: None,
+            pending_imports: Vec::new(),
             retired_imports: Vec::new(),
         }))
     }

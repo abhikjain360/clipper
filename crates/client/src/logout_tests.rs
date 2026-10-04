@@ -115,7 +115,7 @@ async fn logout_lists_an_upload_and_cancels_it_before_clearing_the_session() {
 }
 
 #[tokio::test]
-async fn logout_lists_a_calendar_sync_and_cancels_it_without_waiting_for_the_feed() {
+async fn logout_lists_a_calendar_sync_and_cancels_it_without_waiting_for_the_server() {
     use super::adversarial_history_tests::encrypted_schedule_object;
 
     let (_directory, engine, listener) = engine_with_listener().await;
@@ -127,9 +127,11 @@ async fn logout_lists_a_calendar_sync_and_cancels_it_without_waiting_for_the_fee
             url: format!("{}/work.ics", engine.base_url()),
         },
         active_import: None,
-        pending_import: None,
+        pending_imports: Vec::new(),
         retired_imports: Vec::new(),
         enabled: true,
+        owner_email: None,
+        alarms_on: true,
     };
     let encrypted = encrypted_schedule_object(
         &ScheduleRecord::Source(Box::new(source.clone())),
@@ -156,9 +158,9 @@ async fn logout_lists_a_calendar_sync_and_cancels_it_without_waiting_for_the_fee
     engine.publish_visible_state(visible).await;
     let (sent, received) = oneshot::channel();
     let server = tokio::spawn(async move {
-        let (mut feed, _) = listener.accept().await.unwrap();
-        let (headers, _) = request(&mut feed).await;
-        assert!(headers.starts_with("get /work.ics "));
+        let (mut source, _) = listener.accept().await.unwrap();
+        let (headers, _) = request(&mut source).await;
+        assert!(headers.starts_with("get /api/objects/"));
         sent.send(()).unwrap();
         let (mut logout, _) = listener.accept().await.unwrap();
         let (headers, _) = request(&mut logout).await;

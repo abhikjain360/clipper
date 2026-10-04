@@ -71,12 +71,21 @@ pub struct CalendarSource {
     /// Whether this client syncs it. Per-client, because each device picks the
     /// sources it is responsible for.
     pub enabled: bool,
+    #[serde(default)]
+    pub owner_email: Option<String>,
+    #[serde(default = "alarms_on_by_default")]
+    pub alarms_on: bool,
     /// Only this complete batch contributes events to the current calendar.
     pub active_import: Option<CalendarImport>,
     /// A staged batch to resume after an interrupted upload.
-    pub pending_import: Option<CalendarImport>,
+    #[serde(
+        default,
+        alias = "pending_import",
+        deserialize_with = "pending_imports"
+    )]
+    pub pending_imports: Vec<CalendarImport>,
     /// Superseded batches awaiting irreversible cleanup.
-    pub retired_imports: Vec<CalendarImport>,
+    pub retired_imports: Vec<RetiredImport>,
 }
 
 /// One source fetch, stored once as an encrypted file, with its parsed event objects.
@@ -86,6 +95,43 @@ pub struct CalendarImport {
     #[serde(deserialize_with = "crate::time::deserialize_date")]
     pub fetched_at: chrono::DateTime<chrono::Utc>,
     pub events: Vec<clipper_api_types::ObjectId>,
+    #[serde(default)]
+    pub content_hash: Vec<u8>,
+}
+
+fn alarms_on_by_default() -> bool {
+    true
+}
+
+fn pending_imports<'de, D>(deserializer: D) -> Result<Vec<CalendarImport>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Many(Vec<CalendarImport>),
+        One(Option<CalendarImport>),
+    }
+    Ok(match Stored::deserialize(deserializer)? {
+        Stored::Many(batches) => batches,
+        Stored::One(batch) => batch.into_iter().collect(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetiredImport {
+    pub object_id: clipper_api_types::ObjectId,
+    pub events: Vec<clipper_api_types::ObjectId>,
+}
+
+impl From<CalendarImport> for RetiredImport {
+    fn from(batch: CalendarImport) -> Self {
+        Self {
+            object_id: batch.object_id,
+            events: batch.events,
+        }
+    }
 }
 
 impl CalendarSource {
@@ -101,10 +147,6 @@ impl CalendarSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "protocol", rename_all = "snake_case")]
 pub enum SourceKind {
-    /// A read-only iCalendar feed at a private URL. It needs no OAuth and no
-    /// admin approval, so it reaches a work calendar whose workspace blocks
-    /// third-party apps. It is polling only and carries no RSVP or attendee
-    /// detail.
     Ics { url: String },
 }
 
@@ -132,6 +174,100 @@ pub struct IngestedEvent {
     #[serde(default)]
     pub overrides: Vec<OccurrenceOverrideData>,
     pub status: IngestedStatus,
+    #[serde(default)]
+    pub organizer: Option<String>,
+    #[serde(default)]
+    pub attendance: Attendance,
+    #[serde(default)]
+    pub alarm_seconds_before: Vec<u64>,
+    #[serde(default)]
+    pub alarm_overrides: Vec<AlarmOverride>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlarmOverride {
+    pub recurrence_id: RecurrenceId,
+    pub status: IngestedStatus,
+    pub all_day: bool,
+    pub organizer: Option<String>,
+    pub attendance: Option<Attendance>,
+    pub seconds_before: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attendance {
+    pub has_attendees: bool,
+    pub owner_partstat: Option<String>,
+}
+
+impl IngestedEvent {
+    pub fn rings(&self, owner: Option<&str>) -> bool {
+        invitation_rings(
+            self.status,
+            matches!(self.span, ScheduleSpan::AllDay { .. }),
+            self.organizer.as_deref(),
+            &self.attendance,
+            owner,
+        )
+    }
+
+    pub fn alarm_offsets_at(&self, recurrence_id: RecurrenceId, owner: Option<&str>) -> &[u64] {
+        if let Some(entry) = self
+            .alarm_overrides
+            .iter()
+            .find(|entry| entry.recurrence_id == recurrence_id)
+        {
+            if invitation_rings(
+                entry.status,
+                entry.all_day,
+                entry.organizer.as_deref(),
+                entry.attendance.as_ref().unwrap_or(&self.attendance),
+                owner,
+            ) {
+                &entry.seconds_before
+            } else {
+                &[]
+            }
+        } else if self.rings(owner) {
+            &self.alarm_seconds_before
+        } else {
+            &[]
+        }
+    }
+
+    pub fn alarm_offsets(&self) -> Vec<u64> {
+        let mut offsets = self.alarm_seconds_before.clone();
+        offsets.extend(
+            self.alarm_overrides
+                .iter()
+                .flat_map(|entry| &entry.seconds_before),
+        );
+        offsets.sort_unstable();
+        offsets.dedup();
+        offsets
+    }
+}
+
+fn invitation_rings(
+    status: IngestedStatus,
+    all_day: bool,
+    organizer: Option<&str>,
+    attendance: &Attendance,
+    owner: Option<&str>,
+) -> bool {
+    if status == IngestedStatus::Cancelled || all_day {
+        return false;
+    }
+    if !attendance.has_attendees {
+        return true;
+    }
+    match owner {
+        Some(owner) => {
+            organizer.is_some_and(|email| email.eq_ignore_ascii_case(owner))
+                || attendance.owner_partstat.as_deref() == Some("ACCEPTED")
+        }
+        None => status != IngestedStatus::Tentative,
+    }
 }
 
 impl IngestedEvent {
@@ -175,6 +311,7 @@ pub enum IngestedStatus {
 pub struct IngestOutcome {
     pub events: Vec<IngestedEvent>,
     pub skipped: Vec<SkippedEvent>,
+    pub rules: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,15 +322,21 @@ pub struct SkippedEvent {
 
 /// Parse an iCalendar feed into events.
 ///
-/// Takes all-day events and invites whatever the organizer or RSVP says.
-/// Attendance status is kept as metadata, never used as a filter.
-///
 /// `import` names the immutable raw file this parse came from. An opaque
 /// recurrence rule stores only that snapshot id and its event UID.
 pub fn parse_ics(
     text: &str,
     source: SourceId,
     import: ObjectId,
+) -> Result<IngestOutcome, IngestError> {
+    parse_ics_for_owner(text, source, import, None)
+}
+
+pub fn parse_ics_for_owner(
+    text: &str,
+    source: SourceId,
+    import: ObjectId,
+    owner: Option<&str>,
 ) -> Result<IngestOutcome, IngestError> {
     let calendar = parse_calendar(text)?;
     let resolver = calendar.build_tz_resolver();
@@ -213,8 +356,17 @@ pub fn parse_ics(
             .as_ref()
             .and_then(|uid| overrides.remove(uid))
             .unwrap_or_default();
-        match event_from_component(component, &matching, source, import, uid.clone(), &resolver) {
-            Ok(event) => outcome.events.push(event),
+        match event_from_component(
+            component, &matching, source, import, &resolver, &calendar, owner,
+        ) {
+            Ok(event) => {
+                if matches!(event.recurrence, Recurrence::Imported { .. })
+                    && let Some(rule) = rrule_text(component)?
+                {
+                    outcome.rules.push((event.uid.clone(), rule));
+                }
+                outcome.events.push(event);
+            }
             Err(reason) => outcome.skipped.push(SkippedEvent {
                 uid,
                 reason: reason.to_string(),
@@ -230,6 +382,7 @@ pub fn parse_ics(
             });
         }
     }
+    outcome.rules.sort();
     Ok(outcome)
 }
 
@@ -589,10 +742,11 @@ fn event_from_component(
     overrides: &[&calcard::icalendar::ICalendarComponent],
     source: SourceId,
     import: ObjectId,
-    uid: Option<String>,
     resolver: &calcard::icalendar::timezone::TzResolver<&str>,
+    calendar: &calcard::icalendar::ICalendar,
+    owner: Option<&str>,
 ) -> Result<IngestedEvent, IngestError> {
-    let uid = uid.ok_or(IngestError::MissingUid)?;
+    let uid = text_property(component, "UID").ok_or(IngestError::MissingUid)?;
     let id = IngestedEvent::derive_id(source, &uid);
     let start =
         date_time_property(component, "DTSTART", resolver)?.ok_or(IngestError::MissingStart)?;
@@ -609,7 +763,54 @@ fn event_from_component(
         )?,
         None => Recurrence::Once,
     };
-    let overrides = recurrence_overrides(component, overrides, id, &span, resolver)?;
+    let provider_overrides = overrides;
+    let overrides = recurrence_overrides(component, provider_overrides, id, &span, resolver)?;
+    let status = event_status(component).unwrap_or(IngestedStatus::Confirmed);
+    let organizer = property(component, "ORGANIZER").and_then(email_address);
+    let attendance = attendance(component, owner);
+    let alarm_seconds_before = alarm_offsets(component, calendar);
+    let mut alarm_overrides = std::collections::BTreeMap::new();
+    for entry in provider_overrides {
+        let time = date_time_property(entry, "RECURRENCE-ID", resolver)?
+            .ok_or(IngestError::MissingRecurrenceId)?;
+        let recurrence_id = recurrence_id_for(&span, &time)?;
+        let all_day = overrides
+            .iter()
+            .find(|entry| entry.recurrence_id == recurrence_id)
+            .map_or(
+                matches!(span, ScheduleSpan::AllDay { .. }),
+                |entry| match &entry.change {
+                    OverrideChange::Rescheduled(span) => {
+                        matches!(span, ScheduleSpan::AllDay { .. })
+                    }
+                    OverrideChange::Cancelled => false,
+                },
+            );
+        alarm_overrides.insert(
+            recurrence_id,
+            AlarmOverride {
+                recurrence_id,
+                status: event_status(entry).unwrap_or(status),
+                all_day,
+                organizer: if property(entry, "ORGANIZER").is_some() {
+                    property(entry, "ORGANIZER").and_then(email_address)
+                } else {
+                    organizer.clone()
+                },
+                attendance: property(entry, "ATTENDEE").map(|_| self::attendance(entry, owner)),
+                seconds_before: if entry.component_ids.iter().any(|id| {
+                    calendar.components.get(*id as usize).is_some_and(|entry| {
+                        entry.component_type == calcard::icalendar::ICalendarComponentType::VAlarm
+                    })
+                }) {
+                    alarm_offsets(entry, calendar)
+                } else {
+                    alarm_seconds_before.clone()
+                },
+            },
+        );
+    }
+    let alarm_overrides = alarm_overrides.into_values().collect();
 
     Ok(IngestedEvent {
         id,
@@ -620,13 +821,127 @@ fn event_from_component(
         span,
         recurrence,
         overrides,
-        status: match text_property(component, "STATUS").as_deref() {
-            Some("CANCELLED") => IngestedStatus::Cancelled,
-            Some("TENTATIVE") => IngestedStatus::Tentative,
-            _ => IngestedStatus::Confirmed,
-        },
+        status,
         uid,
+        organizer,
+        attendance,
+        alarm_seconds_before,
+        alarm_overrides,
     })
+}
+
+fn event_status(component: &calcard::icalendar::ICalendarComponent) -> Option<IngestedStatus> {
+    text_property(component, "STATUS").map(|status| match status.as_str() {
+        "CANCELLED" => IngestedStatus::Cancelled,
+        "TENTATIVE" => IngestedStatus::Tentative,
+        _ => IngestedStatus::Confirmed,
+    })
+}
+
+fn email_address(entry: &calcard::icalendar::ICalendarEntry) -> Option<String> {
+    let value = entry.values.first()?.as_text()?;
+    let email = value.get(7..).filter(|_| {
+        value
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("mailto:"))
+    })?;
+    Some(email.trim().to_ascii_lowercase())
+}
+
+fn attendance(
+    component: &calcard::icalendar::ICalendarComponent,
+    owner: Option<&str>,
+) -> Attendance {
+    use calcard::icalendar::{ICalendarParameterName, ICalendarParameterValue};
+
+    let mut attendance = Attendance {
+        has_attendees: false,
+        owner_partstat: None,
+    };
+    for entry in component
+        .entries
+        .iter()
+        .filter(|entry| entry.name.as_str().eq_ignore_ascii_case("ATTENDEE"))
+    {
+        attendance.has_attendees = true;
+        if owner.is_some_and(|owner| {
+            email_address(entry).is_some_and(|email| email.eq_ignore_ascii_case(owner))
+        }) {
+            let partstat = entry
+                .params
+                .iter()
+                .filter(|param| param.name == ICalendarParameterName::Partstat)
+                .map(|param| &param.value)
+                .find_map(|value| match value {
+                    ICalendarParameterValue::Partstat(status) => {
+                        use calcard::common::IanaString;
+                        Some(status.as_str().to_string())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| "NEEDS-ACTION".into());
+            if attendance.owner_partstat.as_deref() != Some("ACCEPTED") {
+                attendance.owner_partstat = Some(partstat);
+            }
+        }
+    }
+    attendance
+}
+
+fn alarm_offsets(
+    component: &calcard::icalendar::ICalendarComponent,
+    calendar: &calcard::icalendar::ICalendar,
+) -> Vec<u64> {
+    use calcard::icalendar::{
+        ICalendarAction, ICalendarComponentType, ICalendarParameterValue, ICalendarRelated,
+        ICalendarValue,
+    };
+
+    let mut offsets: Vec<_> = component
+        .component_ids
+        .iter()
+        .filter_map(|id| calendar.components.get(*id as usize))
+        .filter(|alarm| alarm.component_type == ICalendarComponentType::VAlarm)
+        .filter(|alarm| {
+            matches!(
+                property(alarm, "ACTION").and_then(|entry| entry.values.first()),
+                Some(ICalendarValue::Action(
+                    ICalendarAction::Display | ICalendarAction::Audio
+                ))
+            )
+        })
+        .filter_map(|alarm| {
+            let trigger = property(alarm, "TRIGGER")?;
+            if trigger
+                .params
+                .iter()
+                .map(|param| &param.value)
+                .any(|value| {
+                    matches!(
+                        value,
+                        ICalendarParameterValue::Related(ICalendarRelated::End)
+                    )
+                })
+            {
+                return None;
+            }
+            let ICalendarValue::Duration(duration) = trigger.values.first()? else {
+                return None;
+            };
+            let seconds = u64::from(duration.weeks) * 604800
+                + u64::from(duration.days) * 86400
+                + u64::from(duration.hours) * 3600
+                + u64::from(duration.minutes) * 60
+                + u64::from(duration.seconds);
+            (duration.neg || seconds == 0).then_some(seconds)
+        })
+        .collect();
+    offsets.sort_unstable();
+    offsets.dedup();
+    if offsets.is_empty() {
+        offsets.push(300);
+    }
+    offsets
 }
 
 /// A start as the feed expresses it, before it becomes a [`ScheduleSpan`].

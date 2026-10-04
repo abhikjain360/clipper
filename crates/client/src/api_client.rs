@@ -1241,6 +1241,20 @@ pub fn decrypt_file_blob_bytes(
 // ── Errors ──
 
 #[derive(Debug, thiserror::Error)]
+pub enum CalendarImportError {
+    #[error("Pending import does not match its original feed")]
+    FeedChanged,
+    #[error("Staged event differs from its original import")]
+    EventChanged,
+    #[error("Original import is not UTF-8")]
+    InvalidText,
+    #[error("Import cannot be read: {0}")]
+    InvalidFeed(String),
+    #[error("Import exceeds the schedule record/manifest size limit")]
+    RecordTooLarge,
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
@@ -1248,6 +1262,10 @@ pub enum ClientError {
     Api { status: u16, error: ErrorResponse },
     #[error("Crypto error: {0}")]
     Crypto(#[from] crypto::CryptoError),
+    #[error("Calendar feed: {0}")]
+    CalendarFeed(#[from] clipper_schedule::IngestError),
+    #[error("Calendar import: {0}")]
+    CalendarImport(#[from] CalendarImportError),
     #[error("WebSocket error: {0}")]
     WebSocket(String),
     #[error("Local store error: {0}")]
@@ -1394,6 +1412,9 @@ impl ClientError {
     pub fn error_response(&self) -> ErrorResponse {
         match self {
             Self::Api { error, .. } => error.clone(),
+            Self::CalendarFeed(_) | Self::CalendarImport(_) => {
+                ErrorResponse::new(ApiErrorCode::BadRequest, self.to_string())
+            }
             Self::Http(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.to_string()),
             Self::Crypto(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.to_string()),
             Self::WebSocket(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.clone()),

@@ -93,6 +93,42 @@ pub fn plan_alarms(
     planned
 }
 
+pub fn plan_imported_alarms(
+    event: &crate::IngestedEvent,
+    occurrences: &[Occurrence],
+    owner: Option<&str>,
+    now: DateTime<Utc>,
+) -> Vec<PlannedAlarm> {
+    let mut planned = Vec::new();
+    for occurrence in occurrences
+        .iter()
+        .filter(|entry| entry.item == ScheduleItemId(event.id))
+    {
+        for seconds in event.alarm_offsets_at(occurrence.recurrence_id, owner) {
+            let Some(lead) = i64::try_from(*seconds)
+                .ok()
+                .and_then(TimeDelta::try_seconds)
+            else {
+                continue;
+            };
+            let Some(fire_at) = occurrence.span.start().checked_sub_signed(lead) else {
+                continue;
+            };
+            if fire_at > now {
+                planned.push(PlannedAlarm {
+                    item: occurrence.item,
+                    recurrence_id: occurrence.recurrence_id,
+                    label: event.title.clone(),
+                    fire_at,
+                    occurrence_start: occurrence.span.start(),
+                });
+            }
+        }
+    }
+    planned.sort_by_key(|alarm| alarm.fire_at);
+    planned
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{NaiveDateTime, TimeZone};

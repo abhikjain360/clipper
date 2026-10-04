@@ -254,6 +254,12 @@ turns a series' occurrences into planned alarms, each with a fire time, the
 occurrence start and the series title as its label, and drops any alarm whose
 fire time has passed.
 
+Imported events use invitation rules and start-relative VALARMs, with a
+five-minute fallback. Each source can silence its imported alarms. Provider
+moves and cancellations apply before planning. `next_alarms` includes complete
+active imported batches alongside user-authored items. Details are in
+[calendar-imports.md](calendar-imports.md).
+
 The Android app asks Rust (`next_alarms`) for the alarms in the next seven days
 and hands that list to Kotlin. It sends a new list when the app becomes active
 or when the schedule or session changes. A phone whose app is never opened runs

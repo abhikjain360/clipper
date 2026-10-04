@@ -22,11 +22,11 @@ pub mod recurrence;
 pub mod summary;
 pub mod time;
 
-pub use alarm::{AlarmPolicy, PlannedAlarm, plan_alarms};
+pub use alarm::{AlarmPolicy, PlannedAlarm, plan_alarms, plan_imported_alarms};
 pub use engine::{EngineError, Expansion, ImportedRuleResolver, RecurrenceEngine};
 pub use ingest::{
     CalendarSource, IngestError, IngestOutcome, IngestedEvent, IngestedStatus, SkippedEvent,
-    SourceId, SourceKind, parse_ics, parse_imported_recurrence_rules,
+    SourceId, SourceKind, parse_ics, parse_ics_for_owner, parse_imported_recurrence_rules,
 };
 pub use item::{
     ActualId, ActualRecord, ActualSpan, ObjectRevisionRef, Occurrence, OccurrenceOrigin,

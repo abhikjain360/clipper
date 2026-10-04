@@ -303,6 +303,15 @@ pub fn source_view(
         protocol: protocol.to_string(),
         location,
         enabled: source.enabled,
+        alarms_on: source.alarms_on,
+        fetched_at: source
+            .active_import
+            .as_ref()
+            .map(|batch| batch.fetched_at.to_rfc3339()),
+        checked_at: source
+            .active_import
+            .as_ref()
+            .map(|batch| batch.fetched_at.to_rfc3339()),
         event_count,
         raw_import_file_id: source
             .active_import

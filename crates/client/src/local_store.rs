@@ -226,6 +226,7 @@ impl StoredObjectRecord {
 #[derive(Debug, Default)]
 struct MemoryState {
     records: HashMap<String, LocalObjectRecord>,
+    calendar_checks: HashMap<String, chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -414,6 +415,82 @@ impl LocalStore {
 
     pub fn session_epoch(&self) -> u64 {
         self.session_epoch.load(atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) async fn record_calendar_check(
+        &self,
+        id: &str,
+        checked_at: chrono::DateTime<chrono::Utc>,
+        visible_clipboard_limit: usize,
+    ) -> Result<LocalVisibleState, LocalStoreError> {
+        let _sync = self.sync.lock().await;
+        let mut checks = self.memory.lock().await.calendar_checks.clone();
+        checks.insert(id.into(), checked_at);
+        self.write_calendar_checks(&checks).await?;
+        self.memory.lock().await.calendar_checks = checks;
+        self.visible_state_inner(visible_clipboard_limit).await
+    }
+
+    pub(crate) async fn clear_calendar_checks(&self) -> Result<(), LocalStoreError> {
+        let _sync = self.sync.lock().await;
+        self.memory.lock().await.calendar_checks.clear();
+        if self.profile_id.read().expect("profile lock").is_some() {
+            self.write_calendar_checks(&HashMap::new()).await?;
+        }
+        Ok(())
+    }
+
+    async fn read_calendar_checks(
+        &self,
+    ) -> Result<HashMap<String, chrono::DateTime<chrono::Utc>>, LocalStoreError> {
+        #[cfg(not(target_family = "wasm"))]
+        let json = self
+            .with_database(|connection| {
+                use rusqlite::OptionalExtension;
+                Ok(connection
+                    .query_row(
+                        "SELECT content FROM calendar_checks WHERE id = 1",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?)
+            })
+            .await?;
+        #[cfg(target_family = "wasm")]
+        let json = browser_storage()?
+            .get_item(&format!("clipper:{}:calendar_checks", self.profile_id()))
+            .map_err(storage_error)?;
+        Ok(json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?
+            .unwrap_or_default())
+    }
+
+    async fn write_calendar_checks(
+        &self,
+        checks: &HashMap<String, chrono::DateTime<chrono::Utc>>,
+    ) -> Result<(), LocalStoreError> {
+        let json = serde_json::to_string(checks)?;
+        #[cfg(not(target_family = "wasm"))]
+        self.with_database(|connection| {
+            if checks.is_empty() {
+                connection.execute("DELETE FROM calendar_checks", [])?;
+            } else {
+                connection.execute("INSERT INTO calendar_checks (id, content) VALUES (1, ?1) ON CONFLICT (id) DO UPDATE SET content = excluded.content", [&json])?;
+            }
+            Ok(())
+        }).await?;
+        #[cfg(target_family = "wasm")]
+        {
+            let storage = browser_storage()?;
+            let key = format!("clipper:{}:calendar_checks", self.profile_id());
+            if checks.is_empty() {
+                storage.remove_item(&key).map_err(storage_error)?;
+            } else {
+                storage.set_item(&key, &json).map_err(storage_error)?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn persist_local_clipboard_present_encrypted(
@@ -798,7 +875,10 @@ impl LocalStore {
     ) -> Result<LocalVisibleState, LocalStoreError> {
         #[cfg(not(target_family = "wasm"))]
         self.sweep_orphaned_temp_files().await;
-        let mut memory = MemoryState::default();
+        let mut memory = MemoryState {
+            calendar_checks: self.read_calendar_checks().await?,
+            ..Default::default()
+        };
         for record in self.live_stored_object_records().await? {
             match self
                 .decrypt_stored_object_record_preview(&record, encryption_key)
@@ -1491,7 +1571,10 @@ impl LocalStore {
         Ok(views)
     }
 
-    fn calendar_sources_inner(records: &[LocalObjectRecord]) -> Vec<CalendarSourceView> {
+    fn calendar_sources_inner(
+        records: &[LocalObjectRecord],
+        checks: &HashMap<String, chrono::DateTime<chrono::Utc>>,
+    ) -> Vec<CalendarSourceView> {
         records
             .iter()
             .filter_map(|record| {
@@ -1499,7 +1582,7 @@ impl LocalStore {
                     return None;
                 };
                 let source = schedule.record.as_source()?;
-                Some(source_view(
+                let mut view = source_view(
                     &record.id,
                     source,
                     records.iter().filter(|record| {
@@ -1508,7 +1591,11 @@ impl LocalStore {
                     }).count() as u32,
                     source.active_import.as_ref().is_some_and(|batch| records.iter().any(|record|
                         record.id == batch.object_id.to_string() && matches!(&record.data, LocalObjectData::File(_)))),
-                ))
+                );
+                view.checked_at = checks.get(&record.id).copied().into_iter()
+                    .chain(source.active_import.as_ref().map(|batch| batch.fetched_at))
+                    .max().map(|time| time.to_rfc3339());
+                Some(view)
             })
             .collect()
     }
@@ -1771,7 +1858,10 @@ impl LocalStore {
             files: Self::file_items_inner(&records),
             collab_docs: Self::collab_items_inner(&records),
             schedule_items: self.schedule_items_inner(&records).await?,
-            calendar_sources: Self::calendar_sources_inner(&records),
+            calendar_sources: Self::calendar_sources_inner(
+                &records,
+                &self.memory.lock().await.calendar_checks,
+            ),
             running_plan: running.as_ref().and_then(|(_, planned)| *planned),
             running_actual: running.map(|(view, _)| view),
             stamp: self.visible_stamp.fetch_add(1, atomic::Ordering::SeqCst) + 1,

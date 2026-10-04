@@ -348,8 +348,10 @@ mod tests {
                 url: "https://example.invalid/private".into(),
             },
             enabled: true,
+            owner_email: None,
+            alarms_on: true,
             active_import: None,
-            pending_import: None,
+            pending_imports: Vec::new(),
             retired_imports: Vec::new(),
         }));
         engine

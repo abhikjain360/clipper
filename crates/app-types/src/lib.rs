@@ -225,6 +225,9 @@ pub struct CalendarSourceView {
     /// screenshotted or logged.
     pub location: String,
     pub enabled: bool,
+    pub alarms_on: bool,
+    pub fetched_at: Option<String>,
+    pub checked_at: Option<String>,
     /// Events currently held from this source.
     pub event_count: u32,
     /// The exact raw snapshot. The reference still names it after the file
@@ -240,6 +243,8 @@ pub struct IngestReport {
     pub added: u32,
     pub updated: u32,
     pub unchanged: u32,
+    pub feed_unchanged: bool,
+    pub superseded: bool,
     /// Event objects retired by replacement. Recordings are never included.
     pub tombstoned: u32,
     /// Entries in the feed this client could not read. Reported rather than

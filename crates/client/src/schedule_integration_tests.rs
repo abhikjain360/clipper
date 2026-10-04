@@ -135,6 +135,756 @@ async fn start_server(data: &Path) -> (TestServer, std::net::SocketAddr) {
     (server, address)
 }
 
+async fn calendar_feed_server(
+    initial: String,
+) -> (
+    String,
+    Arc<RwLock<String>>,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    let feed = Arc::new(RwLock::new(initial));
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let feed_url = format!("http://{}/feed.ics", listener.local_addr().unwrap());
+    let served = Arc::clone(&feed);
+    let counted = Arc::clone(&requests);
+    let feed_task = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            if socket.read(&mut buffer).await.unwrap() == 0 {
+                continue;
+            }
+            counted.fetch_add(1, Ordering::SeqCst);
+            let body = served.read().await.clone();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    (feed_url, feed, requests, feed_task)
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_calendar_unchanged_feeds_and_newer_fetches() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let url = format!("http://{address}");
+    let first = register_proxy_engine(&url, &temp.path().join("first")).await;
+    let second = SyncEngine::new_with_data_dir(&url, temp.path().join("second"));
+    second
+        .login_with_platform("local-test-passphrase", "recovery-test", "Second", "test")
+        .await
+        .unwrap();
+    wait_for(&second, |state| {
+        matches!(state.connection_status, ConnectionStatus::Connected)
+    })
+    .await;
+    let start =
+        chrono::DateTime::from_timestamp(Utc::now().timestamp() / 60 * 60 + 7200, 0).unwrap();
+    let original = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:meeting\r\nSUMMARY:Meeting\r\nDTSTART:{}\r\nDTSTAMP:20260908T000000Z\r\nRRULE:FREQ=DAILY;COUNT=3;BYHOUR=9,17\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        start.format("%Y%m%dT%H%M%SZ")
+    );
+    let (feed_url, feed, requests, feed_task) = calendar_feed_server(original.clone()).await;
+    let source_id = first.add_calendar_source("Work", &feed_url).await.unwrap();
+    first.sync_calendar_source(&source_id).await.unwrap();
+    wait_for(&second, |state| {
+        state
+            .calendar_sources
+            .iter()
+            .any(|source| source.id == source_id && source.event_count == 1)
+    })
+    .await;
+    let before = serde_json::to_value(
+        first
+            .api
+            .list_objects(None, Some(100), None, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    *feed.write().await = original.replace(
+        "DTSTAMP:20260908T000000Z",
+        "DTSTAMP:20261007T010203Z\r\nLAST-MODIFIED:20261007T010203Z",
+    );
+    let report = first.sync_calendar_source(&source_id).await.unwrap();
+    assert!(report.feed_unchanged);
+    assert_eq!(report.unchanged, 1);
+    assert_eq!((report.added, report.tombstoned), (0, 0));
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        2,
+        "manual Sync fetches a new response"
+    );
+    let after = serde_json::to_value(
+        first
+            .api
+            .list_objects(None, Some(100), None, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        after, before,
+        "unchanged refresh creates no objects or revisions"
+    );
+    let state = first.get_state().await;
+    let source = state
+        .calendar_sources
+        .iter()
+        .find(|source| source.id == source_id)
+        .unwrap();
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(source.checked_at.as_deref().unwrap()).unwrap()
+            > chrono::DateTime::parse_from_rfc3339(source.fetched_at.as_deref().unwrap()).unwrap()
+    );
+    let held_key = first.current_encryption_key().await.unwrap();
+    let restarted = copy_session(&first, &url, &temp.path().join("first")).await;
+    let visible = restarted
+        .local_store
+        .hydrate_ciphertext_cache(&held_key, RECENT_CLIPBOARD_LIMIT)
+        .await
+        .unwrap();
+    assert_eq!(
+        visible
+            .calendar_sources
+            .iter()
+            .find(|source| source.id == source_id)
+            .unwrap()
+            .checked_at,
+        source.checked_at
+    );
+    *feed.write().await = original.replace("BYHOUR=9,17", "BYHOUR=9,18");
+    assert!(
+        !first
+            .sync_calendar_source(&source_id)
+            .await
+            .unwrap()
+            .feed_unchanged,
+        "an imported rule change replaces the batch"
+    );
+
+    let alarms_feed = original.replace("RRULE:FREQ=DAILY;COUNT=3;BYHOUR=9,17\r\n", "");
+    *feed.write().await = alarms_feed.clone();
+    first.sync_calendar_source(&source_id).await.unwrap();
+    let alarms = first.next_alarms(24, "UTC").await.unwrap();
+    assert_eq!(alarms.len(), 1);
+    assert_eq!(alarms[0].label, "Meeting");
+    assert_eq!(
+        alarms[0].fire_at_millis,
+        (start - chrono::TimeDelta::minutes(5)).timestamp_millis()
+    );
+    first
+        .set_calendar_source_alarms(&source_id, false)
+        .await
+        .unwrap();
+    assert!(first.next_alarms(24, "UTC").await.unwrap().is_empty());
+    first
+        .set_calendar_source_alarms(&source_id, true)
+        .await
+        .unwrap();
+
+    for host in ["calendar.google.com", "www.google.com"] {
+        let google = first
+            .add_calendar_source(
+                "Google",
+                &format!("https://{host}/calendar/ical/me%40gmail.com/private-secret/basic.ics"),
+            )
+            .await
+            .unwrap();
+        for (partstat, rings) in [("DECLINED", false), ("ACCEPTED", true)] {
+            let text = alarms_feed.replace(
+                "SUMMARY:Meeting\r\n",
+                &format!("SUMMARY:Invite\r\nATTENDEE;PARTSTAT={partstat}:mailto:me@gmail.com\r\n"),
+            );
+            let batch = first
+                .stage_calendar_import(&google, &text, Utc::now())
+                .await
+                .unwrap();
+            first
+                .finish_calendar_import(&google, &text, &batch)
+                .await
+                .unwrap();
+            let alarms = first.next_alarms(24, "UTC").await.unwrap();
+            assert_eq!(
+                alarms
+                    .iter()
+                    .filter(|alarm| alarm.label == "Invite")
+                    .count(),
+                usize::from(rings)
+            );
+        }
+        first.delete_schedule_object(&google).await.unwrap();
+    }
+
+    for newest_first in [true, false] {
+        let older_text = alarms_feed.replace("SUMMARY:Meeting", "SUMMARY:Older");
+        let newer_text = alarms_feed.replace("SUMMARY:Meeting", "SUMMARY:Newer");
+        let older_time = Utc::now();
+        let newer_time = older_time + chrono::TimeDelta::microseconds(1);
+        let (older, newer) = tokio::join!(
+            first.stage_calendar_import(&source_id, &older_text, older_time),
+            second.stage_calendar_import(&source_id, &newer_text, newer_time),
+        );
+        let older = older.unwrap();
+        let newer = newer.unwrap();
+        wait_for(&first, |state| {
+            state
+                .files
+                .iter()
+                .any(|file| file.id == newer.object_id.to_string())
+        })
+        .await;
+        wait_for(&second, |state| {
+            state
+                .files
+                .iter()
+                .any(|file| file.id == older.object_id.to_string())
+        })
+        .await;
+        if newest_first {
+            let report = second
+                .finish_calendar_import(&source_id, &newer_text, &newer)
+                .await
+                .unwrap();
+            assert!(
+                report.skipped.is_empty(),
+                "newer cleanup: {:?}",
+                report.skipped
+            );
+            let report = first
+                .finish_calendar_import(&source_id, &older_text, &older)
+                .await
+                .unwrap();
+            assert!(report.superseded);
+            assert!(
+                report.skipped.is_empty(),
+                "older cleanup: {:?}",
+                report.skipped
+            );
+        } else {
+            let (older_report, newer_report) = tokio::join!(
+                first.finish_calendar_import(&source_id, &older_text, &older),
+                second.finish_calendar_import(&source_id, &newer_text, &newer),
+            );
+            let older_report = older_report.unwrap();
+            let newer_report = newer_report.unwrap();
+            assert!(
+                older_report.skipped.is_empty(),
+                "older cleanup: {:?}",
+                older_report.skipped
+            );
+            assert!(
+                newer_report.skipped.is_empty(),
+                "newer cleanup: {:?}",
+                newer_report.skipped
+            );
+        }
+        wait_for(&first, |state| {
+            state.calendar_sources.iter().any(|source| {
+                source.id == source_id
+                    && source.fetched_at.as_deref() == Some(newer_time.to_rfc3339().as_str())
+            })
+        })
+        .await;
+        wait_for(&second, |state| {
+            state.calendar_sources.iter().any(|source| {
+                source.id == source_id
+                    && source.fetched_at.as_deref() == Some(newer_time.to_rfc3339().as_str())
+            })
+        })
+        .await;
+        let (record, _) = load_schedule_object(&first, &source_id).await;
+        let source = record.as_source().unwrap();
+        assert_eq!(source.active_import.as_ref(), Some(&newer));
+        assert!(source.pending_imports.is_empty());
+        assert!(
+            source.retired_imports.is_empty(),
+            "both devices finish batch cleanup"
+        );
+        for id in older.events.iter().chain(std::iter::once(&older.object_id)) {
+            assert!(
+                matches!(
+                    first.api.get_object_revision(&id.to_string(), 1).await,
+                    Err(ClientError::Api { status: 404, .. })
+                ),
+                "older batch object {id} was purged"
+            );
+        }
+    }
+
+    let pending_time = Utc::now();
+    let pending = second
+        .stage_calendar_import(
+            &source_id,
+            &alarms_feed.replace("SUMMARY:Meeting", "SUMMARY:Pending"),
+            pending_time,
+        )
+        .await
+        .unwrap();
+    wait_for(&first, |state| {
+        state
+            .files
+            .iter()
+            .any(|file| file.id == pending.object_id.to_string())
+    })
+    .await;
+    *feed.write().await = alarms_feed.replace("SUMMARY:Meeting", "SUMMARY:Fresh");
+    let before_requests = requests.load(Ordering::SeqCst);
+    first.sync_calendar_source(&source_id).await.unwrap();
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        before_requests + 1,
+        "recovering another device's pending batch still fetches fresh"
+    );
+    assert_eq!(
+        first.next_alarms(24, "UTC").await.unwrap()[0].label,
+        "Fresh"
+    );
+    *feed.write().await = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n".into();
+    first.sync_calendar_source(&source_id).await.unwrap();
+    let before = serde_json::to_value(
+        first
+            .api
+            .list_objects(None, Some(100), None, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let report = first.sync_calendar_source(&source_id).await.unwrap();
+    assert!(report.feed_unchanged);
+    assert_eq!(report.unchanged, 0);
+    assert_eq!(
+        before,
+        serde_json::to_value(
+            first
+                .api
+                .list_objects(None, Some(100), None, None)
+                .await
+                .unwrap()
+        )
+        .unwrap()
+    );
+    let (record, head) = load_schedule_object(&first, &source_id).await;
+    let mut future_source = record.as_source().unwrap().clone();
+    let previous = future_source.active_import.as_ref().unwrap().object_id;
+    future_source.active_import.as_mut().unwrap().fetched_at =
+        Utc::now() + chrono::TimeDelta::hours(1);
+    first
+        .write_schedule_record(
+            &source_id,
+            ScheduleRecord::Source(Box::new(future_source)),
+            EnvelopePlacement::Revise(head),
+        )
+        .await
+        .unwrap();
+    assert!(
+        first
+            .sync_calendar_source(&source_id)
+            .await
+            .unwrap()
+            .feed_unchanged
+    );
+    *feed.write().await =
+        alarms_feed.replace("SUMMARY:Meeting", "SUMMARY:Fresh after clock change");
+    let report = first.sync_calendar_source(&source_id).await.unwrap();
+    assert!(!report.feed_unchanged);
+    let (record, _) = load_schedule_object(&first, &source_id).await;
+    let current = record.as_source().unwrap().active_import.as_ref().unwrap();
+    assert_ne!(current.object_id, previous);
+    assert!(current.fetched_at <= Utc::now());
+    assert!(
+        first
+            .sync_calendar_source(&source_id)
+            .await
+            .unwrap()
+            .feed_unchanged
+    );
+    feed_task.abort();
+    first.logout(true).await.unwrap();
+    let cleared = restarted
+        .local_store
+        .hydrate_ciphertext_cache(&held_key, RECENT_CLIPBOARD_LIMIT)
+        .await
+        .unwrap();
+    let source = cleared
+        .calendar_sources
+        .iter()
+        .find(|source| source.id == source_id)
+        .unwrap();
+    assert_eq!(
+        source.checked_at, source.fetched_at,
+        "logout clears persisted local check times"
+    );
+    second.logout(true).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_calendar_unusable_pending_batches_are_retired_before_fresh_fetches() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let url = format!("http://{address}");
+    let engine = register_proxy_engine(&url, &temp.path().join("client")).await;
+    let text = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:meeting\r\nSUMMARY:Fresh\r\nDTSTART:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        (Utc::now() + chrono::TimeDelta::hours(2)).format("%Y%m%dT%H%M%SZ")
+    );
+    let (feed_url, _, requests, feed_task) = calendar_feed_server(text.clone()).await;
+    let source_id = engine
+        .add_calendar_source("Recovery", &feed_url)
+        .await
+        .unwrap();
+    let (record, _) = load_schedule_object(&engine, &source_id).await;
+    let source_domain_id = record.as_source().unwrap().id;
+    for mismatch in ["hash", "event", "raw", "shape"] {
+        let old_text = text.replace("SUMMARY:Fresh", "SUMMARY:Pending");
+        let mut batch = engine
+            .stage_calendar_import(&source_id, &old_text, Utc::now())
+            .await
+            .unwrap();
+        if matches!(mismatch, "event" | "shape") {
+            let mut event =
+                clipper_schedule::parse_ics(&old_text, source_domain_id, batch.object_id)
+                    .unwrap()
+                    .events
+                    .remove(0);
+            event.title = "Previously normalized title".into();
+            if mismatch == "shape" {
+                let SessionCredentials {
+                    api,
+                    encryption_key,
+                    device_id_typed,
+                    signing_key,
+                    ..
+                } = engine
+                    .credentials_for_session(engine.history_epoch.load(Ordering::SeqCst))
+                    .await
+                    .unwrap();
+                let payload_id: ObjectPayloadId = uuid::Uuid::now_v7().into();
+                let created_at = Utc::now().to_rfc3339();
+                let aad_body = object_envelope_body_for_aad(
+                    batch.events[0],
+                    ObjectKind::Schedule,
+                    EnvelopePlacement::Create,
+                    device_id_typed,
+                    created_at.clone(),
+                    vec![payload_id],
+                );
+                let record = ScheduleRecord::Ingested(Box::new(event));
+                let (meta_nonce, meta_ciphertext) =
+                    encrypt_schedule_meta(&record.meta(), &encryption_key, &aad_body).unwrap();
+                let mut data = serde_json::to_value(&record).unwrap();
+                data.as_object_mut().unwrap().remove("attendance");
+                let aad = crypto::object_payload_aad(&aad_body, payload_id).unwrap();
+                let (nonce, ciphertext) =
+                    crypto::encrypt(&encryption_key, &serde_json::to_vec(&data).unwrap(), &aad)
+                        .unwrap();
+                let payload = ObjectEnvelopePayload {
+                    id: payload_id,
+                    nonce: nonce.to_vec(),
+                    ciphertext_size: ciphertext.len() as i64,
+                    sha256_ciphertext: crypto::sha256(&ciphertext).to_vec(),
+                };
+                let body = object_envelope_body(
+                    batch.events[0],
+                    ObjectKind::Schedule,
+                    EnvelopePlacement::Create,
+                    device_id_typed,
+                    created_at,
+                    meta_nonce.clone(),
+                    crypto::sha256(&meta_ciphertext).to_vec(),
+                    vec![payload.clone()],
+                );
+                let envelope = ObjectEnvelope {
+                    signature: crypto::sign_object_envelope_body(&signing_key, &body).unwrap(),
+                    body,
+                };
+                api.object_init(&ObjectInitRequest {
+                    id: batch.events[0],
+                    kind: ObjectKind::Schedule,
+                    meta_nonce,
+                    meta_ciphertext,
+                    payloads: vec![ObjectPayloadInit {
+                        id: payload.id,
+                        nonce: payload.nonce,
+                        ciphertext_size: payload.ciphertext_size,
+                        sha256_ciphertext: payload.sha256_ciphertext,
+                        inline_ciphertext: Some(ciphertext),
+                    }],
+                    envelope,
+                })
+                .await
+                .unwrap();
+            } else {
+                engine
+                    .write_schedule_record(
+                        &batch.events[0].to_string(),
+                        ScheduleRecord::Ingested(Box::new(event)),
+                        EnvelopePlacement::Create,
+                    )
+                    .await
+                    .unwrap();
+            }
+        } else {
+            if mismatch == "raw" {
+                let raw = engine
+                    .upload_file_bytes(
+                        &format!("calendar-import-{}-invalid.ics", source_domain_id),
+                        Some("text/calendar"),
+                        &[255],
+                    )
+                    .await
+                    .unwrap();
+                batch.object_id = raw.parse().unwrap();
+                batch.events.clear();
+            }
+            batch.content_hash = vec![0; 32];
+            let (record, head) = load_schedule_object(&engine, &source_id).await;
+            let mut source = record.as_source().unwrap().clone();
+            if mismatch == "raw" {
+                let staged = source.pending_imports.pop().unwrap();
+                source.retired_imports.push(staged.into());
+                source.pending_imports.push(batch.clone());
+            } else {
+                source.pending_imports[0] = batch.clone();
+            }
+            engine
+                .write_schedule_record(
+                    &source_id,
+                    ScheduleRecord::Source(Box::new(source)),
+                    EnvelopePlacement::Revise(head),
+                )
+                .await
+                .unwrap();
+        }
+        let before = requests.load(Ordering::SeqCst);
+        engine.sync_calendar_source(&source_id).await.unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), before + 1);
+        let (record, _) = load_schedule_object(&engine, &source_id).await;
+        let source = record.as_source().unwrap();
+        assert!(source.pending_imports.is_empty());
+        assert!(source.retired_imports.is_empty());
+        assert_ne!(
+            source.active_import.as_ref().unwrap().object_id,
+            batch.object_id
+        );
+        assert_eq!(
+            engine.next_alarms(24 * 366, "UTC").await.unwrap()[0].label,
+            "Fresh"
+        );
+        for id in batch.events.iter().chain(std::iter::once(&batch.object_id)) {
+            assert!(
+                matches!(
+                    engine.api.get_object_revision(&id.to_string(), 1).await,
+                    Err(ClientError::Api { status: 404, .. })
+                ),
+                "unusable {mismatch} batch target {id} was purged"
+            );
+        }
+    }
+    feed_task.abort();
+    engine.logout(true).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_calendar_late_uploads_are_cleaned_after_retirement() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, upstream) = start_server(temp.path()).await;
+    let direct_url = format!("http://{upstream}");
+    let first = register_proxy_engine(&direct_url, &temp.path().join("first")).await;
+    let second = SyncEngine::new_with_data_dir(&direct_url, temp.path().join("second"));
+    second
+        .login_with_platform("local-test-passphrase", "recovery-test", "Second", "test")
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let arrived = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Semaphore::new(0));
+    let fail_revision = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let proxy = tokio::spawn(paused_import_proxy(
+        listener,
+        upstream,
+        Arc::clone(&armed),
+        Arc::clone(&arrived),
+        Arc::clone(&resume),
+        Arc::clone(&fail_revision),
+    ));
+    let slow = copy_session(&first, &proxy_url, &temp.path().join("slow")).await;
+    let source_id = slow
+        .add_calendar_source("Calendar", "http://127.0.0.1:9/feed.ics")
+        .await
+        .unwrap();
+    let text = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:meeting\r\nSUMMARY:Older\r\nDTSTART:20261008T120000Z\r\nRRULE:FREQ=DAILY;COUNT=3;BYHOUR=9,17\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    for interrupt_tracking in [false, true] {
+        let older = slow
+            .stage_calendar_import(&source_id, text, Utc::now())
+            .await
+            .unwrap();
+        wait_for(&second, |state| {
+            state
+                .files
+                .iter()
+                .any(|file| file.id == older.object_id.to_string())
+        })
+        .await;
+        armed.store(true, Ordering::SeqCst);
+        let uploading = {
+            let slow = Arc::clone(&slow);
+            let source_id = source_id.clone();
+            let older = older.clone();
+            tokio::spawn(async move { slow.finish_calendar_import(&source_id, text, &older).await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), arrived.notified())
+            .await
+            .expect("event upload reaches the proxy");
+        second
+            .finish_calendar_import(&source_id, text, &older)
+            .await
+            .unwrap();
+        let newer_text = text.replace("SUMMARY:Older", "SUMMARY:Newer");
+        let newer = second
+            .stage_calendar_import(&source_id, &newer_text, Utc::now())
+            .await
+            .unwrap();
+        let report = second
+            .finish_calendar_import(&source_id, &newer_text, &newer)
+            .await
+            .unwrap();
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        let (record, _) = load_schedule_object(&second, &source_id).await;
+        assert!(record.as_source().unwrap().retired_imports.is_empty());
+        for id in older.events.iter().chain(std::iter::once(&older.object_id)) {
+            assert!(matches!(
+                second.api.get_object_revision(&id.to_string(), 1).await,
+                Err(ClientError::Api { status: 404, .. })
+            ));
+        }
+        fail_revision.store(interrupt_tracking, Ordering::SeqCst);
+        resume.add_permits(1);
+        let report = tokio::time::timeout(Duration::from_secs(10), uploading)
+            .await
+            .expect("late upload finishes")
+            .unwrap();
+        if interrupt_tracking {
+            assert!(report.is_err(), "the retired-entry write was interrupted");
+            assert!(!fail_revision.load(Ordering::SeqCst));
+            assert!(
+                slow.api
+                    .get_object_revision(&older.events[0].to_string(), 1)
+                    .await
+                    .is_ok()
+            );
+            let restarted = SyncEngine::new_with_data_dir(&proxy_url, temp.path().join("slow"));
+            restarted
+                .login_with_platform(
+                    "local-test-passphrase",
+                    "recovery-test",
+                    "Restarted",
+                    "test",
+                )
+                .await
+                .unwrap();
+            wait_for(&restarted, |state| {
+                matches!(state.connection_status, ConnectionStatus::Connected)
+            })
+            .await;
+            assert!(
+                restarted.sync_calendar_source(&source_id).await.is_err(),
+                "the fresh feed is unavailable after recovery"
+            );
+            restarted.logout(true).await.unwrap();
+        } else {
+            let report = report.unwrap();
+            assert!(report.superseded);
+            assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        }
+        let (record, _) = load_schedule_object(&second, &source_id).await;
+        let source = record.as_source().unwrap();
+        assert_eq!(source.active_import.as_ref(), Some(&newer));
+        assert!(source.pending_imports.is_empty());
+        assert!(source.retired_imports.is_empty());
+        for id in older.events.iter().chain(std::iter::once(&older.object_id)) {
+            assert!(
+                matches!(
+                    second.api.get_object_revision(&id.to_string(), 1).await,
+                    Err(ClientError::Api { status: 404, .. })
+                ),
+                "late batch object {id} was purged"
+            );
+        }
+    }
+    first.logout(true).await.unwrap();
+    second.logout(true).await.unwrap();
+    proxy.abort();
+}
+
+async fn paused_import_proxy(
+    listener: tokio::net::TcpListener,
+    upstream: std::net::SocketAddr,
+    armed: Arc<std::sync::atomic::AtomicBool>,
+    arrived: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Semaphore>,
+    fail_revision: Arc<std::sync::atomic::AtomicBool>,
+) {
+    loop {
+        let Ok((client, _)) = listener.accept().await else {
+            return;
+        };
+        let armed = Arc::clone(&armed);
+        let arrived = Arc::clone(&arrived);
+        let resume = Arc::clone(&resume);
+        let fail_revision = Arc::clone(&fail_revision);
+        tokio::spawn(async move {
+            let mut server = tokio::net::TcpStream::connect(upstream).await.unwrap();
+            let (mut client_read, mut client_write) = client.into_split();
+            let (mut server_read, mut server_write) = server.split();
+            let upload = async move {
+                let mut buffer = [0; 65536];
+                loop {
+                    let read = match client_read.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    if buffer[..read].starts_with(b"POST /api/objects/init ")
+                        && armed.swap(false, Ordering::SeqCst)
+                    {
+                        arrived.notify_one();
+                        resume.acquire().await.unwrap().forget();
+                    }
+                    if buffer[..read].starts_with(b"POST /api/objects/")
+                        && buffer[..read]
+                            .windows(b"/revisions HTTP/1.1".len())
+                            .any(|part| part == b"/revisions HTTP/1.1")
+                        && fail_revision.swap(false, Ordering::SeqCst)
+                    {
+                        break;
+                    }
+                    if server_write.write_all(&buffer[..read]).await.is_err() {
+                        break;
+                    }
+                }
+            };
+            let download = tokio::io::copy(&mut server_read, &mut client_write);
+            tokio::select! {
+                () = upload => {},
+                _ = download => {},
+            }
+        });
+    }
+}
+
 async fn lossy_proxy(
     listener: tokio::net::TcpListener,
     upstream: std::net::SocketAddr,
@@ -470,7 +1220,7 @@ async fn lost_timer_replies_recover_committed_starts_and_stops() {
 
 #[tokio::test]
 #[ignore = "build clipper-server first; starts an isolated local server"]
-async fn calendar_sync_retries_reuse_raw_feeds_and_remove_rejected_uploads() {
+async fn calendar_sync_retries_keep_one_snapshot_and_latest_source_settings() {
     crate::ensure_crypto_provider();
     let temp = tempfile::tempdir().unwrap();
     let (_server, upstream) = start_server(temp.path()).await;
@@ -531,10 +1281,14 @@ async fn calendar_sync_retries_reuse_raw_feeds_and_remove_rejected_uploads() {
     )
     .await
     .unwrap();
-    assert!(matches!(
-        engine.sync_calendar_source(&source).await,
-        Err(ClientError::Api { status: 409, .. })
-    ));
+    assert!(
+        engine
+            .sync_calendar_source(&source)
+            .await
+            .unwrap()
+            .feed_unchanged
+    );
+    assert_eq!(engine.get_state().await.calendar_sources[0].name, "Changed");
     let after = engine
         .api
         .list_objects(Some(ObjectKind::File), Some(100), None, None)
@@ -830,7 +1584,11 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
         feed.read().await.as_bytes()
     );
     let mut interrupted_source = first_source.clone();
-    interrupted_source.pending_import = interrupted_source.active_import.take();
+    interrupted_source.pending_imports = interrupted_source
+        .active_import
+        .take()
+        .into_iter()
+        .collect();
     let interrupted_head = first.local_head(&source).await.expect("source head");
     first
         .write_schedule_record(
@@ -845,7 +1603,7 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
     first
         .sync_calendar_source(&source)
         .await
-        .expect("resume stored pending import");
+        .expect_err("recover pending import, then reject the newly fetched invalid feed");
     *feed.write().await = original_feed;
     let resumed_source = first
         .local_store
@@ -858,21 +1616,21 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
                 .flatten()
         })
         .expect("resumed source");
-    assert!(resumed_source.pending_import.is_none());
+    assert!(resumed_source.pending_imports.is_empty());
     assert_eq!(
         resumed_source
             .active_import
             .as_ref()
             .map(|batch| batch.object_id),
         Some(first_import.object_id),
-        "resume promotes the exact stored snapshot without fetching a new raw file"
+        "recovery promotes the saved snapshot before fetching the new response"
     );
     assert_eq!(
         first
             .sync_calendar_source(&source)
             .await
             .expect("replacement sync")
-            .added,
+            .unchanged,
         1
     );
     let replacement_source = first
@@ -889,7 +1647,7 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
     let replacement_import = replacement_source
         .active_import
         .expect("replacement import");
-    assert_ne!(replacement_import.object_id, first_import.object_id);
+    assert_eq!(replacement_import.object_id, first_import.object_id);
     assert_eq!(replacement_import.events.len(), 1);
     let imported = first
         .local_store
@@ -980,9 +1738,8 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
         .expect("source to test cleanup ownership");
     poisoned_source
         .retired_imports
-        .push(clipper_schedule::ingest::CalendarImport {
+        .push(clipper_schedule::ingest::RetiredImport {
             object_id: uuid::Uuid::new_v4().into(),
-            fetched_at: Utc::now(),
             events: vec![provider_actual.parse().expect("actual object id")],
         });
     first
@@ -1476,6 +2233,7 @@ fn imported_source_readiness_requires_a_complete_active_batch() {
     let batch = clipper_schedule::ingest::CalendarImport {
         object_id: raw_id,
         fetched_at: Utc::now(),
+        content_hash: Vec::new(),
         events: vec![event_id],
     };
     let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:ready\r\nSUMMARY:Ready\r\nDTSTART:20260908T090000Z\r\nDTEND:20260908T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
@@ -1489,19 +2247,22 @@ fn imported_source_readiness_requires_a_complete_active_batch() {
         revision: 1,
         parent_hash: [0; crypto::SHA256_BYTES],
     };
-    let source_record = |active_import, pending_import| {
-        ScheduleRecord::Source(Box::new(CalendarSource {
-            id: source_id,
-            name: "Ready".into(),
-            kind: SourceKind::Ics {
-                url: "https://example.test/feed.ics".into(),
-            },
-            enabled: true,
-            active_import,
-            pending_import,
-            retired_imports: Vec::new(),
-        }))
-    };
+    let source_record =
+        |active_import, pending_import: Option<clipper_schedule::ingest::CalendarImport>| {
+            ScheduleRecord::Source(Box::new(CalendarSource {
+                id: source_id,
+                name: "Ready".into(),
+                kind: SourceKind::Ics {
+                    url: "https://example.test/feed.ics".into(),
+                },
+                enabled: true,
+                owner_email: None,
+                alarms_on: true,
+                active_import,
+                pending_imports: pending_import.into_iter().collect(),
+                retired_imports: Vec::new(),
+            }))
+        };
     let complete = vec![
         (
             "source".into(),
