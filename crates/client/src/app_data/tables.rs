@@ -24,6 +24,7 @@ pub(crate) struct AppDataTables {
 impl AppDataTables {
     pub fn open() -> rusqlite::Result<Self> {
         let connection = Connection::open_in_memory()?;
+        connection.pragma_update(None, "temp_store", "MEMORY")?;
         let mut schemas = Vec::new();
         for collection in COLLECTIONS {
             let schema = collection.schema();
@@ -239,6 +240,8 @@ mod tests {
             "CREATE TEMP TABLE notes (id TEXT)",
             "ATTACH DATABASE 'stolen.db' AS stolen",
             "PRAGMA writable_schema = ON",
+            "PRAGMA temp_store = FILE",
+            "PRAGMA temp_store",
             "BEGIN",
             "SELECT 1; DELETE FROM gym.exercises",
             "SELECT 1; SELECT 2",
@@ -260,5 +263,10 @@ mod tests {
                 .unwrap()[0]["rows"],
             1
         );
+        let temp_store: i64 = tables
+            .connection
+            .query_row("PRAGMA temp_store", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(temp_store, 2, "sorts and temporary tables stay in memory");
     }
 }

@@ -117,7 +117,10 @@ relies on the envelope's authenticated encryption.
 
 A device that is offline keeps its pending changes across restarts and sends
 them when it reconnects. While online it sends them after each write, on
-reconnect, and every 30 seconds while any are waiting.
+reconnect, and every 30 seconds while any are waiting. One sending pass
+sends each pending change once, and sends a change that won a conflict at
+most once more; a change still pending after that waits for the next pass,
+and the device fetches received changes between passes.
 
 A device holds at most one pending change per row. Writing the row again
 before the server accepts the change replaces the pending change, which keeps
@@ -147,6 +150,13 @@ In both kinds a delete wins over an edit, whatever their write times, so a
 deleted row stays deleted. Two edits of an append-only row keep the server's
 value. A local change that wins is encrypted and signed again for the next
 revision and keeps its original write time.
+
+A device trusts a conflict only if it moves the row forward: the server's
+current revision must be higher than the revision the change replaced. A
+conflict that reports an older or equal revision, or reports no row while the
+device holds the row past revision 1, comes from a server that lost or rolled
+back data. The device treats the change as refused: it keeps it, stops sending
+it and reports it in its sync status.
 
 ## Server routes
 

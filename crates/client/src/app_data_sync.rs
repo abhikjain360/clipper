@@ -359,34 +359,66 @@ impl SyncEngine {
 
     async fn push_app_data(&self, epoch: u64) -> Result<Option<Vec<String>>, ClientError> {
         let mut refusals: Option<Vec<String>> = None;
+        let mut resent = Vec::new();
+        let mut after_position = 0;
         loop {
+            let (api, batch) = {
+                let _active_key = self.hold_session_for_write(epoch).await?;
+                (
+                    self.api.with_current_token()?,
+                    self.local_store
+                        .pending_app_data_changes(after_position, MAX_APP_DATA_BATCH_CHANGES)
+                        .await?,
+                )
+            };
+            let Some((last_position, _)) = batch.last() else {
+                break;
+            };
+            after_position = *last_position;
+            let pushed = self
+                .send_app_data_batch(
+                    epoch,
+                    &api,
+                    batch.into_iter().map(|(_, change)| change).collect(),
+                )
+                .await?;
+            refusals.get_or_insert_default().extend(pushed.refusals);
+            resent.extend(pushed.resent);
+        }
+        for row_keys in resent.chunks(MAX_APP_DATA_BATCH_CHANGES) {
             let (api, changes) = {
                 let _active_key = self.hold_session_for_write(epoch).await?;
                 (
                     self.api.with_current_token()?,
                     self.local_store
-                        .pending_app_data_changes(MAX_APP_DATA_BATCH_CHANGES)
+                        .pending_app_data_changes_for(row_keys)
                         .await?,
                 )
             };
             if changes.is_empty() {
-                return Ok(refusals);
+                continue;
             }
-            let request = AppDataChangesRequest { changes };
-            let response = api.send_app_data_changes(&request).await?;
-            if response.results.len() != request.changes.len() {
-                return Err(ClientError::UnexpectedResponse(
-                    "app-data results do not match the changes sent".into(),
-                ));
-            }
-            let (progressed, refused) = self
-                .apply_push_results(epoch, request.changes, response.results)
-                .await?;
-            refusals.get_or_insert_default().extend(refused);
-            if !progressed {
-                return Ok(refusals);
-            }
+            let pushed = self.send_app_data_batch(epoch, &api, changes).await?;
+            refusals.get_or_insert_default().extend(pushed.refusals);
         }
+        Ok(refusals)
+    }
+
+    async fn send_app_data_batch(
+        &self,
+        epoch: u64,
+        api: &crate::api_client::ApiClient,
+        changes: Vec<AppDataChange>,
+    ) -> Result<PushedBatch, ClientError> {
+        let request = AppDataChangesRequest { changes };
+        let response = api.send_app_data_changes(&request).await?;
+        if response.results.len() != request.changes.len() {
+            return Err(ClientError::UnexpectedResponse(
+                "app-data results do not match the changes sent".into(),
+            ));
+        }
+        self.apply_push_results(epoch, request.changes, response.results)
+            .await
     }
 
     async fn apply_push_results(
@@ -394,7 +426,7 @@ impl SyncEngine {
         epoch: u64,
         changes: Vec<AppDataChange>,
         results: Vec<AppDataChangeResult>,
-    ) -> Result<(bool, Vec<String>), ClientError> {
+    ) -> Result<PushedBatch, ClientError> {
         let _active_key = self.hold_session_for_write(epoch).await?;
         let (_, device_id, signing_key) = self.current_device_signing_context().await?;
         let mut guard = self.app_data.session.lock().await;
@@ -403,15 +435,13 @@ impl SyncEngine {
             device_id,
             signing_key: &signing_key,
         };
-        let mut progressed = false;
-        let mut refusals = Vec::new();
+        let mut pushed = PushedBatch::default();
         for (change, result) in changes.into_iter().zip(results) {
             let row_key: [u8; 32] = change.row_key.as_slice().try_into().map_err(|_| {
                 ClientError::LocalStore("a pending app-data change has a malformed row key".into())
             })?;
             match result {
                 AppDataChangeResult::Accepted { sequence } => {
-                    progressed = true;
                     if !self
                         .local_store
                         .accept_app_data_change(&row_key, &change.signature, sequence)
@@ -424,6 +454,7 @@ impl SyncEngine {
                             &writer,
                         )
                         .await?;
+                        pushed.resent.push(row_key);
                     }
                 }
                 AppDataChangeResult::Refused { reason } => {
@@ -433,7 +464,7 @@ impl SyncEngine {
                         .refuse_app_data_change(&row_key, &change.signature, &reason)
                         .await?
                     {
-                        refusals.push(reason);
+                        pushed.refusals.push(reason);
                     }
                 }
                 AppDataChangeResult::Conflict { current } => {
@@ -441,19 +472,23 @@ impl SyncEngine {
                         .resolve_app_data_conflict(session, &row_key, &change, current, &writer)
                         .await
                     {
-                        Ok(()) => progressed = true,
+                        Ok(true) => pushed.resent.push(row_key),
+                        Ok(false) => {}
                         Err(error) => {
                             let reason = error.to_string();
-                            self.local_store
+                            if self
+                                .local_store
                                 .refuse_app_data_change(&row_key, &change.signature, &reason)
-                                .await?;
-                            refusals.push(reason);
+                                .await?
+                            {
+                                pushed.refusals.push(reason);
+                            }
                         }
                     }
                 }
             }
         }
-        Ok((progressed, refusals))
+        Ok(pushed)
     }
 
     async fn resolve_app_data_conflict(
@@ -463,19 +498,31 @@ impl SyncEngine {
         sent: &AppDataChange,
         current: Option<AppDataRow>,
         writer: &Writer<'_>,
-    ) -> Result<(), ClientError> {
+    ) -> Result<bool, ClientError> {
         let Some((local, Some(_))) = self.local_store.app_data_row(row_key).await? else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(current) = current else {
-            return self
-                .resend_app_data_change_after(session, row_key, 0, writer)
-                .await;
+            if local.revision != 1 {
+                return Err(ClientError::UnexpectedResponse(format!(
+                    "the server no longer holds a row this device holds at revision {}",
+                    local.revision
+                )));
+            }
+            self.resend_app_data_change_after(session, row_key, 0, writer)
+                .await?;
+            return Ok(true);
         };
-        if current.row_key != row_key.as_slice() || current.revision == sent.replaces_revision {
+        if current.row_key != row_key.as_slice() {
             return Err(ClientError::UnexpectedResponse(
-                "the server reported a conflict that does not match the change".into(),
+                "the server reported a conflict for a different row".into(),
             ));
+        }
+        if current.revision <= sent.replaces_revision {
+            return Err(ClientError::UnexpectedResponse(format!(
+                "the server's revision {} is not newer than revision {} this change replaces",
+                current.revision, sent.replaces_revision
+            )));
         }
         let theirs = session.keys.verified(&current)?;
         let ours = session.keys.open(
@@ -494,14 +541,15 @@ impl SyncEngine {
             })
         };
         if keep_ours {
-            return self
-                .resend_app_data_change_after(session, row_key, current.revision, writer)
-                .await;
+            self.resend_app_data_change_after(session, row_key, current.revision, writer)
+                .await?;
+            return Ok(true);
         }
         let row = StoredAppDataRow::from_server(&current)
             .ok_or_else(|| ClientError::UnexpectedResponse("malformed row key".into()))?;
         self.local_store.replace_app_data_row(&row).await?;
-        show(&session.tables, &theirs, current.revision)
+        show(&session.tables, &theirs, current.revision)?;
+        Ok(false)
     }
 
     async fn resend_app_data_change_after(
@@ -535,6 +583,12 @@ impl SyncEngine {
             .await?;
         show(&session.tables, &envelope, revision)
     }
+}
+
+#[derive(Default)]
+struct PushedBatch {
+    refusals: Vec<String>,
+    resent: Vec<[u8; 32]>,
 }
 
 struct Writer<'a> {

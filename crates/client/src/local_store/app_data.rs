@@ -122,25 +122,58 @@ impl LocalStore {
 
     pub(crate) async fn pending_app_data_changes(
         &self,
+        after_position: i64,
         limit: usize,
+    ) -> Result<Vec<(i64, AppDataChange)>, LocalStoreError> {
+        self.with_database(|connection| {
+            let mut statement = connection.prepare(&format!(
+                "SELECT {ROW_COLUMNS}, p.replaces_revision, r.rowid
+                 FROM app_data_rows r JOIN app_data_pending p ON p.row_key = r.row_key
+                 WHERE p.refusal IS NULL AND r.rowid > ?1
+                 ORDER BY r.rowid
+                 LIMIT ?2"
+            ))?;
+            let rows = statement.query_map(params![after_position, limit as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(9)?,
+                    read_row(row)?,
+                    row.get::<_, i64>(8)? as u64,
+                ))
+            })?;
+            let mut changes = Vec::new();
+            for row in rows {
+                let (position, row, replaces_revision) = row?;
+                match row.change(replaces_revision) {
+                    Some(change) => changes.push((position, change)),
+                    None => tracing::warn!("Skipping a pending app-data change with no device id"),
+                }
+            }
+            Ok(changes)
+        })
+        .await
+    }
+
+    pub(crate) async fn pending_app_data_changes_for(
+        &self,
+        row_keys: &[[u8; 32]],
     ) -> Result<Vec<AppDataChange>, LocalStoreError> {
         self.with_database(|connection| {
             let mut statement = connection.prepare(&format!(
                 "SELECT {ROW_COLUMNS}, p.replaces_revision
                  FROM app_data_rows r JOIN app_data_pending p ON p.row_key = r.row_key
-                 WHERE p.refusal IS NULL
-                 ORDER BY r.rowid
-                 LIMIT ?1"
+                 WHERE p.refusal IS NULL AND r.row_key = ?1"
             ))?;
-            let rows = statement.query_map(params![limit as i64], |row| {
-                Ok((read_row(row)?, row.get::<_, i64>(8)? as u64))
-            })?;
             let mut changes = Vec::new();
-            for row in rows {
-                let (row, replaces_revision) = row?;
-                match row.change(replaces_revision) {
-                    Some(change) => changes.push(change),
-                    None => tracing::warn!("Skipping a pending app-data change with no device id"),
+            for row_key in row_keys {
+                let pending = statement
+                    .query_row(params![row_key.as_slice()], |row| {
+                        Ok((read_row(row)?, row.get::<_, i64>(8)? as u64))
+                    })
+                    .optional()?;
+                if let Some(change) =
+                    pending.and_then(|(row, replaces_revision)| row.change(replaces_revision))
+                {
+                    changes.push(change);
                 }
             }
             Ok(changes)

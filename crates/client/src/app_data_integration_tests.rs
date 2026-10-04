@@ -7,6 +7,7 @@ use std::{
 use clipper_gym::{Muscle, Recovery};
 use serde_json::{Value, json};
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     task::JoinHandle,
 };
@@ -27,33 +28,72 @@ const TABLES: [&str; 6] = [
     "gym.recovery",
 ];
 
-struct SwitchableProxy {
+type HeldSends = tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>;
+
+struct TestProxy {
     url: String,
     online: Arc<AtomicBool>,
+    held_sends: Arc<std::sync::Mutex<Option<HeldSends>>>,
+    requests: Arc<std::sync::Mutex<Vec<&'static str>>>,
     connections: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
     listener: JoinHandle<()>,
 }
 
-impl SwitchableProxy {
+impl TestProxy {
     async fn start(upstream: SocketAddr) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let online = Arc::new(AtomicBool::new(true));
+        let held_sends = Arc::new(std::sync::Mutex::new(None::<HeldSends>));
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
         let connections = Arc::new(std::sync::Mutex::new(Vec::new()));
         let accepting = Arc::clone(&online);
+        let holding = Arc::clone(&held_sends);
+        let logging = Arc::clone(&requests);
         let tracked = Arc::clone(&connections);
         let listener = tokio::spawn(async move {
             loop {
-                let Ok((mut client, _)) = listener.accept().await else {
+                let Ok((client, _)) = listener.accept().await else {
                     return;
                 };
                 if !accepting.load(Ordering::SeqCst) {
                     continue;
                 }
+                let holding = Arc::clone(&holding);
+                let logging = Arc::clone(&logging);
                 let connection = tokio::spawn(async move {
-                    if let Ok(mut server) = TcpStream::connect(upstream).await {
-                        let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                    let Ok(server) = TcpStream::connect(upstream).await else {
+                        return;
+                    };
+                    let (mut client_read, mut client_write) = client.into_split();
+                    let (mut server_read, mut server_write) = server.into_split();
+                    let download = tokio::spawn(async move {
+                        let _ = tokio::io::copy(&mut server_read, &mut client_write).await;
+                    });
+                    let mut buffer = vec![0_u8; 65536];
+                    loop {
+                        let read = match client_read.read(&mut buffer).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => read,
+                        };
+                        let chunk = &buffer[..read];
+                        if chunk.starts_with(b"POST /api/app-data/changes") {
+                            logging.lock().unwrap().push("send");
+                            let held = holding.lock().unwrap().clone();
+                            if let Some(held) = held {
+                                let (release, released) = tokio::sync::oneshot::channel();
+                                if held.send(release).is_ok() {
+                                    let _ = released.await;
+                                }
+                            }
+                        } else if chunk.starts_with(b"GET /api/app-data/changes") {
+                            logging.lock().unwrap().push("fetch");
+                        }
+                        if server_write.write_all(chunk).await.is_err() {
+                            break;
+                        }
                     }
+                    download.abort();
                 });
                 tracked.lock().unwrap().push(connection);
             }
@@ -61,6 +101,8 @@ impl SwitchableProxy {
         Self {
             url,
             online,
+            held_sends,
+            requests,
             connections,
             listener,
         }
@@ -80,9 +122,24 @@ impl SwitchableProxy {
     fn go_online(&self) {
         self.online.store(true, Ordering::SeqCst);
     }
+
+    fn hold_sends(&self) -> tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<()>> {
+        let (held, receiver) = tokio::sync::mpsc::unbounded_channel();
+        *self.held_sends.lock().unwrap() = Some(held);
+        self.requests.lock().unwrap().clear();
+        receiver
+    }
+
+    fn stop_holding_sends(&self) {
+        *self.held_sends.lock().unwrap() = None;
+    }
+
+    fn requests(&self) -> Vec<&'static str> {
+        self.requests.lock().unwrap().clone()
+    }
 }
 
-impl Drop for SwitchableProxy {
+impl Drop for TestProxy {
     fn drop(&mut self) {
         self.listener.abort();
         for connection in self.connections.lock().unwrap().drain(..) {
@@ -209,7 +266,7 @@ async fn live_app_data_syncs_resolves_conflicts_and_rejects_tampered_rows() {
     let data = temp.path();
     let (_server, address) = start_server(data).await;
     let url = format!("http://{address}");
-    let proxy = SwitchableProxy::start(address).await;
+    let proxy = TestProxy::start(address).await;
     let first = signed_in(&url, data, "first", true).await;
     let second = signed_in(&proxy.url, data, "second", false).await;
 
@@ -425,5 +482,177 @@ async fn live_app_data_syncs_resolves_conflicts_and_rejects_tampered_rows() {
     assert_eq!(
         status.last_sync_error.as_deref(),
         Some("Rejected 2 app-data changes from the server that failed verification")
+    );
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_app_data_refuses_conflicts_that_do_not_move_a_row_forward() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data = temp.path();
+    let (_server, address) = start_server(data).await;
+    let first = signed_in(&format!("http://{address}"), data, "first", true).await;
+    let keys = AppDataKeys::derive(&first.current_encryption_key().await.unwrap());
+    let server = rusqlite::Connection::open(data.join("server/clipper.db")).unwrap();
+    server.busy_timeout(Duration::from_secs(5)).unwrap();
+    let synced = async || pending(&first).await == 0;
+
+    let squat = write(&first, "gym.exercises", None, exercise("Squat")).await;
+    eventually("the first revision reaches the server", synced).await;
+    let squat_key = keys
+        .row_key("gym.exercises", squat.parse().unwrap())
+        .to_vec();
+    let backup: (i64, i64, Vec<u8>, Vec<u8>, Vec<u8>) = server
+        .query_row(
+            "SELECT revision, sequence, nonce, ciphertext, signature
+             FROM app_data_rows WHERE row_key = ?1",
+            [&squat_key],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    write(
+        &first,
+        "gym.exercises",
+        Some(&squat),
+        exercise("Front squat"),
+    )
+    .await;
+    eventually("the second revision reaches the server", synced).await;
+    server
+        .execute(
+            "UPDATE app_data_rows
+             SET revision = ?1, sequence = ?2, nonce = ?3, ciphertext = ?4, signature = ?5
+             WHERE row_key = ?6",
+            rusqlite::params![backup.0, backup.1, backup.2, backup.3, backup.4, squat_key],
+        )
+        .unwrap();
+
+    let weighed = write(
+        &first,
+        "gym.body_weight",
+        None,
+        json!({"time": "2026-10-07T07:00:00Z", "kg": 80.5}),
+    )
+    .await;
+    write(
+        &first,
+        "gym.body_weight",
+        Some(&weighed),
+        json!({"time": "2026-10-07T07:00:00Z", "kg": 81.0}),
+    )
+    .await;
+    eventually("the edited weighing reaches the server", synced).await;
+    server
+        .execute(
+            "DELETE FROM app_data_rows WHERE row_key = ?1",
+            [keys
+                .row_key("gym.body_weight", weighed.parse().unwrap())
+                .to_vec()],
+        )
+        .unwrap();
+
+    write(
+        &first,
+        "gym.exercises",
+        Some(&squat),
+        exercise("Back squat"),
+    )
+    .await;
+    write(
+        &first,
+        "gym.body_weight",
+        Some(&weighed),
+        json!({"time": "2026-10-07T07:00:00Z", "kg": 81.5}),
+    )
+    .await;
+    eventually("both changes are refused", async || {
+        let status = first.app_data_status().await.expect("status");
+        status.refused_changes == 2 && status.pending_changes == 0
+    })
+    .await;
+    let revision: i64 = server
+        .query_row(
+            "SELECT revision FROM app_data_rows WHERE row_key = ?1",
+            [&squat_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(revision, 1);
+    assert_eq!(
+        field(&first, "gym.exercises", &squat, "name").await,
+        json!("Back squat")
+    );
+    assert!(
+        first
+            .app_data_status()
+            .await
+            .expect("status")
+            .last_sync_error
+            .is_some()
+    );
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_app_data_pulls_between_bounded_push_passes() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data = temp.path();
+    let (_server, address) = start_server(data).await;
+    let proxy = TestProxy::start(address).await;
+    let first = signed_in(&proxy.url, data, "first", true).await;
+    let second = signed_in(&format!("http://{address}"), data, "second", false).await;
+    let squat = write(&first, "gym.exercises", None, exercise("Squat")).await;
+    let session_id = Uuid::now_v7();
+    let logged = write(&first, "gym.sets", None, set(session_id, &squat, 5)).await;
+    eventually("the second device receives the set", async || {
+        field(&second, "gym.sets", &logged, "reps").await == json!(5)
+    })
+    .await;
+
+    let mut held = proxy.hold_sends();
+    delete(&first, "gym.sets", &logged).await;
+    for reps in 6..12 {
+        let release = tokio::time::timeout(Duration::from_secs(30), held.recv())
+            .await
+            .expect("the first device sends again")
+            .expect("held send");
+        write(
+            &second,
+            "gym.sets",
+            Some(&logged),
+            set(session_id, &squat, reps),
+        )
+        .await;
+        eventually("the competing edit reaches the server", async || {
+            pending(&second).await == 0
+        })
+        .await;
+        release.send(()).expect("release the held send");
+    }
+    proxy.stop_holding_sends();
+    drop(held);
+
+    eventually("the delete wins once the edits stop", async || {
+        field(&first, "gym.sets", &logged, "reps").await == Value::Null
+            && field(&second, "gym.sets", &logged, "reps").await == Value::Null
+            && pending(&first).await == 0
+    })
+    .await;
+    let requests = proxy.requests();
+    assert!(
+        requests
+            .split(|request| *request == "fetch")
+            .all(|sends| sends.len() <= 2),
+        "a push pass sent more than one retry before pulling: {requests:?}"
     );
 }
