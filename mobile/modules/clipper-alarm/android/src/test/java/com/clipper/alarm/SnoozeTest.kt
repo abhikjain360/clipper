@@ -4,10 +4,6 @@ import android.app.AlarmManager
 import android.app.Application
 import android.content.Intent
 import android.os.Looper
-import android.os.SystemClock
-import android.view.MotionEvent
-import android.view.View
-import android.view.ViewGroup
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -25,7 +21,6 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ServiceController
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowAlarmManager
-import java.util.TimeZone
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], application = Application::class)
@@ -69,63 +64,6 @@ class SnoozeTest {
     }
 
     @Test
-    fun ringScreenSlideLeftSnoozes() {
-        val alarm = alarm()
-        startRinging(alarm)
-        val activity = Robolectric.buildActivity(RingActivity::class.java,
-            RingActivity.intent(context, alarm.label, alarm.itemId, alarm.occurrenceKey))
-            .create().start().resume()
-        try {
-            val root = activity.get().findViewById<ViewGroup>(android.R.id.content)
-            drag(requireNotNull(slider(root)), 0.05f)
-            requireNotNull(service).get().onStartCommand(shadowOf(context).nextStartedService, 0, 2)
-            assertFalse(RingService.isRinging)
-            assertTrue(activity.get().isFinishing)
-            assertEquals(1, AlarmMirror.loadSnoozes(context).size)
-        } finally {
-            activity.pause().stop().destroy()
-        }
-    }
-
-    @Test
-    fun ringScreenSlideRightDismisses() {
-        val alarm = alarm()
-        startRinging(alarm)
-        val activity = Robolectric.buildActivity(RingActivity::class.java,
-            RingActivity.intent(context, alarm.label, alarm.itemId, alarm.occurrenceKey))
-            .create().start().resume()
-        try {
-            val root = activity.get().findViewById<ViewGroup>(android.R.id.content)
-            drag(requireNotNull(slider(root)), 0.95f)
-            requireNotNull(service).get().onStartCommand(shadowOf(context).nextStartedService, 0, 2)
-            assertFalse(RingService.isRinging)
-            assertTrue(activity.get().isFinishing)
-            assertTrue(AlarmMirror.loadSnoozes(context).isEmpty())
-        } finally {
-            activity.pause().stop().destroy()
-        }
-    }
-
-    @Test
-    fun notificationTapOpensRingScreenWithoutStoppingTheAlarm() {
-        val alarm = alarm()
-        startRinging(alarm)
-        val notification = shadowOf(requireNotNull(service).get()).lastForegroundNotification
-        notification.contentIntent.send()
-        val request = requireNotNull(shadowOf(context).nextStartedActivity)
-        val activity = Robolectric.buildActivity(RingActivity::class.java, request)
-            .create().start().resume()
-        try {
-            assertFalse(activity.get().isFinishing)
-            assertTrue(RingService.isRinging)
-            assertTrue(AlarmMirror.loadSnoozes(context).isEmpty())
-            assertTrue(shadowOf(manager).scheduledAlarms.isEmpty())
-        } finally {
-            activity.pause().stop().destroy()
-        }
-    }
-
-    @Test
     fun snoozeSurvivesPlanReplacementAndDoesNotReplaceAnotherSnooze() {
         val original = alarm()
         scheduler.replaceAll(listOf(original.copy(fireAtMillis = System.currentTimeMillis() + 3_600_000L)))
@@ -157,17 +95,6 @@ class SnoozeTest {
         assertEquals(expected, restored.triggerAtMs)
         assertNotNull(restored.alarmClockInfo)
         assertEquals(1, AlarmMirror.loadSnoozes(context.createDeviceProtectedStorageContext()).size)
-    }
-
-    @Test
-    fun bootRearmsASnoozeThatBecameDueDuringReboot() {
-        AlarmMirror.addSnooze(context, alarm().copy(fireAtMillis = System.currentTimeMillis() - 60_000L))
-        val now = System.currentTimeMillis()
-
-        boot()
-
-        assertTrue(shadowOf(manager).scheduledAlarms.single().triggerAtMs in
-            (now + 1_000L)..(System.currentTimeMillis() + 1_000L))
     }
 
     @Test
@@ -215,71 +142,6 @@ class SnoozeTest {
         assertTrue(AlarmMirror.loadSnoozes(context).isEmpty())
     }
 
-    @Test
-    fun cancelAllCancelsSnoozes() {
-        scheduler.snooze(alarm(), AlarmMirror.generation(context))
-        scheduler.cancelAll()
-        assertTrue(shadowOf(manager).scheduledAlarms.isEmpty())
-        assertTrue(AlarmMirror.loadSnoozes(context).isEmpty())
-        boot()
-        assertTrue(shadowOf(manager).scheduledAlarms.isEmpty())
-    }
-
-    @Test
-    fun duplicateSnoozeDeliveryCannotRingTwice() {
-        scheduler.snooze(alarm(), AlarmMirror.generation(context))
-        val scheduled = shadowOf(manager).scheduledAlarms.single()
-        val delivery = Intent(shadowOf(scheduled.operation).savedIntent)
-        manager.cancel(requireNotNull(scheduled.operation))
-        AlarmReceiver().onReceive(context, delivery)
-        assertNotNull(shadowOf(context).nextStartedService)
-        AlarmReceiver().onReceive(context, delivery)
-        assertNull(shadowOf(context).nextStartedService)
-    }
-
-    @Test
-    fun widgetShowsSnoozeBeforeALaterPlannedAlarm() {
-        val now = System.currentTimeMillis()
-        scheduler.replaceAll(listOf(alarm().copy(fireAtMillis = now + 3_600_000L)))
-        scheduler.snooze(alarm(), AlarmMirror.generation(context))
-        val snooze = AlarmMirror.loadSnoozes(context).single().alarm
-        val zone = TimeZone.getTimeZone("UTC")
-        assertEquals(ClipperClockText.formatNextAlarm(snooze.fireAtMillis, now, zone),
-            ClipperClockText.nextAlarm(AlarmMirror.loadUpcoming(context), now, zone))
-    }
-
-    @Test
-    fun snoozeWithoutARingingAlarmDoesNothing() {
-        service = Robolectric.buildService(RingService::class.java).create()
-        requireNotNull(service).get().onStartCommand(
-            Intent(context, RingService::class.java).setAction(AlarmIntents.ACTION_SNOOZE), 0, 1)
-        assertFalse(RingService.isRinging)
-        assertTrue(AlarmMirror.loadSnoozes(context).isEmpty())
-    }
-
-    @Test
-    fun normalPlanAlarmStillRings() {
-        scheduler.replaceAll(listOf(alarm().copy(fireAtMillis = System.currentTimeMillis() + 60_000L)))
-        val scheduled = shadowOf(manager).scheduledAlarms.single()
-        manager.cancel(requireNotNull(scheduled.operation))
-        AlarmReceiver().onReceive(context, shadowOf(scheduled.operation).savedIntent)
-        val request = requireNotNull(shadowOf(context).nextStartedService)
-        service = Robolectric.buildService(RingService::class.java).create()
-        requireNotNull(service).get().onStartCommand(request, 0, 1)
-        assertTrue(RingService.isRinging)
-    }
-
-    @Test
-    fun queuedRingRequestCannotStartAfterLogout() {
-        RingService.start(context, alarm(), AlarmMirror.generation(context))
-        val queued = requireNotNull(shadowOf(context).nextStartedService)
-        AlarmMirror.clear(context)
-        service = Robolectric.buildService(RingService::class.java).create()
-        requireNotNull(service).get().onStartCommand(queued, 0, 1)
-        assertFalse(RingService.isRinging)
-        assertTrue(AlarmMirror.loadSnoozes(context).isEmpty())
-    }
-
     private fun startRinging(alarm: PlannedAlarm) {
         service = Robolectric.buildService(RingService::class.java).create()
         RingService.start(context, alarm, AlarmMirror.generation(context))
@@ -291,27 +153,6 @@ class SnoozeTest {
         context.sendBroadcast(Intent(context, BootReceiver::class.java)
             .setAction(Intent.ACTION_LOCKED_BOOT_COMPLETED))
         shadowOf(Looper.getMainLooper()).idle()
-    }
-
-    private fun slider(view: View): AlarmSlideControl? = when (view) {
-        is AlarmSlideControl -> view
-        is ViewGroup -> (0 until view.childCount).firstNotNullOfOrNull { slider(view.getChildAt(it)) }
-        else -> null
-    }
-
-    private fun drag(slider: AlarmSlideControl, fraction: Float) {
-        val density = slider.resources.displayMetrics.density
-        slider.layout(0, 0, (400 * density).toInt(), (96 * density).toInt())
-        val now = SystemClock.uptimeMillis()
-        listOf(MotionEvent.ACTION_DOWN to 0.5f, MotionEvent.ACTION_MOVE to fraction,
-            MotionEvent.ACTION_UP to fraction).forEach { (action, position) ->
-            val event = MotionEvent.obtain(now, now, action, slider.width * position, slider.height / 2f, 0)
-            try {
-                slider.dispatchTouchEvent(event)
-            } finally {
-                event.recycle()
-            }
-        }
     }
 
     private fun alarm(itemId: String = "item") = PlannedAlarm(

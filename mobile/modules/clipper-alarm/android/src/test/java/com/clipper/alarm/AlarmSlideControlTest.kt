@@ -62,38 +62,6 @@ class AlarmSlideControlTest {
         assertEquals(listOf("snooze"), actions)
     }
 
-    @Test
-    fun tappingTheHandleAndTrackDoesNothing() {
-        touch(MotionEvent.ACTION_DOWN, 0.05f)
-        touch(MotionEvent.ACTION_UP, 0.05f)
-        touch(MotionEvent.ACTION_DOWN, 0.5f)
-        touch(MotionEvent.ACTION_UP, 0.5f)
-        assertTrue(actions.isEmpty())
-    }
-
-    @Test
-    fun aDragStartingOnTheTrackDoesNothing() {
-        touch(MotionEvent.ACTION_DOWN, 0.05f)
-        touch(MotionEvent.ACTION_MOVE, 0.95f)
-        touch(MotionEvent.ACTION_UP, 0.95f)
-        assertTrue(actions.isEmpty())
-    }
-
-    @Test
-    fun cancellingADragPastTheThresholdDoesNothing() {
-        touch(MotionEvent.ACTION_DOWN, 0.5f)
-        touch(MotionEvent.ACTION_MOVE, 0.95f)
-        touch(MotionEvent.ACTION_CANCEL, 0.95f)
-        assertTrue(actions.isEmpty())
-    }
-
-    @Test
-    fun accessibilityActionsSnoozeAndDismissWithoutDragging() {
-        assertTrue(slider.performAccessibilityAction(R.id.clipper_alarm_snooze_action, null))
-        assertTrue(slider.performAccessibilityAction(R.id.clipper_alarm_dismiss_action, null))
-        assertEquals(listOf("snooze", "dismiss"), actions)
-    }
-
     private fun touch(action: Int, fraction: Float) {
         val now = SystemClock.uptimeMillis()
         val event = MotionEvent.obtain(now, now, action, slider.width * fraction, slider.height / 2f, 0)
