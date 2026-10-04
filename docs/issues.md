@@ -735,6 +735,18 @@ Each entry has:
 
 ## Bugs
 
+### 143. Android startup hangs when the fingerprint prompt cannot start
+
+- **Status:** open; seen on the owner's phone on 2026-10-07.
+- **Where:** `mobile/src/backend.ts`, the resume read of the stored
+  credentials through `expo-secure-store` with `requireAuthentication`.
+- **What happens:** opening the app while the phone is locked, for example
+  with `adb shell monkey`, makes Android refuse the fingerprint prompt
+  ("Unable to start authentication. Called after onSaveInstanceState()"). The
+  credential read then never settles, and the app stays on "Starting Clipper"
+  until it is removed from recent apps and opened again.
+- **Decision:**
+
 ### 12. Migration 5 broke collab docs on servers upgraded from main
 
 - **Status:** fixed in `3b57f4c`
