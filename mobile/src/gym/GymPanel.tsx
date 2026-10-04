@@ -71,11 +71,3 @@ export function GymPanel({ onError }: { onError: (error: string | null) => void 
     </YStack>
   );
 }
-
-export async function hasOpenGymSession(): Promise<boolean> {
-  try {
-    return (await gym().gymOpenSession()) !== undefined;
-  } catch {
-    return false;
-  }
-}

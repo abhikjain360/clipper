@@ -20,6 +20,7 @@ import {
 } from "./gymClient";
 import { colors, GymCard, Muted, SetEditor } from "./GymUi";
 import { confirmDeleteSet } from "./LiveSession";
+import { stopRestEnd } from "./restAlarm";
 
 export function History({ onError }: { onError: (error: string | null) => void }) {
   const [sessions, setSessions] = useState<GymSessionSummary[] | null>(null);
@@ -150,6 +151,7 @@ function SessionDetail({
           void (async () => {
             try {
               await gym().gymDeleteSession(target.id);
+              stopRestEnd(target.id);
               onBack();
             } catch (caught) {
               onError(formatBackendError(caught));

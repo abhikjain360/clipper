@@ -132,12 +132,12 @@ class ClipperAlarmModule : Module() {
             RingService.dismiss(context)
         }
 
-        Function("scheduleRestEnd") { atMillis: Double, title: String, text: String ->
-            RestTimer.schedule(context, atMillis.toLong(), title, text)
+        Function("scheduleRestEnd") { sessionId: String, endsAtMillis: Double, title: String, text: String ->
+            RestTimer.schedule(context, sessionId, endsAtMillis.toLong(), title, text)
         }
 
-        Function("cancelRestEnd") {
-            RestTimer.cancel(context)
+        Function("cancelRestEnd") { sessionId: String? ->
+            RestTimer.cancel(context, sessionId)
         }
     }
 

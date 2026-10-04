@@ -10,7 +10,6 @@ import {
   type GymSet,
   type GymTemplate,
 } from "@clipper/mobile-bridge";
-import { cancelRestEnd, scheduleRestEnd } from "../../modules/clipper-alarm";
 import { formatBackendError } from "../backend";
 import {
   formatClock,
@@ -33,6 +32,7 @@ import {
   ReserveChips,
   SetEditor,
 } from "./GymUi";
+import { armRestEnd, askToNotifyRestEnd, stopRestEnd } from "./restAlarm";
 
 export function LiveSession({ onError }: { onError: (error: string | null) => void }) {
   const [view, setView] = useState<GymSession | null | undefined>(undefined);
@@ -104,22 +104,9 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
     setReserve(prefill?.repsInReserve);
   }, [pendingKey]);
 
-  const restEnd = view?.rest?.endsAtMillis;
-  const restNotice =
-    current && nextKind !== undefined
-      ? `Next: ${current.name}, ${setLabel(nextKind, nextNumber).toLowerCase()}`
-      : "Time for the next set";
-  const loaded = view !== undefined;
   useEffect(() => {
-    if (!loaded) return;
-    try {
-      if (restEnd !== undefined && restEnd > Date.now()) {
-        scheduleRestEnd(restEnd, "Rest is over", restNotice);
-      } else {
-        cancelRestEnd();
-      }
-    } catch {}
-  }, [loaded, restEnd, restNotice]);
+    if (view !== undefined) armRestEnd(view);
+  }, [view]);
 
   async function run(action: () => Promise<unknown>) {
     if (busyRef.current) return;
@@ -148,6 +135,7 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
       reps: parseCount(reps),
       repsInReserve: reserve,
     };
+    void askToNotifyRestEnd();
     void run(() => gym().gymCompleteSet(sessionId, exerciseId, nextKind, order, values));
   }
 
@@ -159,9 +147,7 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
         onPress: () =>
           void run(async () => {
             await gym().gymFinishSession(session.id);
-            try {
-              cancelRestEnd();
-            } catch {}
+            stopRestEnd(session.id);
           }),
       },
     ]);
@@ -181,7 +167,10 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
         templates={templates}
         exercises={exercises}
         busy={busy}
-        onStart={(templateId) => void run(() => gym().gymStartSession(templateId))}
+        onStart={(templateId) => {
+          void askToNotifyRestEnd();
+          void run(() => gym().gymStartSession(templateId));
+        }}
       />
     );
   }

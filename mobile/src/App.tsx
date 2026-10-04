@@ -90,7 +90,8 @@ import {
   writeClipboardText,
 } from "./backend";
 import { subscribeToCollabDoc, type CollabDocStatus } from "./collabDoc";
-import { GymPanel, hasOpenGymSession } from "./gym/GymPanel";
+import { GymPanel } from "./gym/GymPanel";
+import { armRestEndForOpenWorkout, stopRestEnd } from "./gym/restAlarm";
 import tamaguiConfig from "./tamagui.config";
 
 type TabName = "clipboard" | "files" | "devices" | "collab" | "schedule" | "alarms" | "gym";
@@ -130,6 +131,7 @@ function clearAlarms() {
   try {
     dismissAlarm();
   } catch {}
+  stopRestEnd(null);
 }
 
 /** The device's IANA zone, which resolves floating alarms. */
@@ -482,7 +484,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
 
   useEffect(() => {
     let cancelled = false;
-    void hasOpenGymSession().then((open) => {
+    void armRestEndForOpenWorkout().then((open) => {
       if (open && !cancelled) setTab("gym");
     });
     return () => {
@@ -566,12 +568,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
         return;
       }
       setRunningWork(null);
-      try {
-        cancelAllAlarms();
-      } catch {}
-      try {
-        dismissAlarm();
-      } catch {}
+      clearAlarms();
       onState(await backend.getState());
     } catch (caught) {
       setError(formatBackendError(caught));

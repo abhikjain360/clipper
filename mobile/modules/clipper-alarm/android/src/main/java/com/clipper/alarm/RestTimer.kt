@@ -15,28 +15,35 @@ class RestTimerReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != RestTimer.ACTION_REST_OVER) return
-        RestTimer.show(
-            context.applicationContext,
-            intent.getStringExtra(RestTimer.EXTRA_TITLE) ?: "Rest is over",
-            intent.getStringExtra(RestTimer.EXTRA_TEXT).orEmpty(),
-        )
+        RestTimer.deliver(context.applicationContext, intent)
     }
 }
 
 object RestTimer {
     const val ACTION_REST_OVER = "com.clipper.alarm.action.REST_OVER"
-    const val EXTRA_TITLE = "com.clipper.alarm.extra.REST_TITLE"
-    const val EXTRA_TEXT = "com.clipper.alarm.extra.REST_TEXT"
+    private const val EXTRA_SESSION_ID = "com.clipper.alarm.extra.REST_SESSION_ID"
+    private const val EXTRA_ENDS_AT = "com.clipper.alarm.extra.REST_ENDS_AT"
+    private const val EXTRA_TITLE = "com.clipper.alarm.extra.REST_TITLE"
+    private const val EXTRA_TEXT = "com.clipper.alarm.extra.REST_TEXT"
+    private const val PREFERENCES = "clipper.gym.rest"
+    private const val ARMED_SESSION_ID = "session_id"
+    private const val ARMED_ENDS_AT = "ends_at"
     private const val CHANNEL_ID = "clipper.gym.rest"
     private const val NOTIFICATION_ID = 4712
     private const val REQUEST_CODE = 4712
 
     @SuppressLint("MissingPermission")
-    fun schedule(context: Context, atMillis: Long, title: String, text: String) {
+    fun schedule(context: Context, sessionId: String, endsAtMillis: Long, title: String, text: String) {
         val alarmManager = context.getSystemService(AlarmManager::class.java)
-        context.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
+        notificationManager(context)?.cancel(NOTIFICATION_ID)
+        preferences(context).edit()
+            .putString(ARMED_SESSION_ID, sessionId)
+            .putLong(ARMED_ENDS_AT, endsAtMillis)
+            .commit()
         val intent = Intent(context, RestTimerReceiver::class.java).apply {
             action = ACTION_REST_OVER
+            putExtra(EXTRA_SESSION_ID, sessionId)
+            putExtra(EXTRA_ENDS_AT, endsAtMillis)
             putExtra(EXTRA_TITLE, title)
             putExtra(EXTRA_TEXT, text)
         }
@@ -49,13 +56,19 @@ object RestTimer {
         val exact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
             alarmManager.canScheduleExactAlarms()
         if (exact) {
-            alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMillis, pending)
+            alarmManager.setAlarmClock(
+                AlarmManager.AlarmClockInfo(endsAtMillis, openApp(context)),
+                pending,
+            )
         } else {
-            alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMillis, pending)
+            alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, endsAtMillis, pending)
         }
     }
 
-    fun cancel(context: Context) {
+    fun cancel(context: Context, sessionId: String?) {
+        val armed = preferences(context).getString(ARMED_SESSION_ID, null)
+        if (sessionId != null && armed != null && armed != sessionId) return
+        preferences(context).edit().clear().commit()
         val intent = Intent(context, RestTimerReceiver::class.java).apply {
             action = ACTION_REST_OVER
         }
@@ -68,11 +81,26 @@ object RestTimer {
             context.getSystemService(AlarmManager::class.java).cancel(pending)
             pending.cancel()
         }
-        context.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
+        notificationManager(context)?.cancel(NOTIFICATION_ID)
     }
 
-    fun show(context: Context, title: String, text: String) {
-        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+    fun deliver(context: Context, intent: Intent) {
+        val preferences = preferences(context)
+        val armedSession = preferences.getString(ARMED_SESSION_ID, null)
+        val armedEnd = preferences.getLong(ARMED_ENDS_AT, -1L)
+        val sessionId = intent.getStringExtra(EXTRA_SESSION_ID)
+        val endsAt = intent.getLongExtra(EXTRA_ENDS_AT, -2L)
+        if (armedSession == null || armedSession != sessionId || armedEnd != endsAt) return
+        preferences.edit().clear().commit()
+        show(
+            context,
+            intent.getStringExtra(EXTRA_TITLE) ?: "Rest is over",
+            intent.getStringExtra(EXTRA_TEXT).orEmpty(),
+        )
+    }
+
+    private fun show(context: Context, title: String, text: String) {
+        val manager = notificationManager(context) ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             manager.getNotificationChannel(CHANNEL_ID) == null
         ) {
@@ -85,9 +113,6 @@ object RestTimer {
                     },
             )
         }
-        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
-            ?: Intent()
-        val open = PendingIntent.getActivity(context, REQUEST_CODE, launch, PendingIntent.FLAG_IMMUTABLE)
         val notification = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(context, CHANNEL_ID)
         } else {
@@ -101,8 +126,20 @@ object RestTimer {
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
             .setCategory(Notification.CATEGORY_REMINDER)
             .setAutoCancel(true)
-            .setContentIntent(open)
+            .setContentIntent(openApp(context))
             .build()
         runCatching { manager.notify(NOTIFICATION_ID, notification) }
     }
+
+    private fun openApp(context: Context): PendingIntent {
+        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: Intent()
+        return PendingIntent.getActivity(context, REQUEST_CODE, launch, PendingIntent.FLAG_IMMUTABLE)
+    }
+
+    private fun preferences(context: Context) =
+        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+
+    private fun notificationManager(context: Context) =
+        context.getSystemService(NotificationManager::class.java)
 }
