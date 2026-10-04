@@ -93,6 +93,7 @@ mod tests {
             location: "https://example.com/…".into(),
             enabled,
             alarms_on: true,
+            target_device: None,
             fetched_at: checked_at.map(|time| time.to_rfc3339()),
             checked_at: checked_at.map(|time| time.to_rfc3339()),
             event_count: 0,

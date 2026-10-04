@@ -73,6 +73,11 @@ pub fn format_quantity(amount: Option<f64>, unit: Option<&str>) -> String {
         Some("kg" | "l") => rounded(amount, 2),
         _ => with_fraction(amount),
     };
+    let number = if number == "0" && amount > 0.0 {
+        two_significant_figures(amount)
+    } else {
+        number
+    };
     match unit {
         Some(unit) => format!("{number} {unit}"),
         None => number,
@@ -82,6 +87,12 @@ pub fn format_quantity(amount: Option<f64>, unit: Option<&str>) -> String {
 fn rounded(amount: f64, decimals: i32) -> String {
     let scale = 10_f64.powi(decimals);
     plain_number((amount * scale).round() / scale)
+}
+
+fn two_significant_figures(amount: f64) -> String {
+    let decimals = (1 - amount.log10().floor() as i32).max(0) as usize;
+    let text = format!("{amount:.decimals$}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 fn plain_number(number: f64) -> String {

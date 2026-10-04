@@ -6,9 +6,9 @@ use clipper_cli::{Cli, Command, Error, RangeArgs, ScheduleCommand};
 use clipper_daemon_client::Connection;
 use clipper_daemon_types::{
     ActualView, ApiErrorCode, AppState, AuthChallenge, AuthenticateResult, AuthenticatedSession,
-    DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, ErrorResponse, IPC_AUTH_NONCE_BYTES,
-    IPC_AUTH_VERSION, OccurrenceView, ScheduleItemView, ipc_client_auth_message,
-    ipc_daemon_auth_message,
+    CalendarSourceView, DaemonCommand, DaemonEvent, DaemonRequest, DaemonResponse, ErrorResponse,
+    IPC_AUTH_NONCE_BYTES, IPC_AUTH_VERSION, OccurrenceView, ScheduleItemView,
+    ipc_client_auth_message, ipc_daemon_auth_message,
 };
 use clipper_schedule::{
     BlockDuration, Expansion, ObjectRevisionRef, PlannedRef, Recurrence, RecurrenceEngine,
@@ -25,6 +25,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 const SECRET: [u8; 32] = [7; 32];
+const DEVICE: &str = "11111111-1111-4111-8111-111111111111";
 
 async fn execute(path: &Path, command: Command, input: &[u8]) -> Result<Value, Error> {
     let mut connection =
@@ -148,6 +149,33 @@ async fn schedule_changes_use_authenticated_connections_and_reject_stale_writes(
                 .command;
             assert_eq!(execute(&path, command, b"").await.unwrap(), Value::Null);
         }
+        let list = Cli::try_parse_from(["clipper", "calendar", "list"])
+            .unwrap()
+            .command;
+        let sources = execute(&path, list, b"").await.unwrap();
+        assert_eq!(sources.as_array().unwrap().len(), 1);
+        assert_eq!(sources[0]["target_device"], Value::Null);
+        let source_id = sources[0]["id"].as_str().unwrap();
+        for target in [DEVICE, "phones"] {
+            let command =
+                Cli::try_parse_from(["clipper", "calendar", "ring-on", source_id, target])
+                    .unwrap()
+                    .command;
+            assert_eq!(execute(&path, command, b"").await.unwrap(), Value::Null);
+            let list = Cli::try_parse_from(["clipper", "calendar", "list"])
+                .unwrap()
+                .command;
+            let sources = execute(&path, list, b"").await.unwrap();
+            assert_eq!(sources[0]["id"], source_id);
+            assert_eq!(
+                sources[0]["target_device"],
+                if target == "phones" {
+                    Value::Null
+                } else {
+                    Value::String(target.into())
+                }
+            );
+        }
         let actuals = execute(&path, Command::Actuals(range()), b"")
             .await
             .unwrap();
@@ -214,15 +242,17 @@ async fn schedule_changes_use_authenticated_connections_and_reject_stale_writes(
 
 async fn serve(listener: UnixListener) {
     let object_id = Uuid::new_v4().to_string();
+    let source_id = Uuid::new_v4().to_string();
+    let mut target_device = None;
     let mut stored: Option<ScheduleItem> = None;
     let mut revision = 0;
-    for session in 0..15 {
+    for session in 0..20 {
         let (stream, _) = listener.accept().await.unwrap();
         let (read, mut write) = stream.into_split();
         let mut reader = BufReader::new(read);
         let nonce = vec![3; IPC_AUTH_NONCE_BYTES];
         let challenge = DaemonEvent::auth_challenge(AuthChallenge {
-            protocol_version: if session == 14 {
+            protocol_version: if session == 19 {
                 IPC_AUTH_VERSION - 1
             } else {
                 IPC_AUTH_VERSION
@@ -233,7 +263,7 @@ async fn serve(listener: UnixListener) {
             .write_all(format!("{}\n", serde_json::to_string(&challenge).unwrap()).as_bytes())
             .await
             .unwrap();
-        if session == 14 {
+        if session == 19 {
             let mut line = String::new();
             assert_eq!(reader.read_line(&mut line).await.unwrap(), 0);
             continue;
@@ -251,7 +281,7 @@ async fn serve(listener: UnixListener) {
         let mut mac = Hmac::<Sha256>::new_from_slice(&SECRET).unwrap();
         mac.update(&ipc_daemon_auth_message(&nonce, &auth.client_nonce));
         let mut tag = mac.finalize().into_bytes().to_vec();
-        if session == 13 {
+        if session == 18 {
             tag[0] ^= 1;
         }
         let response = DaemonResponse::success(
@@ -268,7 +298,7 @@ async fn serve(listener: UnixListener) {
             .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
             .await
             .unwrap();
-        if session == 13 {
+        if session == 18 {
             line.clear();
             assert_eq!(reader.read_line(&mut line).await.unwrap(), 0);
             continue;
@@ -315,8 +345,15 @@ async fn serve(listener: UnixListener) {
                     .collect();
                 Ok(Some(
                     serde_json::to_value(AppState {
-                        session: (session != 11).then(AuthenticatedSession::default),
+                        session: (session != 16).then(AuthenticatedSession::default),
                         schedule_items,
+                        calendar_sources: vec![CalendarSourceView {
+                            id: source_id.clone(),
+                            name: "Work".into(),
+                            alarms_on: true,
+                            target_device: target_device.clone(),
+                            ..Default::default()
+                        }],
                         ..Default::default()
                     })
                     .unwrap(),
@@ -377,7 +414,18 @@ async fn serve(listener: UnixListener) {
                 assert_eq!(params.duration.unwrap().minutes(), 60);
                 Ok(None)
             }
-            DaemonCommand::ActualsBetween(_) if session == 12 => {
+            DaemonCommand::SetCalendarSourceTargetDevice(params) => {
+                assert_eq!(params.object_id, source_id);
+                assert!(
+                    params
+                        .target_device
+                        .as_deref()
+                        .is_none_or(|device| device == DEVICE)
+                );
+                target_device = params.target_device;
+                Ok(None)
+            }
+            DaemonCommand::ActualsBetween(_) if session == 17 => {
                 Err(ErrorResponse::new(ApiErrorCode::Unknown, "Not logged in"))
             }
             DaemonCommand::ActualsBetween(params) => {

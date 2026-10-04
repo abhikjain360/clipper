@@ -979,6 +979,24 @@ function CalendarSources({
     const [name, setName] = useState("");
     const [url, setUrl] = useState("");
     const [busy, setBusy] = useState<string | null>(null);
+    const [devices, setDevices] = useState<DeviceInfo[]>([]);
+    const [devicesLoading, setDevicesLoading] = useState(false);
+    const [devicesError, setDevicesError] = useState<string | null>(null);
+    const loadDevices = useCallback(async () => {
+        setDevicesLoading(true);
+        setDevicesError(null);
+        try {
+            const backend = await clipperBackend();
+            setDevices(await backend.listDevices());
+        } catch (caught) {
+            setDevicesError(formatBackendError(caught));
+        } finally {
+            setDevicesLoading(false);
+        }
+    }, []);
+    useEffect(() => {
+        void loadDevices();
+    }, [loadDevices, sources.length]);
     const canSync = isTauriRuntime();
     const [now, setNow] = useState(Date.now);
     useEffect(() => {
@@ -1069,6 +1087,20 @@ function CalendarSources({
         try {
             const backend = await clipperBackend();
             await backend.setCalendarSourceAlarms(source.id, alarmsOn);
+            onState(await backend.getState());
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        } finally {
+            setBusy(null);
+        }
+    }
+
+    async function setTargetDevice(source: CalendarSourceView, targetDevice: string) {
+        onError(null);
+        setBusy(source.id);
+        try {
+            const backend = await clipperBackend();
+            await backend.setCalendarSourceTargetDevice(source.id, targetDevice || null);
             onState(await backend.getState());
         } catch (caught) {
             onError(formatBackendError(caught));
@@ -1202,6 +1234,29 @@ function CalendarSources({
                         >
                             <Switch.Thumb />
                         </Switch>
+                        <Label htmlFor={`calendar-target-${source.id}`} size="$2">
+                            Ring on
+                        </Label>
+                        <select
+                            id={`calendar-target-${source.id}`}
+                            value={source.target_device ?? ""}
+                            disabled={busy !== null || devicesLoading}
+                            onChange={(event) => void setTargetDevice(source, event.target.value)}
+                        >
+                            <option value="">All phones</option>
+                            {devices.map((device) => (
+                                <option key={device.id} value={device.id}>
+                                    {device.name} ({device.platform})
+                                </option>
+                            ))}
+                            {source.target_device &&
+                                !devices.some((device) => device.id === source.target_device) && (
+                                    <option value={source.target_device}>
+                                        Saved device (unavailable)
+                                    </option>
+                                )}
+                        </select>
+                        {devicesLoading && <Spinner size="small" />}
                         {source.raw_import_file_id && source.raw_import_available && (
                             <Button
                                 size="$2"
@@ -1232,6 +1287,11 @@ function CalendarSources({
                     </XStack>
                 </XStack>
             ))}
+            {devicesError && (
+                <Paragraph fontSize={12} color="#f87171">
+                    Devices could not be loaded: {devicesError}
+                </Paragraph>
+            )}
         </Card>
     );
 }

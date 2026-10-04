@@ -29,7 +29,7 @@ futures-util.workspace = true
 tokio = { workspace = true, features = ["macros", "sync", "rt"] }
 tracing.workspace = true
 url = "2.5.8"
-uuid = { workspace = true, features = ["js", "v7"] }
+uuid = { workspace = true, features = ["js", "v5", "v7"] }
 zeroize.workspace = true
 web-time = "1.1.0"
 

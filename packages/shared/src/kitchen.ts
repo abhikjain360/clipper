@@ -89,6 +89,8 @@ export type KitchenPastSession = {
 export type KitchenRecipe = {
   id: string;
   revision: number;
+  newer_revision: number | null;
+  deleted: boolean;
   read_only: boolean;
   title: string;
   summary: string;
@@ -147,7 +149,7 @@ export type KitchenPlan = {
 export type KitchenTimerAction = "start" | "pause" | "resume" | "add_minute" | "clear";
 
 export type KitchenSessionChange =
-  | { change: "start"; servings: number }
+  | { change: "start" }
   | { change: "servings"; servings: number }
   | { change: "gathered"; ingredient: string; gathered: boolean }
   | { change: "step_done"; step: number; done: boolean }
@@ -174,7 +176,12 @@ export type KitchenBackend = {
   recipe: (id: string, servings: number | null, zone: string) => Promise<KitchenRecipe>;
   recipeHistory: (id: string) => Promise<AppDocumentRevision[]>;
   recipeRevision: (id: string, revision: number, servings: number | null) => Promise<KitchenRecipe>;
-  changeSession: (recipeId: string, change: KitchenSessionChange) => Promise<void>;
+  changeSession: (
+    recipeId: string,
+    revision: number,
+    servings: number,
+    change: KitchenSessionChange,
+  ) => Promise<void>;
   pantry: () => Promise<KitchenPantry>;
   changePantry: (change: KitchenPantryChange) => Promise<void>;
   plans: () => Promise<KitchenPlan[]>;

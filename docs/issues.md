@@ -1277,6 +1277,42 @@ Each entry has:
   override objects with their own revisions. The editing UI and "this and
   later" remain open; no series splitting is implemented.
 
+### 152. Concurrent occurrence overrides hid the whole series
+
+- **Status:** fixed in the working tree.
+- **Severity:** high (P1). On main in `607f56a`.
+- **Where:** `crates/client/src/schedule_changes.rs`,
+  `crates/client/src/schedule_context.rs`, `crates/client/src/local_store.rs`.
+- **What happened:** two devices changing the same occurrence before syncing
+  created separate override objects. Duplicate recurrence identities made
+  expansion and alarm planning skip the entire series and blocked later edits.
+- **Fix:** derive the override object ID from the series and recurrence
+  identity with UUIDv5. Retry revision conflicts against the recovered head.
+  Existing duplicates use the newest signed revision write time, with a stable
+  object-ID tie-break, and log a warning. Restore clears all known duplicates.
+- **Validation:** a local-server workflow covers two devices writing before
+  syncing, one surviving override, restore and reuse of its revision chain,
+  and older duplicate objects without hiding the series or its alarms.
+
+### 153. Deleting a series left its occurrence overrides live
+
+- **Status:** fixed in the working tree.
+- **Severity:** medium. On main in `607f56a`.
+- **Where:** `crates/client/src/engine.rs`, `delete_schedule_object_inner`;
+  `crates/client/src/schedule_changes.rs`, restore and override cleanup.
+- **What happened:** deletion tombstoned only the series. Its standalone
+  overrides stayed live and unlisted; restore failed because the series was
+  missing.
+- **Fix:** tombstone the series' known overrides before the series in the
+  same client operation. Restore on a deleted series cleans up matching
+  overrides without requiring a live definition. Cleanup retries conflicts
+  against the recovered head and preserves historical revisions.
+- **Validation:** a local-server workflow cancels occurrences, deletes the
+  series, checks that no live overrides remain, and verifies the second device
+  agrees after sync. It also cleans up orphan overrides from an earlier
+  deletion one occurrence at a time, checks repeated restore succeeds, and
+  restores from a device that has not yet received the override tombstones.
+
 ### 90. Editing recorded time
 
 - **Status:** open
@@ -1563,9 +1599,14 @@ Each entry has:
 - **Decision:** an absent target keeps alarms on all Android phones. A target
   restricts delivery to that registered device. Mac targets use notifications
   with sound in the running Tauri app, including with its window closed.
-  Imported alarms keep their phone behaviour. A removed device does not cause
-  fallback delivery; its saved target remains visible in the composer.
-  `clipper devices` lists IDs, names, platforms and the current device.
+  Calendar sources now have the same target choice in the web/desktop and
+  Android calendar lists. An absent source target keeps imported alarms on
+  all phones; a selected phone or Mac receives that source's alarms alone.
+  The source's alarm switch still silences it without clearing the target.
+  A removed device does not cause fallback delivery; its saved target remains
+  visible. `clipper devices` lists IDs, names, platforms and the current device.
+  `clipper calendar list` exposes source IDs and targets;
+  `clipper calendar ring-on <source-id> <device-id|phones>` changes the target.
   Stopping an alarm from another device remains out of scope. Verify sound,
   permission and delivery with the window closed in the installed build.
 
@@ -1615,8 +1656,9 @@ Each entry has:
   alarm switch. Native apps offer manual Sync. Android supports adding,
   refreshing and removing calendars through UniFFI, and recalculates registered
   alarms after engine state changes, including imported batches and source
-  alarm settings. Desktop does not deliver imported alarms; user-authored
-  alarms can target a Mac and use notifications with sound.
+  alarm settings. Imported calendars and user-authored alarms can target a
+  Mac and use notifications with sound. Untargeted calendars ring on phones
+  only.
 - **Decision:** desktop refreshes hourly while logged in and Android refreshes
   on launch and foreground. Browser feeds refresh through a native app; the
   browser shows the desktop refresh note and no Sync button.

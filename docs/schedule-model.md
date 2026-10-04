@@ -107,6 +107,26 @@ schedule. If a synced edit is incompatible, or its base revision cannot be
 loaded, the client skips that series and publishes a warning in the Schedule
 UI. Other series still render and generate alarms.
 
+Standalone override object IDs are UUIDv5 values derived from the series ID
+and canonical recurrence identity under a fixed namespace. Two devices changing
+the same occurrence write one object; a revision conflict loads the accepted
+head and retries the change. Restoring appends a tombstone, and a later change
+continues the same object's revision chain.
+
+Older clients could create separate override objects for one identity. Local
+schedule snapshots order revisions by their signed write time, newest first,
+with the object ID as a stable tie-break. Expansion and alarm planning use
+the newest override for each identity and log the duplicates. Superseded
+duplicates do not hide the series. Moves use the selected override's duration
+when no duration is supplied; restore removes all known overrides for that
+occurrence.
+
+Deleting a series tombstones its known standalone overrides before tombstoning
+the series, within the same client operation. Restore also works after the
+series has been deleted: it tombstones any known overrides for the requested
+occurrence without restoring the series. With no matching overrides it succeeds
+without writing another revision. Historical revisions remain available.
+
 Provider overrides live inside the imported event object as
 `OccurrenceOverrideData` values. Pinning that object revision captures them;
 they have no revisions of their own.
@@ -289,7 +309,10 @@ ringing on phones. Alarm plans use the latest schedule definition and each
 device's current session ID.
 
 Imported events use invitation rules and start-relative VALARMs, with a
-five-minute fallback. Each source can silence its imported alarms. Provider
+five-minute fallback. Each source can silence its imported alarms or select
+one registered device with **Ring on**, including a Mac. An absent
+`CalendarSource.target_device` means all phones, with no Mac notification.
+Sources saved before this field existed keep that default. Provider
 moves and cancellations apply before planning. `next_alarms` includes complete
 active imported batches alongside user-authored items. Details are in
 [calendar-imports.md](calendar-imports.md).
@@ -298,9 +321,11 @@ active imported batches alongside user-authored items. Details are in
 
 Tauri requests a plan containing only alarms targeted at the signed-in Mac.
 It delivers each due alarm through the same UserNotifications API as break
-reminders, with the block title and the default notification sound. Untargeted
-and imported alarms do not notify on Macs. The plan is refreshed after state
-changes and before delivery, using the system time zone for floating blocks.
+reminders, with the block or imported event title and the default notification
+sound. A source targeted at that Mac contributes its imported alarms;
+untargeted sources and sources targeted at other devices do not. The plan is
+refreshed after state changes and before delivery, using the system time zone
+for floating blocks.
 Closing the window hides it and keeps this task running; Quit ends delivery.
 After a delay such as waking from sleep, alarms at most one minute late can
 still notify. Relaunch does not replay missed alarms.
@@ -320,8 +345,9 @@ and hands that list to Kotlin. It sends a new list when the app becomes active
 or when the schedule or session changes. A phone whose app is never opened runs
 out of alarms after seven days.
 
-Rust includes untargeted alarms and alarms targeted at this phone, alongside
-the imported alarms. The UniFFI wrapper returns that filtered plan unchanged.
+Rust includes untargeted alarms and alarms targeted at this phone. This rule
+applies to both authored blocks and calendar sources. The UniFFI wrapper
+returns that filtered plan unchanged.
 
 The Kotlin side is an Expo local module at `mobile/modules/clipper-alarm`. Its
 own `AndroidManifest.xml` merges into the app's and declares the permissions,

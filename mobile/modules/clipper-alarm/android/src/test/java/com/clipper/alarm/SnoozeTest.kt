@@ -56,8 +56,8 @@ class SnoozeTest {
         assertFalse(shadowOf(notification.fullScreenIntent).savedIntent
             .getBooleanExtra(AlarmIntents.EXTRA_CAN_SNOOZE, true))
 
-        ringing.onStartCommand(Intent(context, RingService::class.java)
-            .setAction(AlarmIntents.ACTION_SNOOZE), 0, 2)
+        RingService.snooze(context)
+        ringing.onStartCommand(shadowOf(context).nextStartedService, 0, 2)
         assertFalse(RingService.isRinging)
         assertTrue(shadowOf(ringing).isForegroundStopped)
         assertTrue(AlarmMirror.loadSnoozes(context).isEmpty())
@@ -69,8 +69,8 @@ class SnoozeTest {
             .putString("plan", JSONArray().put(olderAlarm).toString()).commit()
         service?.destroy()
         startRinging(AlarmMirror.load(context).single())
-        requireNotNull(service).get().onStartCommand(Intent(context, RingService::class.java)
-            .setAction(AlarmIntents.ACTION_SNOOZE), 0, 2)
+        RingService.snooze(context)
+        requireNotNull(service).get().onStartCommand(shadowOf(context).nextStartedService, 0, 2)
         assertFalse(RingService.isRinging)
         assertEquals(1, AlarmMirror.loadSnoozes(context).size)
         assertNotNull(shadowOf(manager).scheduledAlarms.single().alarmClockInfo)
@@ -133,8 +133,9 @@ class SnoozeTest {
         val original = alarm()
         startRinging(original)
         repeat(3) {
+            RingService.snooze(context)
             requireNotNull(service).get().onStartCommand(
-                Intent(context, RingService::class.java).setAction(AlarmIntents.ACTION_SNOOZE), 0, 2)
+                shadowOf(context).nextStartedService, 0, 2)
             assertFalse(RingService.isRinging)
             val scheduled = shadowOf(manager).scheduledAlarms.single()
             manager.cancel(requireNotNull(scheduled.operation))

@@ -131,6 +131,8 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): M
     },
     setCalendarSourceAlarms: async (objectId, alarmsOn) =>
       client.setCalendarSourceAlarms(objectId, alarmsOn),
+    setCalendarSourceTargetDevice: async (objectId, targetDevice) =>
+      client.setCalendarSourceTargetDevice(objectId, targetDevice ?? undefined),
     startActual: async (planContext) => client.startActual(planContext),
     stopActual: async (objectId) => client.stopActual(objectId),
     actualsBetween: async (from, to) => (await client.actualsBetween(from, to)).map(mapActualView),
@@ -328,6 +330,7 @@ function mapCalendarSourceView(source: NativeCalendarSourceView): CalendarSource
   return {
     enabled: source.enabled,
     alarms_on: source.alarmsOn,
+    target_device: source.targetDevice ?? null,
     fetched_at: source.fetchedAt ?? null,
     checked_at: source.checkedAt ?? null,
     event_count: source.eventCount,

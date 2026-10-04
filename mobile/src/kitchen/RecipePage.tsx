@@ -66,7 +66,7 @@ export function RecipePage({
 
   function change(value: KitchenSessionChange) {
     if (!view || view.readOnly || disabled) return;
-    void run(() => kitchen().kitchenChangeSession(recipeId, value));
+    void run(() => kitchen().kitchenChangeSession(recipeId, view.revision, view.servings, value));
   }
 
   function changeServings(value: number) {
@@ -80,13 +80,29 @@ export function RecipePage({
     const saved = await run(() =>
       kitchen().kitchenChangeSession(
         recipeId,
+        view.revision,
+        view.servings,
         new KitchenSessionChange.Finish({ notes: notes.trim() || undefined }),
       ),
     );
     if (saved) {
       setFinishing(false);
       setNotes("");
+      if (view.deleted) onBack();
     }
+  }
+
+  async function discardSession() {
+    if (!view || view.readOnly || disabled) return;
+    const saved = await run(() =>
+      kitchen().kitchenChangeSession(
+        recipeId,
+        view.revision,
+        view.servings,
+        new KitchenSessionChange.Discard(),
+      ),
+    );
+    if (saved && view.deleted) onBack();
   }
 
   function discard() {
@@ -95,11 +111,12 @@ export function RecipePage({
       {
         text: "Discard",
         style: "destructive",
-        onPress: () => change(new KitchenSessionChange.Discard()),
+        onPress: () => void discardSession(),
       },
     ]);
   }
 
+  const editable = view !== null && !view.readOnly && !view.deleted;
   return (
     <YStack flex={1} gap="$3">
       <XStack items="center" gap="$2">
@@ -117,11 +134,21 @@ export function RecipePage({
           </Button>
         )}
       </XStack>
-      {revision !== undefined && <H2 size="$5">{`Revision ${revision} (read-only)`}</H2>}
+      {view?.readOnly && <H2 size="$5">{`Revision ${view.revision} (read-only)`}</H2>}
       <LoadStatus loading={loading} failed={failed} onRetry={reload} />
       {view && (
         <ScrollView flex={1} keyboardShouldPersistTaps="always">
           <YStack gap="$3" pb="$8">
+            {view.deleted && (
+              <Text color={colors.warm}>
+                This recipe was deleted. Finish or discard this cooking session.
+              </Text>
+            )}
+            {view.newerRevision !== undefined && (
+              <Text color={colors.warm}>
+                {`This session cooks from revision ${view.revision}. Revision ${view.newerRevision} is newer and applies from the next cook.`}
+              </Text>
+            )}
             <YStack gap="$2">
               <H2 size="$6">{view.title}</H2>
               <Text>{view.summary}</Text>
@@ -173,9 +200,7 @@ export function RecipePage({
                   theme="blue"
                   size="$5"
                   disabled={disabled}
-                  onPress={() =>
-                    change(new KitchenSessionChange.Start({ servings: view.servings }))
-                  }
+                  onPress={() => change(new KitchenSessionChange.Start())}
                 >
                   Start cooking
                 </Button>
@@ -199,7 +224,7 @@ export function RecipePage({
                   {group.name && <Text fontWeight="600">{group.name}</Text>}
                   {group.ingredients.map((ingredient) => (
                     <XStack key={ingredient.id} items="center" gap="$2">
-                      {!view.readOnly && (
+                      {editable && (
                         <Tick
                           checked={ingredient.gathered}
                           label={`Gather ${ingredient.name}`}
@@ -238,7 +263,7 @@ export function RecipePage({
               <GymCard key={step.index}>
                 <YStack gap="$3">
                   <XStack items="flex-start" gap="$2">
-                    {!view.readOnly && (
+                    {editable && (
                       <Tick
                         checked={step.done}
                         label={`Step ${step.index + 1} done`}
@@ -258,7 +283,7 @@ export function RecipePage({
                       <Text>{step.text}</Text>
                     </YStack>
                   </XStack>
-                  {!view.readOnly &&
+                  {editable &&
                     step.timers.map((timer) => (
                       <StepTimer
                         key={timer.index}

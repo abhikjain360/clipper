@@ -22,7 +22,6 @@ import java.util.Date
  * Plain Android views rather than React Native. This has to appear over the
  * lock screen after a reboot, before the user has unlocked, and at that point
  * the JS bundle, the encrypted store and the sync engine are all unavailable.
- * The label it shows arrives in the intent for the same reason.
  *
  * `showWhenLocked` and `turnScreenOn` in the manifest are what put it in front
  * of the keyguard instead of behind it.
@@ -30,16 +29,20 @@ import java.util.Date
 class RingActivity : Activity() {
 
     private val onRingingStopped: () -> Unit = { finish() }
+    private val onAlarmChanged: (PlannedAlarm) -> Unit = { showAlarm(it) }
 
     override fun onStart() {
         super.onStart()
         RingService.stoppedListeners.add(onRingingStopped)
+        RingService.alarmListeners.add(onAlarmChanged)
         // Also handles a notification tap racing with dismissal/auto-silence.
         if (!RingService.isRinging) finish()
+        else RingService.displayedAlarm?.let(::showAlarm)
     }
 
     override fun onStop() {
         RingService.stoppedListeners.remove(onRingingStopped)
+        RingService.alarmListeners.remove(onAlarmChanged)
         super.onStop()
     }
 
@@ -47,14 +50,18 @@ class RingActivity : Activity() {
         super.onCreate(savedInstanceState)
         showOverKeyguard()
 
-        val label = intent.getStringExtra(AlarmIntents.EXTRA_LABEL) ?: "Alarm"
-        setContentView(buildLayout(label))
+        RingService.displayedAlarm?.let(::showAlarm)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        setContentView(buildLayout(intent.getStringExtra(AlarmIntents.EXTRA_LABEL) ?: "Alarm"))
+        RingService.displayedAlarm?.let(::showAlarm)
+    }
+
+    private fun showAlarm(alarm: PlannedAlarm) {
+        setIntent(intent(this, alarm))
+        setContentView(buildLayout(alarm))
     }
 
     /**
@@ -85,7 +92,7 @@ class RingActivity : Activity() {
     }
 
     @Suppress("DEPRECATION")
-    private fun buildLayout(label: String): ViewGroup {
+    private fun buildLayout(alarm: PlannedAlarm): ViewGroup {
         val density = resources.displayMetrics.density
         fun dp(value: Int) = (value * density).toInt()
 
@@ -118,7 +125,7 @@ class RingActivity : Activity() {
                     gravity = Gravity.CENTER
                 })
                 addView(TextView(this@RingActivity).apply {
-                    text = label
+                    text = alarm.label
                     textSize = 22f
                     setTextColor(Color.parseColor("#8b949e"))
                     gravity = Gravity.CENTER
@@ -127,9 +134,9 @@ class RingActivity : Activity() {
             }
             addView(details, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             addView(AlarmSlideControl(this@RingActivity).apply {
-                canSnooze = intent.getBooleanExtra(AlarmIntents.EXTRA_CAN_SNOOZE, true)
-                onSnooze = { RingService.snooze(this@RingActivity) }
-                onDismiss = { RingService.dismiss(this@RingActivity) }
+                canSnooze = alarm.canSnooze
+                onSnooze = { RingService.snooze(this@RingActivity, alarm) }
+                onDismiss = { RingService.dismiss(this@RingActivity, alarm) }
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(96)))
         }
     }
@@ -137,16 +144,15 @@ class RingActivity : Activity() {
     companion object {
         fun intent(
             context: Context,
-            label: String,
-            itemId: String,
-            occurrenceKey: String,
-            canSnooze: Boolean = true,
+            alarm: PlannedAlarm,
         ): Intent = Intent(context, RingActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            putExtra(AlarmIntents.EXTRA_LABEL, label)
-            putExtra(AlarmIntents.EXTRA_ITEM_ID, itemId)
-            putExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY, occurrenceKey)
-            putExtra(AlarmIntents.EXTRA_CAN_SNOOZE, canSnooze)
+            putExtra(AlarmIntents.EXTRA_LABEL, alarm.label)
+            putExtra(AlarmIntents.EXTRA_ITEM_ID, alarm.itemId)
+            putExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY, alarm.occurrenceKey)
+            putExtra(AlarmIntents.EXTRA_FIRE_AT, alarm.fireAtMillis)
+            putExtra(AlarmIntents.EXTRA_START, alarm.occurrenceStartMillis)
+            putExtra(AlarmIntents.EXTRA_CAN_SNOOZE, alarm.canSnooze)
         }
     }
 }

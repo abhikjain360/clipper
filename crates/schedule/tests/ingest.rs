@@ -1399,6 +1399,14 @@ fn calendars_saved_before_imported_alarms_still_load_and_stay_silent_until_refre
     }))
     .expect("a source saved by the previous version loads");
     assert!(source.alarms_on);
+    assert_eq!(source.target_device, None);
+    assert!(
+        !serde_json::to_value(&source)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("target_device")
+    );
     assert_eq!(source.owner_email, None);
     assert_eq!(source.pending_imports.len(), 1);
     assert_eq!(source.retired_imports.len(), 1);

@@ -807,7 +807,13 @@ function SchedulePanel({
       const [expanded, recorded, plans] = await Promise.all([
         backend.expandSchedule(from, to, zone),
         backend.actualsBetween(from, to),
-        backend.nativeClient().kitchenPlans(),
+        backend
+          .nativeClient()
+          .kitchenPlans()
+          .catch((caught: unknown) => {
+            if (generation === loadGeneration.current) onError(formatBackendError(caught));
+            return [];
+          }),
       ]);
       if (generation !== loadGeneration.current) return;
       expanded.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
@@ -1024,6 +1030,31 @@ function MobileCalendars({
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const busyRef = useRef(false);
+  const [devices, setDevices] = useState<DeviceInfo[]>([]);
+  const [devicesLoading, setDevicesLoading] = useState(false);
+  const [devicesError, setDevicesError] = useState<string | null>(null);
+  const [ringOnSource, setRingOnSource] = useState<string | null>(null);
+  const loadDevices = useCallback(async () => {
+    setDevicesLoading(true);
+    setDevicesError(null);
+    try {
+      setDevices(await backend.listDevices());
+    } catch (caught) {
+      setDevicesError(formatBackendError(caught));
+    } finally {
+      setDevicesLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    void loadDevices();
+  }, [loadDevices, sources.length]);
+
+  async function setTargetDevice(source: CalendarSourceView, targetDevice: string | null) {
+    await change(source.id, async () => {
+      await backend.setCalendarSourceTargetDevice(source.id, targetDevice);
+      setRingOnSource(null);
+    });
+  }
 
   async function change(id: string, action: () => Promise<unknown>) {
     if (busyRef.current) return;
@@ -1122,6 +1153,51 @@ function MobileCalendars({
             <Paragraph size="$2" color="#9aa4ad">
               {calendarSyncLabel(source.checked_at, now)}
             </Paragraph>
+            <Button
+              size="$3"
+              disabled={busy !== null}
+              onPress={() => {
+                setRingOnSource(ringOnSource === source.id ? null : source.id);
+                void loadDevices();
+              }}
+            >
+              Ring on:{" "}
+              {source.target_device
+                ? (devices.find((device) => device.id === source.target_device)?.name ??
+                  "Saved device (unavailable)")
+                : "All phones"}
+            </Button>
+            {ringOnSource === source.id && (
+              <YStack gap="$2">
+                <Button
+                  size="$3"
+                  theme={!source.target_device ? "blue" : undefined}
+                  disabled={busy !== null}
+                  onPress={() => void setTargetDevice(source, null)}
+                >
+                  All phones
+                </Button>
+                {devicesLoading ? (
+                  <Spinner size="small" />
+                ) : (
+                  devices.map((device) => (
+                    <Button
+                      key={device.id}
+                      size="$3"
+                      theme={source.target_device === device.id ? "blue" : undefined}
+                      disabled={busy !== null}
+                      onPress={() => void setTargetDevice(source, device.id)}
+                    >
+                      {device.name} ({device.platform})
+                    </Button>
+                  ))
+                )}
+                {devicesError && <Paragraph color="#f87171">{devicesError}</Paragraph>}
+                <Button size="$3" disabled={busy !== null} onPress={() => setRingOnSource(null)}>
+                  Close
+                </Button>
+              </YStack>
+            )}
             <XStack items="center" gap="$2" flexWrap="wrap">
               <Label htmlFor={`calendar-alarms-${source.id}`}>
                 Alarms {source.alarms_on ? "on" : "off"}

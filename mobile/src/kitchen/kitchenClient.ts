@@ -61,6 +61,7 @@ export function useKitchenView<T>(
       } catch (caught) {
         if (cancelled) return;
         onError(formatBackendError(caught));
+        setView(null);
         setFailed(true);
       } finally {
         if (!cancelled) setLoading(false);

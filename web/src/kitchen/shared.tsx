@@ -25,6 +25,7 @@ export function useKitchenData<T>(
             })
             .catch((caught: unknown) => {
                 if (!cancelled) {
+                    setValue(null);
                     setFailed(true);
                     const message = formatBackendError(caught);
                     setError(message);

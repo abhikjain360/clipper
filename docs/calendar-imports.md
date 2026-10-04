@@ -46,13 +46,18 @@ the same meeting or feed imported through two sources is intentionally duplicate
 - `pending_imports` records uploads that can be resumed. Concurrent devices can
   stage separate batches. `retired_imports` records the raw file ID and event
   IDs of superseded batches whose irreversible cleanup needs to finish.
-- The encrypted source stores `owner_email` and `alarms_on`. For a
+- The encrypted source stores `owner_email`, `alarms_on` and optional
+  `target_device`. An absent target is omitted from stored JSON and means all
+  phones, preserving existing sources. A target is one registered device ID,
+  which can name a phone or a Mac. The target and alarm switch are shared
+  across devices and preserved when imports are refreshed or replaced. For a
   `calendar.google.com/calendar/ical/` or `www.google.com/calendar/ical/` URL,
   the owner is the URL-decoded first
   path segment after `/calendar/ical/`, when it contains an email address. Other
   feeds have an unknown owner. The owner is derived on add and refresh. The
   source's alarm setting defaults to on and is shared across devices.
-- The source view exposes `alarms_on` and the active batch's shared `fetched_at`.
+- The source view exposes `alarms_on`, `target_device` and the active batch's
+  shared `fetched_at`.
   Each device persists its successful fetch completion times locally. The view's
   `checked_at` is the later of that local check time and the shared fetch time.
   “Last synced” labels and hourly refresh limits use `checked_at`. An unchanged
@@ -81,9 +86,18 @@ Moved occurrences ring relative to their new start, and cancelled occurrences
 do not ring. A provider override can change attendance, status or alarms;
 omitted fields inherit the master's values. Alarm labels use the event title.
 Only complete active batches ring. Turning off `alarms_on` silences the entire
-source without hiding its events. Native callers change this setting through
-`SyncEngine::set_calendar_source_alarms`; `next_alarms` combines imported alarms
-with user-authored alarms.
+source without hiding its events or clearing its target. An untargeted source
+rings on all phones and stays silent on Macs. A targeted source rings only on
+that device: phone plans exclude other devices' sources, and the desktop's
+due-alarm selection includes sources targeted at that Mac. The event's existing
+invitation and VALARM rules still apply. An unavailable target has no fallback.
+
+The calendar list has a **Ring on** choice in the web/desktop and Android
+schedule screens. It offers **All phones** and the registered devices.
+Callers change the settings through `SyncEngine::set_calendar_source_alarms`
+and `SyncEngine::set_calendar_source_target_device`; `next_alarms` combines
+imported alarms with user-authored alarms. Local agents can use
+`clipper calendar list` and `clipper calendar ring-on <source-id> <device-id|phones>`.
 
 ## Refresh and failure behavior
 

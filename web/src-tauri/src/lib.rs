@@ -22,8 +22,9 @@ use clipper_daemon_types::{
     DeleteScheduleObjectParams, DeviceListResult, DownloadFileParams, ExpandScheduleParams,
     GetCollabDocMetaParams, LoginParams, LogoutParams, RegisterParams, RegisterResult,
     RemoveDeviceParams, RenameCollabDocParams, SendClipboardPayloadParams,
-    SetCalendarSourceAlarmsParams, StartActualParams, StopActualParams, SyncCalendarSourceParams,
-    UpdateScheduleItemParams, UploadFileParams, UploadFileResult,
+    SetCalendarSourceAlarmsParams, SetCalendarSourceTargetDeviceParams, StartActualParams,
+    StopActualParams, SyncCalendarSourceParams, UpdateScheduleItemParams, UploadFileParams,
+    UploadFileResult,
 };
 use clipper_schedule::ScheduleItem;
 use daemon_client::{DaemonClient, DaemonClientError};
@@ -175,6 +176,7 @@ pub fn run() {
             add_calendar_source,
             sync_calendar_source,
             set_calendar_source_alarms,
+            set_calendar_source_target_device,
             rename_collab_doc,
             get_collab_doc_meta,
             list_devices,
@@ -193,8 +195,9 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                if let Err(error) = window.hide() {
-                    tracing::warn!(%error, "Could not hide the Clipper window");
+                match window.hide() {
+                    Ok(()) => kitchen::window_hidden(true),
+                    Err(error) => tracing::warn!(%error, "Could not hide the Clipper window"),
                 }
             }
             #[cfg(not(target_os = "macos"))]
@@ -207,7 +210,9 @@ pub fn run() {
         if let tauri::RunEvent::Reopen { .. } = event
             && let Some(window) = app.get_webview_window("main")
         {
-            let _ = window.show();
+            if window.show().is_ok() {
+                kitchen::window_hidden(false);
+            }
             let _ = window.set_focus();
         }
         #[cfg(not(target_os = "macos"))]
@@ -670,6 +675,24 @@ async fn set_calendar_source_alarms(
             SetCalendarSourceAlarmsParams {
                 object_id,
                 alarms_on,
+            },
+        ))
+        .await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_calendar_source_target_device(
+    backend: State<'_, DesktopBackend>,
+    object_id: String,
+    target_device: Option<String>,
+) -> CommandResult<()> {
+    backend
+        .daemon
+        .send_ok(DaemonCommand::SetCalendarSourceTargetDevice(
+            SetCalendarSourceTargetDeviceParams {
+                object_id,
+                target_device,
             },
         ))
         .await?;

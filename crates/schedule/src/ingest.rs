@@ -15,7 +15,7 @@ use std::{
 
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use chrono_tz::Tz;
-use clipper_api_types::ObjectId;
+use clipper_api_types::{DeviceId, ObjectId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -75,6 +75,8 @@ pub struct CalendarSource {
     pub owner_email: Option<String>,
     #[serde(default = "alarms_on_by_default")]
     pub alarms_on: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_device: Option<DeviceId>,
     /// Only this complete batch contributes events to the current calendar.
     pub active_import: Option<CalendarImport>,
     /// A staged batch to resume after an interrupted upload.

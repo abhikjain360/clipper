@@ -298,6 +298,17 @@ impl MobileClipperClient {
         Ok(())
     }
 
+    pub async fn set_calendar_source_target_device(
+        &self,
+        object_id: String,
+        target_device: Option<String>,
+    ) -> Result<(), MobileError> {
+        self.engine
+            .set_calendar_source_target_device(&object_id, target_device.as_deref())
+            .await?;
+        Ok(())
+    }
+
     pub async fn delete_schedule_object(&self, object_id: String) -> Result<(), MobileError> {
         self.engine.delete_schedule_object(&object_id).await?;
         Ok(())

@@ -5,6 +5,7 @@ use clipper_schedule::{
 
 use super::*;
 
+#[derive(Clone, Copy)]
 enum Change {
     Cancel,
     Move {
@@ -15,6 +16,66 @@ enum Change {
 }
 
 impl SyncEngine {
+    pub(super) async fn remove_occurrence_overrides(
+        &self,
+        object_id: &str,
+        occurrence_key: Option<&str>,
+    ) -> Result<(), ClientError> {
+        let object_id: ObjectId = object_id.parse().map_err(|source| ClientError::InvalidId {
+            kind: "schedule object id",
+            source,
+        })?;
+        loop {
+            let records = self.local_store.schedule_records_with_ids().await;
+            let ids: Vec<_> = records
+                .into_iter()
+                .filter_map(|(id, record)| match record {
+                    ScheduleRecord::Override(entry)
+                        if entry.base.object_id == object_id
+                            && occurrence_key.is_none_or(|key| {
+                                crate::schedule::occurrence_key(&entry.override_data.recurrence_id)
+                                    == key
+                            }) =>
+                    {
+                        Some(id)
+                    }
+                    _ => None,
+                })
+                .collect();
+            if ids.is_empty() {
+                return Ok(());
+            }
+            for id in ids {
+                match self.tombstone_schedule_object(&id).await {
+                    Ok(()) | Err(ClientError::Api { status: 409, .. }) => {}
+                    Err(error @ ClientError::Api { status: 400, .. })
+                        if matches!(&error, ClientError::Api { error, .. }
+                            if error.code == ApiErrorCode::ObjectDeleteUnsupported) =>
+                    {
+                        let epoch = self.history_epoch.load(Ordering::SeqCst);
+                        let credentials = self.credentials_for_session(epoch).await?;
+                        let head = credentials.api.get_object_head(&id).await?;
+                        if head.id.to_string() != id
+                            || head.kind != ObjectKind::Schedule
+                            || head.envelope.body.operation != ObjectEnvelopeOperation::Delete
+                        {
+                            return Err(error);
+                        }
+                        verify_object_head_envelope(&head)?;
+                        self.accept_recovered_head(
+                            epoch,
+                            &credentials.api,
+                            &credentials.encryption_key,
+                            &head,
+                        )
+                        .await?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+
     pub async fn cancel_occurrence(
         &self,
         object_id: &str,
@@ -60,17 +121,38 @@ impl SyncEngine {
         change: Change,
     ) -> Result<(), ClientError> {
         let epoch = self.history_epoch.load(Ordering::SeqCst);
+        let _write = self.calendar_write.lock().await;
+        loop {
+            match self
+                .change_occurrence_inner(epoch, object_id, occurrence_key, change)
+                .await
+            {
+                Err(ClientError::Api { status: 409, .. }) => {}
+                result => return result,
+            }
+        }
+    }
+
+    async fn change_occurrence_inner(
+        &self,
+        epoch: u64,
+        object_id: &str,
+        occurrence_key: &str,
+        change: Change,
+    ) -> Result<(), ClientError> {
         let recurrence_id = crate::schedule::parse_occurrence_key(occurrence_key)
             .ok_or_else(|| invalid("Invalid occurrence key"))?;
-        let _write = self.calendar_write.lock().await;
         self.credentials_for_session(epoch).await?;
         let records = self.local_store.schedule_records_with_heads().await?;
-        let (_, record, head) = records
-            .iter()
-            .find(|(id, _, _)| id == object_id)
-            .ok_or_else(|| ClientError::ItemNotFound {
-                id: object_id.into(),
-            })?;
+        let stored = records.iter().find(|(id, _, _)| id == object_id);
+        if matches!(change, Change::Restore) && stored.is_none() {
+            return self
+                .remove_occurrence_overrides(object_id, Some(occurrence_key))
+                .await;
+        }
+        let (_, record, head) = stored.ok_or_else(|| ClientError::ItemNotFound {
+            id: object_id.into(),
+        })?;
         let ScheduleRecord::Item(item) = record else {
             return Err(invalid(
                 "Occurrence changes require a locally authored schedule item",
@@ -91,10 +173,9 @@ impl SyncEngine {
             })
             .collect();
         if matches!(change, Change::Restore) && !existing.is_empty() {
-            for (id, _, _) in existing {
-                self.tombstone_schedule_object(id).await?;
-            }
-            return Ok(());
+            return self
+                .remove_occurrence_overrides(object_id, Some(occurrence_key))
+                .await;
         }
         let start = match recurrence_id {
             RecurrenceId::Floating(local) => TimedStart::Floating(local)
@@ -170,21 +251,34 @@ impl SyncEngine {
             }
             Change::Restore => unreachable!(),
         };
+        const NAMESPACE: uuid::Uuid =
+            uuid::Uuid::from_u128(0xc73e_4452_1ef7_561c_98b5_a71b_386c_65d8);
+        let override_id = uuid::Uuid::new_v5(
+            &NAMESPACE,
+            format!(
+                "{}:{}",
+                item.id,
+                crate::schedule::occurrence_key(&recurrence_id)
+            )
+            .as_bytes(),
+        );
+        let id = override_id.to_string();
         let entry = OccurrenceOverride {
             base,
             override_data: OccurrenceOverrideData {
-                id: existing
-                    .first()
-                    .map(|(_, entry, _)| entry.override_data.id)
-                    .unwrap_or_else(OverrideId::new),
+                id: OverrideId(override_id),
                 item: item.id,
                 recurrence_id,
                 change,
             },
         };
-        let (id, placement) = match existing.first() {
-            Some((id, _, head)) => ((*id).clone(), EnvelopePlacement::Revise(**head)),
-            None => (uuid::Uuid::now_v7().to_string(), EnvelopePlacement::Create),
+        let head = match records.iter().find(|(object_id, _, _)| object_id == &id) {
+            Some((_, _, head)) => Some(*head),
+            None => self.local_store.local_head(&id).await?,
+        };
+        let placement = match head {
+            Some(head) => EnvelopePlacement::Revise(head),
+            None => EnvelopePlacement::Create,
         };
         self.write_schedule_record_for_session(
             epoch,

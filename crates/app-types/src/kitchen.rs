@@ -119,6 +119,8 @@ pub struct KitchenPastSession {
 pub struct KitchenRecipe {
     pub id: String,
     pub revision: u64,
+    pub newer_revision: Option<u64>,
+    pub deleted: bool,
     pub read_only: bool,
     pub title: String,
     pub summary: String,
@@ -199,9 +201,7 @@ pub enum KitchenTimerAction {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "change", rename_all = "snake_case")]
 pub enum KitchenSessionChange {
-    Start {
-        servings: u32,
-    },
+    Start,
     Servings {
         servings: u32,
     },

@@ -148,14 +148,18 @@ impl SyncEngine {
             if entry.base.object_id != pin.object_id {
                 continue;
             }
+            if !local_keys.insert(entry.override_data.recurrence_id) {
+                warn!(
+                    item = %item.id,
+                    occurrence = %crate::schedule::occurrence_key(&entry.override_data.recurrence_id),
+                    ignored_object_id = %id,
+                    "Multiple local overrides target the same occurrence; using the newest revision write"
+                );
+                continue;
+            }
             if entry.override_data.item != item.id {
                 return Err(invalid(
                     "An override references a different schedule identity",
-                ));
-            }
-            if !local_keys.insert(entry.override_data.recurrence_id) {
-                return Err(invalid(
-                    "Multiple local overrides target the same occurrence",
                 ));
             }
             if entry.base != pin {
@@ -358,6 +362,7 @@ mod tests {
             enabled: true,
             owner_email: None,
             alarms_on: true,
+            target_device: None,
             active_import: None,
             pending_imports: Vec::new(),
             retired_imports: Vec::new(),

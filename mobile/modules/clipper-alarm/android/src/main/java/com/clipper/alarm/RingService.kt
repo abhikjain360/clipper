@@ -9,6 +9,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -19,11 +20,11 @@ import android.util.Log
 import android.widget.Toast
 
 /**
- * Holds a ringing alarm alive.
+ * Holds ringing alarms alive.
  *
  * A foreground service rather than an activity alone, because an activity can
- * be swiped away or never shown, while the sound has to keep going until it is
- * dismissed or the ten-minute auto-silence window expires. The `mediaPlayback`
+ * be swiped away or never shown, while the sound has to keep going until all
+ * alarms are handled or the ten-minute auto-silence window expires. The `mediaPlayback`
  * type permits audio from the background. Its notification carries a
  * full-screen intent, which is how the ring screen appears over the lock
  * screen.
@@ -40,8 +41,9 @@ class RingService : Service() {
     }
     private var ringer: Ringer? = null
     private var wakeLock: PowerManager.WakeLock? = null
-    private var activeAlarm: PlannedAlarm? = null
-    private var activeGeneration = -1L
+    private data class RingingAlarm(val alarm: PlannedAlarm, val generation: Long)
+
+    private val ringingAlarms = mutableListOf<RingingAlarm>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -55,21 +57,21 @@ class RingService : Service() {
             return START_NOT_STICKY
         }
 
-        when (intent?.action) {
+        when (intent.action) {
             AlarmIntents.ACTION_SNOOZE -> {
-                val alarm = activeAlarm
-                if (alarm == null) {
-                    stopSelf(startId)
-                    return START_NOT_STICKY
-                }
+                val ringing = ringingAlarms.firstOrNull { matches(intent, it.alarm) }
+                    ?: return ringingResult(startId)
+                val alarm = ringing.alarm
                 if (!alarm.canSnooze) {
-                    stopRinging()
-                    return START_NOT_STICKY
+                    ringingAlarms.remove(ringing)
+                    updateRinging()
+                    return ringingResult(startId)
                 }
                 return try {
-                    AlarmScheduler(this).snooze(alarm, activeGeneration)
-                    stopRinging()
-                    START_NOT_STICKY
+                    AlarmScheduler(this).snooze(alarm, ringing.generation)
+                    ringingAlarms.remove(ringing)
+                    updateRinging()
+                    ringingResult(startId)
                 } catch (error: Throwable) {
                     Log.e(TAG, "Could not snooze the alarm", error)
                     Toast.makeText(this, "Could not snooze the alarm", Toast.LENGTH_LONG).show()
@@ -77,26 +79,40 @@ class RingService : Service() {
                 }
             }
             AlarmIntents.ACTION_DISMISS -> {
-                stopRinging()
-                return START_NOT_STICKY
+                if (!hasIdentity(intent)) {
+                    stopRinging()
+                } else if (ringingAlarms.removeAll { matches(intent, it.alarm) }) {
+                    updateRinging()
+                }
+                return ringingResult(startId)
+            }
+            AlarmIntents.ACTION_PLAN_CHANGED -> {
+                val plan = AlarmMirror.load(this)
+                if (ringingAlarms.removeAll { ringing ->
+                    !ringing.alarm.canSnooze && plan.none { sameAlarm(it, ringing.alarm) }
+                }) {
+                    updateRinging()
+                }
+                return ringingResult(startId)
             }
         }
 
         val generation = intent.getLongExtra(AlarmIntents.EXTRA_GENERATION, -1L)
         if (generation != AlarmMirror.generation(this)) {
             Log.i(TAG, "Ignoring cancelled ring request")
-            if (activeAlarm == null) stopSelf(startId)
-            return START_NOT_STICKY
+            return ringingResult(startId)
         }
 
-        val label = intent?.getStringExtra(AlarmIntents.EXTRA_LABEL) ?: DEFAULT_LABEL
-        val itemId = intent?.getStringExtra(AlarmIntents.EXTRA_ITEM_ID).orEmpty()
-        val occurrenceKey = intent?.getStringExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY).orEmpty()
+        val label = intent.getStringExtra(AlarmIntents.EXTRA_LABEL) ?: DEFAULT_LABEL
+        val itemId = intent.getStringExtra(AlarmIntents.EXTRA_ITEM_ID).orEmpty()
+        val occurrenceKey = intent.getStringExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY).orEmpty()
         val fireAt = intent.getLongExtra(AlarmIntents.EXTRA_FIRE_AT, System.currentTimeMillis())
         val canSnooze = intent.getBooleanExtra(AlarmIntents.EXTRA_CAN_SNOOZE, true)
-        activeAlarm = PlannedAlarm(itemId, occurrenceKey, label, fireAt,
+        val alarm = PlannedAlarm(itemId, occurrenceKey, label, fireAt,
             intent.getLongExtra(AlarmIntents.EXTRA_START, fireAt), canSnooze)
-        activeGeneration = generation
+        if (ringingAlarms.none { sameAlarm(it.alarm, alarm) }) {
+            ringingAlarms.add(RingingAlarm(alarm, generation))
+        }
         // Android 10+ restricts background activity launches. The full-screen
         // intent on the alarm notification is the supported path while the
         // app is backgrounded or the device is locked; a direct launch is
@@ -104,12 +120,7 @@ class RingService : Service() {
         val appWasVisible = isAppVisible()
 
         acquireWakeLock()
-        startForegroundWithNotification(label, itemId, occurrenceKey, canSnooze)
-
-        isRinging = true
-        ClipperClockWidget.updateAll(this)
-        // A newly delivered alarm gets a full ring window; dismiss/destroy
-        // removes the old callback so it cannot silence a later alarm.
+        updateRinging()
         handler.removeCallbacks(autoSilence)
         handler.postDelayed(autoSilence, AUTO_SILENCE_MS)
 
@@ -120,7 +131,7 @@ class RingService : Service() {
         if (appWasVisible) {
             runCatching {
                 startActivity(
-                    RingActivity.intent(this, label, itemId, occurrenceKey, canSnooze)
+                    RingActivity.intent(this, requireNotNull(displayedAlarm))
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 )
             }.onFailure { Log.w(TAG, "Could not show ring activity", it) }
@@ -136,11 +147,32 @@ class RingService : Service() {
         super.onDestroy()
     }
 
+    private fun ringingResult(startId: Int): Int {
+        if (ringingAlarms.isNotEmpty()) return START_STICKY
+        stopSelf(startId)
+        return START_NOT_STICKY
+    }
+
+    private fun updateRinging() {
+        val alarm = (ringingAlarms.firstOrNull { it.alarm.canSnooze }
+            ?: ringingAlarms.firstOrNull())?.alarm
+        if (alarm == null) {
+            stopRinging()
+            return
+        }
+        val changed = displayedAlarm != alarm
+        displayedAlarm = alarm
+        isRinging = true
+        startForegroundWithNotification(alarm)
+        ClipperClockWidget.updateAll(this)
+        if (changed) alarmListeners.toList().forEach { it(alarm) }
+    }
+
     private fun stopRinging() {
         handler.removeCallbacks(autoSilence)
         isRinging = false
-        activeAlarm = null
-        activeGeneration = -1L
+        ringingAlarms.clear()
+        displayedAlarm = null
         ClipperClockWidget.updateAll(this)
         stoppedListeners.toList().forEach { it() }
         ringer?.stop()
@@ -152,11 +184,12 @@ class RingService : Service() {
     }
 
     private fun acquireWakeLock() {
-        wakeLock?.let { if (it.isHeld) it.release() }
-        val power = getSystemService(PowerManager::class.java) ?: return
-        wakeLock = power
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "clipper:alarm")
-            .apply { runCatching { acquire(WAKE_LOCK_TIMEOUT_MS) } }
+        if (wakeLock == null) {
+            val power = getSystemService(PowerManager::class.java) ?: return
+            wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "clipper:alarm")
+                .apply { setReferenceCounted(false) }
+        }
+        wakeLock?.let { runCatching { it.acquire(WAKE_LOCK_TIMEOUT_MS) } }
     }
 
     private fun isAppVisible(): Boolean {
@@ -166,12 +199,7 @@ class RingService : Service() {
         return process?.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
     }
 
-    private fun startForegroundWithNotification(
-        label: String,
-        itemId: String,
-        occurrenceKey: String,
-        canSnooze: Boolean,
-    ) {
+    private fun startForegroundWithNotification(alarm: PlannedAlarm) {
         // Notification channels and the channel-aware Notification.Builder
         // were added in API 26. The alarm module still supports API 24/25,
         // where the legacy builder is the only loadable path.
@@ -180,7 +208,7 @@ class RingService : Service() {
         val fullScreen = PendingIntent.getActivity(
             this,
             0,
-            RingActivity.intent(this, label, itemId, occurrenceKey, canSnooze),
+            RingActivity.intent(this, alarm),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
@@ -190,7 +218,7 @@ class RingService : Service() {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
         })
-            .setContentTitle(label)
+            .setContentTitle(alarm.label)
             .setContentText("Alarm")
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
             .setCategory(Notification.CATEGORY_ALARM)
@@ -198,14 +226,18 @@ class RingService : Service() {
             .setContentIntent(fullScreen)
             .setFullScreenIntent(fullScreen, true)
             .apply {
-                if (!canSnooze) {
-                    val dismiss = PendingIntent.getService(this@RingService, 0,
-                        Intent(this@RingService, RingService::class.java)
-                            .setAction(AlarmIntents.ACTION_DISMISS),
+                if (alarm.canSnooze) {
+                    val snooze = PendingIntent.getService(this@RingService, 0,
+                        actionIntent(this@RingService, AlarmIntents.ACTION_SNOOZE, alarm),
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
                     addAction(Notification.Action.Builder(null,
-                        getString(R.string.clipper_alarm_dismiss), dismiss).build())
+                        getString(R.string.clipper_alarm_snooze), snooze).build())
                 }
+                val dismiss = PendingIntent.getService(this@RingService, 0,
+                    actionIntent(this@RingService, AlarmIntents.ACTION_DISMISS, alarm),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                addAction(Notification.Action.Builder(null,
+                    getString(R.string.clipper_alarm_dismiss), dismiss).build())
             }
             .build()
 
@@ -232,9 +264,13 @@ class RingService : Service() {
         private const val WAKE_LOCK_TIMEOUT_MS = AUTO_SILENCE_MS + 30_000L
 
         // Service and activity lifecycle callbacks run on the main thread.
+        @Volatile
         internal var isRinging = false
             private set
+        internal var displayedAlarm: PlannedAlarm? = null
+            private set
         internal val stoppedListeners = mutableSetOf<() -> Unit>()
+        internal val alarmListeners = mutableSetOf<(PlannedAlarm) -> Unit>()
 
         fun start(context: Context, label: String, itemId: String, occurrenceKey: String) {
             val now = System.currentTimeMillis()
@@ -262,18 +298,52 @@ class RingService : Service() {
                 .onFailure { Log.e(TAG, "Could not start the ring service", it) }
         }
 
-        fun dismiss(context: Context) {
-            val intent = Intent(context, RingService::class.java)
-                .setAction(AlarmIntents.ACTION_DISMISS)
+        fun dismiss(context: Context, alarm: PlannedAlarm? = null) {
+            val intent = actionIntent(context, AlarmIntents.ACTION_DISMISS, alarm)
             runCatching { context.startService(intent) }
         }
 
-        fun snooze(context: Context) {
-            val intent = Intent(context, RingService::class.java)
-                .setAction(AlarmIntents.ACTION_SNOOZE)
+        fun snooze(context: Context, alarm: PlannedAlarm? = displayedAlarm) {
+            if (alarm == null) return
+            val intent = actionIntent(context, AlarmIntents.ACTION_SNOOZE, alarm)
             runCatching { context.startService(intent) }
                 .onFailure { Log.e(TAG, "Could not snooze the alarm", it) }
         }
+
+        internal fun planChanged(context: Context) {
+            if (!isRinging) return
+            val intent = Intent(context, RingService::class.java)
+                .setAction(AlarmIntents.ACTION_PLAN_CHANGED)
+            runCatching { context.startService(intent) }
+                .onFailure { Log.e(TAG, "Could not update ringing timers", it) }
+        }
+
+        private fun actionIntent(context: Context, action: String, alarm: PlannedAlarm?): Intent =
+            Intent(context, RingService::class.java).setAction(action).apply {
+                if (alarm != null) {
+                    data = Uri.Builder().scheme("clipper-alarm").authority("ring")
+                        .appendPath(alarm.itemId).appendPath(alarm.occurrenceKey)
+                        .appendPath(alarm.fireAtMillis.toString()).build()
+                    putExtra(AlarmIntents.EXTRA_ITEM_ID, alarm.itemId)
+                    putExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY, alarm.occurrenceKey)
+                    putExtra(AlarmIntents.EXTRA_FIRE_AT, alarm.fireAtMillis)
+                }
+            }
+
+        private fun hasIdentity(intent: Intent): Boolean =
+            intent.hasExtra(AlarmIntents.EXTRA_ITEM_ID) ||
+                intent.hasExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY) ||
+                intent.hasExtra(AlarmIntents.EXTRA_FIRE_AT)
+
+        private fun matches(intent: Intent, alarm: PlannedAlarm): Boolean =
+            intent.getStringExtra(AlarmIntents.EXTRA_ITEM_ID) == alarm.itemId &&
+                intent.getStringExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY) == alarm.occurrenceKey &&
+                intent.hasExtra(AlarmIntents.EXTRA_FIRE_AT) &&
+                intent.getLongExtra(AlarmIntents.EXTRA_FIRE_AT, -1L) == alarm.fireAtMillis
+
+        private fun sameAlarm(first: PlannedAlarm, second: PlannedAlarm): Boolean =
+            first.itemId == second.itemId && first.occurrenceKey == second.occurrenceKey &&
+                first.fireAtMillis == second.fireAtMillis
 
         /**
          * The channel must exist before the notification, and it is created on

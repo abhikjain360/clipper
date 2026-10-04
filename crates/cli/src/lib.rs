@@ -8,7 +8,8 @@ use clipper_daemon_types::{
     ActualsBetweenParams, AppDataWrite, AppDocumentHistoryParams, AppDocumentRevisionParams,
     AppState, CreateScheduleItemParams, DaemonCommand, DeleteScheduleObjectParams,
     DeviceListResult, ExpandScheduleParams, MoveOccurrenceParams, OccurrenceParams, OccurrenceView,
-    QueryAppDataParams, UpdateScheduleItemParams, WriteAppDataParams,
+    QueryAppDataParams, SetCalendarSourceTargetDeviceParams, UpdateScheduleItemParams,
+    WriteAppDataParams,
 };
 use clipper_schedule::{
     AlarmPolicy, BlockDuration, Cadence, Frequency, PlannedRef, Recurrence, ScheduleItem,
@@ -36,6 +37,11 @@ pub enum Command {
         #[command(subcommand)]
         command: ScheduleCommand,
     },
+    #[command(about = "List imported calendars and choose where their alarms ring")]
+    Calendar {
+        #[command(subcommand)]
+        command: CalendarCommand,
+    },
     #[command(about = "Read recorded actual time in a range")]
     Actuals(RangeArgs),
     #[command(about = "List the account's devices, marking this device")]
@@ -45,6 +51,35 @@ pub enum Command {
         #[command(subcommand)]
         command: DataCommand,
     },
+}
+
+#[derive(Subcommand)]
+pub enum CalendarCommand {
+    #[command(about = "List calendar sources with their object ids and alarm settings")]
+    List,
+    #[command(about = "Ring a calendar on one registered device, or all phones")]
+    RingOn {
+        source_id: Uuid,
+        target: CalendarTarget,
+    },
+}
+
+#[derive(Clone)]
+pub enum CalendarTarget {
+    Phones,
+    Device(Uuid),
+}
+
+impl std::str::FromStr for CalendarTarget {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value == "phones" {
+            Ok(Self::Phones)
+        } else {
+            value.parse().map(Self::Device)
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -192,6 +227,7 @@ struct Device {
 
 enum Output {
     Items,
+    Calendars,
     Occurrences,
     Devices,
     Saved,
@@ -208,6 +244,13 @@ impl Command {
         let (command, result_kind) = self.request(input)?;
         let result = connection.send(command).await?;
         let result = match result_kind {
+            Output::Calendars => {
+                let state: AppState = decode_result(result)?;
+                if !state.is_logged_in() {
+                    return Err(Error::NotLoggedIn);
+                }
+                serde_json::to_value(state.calendar_sources)?
+            }
             Output::Occurrences => {
                 let occurrences: Vec<OccurrenceView> = decode_result(result)?;
                 let occurrences = occurrences
@@ -271,6 +314,21 @@ impl Command {
 
     fn request(self, input: impl Read) -> Result<(DaemonCommand, Output), Error> {
         match self {
+            Self::Calendar {
+                command: CalendarCommand::List,
+            } => Ok((DaemonCommand::GetState, Output::Calendars)),
+            Self::Calendar {
+                command: CalendarCommand::RingOn { source_id, target },
+            } => Ok((
+                DaemonCommand::SetCalendarSourceTargetDevice(SetCalendarSourceTargetDeviceParams {
+                    object_id: source_id.to_string(),
+                    target_device: match target {
+                        CalendarTarget::Phones => None,
+                        CalendarTarget::Device(id) => Some(id.to_string()),
+                    },
+                }),
+                Output::Result,
+            )),
             Self::Devices => Ok((DaemonCommand::ListDevices, Output::Devices)),
             Self::Data {
                 command: DataCommand::Query { sql },

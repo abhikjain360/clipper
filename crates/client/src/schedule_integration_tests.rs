@@ -51,6 +51,611 @@ fn server_command(binary: &Path, data: &Path) -> Command {
 
 #[tokio::test]
 #[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_calendar_alarms_follow_source_targets_on_phones_and_mac() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let url = format!("http://{address}");
+    let first = SyncEngine::new_with_data_dir(&url, temp.path().join("first"));
+    first
+        .register_with_platform(
+            "test-invite",
+            "calendar-targets",
+            "test-passphrase",
+            "First phone",
+            "android",
+        )
+        .await
+        .unwrap();
+    let second = SyncEngine::new_with_data_dir(&url, temp.path().join("second"));
+    second
+        .login_with_platform(
+            "test-passphrase",
+            "calendar-targets",
+            "Second phone",
+            "android",
+        )
+        .await
+        .unwrap();
+    let mac = SyncEngine::new_with_data_dir(&url, temp.path().join("mac"));
+    mac.login_with_platform("test-passphrase", "calendar-targets", "Mac", "macos")
+        .await
+        .unwrap();
+    let phone_id = second.current_device_id().await.unwrap();
+    let mac_id = mac.current_device_id().await.unwrap();
+    let start =
+        chrono::DateTime::from_timestamp(Utc::now().timestamp() / 60 * 60 + 7200, 0).unwrap();
+    let text = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:meeting\r\nSUMMARY:Work meeting\r\nDTSTART:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        start.format("%Y%m%dT%H%M%SZ")
+    );
+    let (feed_url, feed, _, feed_task) = calendar_feed_server(text.clone()).await;
+    let source_id = first.add_calendar_source("Work", &feed_url).await.unwrap();
+    first.sync_calendar_source(&source_id).await.unwrap();
+    for engine in [&second, &mac] {
+        wait_for(engine, |state| {
+            state
+                .calendar_sources
+                .iter()
+                .any(|source| source.id == source_id && source.event_count == 1)
+        })
+        .await;
+    }
+    let from = Utc::now().to_rfc3339();
+    let due =
+        (start - chrono::TimeDelta::minutes(5) + chrono::TimeDelta::milliseconds(1)).to_rfc3339();
+    for (target, counts) in [
+        (None, [1, 1, 0]),
+        (Some(phone_id.as_str()), [0, 1, 0]),
+        (Some(mac_id.as_str()), [0, 0, 1]),
+    ] {
+        first
+            .set_calendar_source_target_device(&source_id, target)
+            .await
+            .unwrap();
+        for engine in [&first, &second, &mac] {
+            wait_for(engine, |state| {
+                state.calendar_sources.iter().any(|source| {
+                    source.id == source_id
+                        && source.target_device.as_deref() == target
+                        && source.alarms_on
+                })
+            })
+            .await;
+        }
+        let plans = [
+            first.next_alarms(6, "UTC").await.unwrap(),
+            second.next_alarms(6, "UTC").await.unwrap(),
+            mac.desktop_alarms(&from, &due, "UTC").await.unwrap(),
+        ];
+        for (alarms, count) in plans.iter().zip(counts) {
+            assert_eq!(alarms.len(), count);
+            for alarm in alarms {
+                assert_eq!(alarm.label, "Work meeting");
+                assert_eq!(
+                    alarm.fire_at_millis,
+                    (start - chrono::TimeDelta::minutes(5)).timestamp_millis()
+                );
+            }
+        }
+        assert!(
+            mac.desktop_alarms(
+                &from,
+                &(start - chrono::TimeDelta::minutes(5)).to_rfc3339(),
+                "UTC"
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        first
+            .set_calendar_source_alarms(&source_id, false)
+            .await
+            .unwrap();
+        for engine in [&second, &mac] {
+            wait_for(engine, |state| {
+                state.calendar_sources.iter().any(|source| {
+                    source.id == source_id
+                        && !source.alarms_on
+                        && source.target_device.as_deref() == target
+                })
+            })
+            .await;
+        }
+        assert!(first.next_alarms(6, "UTC").await.unwrap().is_empty());
+        assert!(second.next_alarms(6, "UTC").await.unwrap().is_empty());
+        assert!(
+            mac.desktop_alarms(&from, &due, "UTC")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        first
+            .set_calendar_source_alarms(&source_id, true)
+            .await
+            .unwrap();
+    }
+    *feed.write().await = text.replace("Work meeting", "Updated meeting");
+    second.sync_calendar_source(&source_id).await.unwrap();
+    wait_for(&mac, |state| {
+        state.calendar_sources.iter().any(|source| {
+            source.id == source_id
+                && source.target_device.as_deref() == Some(mac_id.as_str())
+                && source.event_count == 1
+                && source.alarms_on
+        })
+    })
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let alarms = mac.desktop_alarms(&from, &due, "UTC").await.unwrap();
+            if alarms.len() == 1 && alarms[0].label == "Updated meeting" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let unknown = uuid::Uuid::new_v4().to_string();
+    assert!(
+        first
+            .set_calendar_source_target_device(&source_id, Some(&unknown))
+            .await
+            .is_err()
+    );
+    assert!(
+        first
+            .set_calendar_source_target_device(&source_id, Some("bad-id"))
+            .await
+            .is_err()
+    );
+    first
+        .set_calendar_source_target_device(&source_id, None)
+        .await
+        .unwrap();
+    wait_for(&first, |state| {
+        state.calendar_sources.iter().any(|source| {
+            source.id == source_id && source.target_device.is_none() && source.event_count == 1
+        })
+    })
+    .await;
+    let source = first
+        .local_store
+        .schedule_records_with_ids()
+        .await
+        .into_iter()
+        .find_map(|(id, record)| {
+            if id == source_id
+                && let ScheduleRecord::Source(source) = record
+            {
+                Some(source)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(source.target_device, None);
+    assert!(
+        !serde_json::to_value(source)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("target_device")
+    );
+    assert_eq!(first.next_alarms(6, "UTC").await.unwrap().len(), 1);
+    feed_task.abort();
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_series_deletion_clears_overrides_and_restore_cleans_old_orphans() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let url = format!("http://{address}");
+    let first = register_proxy_engine(&url, &temp.path().join("first")).await;
+    let second = SyncEngine::new_with_data_dir(&url, temp.path().join("second"));
+    second
+        .login_with_platform("local-test-passphrase", "recovery-test", "Second", "test")
+        .await
+        .unwrap();
+    let tomorrow = Utc::now().date_naive().succ_opt().unwrap();
+    let from = tomorrow
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .to_rfc3339();
+    let to = (tomorrow.and_hms_opt(0, 0, 0).unwrap().and_utc() + chrono::TimeDelta::days(3))
+        .to_rfc3339();
+    for old_deletion in [false, true] {
+        let item = ScheduleItem {
+            break_reminders: false,
+            id: ScheduleItemId::new(),
+            title: "Daily planning".into(),
+            span: ScheduleSpan::Timed {
+                start: TimedStart::Floating(tomorrow.and_hms_opt(9, 0, 0).unwrap()),
+                duration: BlockDuration::from_minutes(45).unwrap(),
+            },
+            recurrence: Recurrence::Every(clipper_schedule::Cadence::each(
+                clipper_schedule::Frequency::Daily,
+            )),
+            reference: None,
+            alarm: Some(AlarmPolicy::minutes_before(5)),
+        };
+        let id = first.create_schedule_item(item).await.unwrap();
+        let occurrences = first.expand_schedule(&from, &to, "UTC").await.unwrap();
+        assert_eq!(occurrences.len(), 3);
+        let key = &occurrences[0].occurrence_key;
+        let other_key = &occurrences[1].occurrence_key;
+        first.cancel_occurrence(&id, key).await.unwrap();
+        first.cancel_occurrence(&id, other_key).await.unwrap();
+        let overrides: Vec<_> = first
+            .local_store
+            .schedule_records_with_ids()
+            .await
+            .into_iter()
+            .filter_map(|(id, record)| matches!(record, ScheduleRecord::Override(_)).then_some(id))
+            .collect();
+        assert_eq!(overrides.len(), 2);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let records = second.local_store.schedule_records_with_ids().await;
+                if second
+                    .get_state()
+                    .await
+                    .schedule_items
+                    .iter()
+                    .any(|item| item.id == id)
+                    && overrides
+                        .iter()
+                        .all(|id| records.iter().any(|(saved, _)| saved == id))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let stale = copy_session(
+            &second,
+            &url,
+            &temp.path().join(format!("stale-{old_deletion}")),
+        )
+        .await;
+        load_schedule_object(&stale, &id).await;
+        for object_id in &overrides {
+            load_schedule_object(&stale, object_id).await;
+        }
+        if old_deletion {
+            first.tombstone_schedule_object(&id).await.unwrap();
+        } else {
+            first.delete_schedule_object(&id).await.unwrap();
+        }
+        wait_for(&second, |state| state.schedule_items.is_empty()).await;
+        if old_deletion {
+            first.restore_occurrence(&id, key).await.unwrap();
+            let live = first
+                .api
+                .list_objects(Some(ObjectKind::Schedule), Some(100), None, None)
+                .await
+                .unwrap();
+            assert_eq!(live.items.len(), 1);
+            let (record, _) = load_schedule_object(&first, &live.items[0].id.to_string()).await;
+            let ScheduleRecord::Override(entry) = record else {
+                panic!("the other occurrence's override remains");
+            };
+            assert_eq!(
+                crate::schedule::occurrence_key(&entry.override_data.recurrence_id),
+                *other_key
+            );
+            second.restore_occurrence(&id, other_key).await.unwrap();
+        }
+        stale.restore_occurrence(&id, key).await.unwrap();
+        stale.restore_occurrence(&id, other_key).await.unwrap();
+        assert!(
+            stale
+                .local_store
+                .schedule_records_with_ids()
+                .await
+                .iter()
+                .all(|(_, record)| !matches!(record, ScheduleRecord::Override(_)))
+        );
+        assert!(
+            first
+                .api
+                .list_objects(Some(ObjectKind::Schedule), Some(100), None, None)
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        for engine in [&first, &second] {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if engine
+                        .local_store
+                        .schedule_records_with_ids()
+                        .await
+                        .is_empty()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
+            })
+            .await
+            .unwrap();
+            for object_id in &overrides {
+                assert_eq!(
+                    engine
+                        .api
+                        .get_object_head(object_id)
+                        .await
+                        .unwrap()
+                        .envelope
+                        .body
+                        .operation,
+                    ObjectEnvelopeOperation::Delete
+                );
+            }
+            assert!(
+                engine
+                    .expand_schedule(&from, &to, "UTC")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(engine.next_alarms(96, "UTC").await.unwrap().is_empty());
+            engine.restore_occurrence(&id, key).await.unwrap();
+            assert!(matches!(
+                engine.cancel_occurrence(&id, key).await,
+                Err(ClientError::ItemNotFound { .. })
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_occurrence_conflicts_and_existing_duplicates_keep_the_series() {
+    use clipper_schedule::{OccurrenceOverrideData, OverrideChange, OverrideId};
+
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let url = format!("http://{address}");
+    let registered = register_proxy_engine(&url, &temp.path().join("registered")).await;
+    let logged_in = SyncEngine::new_with_data_dir(&url, temp.path().join("logged-in"));
+    logged_in
+        .login_with_platform("local-test-passphrase", "recovery-test", "Second", "test")
+        .await
+        .unwrap();
+    let first = copy_session(&registered, &url, &temp.path().join("first")).await;
+    let second = copy_session(&logged_in, &url, &temp.path().join("second")).await;
+    let tomorrow = Utc::now().date_naive().succ_opt().unwrap();
+    let local = tomorrow.and_hms_opt(9, 0, 0).unwrap();
+    let item = ScheduleItem {
+        break_reminders: false,
+        id: ScheduleItemId::new(),
+        title: "Daily planning".into(),
+        span: ScheduleSpan::Timed {
+            start: TimedStart::Floating(local),
+            duration: BlockDuration::from_minutes(45).unwrap(),
+        },
+        recurrence: Recurrence::Every(clipper_schedule::Cadence::each(
+            clipper_schedule::Frequency::Daily,
+        )),
+        reference: None,
+        alarm: Some(AlarmPolicy::minutes_before(5)),
+    };
+    let id = first.create_schedule_item(item.clone()).await.unwrap();
+    load_schedule_object(&second, &id).await;
+    let from = tomorrow
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .to_rfc3339();
+    let to = (tomorrow.and_hms_opt(0, 0, 0).unwrap().and_utc() + chrono::TimeDelta::days(3))
+        .to_rfc3339();
+    let original = first.expand_schedule(&from, &to, "UTC").await.unwrap();
+    assert_eq!(original.len(), 3);
+    let key = &original[0].occurrence_key;
+    assert!(
+        first
+            .local_store
+            .schedule_records_with_ids()
+            .await
+            .iter()
+            .all(|(_, record)| !matches!(record, ScheduleRecord::Override(_)))
+    );
+    assert!(
+        second
+            .local_store
+            .schedule_records_with_ids()
+            .await
+            .iter()
+            .all(|(_, record)| !matches!(record, ScheduleRecord::Override(_)))
+    );
+    let moved = tomorrow.and_hms_opt(11, 0, 0).unwrap();
+    let (cancel, retime) = tokio::join!(
+        first.cancel_occurrence(&id, key),
+        second.move_occurrence(
+            &id,
+            key,
+            moved,
+            Some(BlockDuration::from_minutes(60).unwrap())
+        ),
+    );
+    cancel.unwrap();
+    retime.unwrap();
+    let page = first
+        .api
+        .list_objects(Some(ObjectKind::Schedule), Some(100), None, None)
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 2);
+    let object = page
+        .items
+        .iter()
+        .find(|object| object.id.to_string() != id)
+        .unwrap();
+    assert_eq!(object.revision, 2);
+    let override_id = object.id.to_string();
+    for engine in [&first, &second] {
+        load_schedule_object(engine, &override_id).await;
+        let records = engine.local_store.schedule_records_with_ids().await;
+        assert_eq!(
+            records
+                .iter()
+                .filter(|(_, record)| matches!(record, ScheduleRecord::Override(_)))
+                .count(),
+            1
+        );
+        let expanded = engine.expand_schedule(&from, &to, "UTC").await.unwrap();
+        assert!(expanded.len() == 2 || expanded.len() == 3);
+        assert!(
+            expanded
+                .iter()
+                .any(|entry| entry.occurrence_key == original[1].occurrence_key)
+        );
+        assert!(
+            engine
+                .next_alarms(96, "UTC")
+                .await
+                .unwrap()
+                .iter()
+                .any(|alarm| alarm.occurrence_key == original[1].occurrence_key)
+        );
+        assert!(engine.get_state().await.schedule_warnings.is_empty());
+    }
+    assert_eq!(
+        serde_json::to_value(first.expand_schedule(&from, &to, "UTC").await.unwrap()).unwrap(),
+        serde_json::to_value(second.expand_schedule(&from, &to, "UTC").await.unwrap()).unwrap(),
+    );
+    first.restore_occurrence(&id, key).await.unwrap();
+    second.cancel_occurrence(&id, key).await.unwrap();
+    assert_eq!(second.local_head(&override_id).await.unwrap().revision, 4);
+    second.restore_occurrence(&id, key).await.unwrap();
+    load_schedule_object(&first, &id).await;
+    first
+        .accept_recovered_head(
+            first.history_epoch.load(Ordering::SeqCst),
+            &first.api,
+            &first.current_encryption_key().await.unwrap(),
+            &first.api.get_object_head(&override_id).await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let base = revision_ref(&id, first.local_head(&id).await.unwrap()).unwrap();
+    let recurrence_id = crate::schedule::parse_occurrence_key(key).unwrap();
+    let older = "ffffffff-ffff-4fff-bfff-ffffffffffff";
+    let newer = "00000000-0000-4000-8000-000000000001";
+    let entry = |change| {
+        ScheduleRecord::Override(Box::new(OccurrenceOverride {
+            base,
+            override_data: OccurrenceOverrideData {
+                id: OverrideId::new(),
+                item: item.id,
+                recurrence_id,
+                change,
+            },
+        }))
+    };
+    first
+        .write_schedule_record(
+            older,
+            entry(OverrideChange::Cancelled),
+            EnvelopePlacement::Create,
+        )
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        first
+            .write_schedule_record(
+                older,
+                entry(OverrideChange::Cancelled),
+                EnvelopePlacement::Revise(first.local_head(older).await.unwrap()),
+            )
+            .await
+            .unwrap();
+    }
+    first
+        .write_schedule_record(
+            newer,
+            entry(OverrideChange::Rescheduled(ScheduleSpan::Timed {
+                start: TimedStart::Floating(moved),
+                duration: BlockDuration::from_minutes(75).unwrap(),
+            })),
+            EnvelopePlacement::Create,
+        )
+        .await
+        .unwrap();
+    for object_id in [older, newer] {
+        load_schedule_object(&second, object_id).await;
+    }
+    for engine in [&first, &second] {
+        let expanded = engine.expand_schedule(&from, &to, "UTC").await.unwrap();
+        assert_eq!(expanded.len(), 3);
+        let occurrence = expanded
+            .iter()
+            .find(|entry| &entry.occurrence_key == key)
+            .unwrap();
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&occurrence.start)
+                .unwrap()
+                .to_utc(),
+            moved.and_utc()
+        );
+        let pin: clipper_schedule::PlannedRef =
+            serde_json::from_str(&occurrence.plan_context).unwrap();
+        assert_eq!(pin.override_revision.unwrap().object_id.to_string(), newer);
+        let alarm = engine
+            .next_alarms(96, "UTC")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|alarm| &alarm.occurrence_key == key)
+            .unwrap();
+        assert_eq!(
+            alarm.occurrence_start_millis,
+            moved.and_utc().timestamp_millis()
+        );
+        assert!(engine.get_state().await.schedule_warnings.is_empty());
+    }
+    first
+        .move_occurrence(&id, key, tomorrow.and_hms_opt(12, 0, 0).unwrap(), None)
+        .await
+        .unwrap();
+    let expanded = first.expand_schedule(&from, &to, "UTC").await.unwrap();
+    let occurrence = expanded
+        .iter()
+        .find(|entry| &entry.occurrence_key == key)
+        .unwrap();
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(&occurrence.end).unwrap()
+            - chrono::DateTime::parse_from_rfc3339(&occurrence.start).unwrap(),
+        chrono::TimeDelta::minutes(75)
+    );
+    first.cancel_occurrence(&id, key).await.unwrap();
+    assert_eq!(
+        first
+            .expand_schedule(&from, &to, "UTC")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    first.restore_occurrence(&id, key).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(first.expand_schedule(&from, &to, "UTC").await.unwrap()).unwrap(),
+        serde_json::to_value(original).unwrap()
+    );
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
 async fn live_single_occurrence_changes_sync_and_move_alarms() {
     crate::ensure_crypto_provider();
     let temp = tempfile::tempdir().unwrap();
@@ -2955,6 +3560,7 @@ fn imported_source_readiness_requires_a_complete_active_batch() {
                 enabled: true,
                 owner_email: None,
                 alarms_on: true,
+                target_device: None,
                 active_import,
                 pending_imports: pending_import.into_iter().collect(),
                 retired_imports: Vec::new(),
@@ -3226,7 +3832,14 @@ async fn exercise_revision_aware_plans(engine: &SyncEngine) {
     );
     assert!(!engine.get_state().await.schedule_warnings.is_empty());
     engine.delete_schedule_object(&id).await.unwrap();
-    engine.delete_schedule_object(&override_id).await.unwrap();
+    assert!(
+        engine
+            .local_store
+            .schedule_records_with_ids()
+            .await
+            .iter()
+            .all(|(id, _)| id != &override_id)
+    );
     engine.schedule_history.lock().await.clear();
     let historical = engine.recorded_plan(&moved_actual).await.unwrap().unwrap();
     assert!(matches!(

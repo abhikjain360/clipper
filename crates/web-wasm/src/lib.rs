@@ -551,6 +551,20 @@ pub fn set_calendar_source_alarms(object_id: String, alarms_on: bool) -> Promise
     })
 }
 
+#[wasm_bindgen(js_name = setCalendarSourceTargetDevice)]
+pub fn set_calendar_source_target_device(
+    object_id: String,
+    target_device: Option<String>,
+) -> Promise {
+    ok_promise(async move {
+        engine_or_error()?
+            .set_calendar_source_target_device(&object_id, target_device.as_deref())
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::UNDEFINED)
+    })
+}
+
 #[wasm_bindgen(js_name = createCollabDoc)]
 pub fn create_collab_doc() -> Promise {
     ok_promise(async {

@@ -599,6 +599,49 @@ impl SyncEngine {
         }
     }
 
+    pub async fn set_calendar_source_target_device(
+        &self,
+        id: &str,
+        target_device: Option<&str>,
+    ) -> Result<(), ClientError> {
+        self.run_work(None, async {
+            let target = target_device
+                .map(|id| {
+                    id.parse::<DeviceId>()
+                        .map_err(|source| ClientError::InvalidId {
+                            kind: "device id",
+                            source,
+                        })
+                })
+                .transpose()?;
+            if let Some(id) = target
+                && !self
+                    .list_devices()
+                    .await?
+                    .iter()
+                    .any(|device| device.id == id.to_string())
+            {
+                return Err(ClientError::InvalidArgument(
+                    "Choose a registered device".into(),
+                ));
+            }
+            let _write = self.calendar_write.lock().await;
+            loop {
+                let (mut source, head) = self.read_calendar_source(id).await?;
+                if source.target_device == target {
+                    return Ok(());
+                }
+                source.target_device = target;
+                match self.save_calendar_source(id, &source, head).await {
+                    Ok(_) => return Ok(()),
+                    Err(ClientError::Api { status: 409, .. }) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+        .await
+    }
+
     async fn load_import_event(&self, id: &str) -> Result<Option<ScheduleRecord>, ClientError> {
         self.load_calendar_record(id, false).await
     }

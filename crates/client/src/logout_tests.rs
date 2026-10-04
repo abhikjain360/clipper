@@ -132,6 +132,7 @@ async fn logout_lists_a_calendar_sync_and_cancels_it_without_waiting_for_the_ser
         enabled: true,
         owner_email: None,
         alarms_on: true,
+        target_device: None,
     };
     let encrypted = encrypted_schedule_object(
         &ScheduleRecord::Source(Box::new(source.clone())),

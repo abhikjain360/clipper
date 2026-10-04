@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 /// incompatibly — the desktop app and the daemon are separate binaries, and an
 /// old daemon can outlive an app update (it is reparented to PID 1, so it keeps
 /// running until killed).
-pub const IPC_AUTH_VERSION: u32 = 10;
+pub const IPC_AUTH_VERSION: u32 = 11;
 pub const IPC_AUTH_NONCE_BYTES: usize = 32;
 pub const IPC_AUTH_TAG_BYTES: usize = 32;
 
@@ -99,6 +99,7 @@ pub enum DaemonCommand {
     AddCalendarSource(AddCalendarSourceParams),
     SyncCalendarSource(SyncCalendarSourceParams),
     SetCalendarSourceAlarms(SetCalendarSourceAlarmsParams),
+    SetCalendarSourceTargetDevice(SetCalendarSourceTargetDeviceParams),
     StartActual(StartActualParams),
     StopActual(StopActualParams),
     ActualsBetween(ActualsBetweenParams),
@@ -319,6 +320,12 @@ pub struct SetCalendarSourceAlarmsParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetCalendarSourceTargetDeviceParams {
+    pub object_id: String,
+    pub target_device: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetCollabDocMetaParams {
     pub object_id: String,
 }
@@ -378,6 +385,8 @@ pub struct KitchenRecipeRevisionParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KitchenChangeSessionParams {
     pub recipe_id: String,
+    pub revision: u64,
+    pub servings: u32,
     pub change: KitchenSessionChange,
 }
 

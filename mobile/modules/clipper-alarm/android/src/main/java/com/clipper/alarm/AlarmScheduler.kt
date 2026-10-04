@@ -14,6 +14,7 @@ object AlarmIntents {
     const val ACTION_SNOOZE_FIRE = "com.clipper.alarm.action.SNOOZE_FIRE"
     const val ACTION_DISMISS = "com.clipper.alarm.action.DISMISS"
     const val ACTION_SNOOZE = "com.clipper.alarm.action.SNOOZE"
+    const val ACTION_PLAN_CHANGED = "com.clipper.alarm.action.PLAN_CHANGED"
     // Sent by the system after the user grants exact-alarm access. Keeping the
     // literal here lets the receiver remain loadable on API levels that do not
     // expose AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED.
@@ -56,6 +57,7 @@ class AlarmScheduler(private val context: Context) {
     fun replaceAll(plan: List<PlannedAlarm>): Int = synchronized(AlarmMirror) {
         cancelPlan()
         AlarmMirror.save(context, plan)
+        RingService.planChanged(context)
         // Arm from the mirror rather than from `plan`, so the index used as a
         // request code is always the mirror's own index. Sorting in two places
         // would let two alarms sharing a fire time swap positions, and a fired

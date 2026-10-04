@@ -176,6 +176,8 @@ pub struct SyncEngine {
     session_work: std::sync::Mutex<(u64, Arc<crate::session_work::SessionWork>)>,
     import_rules: Mutex<std::collections::VecDeque<calendar_import::CachedImportRules>>,
     schedule_history: Mutex<HashMap<(u64, clipper_schedule::ObjectRevisionRef), ScheduleRecord>>,
+    #[cfg(not(target_family = "wasm"))]
+    recipe_revisions: Mutex<HashMap<(u64, uuid::Uuid, u64), clipper_kitchen::Recipe>>,
     history_epoch: std::sync::atomic::AtomicU64,
     /// The stamp of the newest view published to `state`, so an older view
     /// arriving late is dropped rather than shown.
@@ -230,6 +232,8 @@ impl SyncEngine {
             session_change: Mutex::new(()),
             session_work: std::sync::Mutex::new((0, crate::session_work::SessionWork::new())),
             schedule_history: Mutex::new(HashMap::new()),
+            #[cfg(not(target_family = "wasm"))]
+            recipe_revisions: Mutex::new(HashMap::new()),
             history_epoch: std::sync::atomic::AtomicU64::new(0),
             published_stamp: std::sync::atomic::AtomicU64::new(0),
             last_confirmed_at: std::sync::atomic::AtomicI64::new(0),
@@ -631,6 +635,8 @@ impl SyncEngine {
         let epoch = {
             let epoch = self.history_epoch.fetch_add(1, Ordering::SeqCst) + 1;
             self.schedule_history.lock().await.clear();
+            #[cfg(not(target_family = "wasm"))]
+            self.recipe_revisions.lock().await.clear();
             self.import_rules.lock().await.clear();
             // Fence anything still in flight from the previous session: the
             // database below is a different profile's, and a straggling write
@@ -878,6 +884,8 @@ impl SyncEngine {
             self.history_epoch.fetch_add(1, Ordering::SeqCst);
             *active_key = None;
             self.schedule_history.lock().await.clear();
+            #[cfg(not(target_family = "wasm"))]
+            self.recipe_revisions.lock().await.clear();
             self.import_rules.lock().await.clear();
             #[cfg(not(target_family = "wasm"))]
             self.app_data.close().await;
@@ -2730,6 +2738,7 @@ impl SyncEngine {
         self.set_calendar_work_label("Deleting", object_id).await;
         let _write = self.calendar_write.lock().await;
         self.remove_calendar_imports(object_id).await?;
+        self.remove_occurrence_overrides(object_id, None).await?;
         self.tombstone_schedule_object(object_id).await
     }
 
@@ -2995,13 +3004,13 @@ impl SyncEngine {
                     _ => continue,
                 },
                 ScheduleRecord::Ingested(event) => {
-                    if !all_phones {
-                        continue;
-                    }
                     let Some(source) = sources.get(&event.source) else {
                         continue;
                     };
                     if !source.alarms_on
+                        || !source
+                            .target_device
+                            .map_or(all_phones, |target| target == device)
                         || !ready_sources.contains(&event.source)
                         || !source.contains_event(object_id, event)
                     {
@@ -3135,6 +3144,7 @@ impl SyncEngine {
             enabled: true,
             owner_email: calendar_import::owner_email(&parsed),
             alarms_on: true,
+            target_device: None,
             active_import: None,
             pending_imports: Vec::new(),
             retired_imports: Vec::new(),
@@ -7614,6 +7624,7 @@ mod adversarial_history_tests {
             enabled: true,
             owner_email: None,
             alarms_on: true,
+            target_device: None,
             active_import: None,
             pending_imports: Vec::new(),
             retired_imports: Vec::new(),

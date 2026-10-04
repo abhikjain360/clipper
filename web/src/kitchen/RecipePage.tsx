@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 import { Button, H2, Input, Paragraph, Text, TextArea, XStack, YStack } from "tamagui";
 import type { KitchenBackend, KitchenIngredient, KitchenSessionChange } from "@clipper/shared";
 import { formatBackendError } from "../backend";
@@ -46,6 +46,7 @@ export function RecipePage({
     const [changeError, setChangeError] = useState<string | null>(null);
     const changing = useRef(false);
     const mounted = useRef(false);
+    const [, navigate] = useLocation();
     const load = useCallback(
         () =>
             revision === null
@@ -53,7 +54,12 @@ export function RecipePage({
                 : backend.recipeRevision(id, revision, servings),
         [backend, id, servings, revision],
     );
-    const { value: recipe, loading, failed } = useKitchenData(load, state, version, onError);
+    const { value: loaded, loading, failed, error } = useKitchenData(load, state, version, onError);
+    const recipe =
+        loaded &&
+        (revision === null ? !loaded.read_only : loaded.read_only && loaded.revision === revision)
+            ? loaded
+            : null;
     useEffect(() => {
         mounted.current = true;
         keepDisplayAwake(backend, true, onError);
@@ -64,13 +70,17 @@ export function RecipePage({
     }, [backend, onError]);
 
     async function change(next: KitchenSessionChange) {
-        if (changing.current || loading || failed || revision !== null || recipe?.read_only) return;
+        if (changing.current || loading || failed || !recipe || recipe.read_only) return;
         changing.current = true;
         setBusy(true);
         setChangeError(null);
         onError(null);
         try {
-            await backend.changeSession(id, next);
+            await backend.changeSession(id, recipe.revision, recipe.servings, next);
+            if (recipe.deleted && (next.change === "finish" || next.change === "discard")) {
+                navigate("/kitchen");
+                return;
+            }
             if (mounted.current) {
                 setVersion((current) => current + 1);
                 setAction(null);
@@ -88,7 +98,8 @@ export function RecipePage({
         }
     }
 
-    const readOnly = revision !== null || recipe?.read_only === true;
+    const historyView = revision !== null || recipe?.read_only === true;
+    const readOnly = historyView || recipe?.deleted === true;
     const disabled = busy || loading || failed;
     return (
         <YStack gap="$3" maxW={900} width="100%" self="center">
@@ -109,10 +120,21 @@ export function RecipePage({
                     </Button>
                 )}
             </XStack>
-            <Loading loading={loading} failed={failed} />
-            {revision !== null && <H2 size="$5">Revision {revision} (read-only)</H2>}
+            <Loading loading={loading} failed={failed} error={error} />
             {recipe && (
                 <>
+                    {recipe.read_only && <H2 size="$5">Revision {recipe.revision} (read-only)</H2>}
+                    {recipe.deleted && (
+                        <Paragraph role="status" color="#f3c969">
+                            This recipe was deleted. Finish or discard this cooking session.
+                        </Paragraph>
+                    )}
+                    {recipe.newer_revision !== null && (
+                        <Paragraph role="status" color="#f3c969">
+                            This session cooks from revision {recipe.revision}. Revision{" "}
+                            {recipe.newer_revision} is newer and applies from the next cook.
+                        </Paragraph>
+                    )}
                     <H2>{recipe.title}</H2>
                     <Paragraph>{recipe.summary}</Paragraph>
                     <XStack gap="$3" flexWrap="wrap">
@@ -295,7 +317,7 @@ export function RecipePage({
                             </YStack>
                         ))}
                     </KitchenCard>
-                    {!readOnly && (
+                    {!historyView && (
                         <XStack gap="$2" flexWrap="wrap">
                             {recipe.session ? (
                                 <>
@@ -318,9 +340,7 @@ export function RecipePage({
                                 <Button
                                     theme="blue"
                                     disabled={disabled}
-                                    onPress={() =>
-                                        void change({ change: "start", servings: recipe.servings })
-                                    }
+                                    onPress={() => void change({ change: "start" })}
                                 >
                                     Start cooking
                                 </Button>

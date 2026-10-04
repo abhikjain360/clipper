@@ -2001,10 +2001,19 @@ impl LocalStore {
         &self,
     ) -> Result<Vec<(String, ScheduleRecord, LocalHead)>, LocalStoreError> {
         let _sync = self.sync.lock().await;
+        let mut cached = self.all_memory_records().await;
+        cached.sort_by_cached_key(|record| {
+            std::cmp::Reverse((
+                chrono::DateTime::parse_from_rfc3339(&record.created_at).ok(),
+                record.id.clone(),
+            ))
+        });
         let mut records = Vec::new();
-        for (id, record) in self.schedule_records_with_ids().await {
-            if let Some(head) = self.local_head(&id).await? {
-                records.push((id, record, head));
+        for record in cached {
+            if let LocalObjectData::Schedule(schedule) = record.data
+                && let Some(head) = self.local_head(&record.id).await?
+            {
+                records.push((record.id, schedule.record, head));
             }
         }
         Ok(records)

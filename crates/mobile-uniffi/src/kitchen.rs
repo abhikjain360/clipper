@@ -49,11 +49,13 @@ impl MobileClipperClient {
     pub async fn kitchen_change_session(
         &self,
         recipe_id: String,
+        revision: u64,
+        servings: u32,
         change: KitchenSessionChange,
     ) -> Result<(), MobileError> {
         Ok(self
             .engine
-            .kitchen_change_session(&recipe_id, change)
+            .kitchen_change_session(&recipe_id, revision, servings, change)
             .await?)
     }
 

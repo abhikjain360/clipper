@@ -687,7 +687,9 @@ impl SyncEngine {
         self.local_store
             .save_local_app_data_change(&row, onto_revision)
             .await?;
-        show(&session.tables, &envelope, revision)
+        show(&session.tables, &envelope, revision)?;
+        self.bump_version();
+        Ok(())
     }
 }
 

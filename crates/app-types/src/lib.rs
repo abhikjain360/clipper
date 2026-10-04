@@ -234,6 +234,8 @@ pub struct CalendarSourceView {
     pub location: String,
     pub enabled: bool,
     pub alarms_on: bool,
+    #[serde(default)]
+    pub target_device: Option<String>,
     pub fetched_at: Option<String>,
     pub checked_at: Option<String>,
     /// Events currently held from this source.

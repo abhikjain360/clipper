@@ -65,6 +65,8 @@ export function tauriBackend(): ClipperBackend {
             invoke<IngestReport>("sync_calendar_source", { objectId }),
         setCalendarSourceAlarms: (objectId, alarmsOn) =>
             invoke<void>("set_calendar_source_alarms", { objectId, alarmsOn }),
+        setCalendarSourceTargetDevice: (objectId, targetDevice) =>
+            invoke<void>("set_calendar_source_target_device", { objectId, targetDevice }),
         createScheduleItem: (item: ScheduleItem) =>
             invoke<string>("create_schedule_item", { item }),
         updateScheduleItem: (objectId, item, expectedRevision) =>
@@ -87,8 +89,8 @@ export function tauriBackend(): ClipperBackend {
             recipeHistory: (id) => invoke<AppDocumentRevision[]>("kitchen_recipe_history", { id }),
             recipeRevision: (id, revision, servings) =>
                 invoke<KitchenRecipe>("kitchen_recipe_revision", { id, revision, servings }),
-            changeSession: (recipeId, change) =>
-                invoke<void>("kitchen_change_session", { recipeId, change }),
+            changeSession: (recipeId, revision, servings, change) =>
+                invoke<void>("kitchen_change_session", { recipeId, revision, servings, change }),
             pantry: () => invoke<KitchenPantry>("kitchen_pantry"),
             changePantry: (change) => invoke<void>("kitchen_change_pantry", { change }),
             plans: () => invoke<KitchenPlan[]>("kitchen_plans"),

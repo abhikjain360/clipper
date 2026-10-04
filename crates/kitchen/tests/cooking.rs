@@ -1,5 +1,5 @@
 use chrono::{DateTime, TimeDelta, Utc};
-use clipper_kitchen::{CookingSession, Recipe, TimerState, decode, scale_factor};
+use clipper_kitchen::{CookingSession, Recipe, TimerState, decode, format_quantity, scale_factor};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -43,6 +43,8 @@ fn scaling_changes_scaled_quantities_and_the_step_text() {
     assert_eq!(quantities(2), ["2 pieces", "600 g", "½ tbsp", "1 pinch"]);
     assert_eq!(quantities(3), ["3 pieces", "900 g", "¾ tbsp", "1 pinch"]);
     assert_eq!(quantities(4), ["4 pieces", "1.2 kg", "1 tbsp", "1 pinch"]);
+    assert_eq!(format_quantity(Some(0.04), Some("tsp")), "0.04 tsp");
+    assert_eq!(format_quantity(Some(0.013), Some("g")), "0.013 g");
     assert_eq!(
         recipe.step_text(0, scale_factor(2, 3)),
         "Slice the Onion (3 pieces) and add the Salt (1 pinch)."

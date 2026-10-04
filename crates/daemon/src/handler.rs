@@ -568,6 +568,18 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                         Err(error) => client_error(id, error),
                     }
                 }
+                DaemonCommand::SetCalendarSourceTargetDevice(params) => {
+                    match engine
+                        .set_calendar_source_target_device(
+                            &params.object_id,
+                            params.target_device.as_deref(),
+                        )
+                        .await
+                    {
+                        Ok(()) => DaemonResponse::success(id, None),
+                        Err(error) => client_error(id, error),
+                    }
+                }
                 DaemonCommand::QueryAppData(params) => {
                     match engine.query_app_data(&params.sql).await {
                         Ok(rows) => json_success(id, rows),
@@ -640,7 +652,12 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 }
                 DaemonCommand::KitchenChangeSession(params) => {
                     match engine
-                        .kitchen_change_session(&params.recipe_id, params.change)
+                        .kitchen_change_session(
+                            &params.recipe_id,
+                            params.revision,
+                            params.servings,
+                            params.change,
+                        )
                         .await
                     {
                         Ok(()) => DaemonResponse::success(id, None),

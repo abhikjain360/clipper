@@ -172,6 +172,8 @@ Quantities are formatted like this:
 - grams and millilitres from 1000 are shown in kilograms and litres;
 - other amounts show a whole number and the nearest of ¼, ⅓, ½, ⅔ and ¾ when
   they are close to one, and up to two decimals otherwise;
+- an amount above zero that these rules would show as 0 is shown with two
+  significant figures, for example `0.04 tsp` or `0.013 g`;
 - units are shown as the recipe writes them;
 - a step names each referenced ingredient with its scaled quantity, for
   example `Slice the Onion (3 pieces)`.
@@ -187,9 +189,20 @@ Quantities are formatted like this:
 - **Servings scaler**: without a session it changes only the page. Once a
   session is open it shows and changes the session's servings.
 - **Cooking session**: Start cooking, ticking an ingredient or a step, or
-  starting a timer opens a session from the recipe's current revision. The page shows the
-  newest unfinished session of the recipe. Finish asks "How was it?" and saves
-  the notes; Discard deletes the row.
+  starting a timer opens a session from the revision and servings the page
+  shows. A recipe has at most one session in use: the unfinished one with the
+  newest start. Two devices that each opened one offline keep both rows until
+  the next session change, which deletes the older ones. Finish asks "How was
+  it?" and saves the notes; Discard deletes the row.
+- **Session revision**: while a session is open, the page shows and changes
+  the recipe revision the session started from, so step and timer indexes and
+  timer minutes stay those of that revision. When the recipe has a newer
+  revision, the page says so; the newer one applies from the next cook.
+  Reading an older revision needs the server once per app run; the app keeps
+  it in memory until sign-out.
+- **Deleted recipe**: an open session of a deleted recipe still shows from its
+  revision, without ticks or timers, and can be finished or discarded, which
+  returns to the recipe list. Its timers do not ring.
 - **Step timers**: each can be started, paused, resumed, extended by one
   minute and cleared. Starting one records this device as the one it rings on;
   resuming keeps that device. Pausing stores the time left. A minute added to
@@ -202,7 +215,9 @@ Quantities are formatted like this:
   list on the same screen.
 - **Screen awake**: while a recipe page is open, Android keeps the screen on
   and the Mac app holds a power assertion that stops the display sleeping
-  (`caffeinate -d`, tied to the app's process).
+  (`caffeinate -d`, tied to the app's process). Closing the Mac window hides
+  it and releases the assertion; reopening it with a recipe page open takes
+  the assertion again.
 
 ### Step timers as alarms
 
@@ -211,11 +226,20 @@ A step timer rings through the alarm path in
 the app closed or Do Not Disturb on. It rings only on the device that started
 it.
 
-- The alarm plan includes one alarm for each running timer in an unfinished
-  session whose device is this one, labelled with the timer label and the
-  recipe title, for example `Simmer · French onion soup`. Its item is the
-  session row id and its occurrence is `timer:<step>:<timer>`. Alarms carry
-  `can_snooze`, which is false for step timers.
+- The alarm plan includes one alarm for each running timer whose device is
+  this one, in the session in use of each recipe that still exists, labelled
+  with the timer label and the recipe title, for example
+  `Simmer · French onion soup`. Its item is the session row id and its
+  occurrence is `timer:<step>:<timer>`. Alarms carry `can_snooze`, which is
+  false for step timers.
+- A timer stays in the plan for ten minutes after it ends, the time a phone
+  rings before it silences itself. When a new plan no longer holds a ringing
+  step timer, Android stops ringing it. Alarms that can snooze are never
+  stopped by a new plan.
+- A step timer never replaces or silences a ringing alarm. While an alarm
+  that can snooze rings, a step timer that fires waits; it rings on screen
+  once the alarm is snoozed or dismissed. Each ringing alarm keeps its own
+  controls, and dismissing one leaves the others ringing.
 - Android sends a new alarm list whenever `kitchen.sessions` changes, locally
   or by sync, besides the existing triggers: every app-data change, local or
   received, counts as a change of the app state. A step timer's ring screen

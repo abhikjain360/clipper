@@ -18,6 +18,9 @@ exit status. It does not start the daemon or sign in.
 
 ```sh
 clipper devices
+clipper calendar list
+clipper calendar ring-on <source-id> <device-id>
+clipper calendar ring-on <source-id> phones
 clipper schedule items
 clipper schedule occurrences --from 2026-10-12 --to 2026-10-19 --zone Europe/Berlin
 clipper schedule add < item.json
@@ -52,7 +55,8 @@ clipper data status
 - Run `schedule items` for current revisions before an update.
 - A revision conflict fails. Read `items` again and review the new definition
   before saving another replacement.
-- `delete` returns `null` on success.
+- `delete` returns `null` on success. Deleting a series also tombstones its
+  known standalone occurrence overrides in the same operation.
 - `occurrences` returns the daemon's result array with `object_id` added to
   each occurrence. This is the stored item's ID; `item_id` is the domain
   series ID. `occurrence_key` identifies one occurrence within that series.
@@ -69,10 +73,26 @@ clipper data status
   occurrence duration, or the series duration if the occurrence is cancelled.
 - `restore` removes the standalone override and returns the occurrence to its
   series timing and duration. Restoring an occurrence without an override
-  succeeds without changing it.
+  succeeds without changing it. If the series has been deleted, `restore`
+  cleans up any matching overrides and succeeds without restoring the series.
 - These changes are signed, encrypted schedule revisions and sync to other
   devices. Occurrence output and alarms use the changed timing. The series
   definition stays the same.
+
+## Calendars
+
+- `calendar list` returns the calendar source views. Each has its stored
+  object `id`, name, redacted location, event count, sync times, `alarms_on`
+  and `target_device`. Use `id` as the source ID in `calendar ring-on`.
+- `calendar ring-on <source-id> <device-id>` sends that calendar's alarms to
+  one registered device. Get device IDs from `clipper devices`. A device can
+  be a phone or a Mac; the Mac delivers its targeted alarms as notifications.
+- `calendar ring-on <source-id> phones` clears the target and rings on all
+  phones. Calendars without a target keep this default and stay silent on Macs.
+- `calendar ring-on` returns `null`. The setting syncs to all devices.
+  The source's alarms switch still silences it, without changing its target.
+- A removed or unavailable target stays selected. There is no fallback to
+  another device; choose another registered device or `phones` to change it.
 
 ## App data
 
