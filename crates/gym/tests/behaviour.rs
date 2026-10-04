@@ -11,6 +11,24 @@ fn id(number: u128) -> Uuid {
     Uuid::from_u128(0x01900000_0000_7000_8000_000000000000 + number)
 }
 
+#[test]
+fn workouts_default_to_active_and_older_readers_accept_archived_rows() {
+    #[derive(serde::Deserialize)]
+    struct OlderWorkout {
+        name: String,
+        exercises: Vec<clipper_gym::WorkoutExercise>,
+    }
+    let value = serde_json::json!({ "name": "Upper", "exercises": [] });
+    let mut workout: clipper_gym::WorkoutTemplate = serde_json::from_value(value).unwrap();
+    assert!(!workout.archived);
+    workout.archived = true;
+    workout.validate().unwrap();
+    let older: OlderWorkout =
+        serde_json::from_value(serde_json::to_value(&workout).unwrap()).unwrap();
+    assert_eq!(older.name, workout.name);
+    assert_eq!(older.exercises, workout.exercises);
+}
+
 fn time(month: u32, day: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, month, day, 12, 0, 0).unwrap()
 }

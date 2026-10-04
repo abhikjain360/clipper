@@ -1,6 +1,6 @@
 import { useGymChange } from "./actions";
 import { Button } from "./Button";
-import { palette } from "@clipper/shared";
+import { activeGymItems, palette } from "@clipper/shared";
 import { ChevronDown, ChevronUp, Play, Plus, RotateCcw, SkipForward } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, AppState as NativeAppState } from "react-native";
@@ -396,12 +396,13 @@ function StartWorkout({
   onStart: (templateId: string | undefined) => void;
 }) {
   const names = new Map(exercises.map((exercise) => [exercise.id, exercise.name]));
+  const active = activeGymItems(templates);
   return (
     <ScrollView flex={1} keyboardShouldPersistTaps="always">
       <YStack gap="$3" pb="$8">
         <H2 size="$6">Start a workout</H2>
-        {templates.length === 0 && <Muted>No workouts yet. Add one in the Library.</Muted>}
-        {templates.map((template) => (
+        {active.length === 0 && <Muted>No active workouts. Add one in the Library.</Muted>}
+        {active.map((template) => (
           <GymCard key={template.id}>
             <YStack gap="$2">
               <Text fontSize={17} fontWeight="600">

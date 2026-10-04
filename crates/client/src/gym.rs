@@ -29,6 +29,7 @@ impl SyncEngine {
     ) -> Result<Vec<GymPlannedExercise>, ClientError> {
         let mut template = WorkoutTemplate {
             name: String::new(),
+            archived: false,
             exercises: exercises
                 .into_iter()
                 .map(planned_value)
@@ -134,6 +135,7 @@ impl SyncEngine {
                 id: id.to_string(),
                 name: template.name,
                 exercises: template.exercises.into_iter().map(planned_view).collect(),
+                archived: template.archived,
             })
             .collect();
         templates.sort_by_key(|template| template.name.to_lowercase());
@@ -146,9 +148,19 @@ impl SyncEngine {
         name: &str,
         exercises: Vec<GymPlannedExercise>,
     ) -> Result<String, ClientError> {
+        let _writing = GYM_WRITES.lock().await;
         let id = id.map(parse_gym_id).transpose()?;
+        let archived = match id {
+            Some(id) => {
+                self.gym_row::<WorkoutTemplate>(WorkoutTemplate::COLLECTION_NAME, id)
+                    .await?
+                    .archived
+            }
+            None => false,
+        };
         let template = WorkoutTemplate {
             name: name.trim().to_string(),
+            archived,
             exercises: exercises
                 .into_iter()
                 .map(planned_value)
@@ -163,6 +175,27 @@ impl SyncEngine {
     pub async fn gym_delete_template(&self, id: &str) -> Result<(), ClientError> {
         self.gym_delete(WorkoutTemplate::COLLECTION_NAME, parse_gym_id(id)?)
             .await
+    }
+
+    pub async fn gym_archive_template(&self, id: &str, archived: bool) -> Result<(), ClientError> {
+        let _writing = GYM_WRITES.lock().await;
+        let id = parse_gym_id(id)?;
+        let mut template: WorkoutTemplate =
+            self.gym_row(WorkoutTemplate::COLLECTION_NAME, id).await?;
+        template.archived = archived;
+        self.gym_put(WorkoutTemplate::COLLECTION_NAME, Some(id), &template)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn gym_archive_exercise(&self, id: &str, archived: bool) -> Result<(), ClientError> {
+        let _writing = GYM_WRITES.lock().await;
+        let id = parse_gym_id(id)?;
+        let mut exercise: Exercise = self.gym_row(Exercise::COLLECTION_NAME, id).await?;
+        exercise.archived = archived;
+        self.gym_put(Exercise::COLLECTION_NAME, Some(id), &exercise)
+            .await?;
+        Ok(())
     }
 
     pub async fn gym_open_session(&self) -> Result<Option<GymSession>, ClientError> {
@@ -272,6 +305,11 @@ impl SyncEngine {
                 let template: WorkoutTemplate = self
                     .gym_row(WorkoutTemplate::COLLECTION_NAME, template_id)
                     .await?;
+                if template.archived {
+                    return Err(ClientError::Other(
+                        "this workout is archived; unarchive it in the Library to start it".into(),
+                    ));
+                }
                 Session::from_template(now, template_id, &template)
             }
             None => Session::blank(now),
@@ -592,6 +630,12 @@ impl SyncEngine {
                     .await?;
             }
             GymChange::DeleteTemplate { id } => self.gym_delete_template(&id).await?,
+            GymChange::ArchiveTemplate { id, archived } => {
+                self.gym_archive_template(&id, archived).await?
+            }
+            GymChange::ArchiveExercise { id, archived } => {
+                self.gym_archive_exercise(&id, archived).await?
+            }
             GymChange::StartSession { template_id } => {
                 self.gym_start_session(template_id.as_deref()).await?;
             }

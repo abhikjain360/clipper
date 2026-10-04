@@ -62,7 +62,12 @@ export type GymTemplate = {
   id: string;
   name: string;
   exercises: GymPlannedExercise[];
+  archived: boolean;
 };
+
+export function activeGymItems<T extends { archived?: boolean }>(items: readonly T[]): T[] {
+  return items.filter((item) => !item.archived);
+}
 
 export type GymSet = {
   id: string;
@@ -161,6 +166,8 @@ export type GymChange =
   | { change: "save_exercise"; id: string | null; exercise: GymExerciseInput }
   | { change: "save_template"; id: string | null; name: string; exercises: GymPlannedExercise[] }
   | { change: "delete_template"; id: string }
+  | { change: "archive_template"; id: string; archived: boolean }
+  | { change: "archive_exercise"; id: string; archived: boolean }
   | { change: "start_session"; template_id: string | null }
   | {
       change: "complete_set";

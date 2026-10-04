@@ -2436,6 +2436,16 @@ Each entry has:
   completion took 217 ms before and 118 ms after. These are debug QA samples,
   not a backend speedup claim.
 
+### 191. Archived exercises were unavailable in Progress
+
+- **Status:** fixed, uncommitted
+- **Where:** `mobile/src/gym/Progress.tsx` and `web/src/gym/Progress.tsx`.
+- **What happened:** the phone reused the add-exercise picker, which excludes
+  archived exercises. The Mac hid archived exercises except the selected one.
+- **Fix:** Progress includes archived exercises in its exercise list. Only
+  choices for new exercises exclude them. Archiving workouts or exercises
+  preserves historical names, progress, fatigue and open sessions.
+
 ## Docs
 
 ### 29. Doc claims the code did not satisfy

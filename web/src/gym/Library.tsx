@@ -4,6 +4,7 @@ import { Label, ScrollView, Spinner, Switch, Text, XStack, YStack } from "tamagu
 import { Input } from "../tamagui.config";
 import { Button } from "./Button";
 import {
+    activeGymItems,
     formatRestSeconds,
     palette,
     type GymBackend,
@@ -11,6 +12,7 @@ import {
     type GymMuscleInfo,
     type GymMuscleShare,
     type GymPlannedExercise,
+    type GymTemplate,
 } from "@clipper/shared";
 import { formatBackendError } from "../backend";
 import {
@@ -56,16 +58,96 @@ export function Library({
     const [exerciseDraft, setExerciseDraft] = useState<ExerciseDraft | null>(null);
     const [templateDraft, setTemplateDraft] = useState<TemplateDraft | null>(null);
     const [deletingTemplate, setDeletingTemplate] = useState<TemplateDraft | null>(null);
+    const [showArchivedWorkouts, setShowArchivedWorkouts] = useState(false);
+    const [showArchivedExercises, setShowArchivedExercises] = useState(false);
 
     if (value === undefined) return <Spinner />;
     const [exercises, templates, muscles] = value;
     const names = new Map(exercises.map((exercise) => [exercise.id, exercise.name]));
     const displayNames = new Map(muscles.map((muscle) => [muscle.muscle, muscle.display_name]));
     const query = search.trim().toLowerCase();
-    const shown = [
-        ...exercises.filter((exercise) => !exercise.archived),
-        ...exercises.filter((exercise) => exercise.archived),
-    ].filter((exercise) => exercise.name.toLowerCase().includes(query));
+    const shown = exercises.filter((exercise) => exercise.name.toLowerCase().includes(query));
+    const archivedExercises = shown.filter((exercise) => exercise.archived);
+    const archivedTemplates = templates.filter((template) => template.archived);
+
+    function templateRow(template: GymTemplate) {
+        return (
+            <XStack key={template.id} gap="$2" items="center">
+                <ListRow
+                    label={`Edit ${template.name}`}
+                    selected={template.id === templateDraft?.id}
+                    onPress={() =>
+                        setTemplateDraft({
+                            id: template.id,
+                            name: template.name,
+                            exercises: template.exercises.map((planned) => ({ ...planned })),
+                        })
+                    }
+                >
+                    <Text fontWeight="600">{template.name}</Text>
+                    <Muted>
+                        {template.exercises
+                            .map((planned) => names.get(planned.exercise_id) ?? "Unknown exercise")
+                            .join(", ")}
+                    </Muted>
+                </ListRow>
+                <Button
+                    size="$3"
+                    busy={busy}
+                    aria-label={`${template.archived ? "Unarchive" : "Archive"} ${template.name}`}
+                    onPress={() =>
+                        void run(() =>
+                            backend.change({
+                                change: "archive_template",
+                                id: template.id,
+                                archived: !template.archived,
+                            }),
+                        )
+                    }
+                >
+                    {template.archived ? "Unarchive" : "Archive"}
+                </Button>
+            </XStack>
+        );
+    }
+
+    function exerciseRow(exercise: GymExercise) {
+        return (
+            <XStack key={exercise.id} gap="$2" items="center">
+                <ListRow
+                    label={`Edit ${exercise.name}`}
+                    selected={exercise.id === exerciseDraft?.id}
+                    onPress={() =>
+                        setExerciseDraft({
+                            id: exercise.id,
+                            name: exercise.name,
+                            muscles: exercise.muscles.map((share) => ({ ...share })),
+                            archived: exercise.archived,
+                        })
+                    }
+                >
+                    <Text>{exercise.name}</Text>
+                    <Muted>{mainMuscles(exercise, displayNames)}</Muted>
+                </ListRow>
+                <Button
+                    size="$3"
+                    busy={busy}
+                    aria-label={`${exercise.archived ? "Unarchive" : "Archive"} ${exercise.name}`}
+                    onPress={() =>
+                        void run(() =>
+                            backend.change({
+                                change: "archive_exercise",
+                                id: exercise.id,
+                                archived: !exercise.archived,
+                            }),
+                        )
+                    }
+                >
+                    {exercise.archived ? "Unarchive" : "Archive"}
+                </Button>
+            </XStack>
+        );
+    }
 
     return (
         <Columns>
@@ -83,33 +165,24 @@ export function Library({
                     </XStack>
                     {templates.length === 0 && <Muted>No workouts yet</Muted>}
                     <YStack gap="$1">
-                        {templates.map((template) => (
-                            <ListRow
-                                key={template.id}
-                                label={`Edit ${template.name}`}
-                                selected={template.id === templateDraft?.id}
-                                onPress={() =>
-                                    setTemplateDraft({
-                                        id: template.id,
-                                        name: template.name,
-                                        exercises: template.exercises.map((planned) => ({
-                                            ...planned,
-                                        })),
-                                    })
+                        {activeGymItems(templates).map(templateRow)}
+                        {archivedTemplates.length > 0 && (
+                            <Button
+                                justify="flex-start"
+                                aria-expanded={showArchivedWorkouts}
+                                icon={
+                                    showArchivedWorkouts ? (
+                                        <ChevronUp size={16} />
+                                    ) : (
+                                        <ChevronDown size={16} />
+                                    )
                                 }
+                                onPress={() => setShowArchivedWorkouts(!showArchivedWorkouts)}
                             >
-                                <Text fontWeight="600">{template.name}</Text>
-                                <Muted>
-                                    {template.exercises
-                                        .map(
-                                            (planned) =>
-                                                names.get(planned.exercise_id) ??
-                                                "Unknown exercise",
-                                        )
-                                        .join(", ")}
-                                </Muted>
-                            </ListRow>
-                        ))}
+                                Archived ({archivedTemplates.length})
+                            </Button>
+                        )}
+                        {showArchivedWorkouts && archivedTemplates.map(templateRow)}
                     </YStack>
                 </GymCard>
             </Column>
@@ -141,35 +214,24 @@ export function Library({
                     <ScrollView maxH="65vh">
                         <YStack gap="$1">
                             {shown.length === 0 && <Muted>No matching exercises</Muted>}
-                            {shown.map((exercise) => (
-                                <ListRow
-                                    key={exercise.id}
-                                    label={`Edit ${exercise.name}`}
-                                    selected={exercise.id === exerciseDraft?.id}
-                                    onPress={() =>
-                                        setExerciseDraft({
-                                            id: exercise.id,
-                                            name: exercise.name,
-                                            muscles: exercise.muscles.map((share) => ({
-                                                ...share,
-                                            })),
-                                            archived: exercise.archived,
-                                        })
+                            {activeGymItems(shown).map(exerciseRow)}
+                            {archivedExercises.length > 0 && (
+                                <Button
+                                    justify="flex-start"
+                                    aria-expanded={showArchivedExercises}
+                                    icon={
+                                        showArchivedExercises ? (
+                                            <ChevronUp size={16} />
+                                        ) : (
+                                            <ChevronDown size={16} />
+                                        )
                                     }
+                                    onPress={() => setShowArchivedExercises(!showArchivedExercises)}
                                 >
-                                    <XStack justify="space-between" gap="$2">
-                                        <Text
-                                            color={
-                                                exercise.archived ? palette.secondary : undefined
-                                            }
-                                        >
-                                            {exercise.name}
-                                        </Text>
-                                        {exercise.archived && <Muted>archived</Muted>}
-                                    </XStack>
-                                    <Muted>{mainMuscles(exercise, displayNames)}</Muted>
-                                </ListRow>
-                            ))}
+                                    Archived ({archivedExercises.length})
+                                </Button>
+                            )}
+                            {showArchivedExercises && archivedExercises.map(exerciseRow)}
                         </YStack>
                     </ScrollView>
                 </GymCard>
@@ -251,6 +313,7 @@ function ListRow({
 }) {
     return (
         <YStack
+            flex={1}
             gap="$1"
             px="$3"
             py="$2"

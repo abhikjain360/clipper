@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { H2, Spinner, Text, XStack, YStack } from "tamagui";
 import { Button } from "./Button";
 import {
+    activeGymItems,
     fatigueColors,
     formatClock,
     formatMinutes,
@@ -408,6 +409,7 @@ function StartWorkout({
     onStart: (templateId: string | null) => void;
 }) {
     const names = new Map(exercises.map((exercise) => [exercise.id, exercise.name]));
+    const active = activeGymItems(templates);
     return (
         <YStack gap="$4">
             <XStack items="center" justify="space-between" gap="$3" flexWrap="wrap">
@@ -416,9 +418,9 @@ function StartWorkout({
                     Start an empty workout
                 </Button>
             </XStack>
-            {templates.length === 0 && <Muted>No workouts yet. Add one in the Library.</Muted>}
+            {active.length === 0 && <Muted>No active workouts. Add one in the Library.</Muted>}
             <XStack gap="$4" flexWrap="wrap">
-                {templates.map((template) => (
+                {active.map((template) => (
                     <YStack key={template.id} grow={1} flexBasis={280} maxW={400}>
                         <GymCard>
                             <CardTitle>{template.name}</CardTitle>

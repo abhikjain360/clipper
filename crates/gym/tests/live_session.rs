@@ -40,6 +40,7 @@ fn planned(
 fn session(exercises: Vec<WorkoutExercise>) -> Session {
     let template = WorkoutTemplate {
         name: "Full body".into(),
+        archived: false,
         exercises,
     };
     template.validate().unwrap();
@@ -248,6 +249,7 @@ fn moving_an_exercise_keeps_superset_groups_together() {
 
     let mut template = WorkoutTemplate {
         name: "Full body".into(),
+        archived: false,
         exercises: vec![
             planned(SQUAT, 0, 3, 90, false),
             planned(BENCH, 0, 3, 90, true),

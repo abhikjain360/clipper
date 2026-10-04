@@ -65,6 +65,22 @@ impl MobileClipperClient {
         Ok(self.engine.gym_delete_template(&id).await?)
     }
 
+    pub async fn gym_archive_template(
+        &self,
+        id: String,
+        archived: bool,
+    ) -> Result<(), MobileError> {
+        Ok(self.engine.gym_archive_template(&id, archived).await?)
+    }
+
+    pub async fn gym_archive_exercise(
+        &self,
+        id: String,
+        archived: bool,
+    ) -> Result<(), MobileError> {
+        Ok(self.engine.gym_archive_exercise(&id, archived).await?)
+    }
+
     pub async fn gym_open_session(&self) -> Result<Option<GymSession>, MobileError> {
         Ok(self.engine.gym_open_session().await?)
     }

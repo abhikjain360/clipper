@@ -107,6 +107,8 @@ pub struct GymTemplate {
     pub id: String,
     pub name: String,
     pub exercises: Vec<GymPlannedExercise>,
+    #[serde(default)]
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -236,6 +238,14 @@ pub enum GymChange {
     },
     DeleteTemplate {
         id: String,
+    },
+    ArchiveTemplate {
+        id: String,
+        archived: bool,
+    },
+    ArchiveExercise {
+        id: String,
+        archived: bool,
     },
     StartSession {
         template_id: Option<String>,

@@ -7,7 +7,14 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import Svg, { Circle, Line, Polyline, Text as SvgText } from "react-native-svg";
 import { Card, H2, Paragraph, ScrollView, Text, XStack, YStack } from "tamagui";
 import type { GymExercise, GymSet, GymSetValues } from "@clipper/mobile-bridge";
-import { fatigueColors, formatKg, palette, parseCount, parseWeight } from "@clipper/shared";
+import {
+  activeGymItems,
+  fatigueColors,
+  formatKg,
+  palette,
+  parseCount,
+  parseWeight,
+} from "@clipper/shared";
 import { setLabel } from "./gymClient";
 import { GymError } from "./errors";
 
@@ -265,11 +272,8 @@ export function ExercisePicker({
     if (visible) setSearch("");
   }, [visible]);
   const query = search.trim().toLowerCase();
-  const shown = exercises.filter(
-    (exercise) =>
-      !exercise.archived &&
-      !excluded?.has(exercise.id) &&
-      exercise.name.toLowerCase().includes(query),
+  const shown = activeGymItems(exercises).filter(
+    (exercise) => !excluded?.has(exercise.id) && exercise.name.toLowerCase().includes(query),
   );
   return (
     <SheetModal visible={visible} title="Pick an exercise" onClose={onClose} busy={busy}>

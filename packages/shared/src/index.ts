@@ -16,6 +16,7 @@ export {
 } from "./palette";
 
 export {
+  activeGymItems,
   deviceZone,
   formatClock,
   formatDay,

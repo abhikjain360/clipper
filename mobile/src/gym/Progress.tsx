@@ -5,13 +5,15 @@ import type { GymExercise, GymOneRepMax } from "@clipper/mobile-bridge";
 import { formatDay, formatKg } from "@clipper/shared";
 import { formatBackendError } from "../backend";
 import { gym } from "./gymClient";
-import { colors, ExercisePicker, GymCard, LineChart, Muted } from "./GymUi";
+import { colors, GymCard, LineChart, Muted, SheetModal } from "./GymUi";
+import { Input } from "../tamagui.config";
 
 export function Progress({ onError }: { onError: (error: string | null) => void }) {
   const [exercises, setExercises] = useState<GymExercise[]>([]);
   const [selected, setSelected] = useState<GymExercise | null | undefined>(undefined);
   const [points, setPoints] = useState<GymOneRepMax[] | null>(null);
   const [picking, setPicking] = useState(false);
+  const [search, setSearch] = useState("");
   const loadGeneration = useRef(0);
 
   useEffect(() => {
@@ -30,6 +32,7 @@ export function Progress({ onError }: { onError: (error: string | null) => void 
             current ??
             list.find((exercise) => exercise.id === loggedId) ??
             list.find((exercise) => !exercise.archived) ??
+            list[0] ??
             null,
         );
       } catch (caught) {
@@ -89,7 +92,13 @@ export function Progress({ onError }: { onError: (error: string | null) => void 
           <Text flex={1} fontWeight="600" numberOfLines={2}>
             {selected.name}
           </Text>
-          <Button size="$3" onPress={() => setPicking(true)}>
+          <Button
+            size="$3"
+            onPress={() => {
+              setSearch("");
+              setPicking(true);
+            }}
+          >
             Change exercise
           </Button>
         </XStack>
@@ -128,15 +137,28 @@ export function Progress({ onError }: { onError: (error: string | null) => void 
           </YStack>
         )}
       </YStack>
-      <ExercisePicker
-        visible={picking}
-        exercises={exercises}
-        onClose={() => setPicking(false)}
-        onPick={(exercise) => {
-          setPicking(false);
-          setSelected(exercise);
-        }}
-      />
+      <SheetModal visible={picking} title="Exercise progress" onClose={() => setPicking(false)}>
+        <Input
+          value={search}
+          onChangeText={setSearch}
+          placeholder="Search exercises"
+          accessibilityLabel="Search exercise progress"
+        />
+        {exercises
+          .filter((exercise) => exercise.name.toLowerCase().includes(search.trim().toLowerCase()))
+          .map((exercise) => (
+            <Button
+              key={exercise.id}
+              justify="flex-start"
+              onPress={() => {
+                setPicking(false);
+                setSelected(exercise);
+              }}
+            >
+              {exercise.name}
+            </Button>
+          ))}
+      </SheetModal>
     </ScrollView>
   );
 }

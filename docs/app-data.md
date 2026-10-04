@@ -477,7 +477,8 @@ The gym logger is the first app on app data. Its collections:
   exercises and, for each, the warm-up sets and their rest (60 seconds unless
   set), the target working sets, reps, reps in reserve and rest, and whether
   it forms a superset with the exercise before it. An exercise appears at
-  most once.
+  most once. `archived` defaults to false when absent. The collection remains
+  at schema version 1; older readers accept the additional field.
 - `gym.sessions` (last write wins): one visit to the gym, with its start and
   end time, the template it started from if any, notes, its exercise plan
   and the exercise the user chose to do now, if any.
@@ -503,6 +504,12 @@ The gym logger is the first app on app data. Its collections:
   under a fixed namespace (`Recovery::row_id` in `crates/gym`), so each muscle
   has exactly one row and devices that set the same muscle settle it by last
   write wins.
+
+The Library lists active workouts and exercises first, with archived items in
+collapsed Archived sections. Archive and Unarchive change only the item's
+flag. Archived workouts cannot start a new session, and archived exercises
+are excluded from add-exercise and workout-editor choices. Open sessions,
+History, Progress and Fatigue still use archived items and their names.
 
 The list of muscles and their default recovery times is part of the app, not a
 collection. Muscle fatigue is calculated on the device from recent working

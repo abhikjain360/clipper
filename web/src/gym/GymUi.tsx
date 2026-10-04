@@ -2,6 +2,7 @@ import { Minus, Plus, Search } from "lucide-react";
 import { useContext, useEffect, useId, useState, type ReactNode } from "react";
 import { Card, Dialog, H2, Label, Paragraph, ScrollView, Text, XStack, YStack } from "tamagui";
 import {
+    activeGymItems,
     fatigueColors,
     formatKg,
     formatSetLabel,
@@ -460,11 +461,8 @@ export function ExercisePicker({
         if (open) setSearch("");
     }, [open]);
     const query = search.trim().toLowerCase();
-    const shown = exercises.filter(
-        (exercise) =>
-            !exercise.archived &&
-            !excluded?.has(exercise.id) &&
-            exercise.name.toLowerCase().includes(query),
+    const shown = activeGymItems(exercises).filter(
+        (exercise) => !excluded?.has(exercise.id) && exercise.name.toLowerCase().includes(query),
     );
     return (
         <GymDialog open={open} title="Pick an exercise" onClose={onClose} busy={busy}>

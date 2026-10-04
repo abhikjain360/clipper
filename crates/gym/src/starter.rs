@@ -158,6 +158,7 @@ pub fn starter_templates() -> Vec<(Uuid, WorkoutTemplate)> {
             FULL_BODY_A,
             WorkoutTemplate {
                 name: "Full body A".into(),
+                archived: false,
                 exercises: vec![
                     planned(BACK_SQUAT, 2, 3, 5, 180, false),
                     planned(BENCH_PRESS, 2, 3, 5, 180, false),
@@ -171,6 +172,7 @@ pub fn starter_templates() -> Vec<(Uuid, WorkoutTemplate)> {
             FULL_BODY_B,
             WorkoutTemplate {
                 name: "Full body B".into(),
+                archived: false,
                 exercises: vec![
                     planned(DEADLIFT, 2, 3, 5, 180, false),
                     planned(OVERHEAD_PRESS, 2, 3, 6, 150, false),

@@ -59,6 +59,8 @@ impl MuscleShare {
 pub struct WorkoutTemplate {
     pub name: String,
     pub exercises: Vec<WorkoutExercise>,
+    #[serde(default)]
+    pub archived: bool,
 }
 
 impl WorkoutTemplate {

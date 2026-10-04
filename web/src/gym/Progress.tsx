@@ -46,15 +46,12 @@ export function Progress({
     const selected =
         exercises.find((exercise) => exercise.id === selectedId) ??
         exercises.find((exercise) => exercise.id === loggedId) ??
-        exercises.find((exercise) => !exercise.archived);
+        exercises.find((exercise) => !exercise.archived) ??
+        exercises[0];
     if (!selected)
         return <Muted>No exercises yet. Add one in the Library, then log a workout.</Muted>;
     const query = search.trim().toLowerCase();
-    const shown = exercises.filter(
-        (exercise) =>
-            (!exercise.archived || exercise.id === selected.id) &&
-            exercise.name.toLowerCase().includes(query),
-    );
+    const shown = exercises.filter((exercise) => exercise.name.toLowerCase().includes(query));
 
     return (
         <Columns>
