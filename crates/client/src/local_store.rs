@@ -13,7 +13,7 @@ mod sqlite;
 #[cfg(not(target_family = "wasm"))]
 use std::path::Path;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{RwLock, atomic},
 };
@@ -94,6 +94,8 @@ pub struct LocalFileRecord {
     pub mime_type: String,
     pub blob_size: i64,
 }
+
+pub(crate) const CALENDAR_SNAPSHOT_MIME_TYPE: &str = "application/x-clipper-calendar-snapshot";
 
 /// A decrypted schedule object, held in whole.
 ///
@@ -1660,7 +1662,22 @@ impl LocalStore {
     }
 
     fn file_items_inner(records: &[LocalObjectRecord]) -> Vec<DecryptedFileItem> {
-        records.iter().filter_map(file_item_from_record).collect()
+        let imports: HashSet<_> = records
+            .iter()
+            .filter_map(|record| {
+                let LocalObjectData::Schedule(schedule) = &record.data else {
+                    return None;
+                };
+                schedule.record.as_source()
+            })
+            .flat_map(|source| source.import_files())
+            .map(|id| id.to_string())
+            .collect();
+        records
+            .iter()
+            .filter_map(file_item_from_record)
+            .filter(|file| !is_calendar_snapshot(file) && !imports.contains(&file.id))
+            .collect()
     }
 
     fn collab_items_inner(records: &[LocalObjectRecord]) -> Vec<CollabItem> {
@@ -3065,6 +3082,19 @@ fn clipboard_item_from_record(record: &LocalObjectRecord) -> Option<DecryptedCli
     })
 }
 
+fn is_calendar_snapshot(file: &DecryptedFileItem) -> bool {
+    file.mime_type == CALENDAR_SNAPSHOT_MIME_TYPE
+        || (file.mime_type == "text/calendar"
+            && file
+                .filename
+                .strip_prefix("calendar-import-")
+                .and_then(|name| name.strip_suffix(".ics"))
+                .and_then(|name| name.rsplit_once('-'))
+                .is_some_and(|(source, time)| {
+                    uuid::Uuid::parse_str(source).is_ok() && time.parse::<i64>().is_ok()
+                }))
+}
+
 fn file_item_from_record(record: &LocalObjectRecord) -> Option<DecryptedFileItem> {
     let LocalObjectData::File(file) = &record.data else {
         return None;
@@ -3876,6 +3906,71 @@ mod tests {
             created_at: created_at.into(),
             source_device_id: TEST_DEVICE_ID.into(),
         }
+    }
+
+    #[test]
+    fn file_views_hide_all_calendar_snapshots_and_untracked_uploads() {
+        use clipper_schedule::ingest::{CalendarImport, CalendarSource};
+
+        let ids = [(); 8].map(|_| uuid::Uuid::now_v7());
+        let mut source: CalendarSource = serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::now_v7(), "name": "Work", "enabled": true,
+            "kind": { "protocol": "ics", "url": "https://example.com/feed.ics" },
+            "active_import": null, "pending_imports": [], "retired_imports": [],
+        }))
+        .unwrap();
+        let batch = |id| -> CalendarImport {
+            serde_json::from_value(serde_json::json!({
+                "object_id": id, "fetched_at": "2026-10-08T10:00:00Z", "events": [],
+            }))
+            .unwrap()
+        };
+        source.import_anchor = Some(ids[0].into());
+        source.active_import = Some(batch(ids[1]));
+        source.retained_imports.push(batch(ids[2]));
+        source.retired_imports.push(batch(ids[3]).into());
+        source.pending_imports.push(batch(ids[4]));
+        let mut records: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| LocalObjectRecord {
+                id: id.to_string(),
+                head: None,
+                seen_generation: None,
+                event_seq: 0,
+                created_seq: 0,
+                created_at: "2026-10-08T10:00:00Z".into(),
+                source_device_id: TEST_DEVICE_ID.into(),
+                data: LocalObjectData::File(LocalFileRecord {
+                    filename: if index == 6 {
+                        format!("calendar-import-{}-1791453600000.ics", source.id)
+                    } else {
+                        "feed.ics".into()
+                    },
+                    blob_size: 5,
+                    mime_type: if index == 5 {
+                        CALENDAR_SNAPSHOT_MIME_TYPE
+                    } else {
+                        "text/calendar"
+                    }
+                    .into(),
+                }),
+            })
+            .collect();
+        assert!(
+            LocalStore::file_items_inner(&records)
+                .iter()
+                .all(|file| file.id != ids[5].to_string() && file.id != ids[6].to_string())
+        );
+        let mut record = records[0].clone();
+        record.id = source.id.to_string();
+        record.data = LocalObjectData::Schedule(LocalScheduleRecord {
+            record: ScheduleRecord::Source(Box::new(source)),
+        });
+        records.push(record);
+        let files = LocalStore::file_items_inner(&records);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].id, ids[7].to_string());
     }
 
     /// A file object at one revision. Files keep no cached payload, so the

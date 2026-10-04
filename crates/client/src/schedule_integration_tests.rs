@@ -52,6 +52,125 @@ fn server_command(binary: &Path, data: &Path) -> Command {
     command
 }
 
+async fn wait_for_import_file(engine: &SyncEngine, id: ObjectId) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if engine
+                .local_store
+                .import_file_object(&id.to_string())
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_calendar_snapshots_stay_internal_across_refreshes() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let url = format!("http://{address}");
+    let first = register_proxy_engine(&url, &temp.path().join("first")).await;
+    let second = SyncEngine::new_with_data_dir(&url, temp.path().join("second"));
+    second
+        .login_with_platform(
+            "local-test-passphrase",
+            "recovery-test",
+            "Second",
+            "android",
+        )
+        .await
+        .unwrap();
+    let start = Utc::now() + chrono::TimeDelta::hours(2);
+    let text = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:meeting\r\nSUMMARY:First\r\nDTSTART:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        start.format("%Y%m%dT%H%M%SZ")
+    );
+    let ordinary = first
+        .upload_file_bytes("personal.ics", Some("text/calendar"), text.as_bytes())
+        .await
+        .unwrap();
+    let (feed_url, feed, _, feed_task) = calendar_feed_server(text.clone()).await;
+    let source_id = first.add_calendar_source("Work", &feed_url).await.unwrap();
+    for title in ["First", "Changed"] {
+        let current = text.replace("SUMMARY:First", &format!("SUMMARY:{title}"));
+        *feed.write().await = current.clone();
+        first.sync_calendar_source(&source_id).await.unwrap();
+        let source = first.read_calendar_source(&source_id).await.unwrap().0;
+        let raw = source.active_import.as_ref().unwrap().object_id;
+        let raw_id = raw.to_string();
+        wait_for(&second, |state| {
+            state.calendar_sources.iter().any(|source| {
+                source.id == source_id
+                    && source.event_count == 1
+                    && source.raw_import_file_id.as_deref() == Some(raw_id.as_str())
+            }) && state.files.iter().any(|file| file.id == ordinary)
+        })
+        .await;
+        wait_for_import_file(&second, raw).await;
+        for engine in [&*first, &second] {
+            let state = engine.get_state().await;
+            assert_eq!(state.files.len(), 1);
+            assert_eq!(state.files[0].id, ordinary);
+            assert_eq!(
+                engine.download_file_bytes(&raw.to_string()).await.unwrap(),
+                current.as_bytes()
+            );
+            let events = engine
+                .expand_schedule(
+                    &Utc::now().to_rfc3339(),
+                    &(start + chrono::TimeDelta::days(1)).to_rfc3339(),
+                    "UTC",
+                )
+                .await
+                .unwrap();
+            assert!(events.iter().any(|event| event.title == title));
+        }
+    }
+    let current = text.replace("SUMMARY:First", "SUMMARY:Pending");
+    let pending = first
+        .stage_windowed_calendar_import(&source_id, &current, Utc::now())
+        .await
+        .unwrap();
+    wait_for_import_file(&second, pending.object_id).await;
+    for engine in [&*first, &second] {
+        assert!(
+            engine
+                .get_state()
+                .await
+                .files
+                .iter()
+                .all(|file| file.id == ordinary)
+        );
+    }
+    assert!(
+        first
+            .is_import_file(&pending.object_id.to_string())
+            .await
+            .unwrap()
+    );
+    first
+        .finish_calendar_import(&source_id, &current, &pending)
+        .await
+        .unwrap();
+    assert_eq!(first.get_state().await.calendar_sources[0].event_count, 1);
+    first.delete_schedule_object(&source_id).await.unwrap();
+    assert!(matches!(
+        first.api.get_object(&pending.object_id.to_string()).await,
+        Err(ClientError::Api { status: 404, .. })
+    ));
+    assert_eq!(first.get_state().await.files[0].id, ordinary);
+    feed_task.abort();
+}
+
 #[tokio::test]
 #[ignore = "build clipper-server first; starts an isolated local server"]
 async fn live_calendar_alarm_lead_preserves_feed_reminders_and_legacy_events() {
@@ -1615,13 +1734,7 @@ async fn live_calendar_import_reads_and_cleanup_survive_replacement() {
         .await
         .unwrap();
     first.refresh().await.unwrap();
-    wait_for(&first, |state| {
-        state
-            .files
-            .iter()
-            .any(|file| file.id == older.object_id.to_string())
-    })
-    .await;
+    wait_for_import_file(&first, older.object_id).await;
     first
         .finish_calendar_import(&source_id, text, &older)
         .await
@@ -1968,20 +2081,8 @@ async fn live_calendar_unchanged_feeds_and_newer_fetches() {
         );
         let older = older.unwrap();
         let newer = newer.unwrap();
-        wait_for(&first, |state| {
-            state
-                .files
-                .iter()
-                .any(|file| file.id == newer.object_id.to_string())
-        })
-        .await;
-        wait_for(&second, |state| {
-            state
-                .files
-                .iter()
-                .any(|file| file.id == older.object_id.to_string())
-        })
-        .await;
+        wait_for_import_file(&first, newer.object_id).await;
+        wait_for_import_file(&second, older.object_id).await;
         if newest_first {
             let report = second
                 .finish_calendar_import(&source_id, &newer_text, &newer)
@@ -2062,13 +2163,7 @@ async fn live_calendar_unchanged_feeds_and_newer_fetches() {
         )
         .await
         .unwrap();
-    wait_for(&first, |state| {
-        state
-            .files
-            .iter()
-            .any(|file| file.id == pending.object_id.to_string())
-    })
-    .await;
+    wait_for_import_file(&first, pending.object_id).await;
     *feed.write().await = alarms_feed.replace("SUMMARY:Meeting", "SUMMARY:Fresh");
     let before_requests = requests.load(Ordering::SeqCst);
     first.sync_calendar_source(&source_id).await.unwrap();
@@ -2371,13 +2466,7 @@ async fn live_calendar_late_uploads_are_cleaned_after_retirement() {
             .stage_calendar_import(&source_id, text, Utc::now())
             .await
             .unwrap();
-        wait_for(&second, |state| {
-            state
-                .files
-                .iter()
-                .any(|file| file.id == older.object_id.to_string())
-        })
-        .await;
+        wait_for_import_file(&second, older.object_id).await;
         armed.store(true, Ordering::SeqCst);
         let uploading = {
             let slow = Arc::clone(&slow);

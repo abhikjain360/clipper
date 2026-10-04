@@ -535,7 +535,7 @@ impl SyncEngine {
                     delta.source.id,
                     fetched_at.timestamp_millis()
                 ),
-                Some("text/calendar"),
+                Some(crate::local_store::CALENDAR_SNAPSHOT_MIME_TYPE),
                 text.as_bytes(),
             )
             .await?

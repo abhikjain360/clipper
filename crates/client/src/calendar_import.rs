@@ -449,7 +449,7 @@ impl SyncEngine {
                     source.id,
                     fetched_at.timestamp_millis()
                 ),
-                Some("text/calendar"),
+                Some(crate::local_store::CALENDAR_SNAPSHOT_MIME_TYPE),
                 text.as_bytes(),
             )
             .await?;
@@ -1365,13 +1365,8 @@ impl SyncEngine {
             .filter_map(|(_, record)| record.as_source())
             .any(|source| {
                 source
-                    .import_anchor
-                    .is_some_and(|anchor| anchor.to_string() == id)
-                    || source
-                        .imports()
-                        .map(|batch| batch.object_id)
-                        .chain(source.retired_imports.iter().map(|batch| batch.object_id))
-                        .any(|batch_id| batch_id.to_string() == id)
+                    .import_files()
+                    .any(|batch_id| batch_id.to_string() == id)
             }))
     }
 }

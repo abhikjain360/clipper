@@ -766,6 +766,16 @@ Each entry has:
 
 ## Bugs
 
+### 188. Calendar snapshots appeared in the user's Files list
+
+- **Status:** fixed in the working tree; uncommitted.
+- **Where:** the shared client file view and calendar snapshot uploads.
+- **What happened:** each changed feed uploaded an internal File object that
+  appeared beside the user's files on desktop, web and phone.
+- **Decision:** filter every calendar source's snapshot references from the
+  shared file view. Mark new uploads with an internal MIME type so they stay
+  hidden before the source records them. Keep calendar reads and cleanup intact.
+
 ### 184. The reconnect snapshot test exceeds its deadline during local checks
 
 - **Status:** open.

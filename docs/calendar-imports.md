@@ -28,8 +28,13 @@ intentionally duplicated.
 - A staged refresh uploads the complete original UTF-8 ICS response once as an
   encrypted File (`calendar-import-<source>-<time>.ics`). It includes events
   outside the window, provider fields, timezone definitions and override
-  components that the normalized model does not retain. It can be downloaded
-  from Files. There is no plaintext server copy.
+  components that the normalized model does not retain. Snapshots are internal:
+  the shared Files list excludes every anchor, active, retained, retired and
+  pending snapshot. New uploads carry an internal MIME type so they stay hidden
+  before the source records them as pending. Calendar sync, decryption and
+  cleanup still use the File objects. The generated filename and `text/calendar`
+  MIME type identify older snapshots before their source arrives during sync.
+  Ordinary ICS uploads remain in Files. There is no plaintext server copy.
 - Each parsed `IngestedEvent` carries its source, provider UID and a stable
   `import: ObjectId` identifying the source's first import. `raw_import`, when
   present, identifies the snapshot containing this event's actual definition.

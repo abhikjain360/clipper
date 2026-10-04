@@ -212,6 +212,14 @@ impl CalendarSource {
             .iter()
             .chain(self.retained_imports.iter())
     }
+
+    pub fn import_files(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.import_anchor
+            .into_iter()
+            .chain(self.imports().map(|batch| batch.object_id))
+            .chain(self.pending_imports.iter().map(|batch| batch.object_id))
+            .chain(self.retired_imports.iter().map(|batch| batch.object_id))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
