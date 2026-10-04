@@ -18,7 +18,9 @@ beside it; document collections add one object kind to it.
   fields it indexes.
 - **Row**: one record in a row collection, identified by a UUIDv7 row id chosen
   by the device that creates it, or by an id the collection derives from the
-  value, as `gym.recovery` does. A row's value is JSON. It can be flat, like
+  value, as `gym.recovery` and `gym.sets` do. A new row of such a collection
+  must use the derived id; an edit or delete names the row's existing id. A
+  row's value is JSON. It can be flat, like
   one logged set, or nested, like a workout template.
 - **Row collection** and **document collection**: the two ways a collection is
   stored. Row collections hold many small records, accept writes offline and
@@ -105,7 +107,9 @@ relies on the envelope's authenticated encryption.
 ## Writing a row
 
 1. The app validates the value against the collection's Rust type. A value
-   that does not decode is refused before anything is stored.
+   that does not decode is refused before anything is stored. A collection
+   either stores the value as written or its Rust type's own encoding of it;
+   the kitchen collections store the encoding (see [kitchen.md](kitchen.md)).
 2. The device stores the encrypted change in its local copy and adds it to its
    pending changes, with the revision it replaces. The app and the device's
    queries see the new value at once.
@@ -138,9 +142,9 @@ When two devices changed the same row while one of them was offline, the
 second one to send is refused with the row's current revision. That device
 then applies the collection's conflict rule:
 
-- **Append-only** collections, such as logged sets and body weight entries,
-  create rows and never edit them, so the only possible conflict is a delete
-  racing an edit. The delete wins.
+- **Append-only** collections, such as body weight entries, create rows and
+  never edit them, so the only possible conflict is a delete racing an edit.
+  The delete wins.
 - **Last write wins** collections, such as exercises and workout templates,
   keep the value with the later device write time. If the local change is
   later, the device resends it on top of the current revision; otherwise it
@@ -150,6 +154,12 @@ In both kinds a delete wins over an edit, whatever their write times, so a
 deleted row stays deleted. Two edits of an append-only row keep the server's
 value. A local change that wins is encrypted and signed again for the next
 revision and keeps its original write time.
+
+A collection can also merge values. `gym.sessions` keeps an end time once a
+session has one. A local write without an end time keeps the stored one. In a
+conflict the winning value takes the other value's end time when it has none,
+and the device then sends the merged value on top of the current revision. A
+device that missed the end therefore cannot reopen a finished session.
 
 A device trusts a conflict only if it moves the row forward: the server's
 current revision must be higher than the revision the change replaced. A
@@ -255,21 +265,52 @@ an `invalidate` for `all` and closes so the client reconnects and fetches.
 ## Document collections
 
 Each record of a document collection is a Clipper object of kind
-`AppDocument`, stored, signed, synced and deleted like the other encrypted
-object kinds in [object-envelopes.md](object-envelopes.md) and
-[ws-sync-flow.md](ws-sync-flow.md). Its encrypted metadata names the
-collection, the document id and the schema version. Its first payload is the
-JSON value; further payloads hold attachments, such as a photo of a dish.
+`AppDocument` (`app_document` on the server), stored, signed, synced and
+deleted like the other encrypted object kinds in
+[object-envelopes.md](object-envelopes.md) and
+[ws-sync-flow.md](ws-sync-flow.md). The collection registry in `crates/client`
+names each collection's storage: rows, with their conflict rule, or documents.
+
+- The document id is the object id, a UUIDv7.
+- The encrypted metadata is the JSON encoding of `AppDocumentMeta` in
+  `crates/api-types`, with the fields `collection`, `document_id` and
+  `schema_version`. A device refuses a document whose metadata names another
+  object id.
+- The first payload in the envelope's payload order is the JSON value, at most
+  256 KiB once encrypted. Further payloads hold attachments, such as a photo of
+  a dish.
 
 Writing a document validates the value against the collection's Rust type and
 then creates or revises the object on the server, so a device cannot save a
-document while offline. Every revision is kept, as for other objects. A device
-fetches a document's earlier revisions only when they are asked for.
+document while offline: the write fails with the offline error. A value that
+does not decode is refused first, offline too. The stored value is chosen as
+for rows, in "Writing a row".
+
+- A write without an id creates a document with a new UUIDv7.
+- A write with an id revises the document this device holds, naming the
+  revision it holds as the parent. If the device holds no document with that
+  id, the write creates one.
+- A revision whose parent is no longer the head fails with a revision conflict.
+  The device then fetches the head, so a read after the failure shows the
+  other write.
+- A delete appends a tombstone. A deleted document cannot be written again.
+
+Every revision is kept, as for other objects. A device fetches a document's
+earlier revisions only when they are asked for.
 
 On unlock, each device decrypts the newest revision of every document into the
 same in-memory tables as rows, with the object revision in the `revision`
-column, so queries treat both kinds alike. History is read from the object, not
-from the tables.
+column and that revision's write time in `written_at`, so queries treat both
+kinds alike. Snapshots and live events keep the tables in step with the held
+documents. A row that names a document collection is never shown. History is
+read from the object, not from the tables.
+
+A document's history lists every revision from 1 to the revision this device
+holds, each with its write time, the id of the device that wrote it and whether
+it is a delete. The device fetches each revision, checks its envelope and that
+it names the revision before it as its parent, and refuses a history that does
+not end at the revision it holds. Reading one revision's value downloads and
+decrypts that revision's first payload. Both need the server.
 
 ## Local storage and queries
 
@@ -352,6 +393,11 @@ authenticated socket (see [local-ipc-security.md](local-ipc-security.md)):
   derives from it.
 - `app_data_status` reports how many changes are waiting to be sent, how many
   the server refused, and the last sync error.
+- `app_document_history` lists a document's revisions, and
+  `app_document_revision` returns the value of one of them.
+
+`write_app_data` writes a document when the collection is a document
+collection, with the rules in "Document collections".
 
 The `clipper` command-line client exposes these as `clipper data query`,
 `clipper data write` and `clipper data status`, and lists a document's earlier
@@ -380,19 +426,28 @@ The gym logger is the first app on app data. Its collections:
 - `gym.exercises` (last write wins): name, the muscles it trains with a share
   for each, and whether it is archived.
 - `gym.workouts` (last write wins): a named template, with an ordered list of
-  exercises and, for each, the warm-up sets, the target working sets, reps,
-  reps in reserve and rest, and whether it forms a superset with the exercise
-  before it. An exercise appears at most once.
+  exercises and, for each, the warm-up sets and their rest (60 seconds unless
+  set), the target working sets, reps, reps in reserve and rest, and whether
+  it forms a superset with the exercise before it. An exercise appears at
+  most once.
 - `gym.sessions` (last write wins): one visit to the gym, with its start and
-  end time, the template it started from if any, notes and its exercise plan.
+  end time, the template it started from if any, notes, its exercise plan
+  and the exercise the user chose to do now, if any.
   The plan is copied from the template when the session starts and has the
   same fields per exercise, plus whether the exercise was skipped. Adding an
   exercise, adding a set, reordering and skipping during the session change
-  the plan.
-- `gym.sets` (append-only): one set, with its session, exercise, order, kind
-  (warm-up or working), weight, reps, reps in reserve and completion time.
-  `order` is one more than the highest order among the session's sets when
-  the set is logged, so sets sort by order and then completion time.
+  the plan. Moving an exercise keeps superset blocks together: within its
+  block it changes places with a neighbour, and across a block boundary its
+  whole block moves past the neighbouring block. Once a session has an end
+  time it keeps it, as described under Conflicts.
+- `gym.sets` (last write wins): one set, with its session, exercise, order,
+  kind (warm-up or working), weight, reps, reps in reserve and completion
+  time. `order` is one more than the highest order among the session's sets
+  when the set is logged, skipping an order whose row was deleted, so sets
+  sort by order and then completion time. Its row id is a UUIDv5 of the
+  session id and the order (`Set::row_id`), so two devices that log the same
+  order of one session write the same row and settle it by last write wins.
+  Editing a set in History is an edit of that row.
 - `gym.body_weight` (append-only): one weighing, with its time and weight in
   kilograms.
 - `gym.recovery` (last write wins): the user's own recovery time for one
@@ -403,7 +458,9 @@ The gym logger is the first app on app data. Its collections:
 
 The list of muscles and their default recovery times is part of the app, not a
 collection. Muscle fatigue is calculated on the device from recent working
-sets and is never stored.
+sets and is never stored. Fatigue, progress and history ignore sets whose
+session was deleted or is missing. Weekly body-weight averages group
+weighings by the device's local calendar week, starting on Monday.
 
 The state of a session in progress is calculated from its plan and its sets
 and is never stored:
@@ -411,22 +468,30 @@ and is never stored:
 - The plan is split into blocks: an exercise that forms a superset with the
   one before it joins that exercise's block. An exercise is open while it is
   not skipped and has fewer warm-up or working sets than planned.
-- The current exercise is in the first block with an open exercise. Within
-  the block it is the open exercise with the fewest working sets, the earlier
-  one on a tie, so a superset alternates. Its next set is a warm-up while
-  planned warm-ups remain, and a working set after that.
+- When the user chose an exercise to do now and it is still open, the
+  current exercise is in that exercise's block. Otherwise it is in the first
+  block with an open exercise. Within the block it is the open exercise with
+  the fewest working sets, the earlier one on a tie, so a superset alternates.
+  Its next set is a warm-up while planned warm-ups remain, and a working set
+  after that. Choosing an exercise does not change the plan, so an exercise
+  left unfinished keeps its remaining sets and becomes current again once the
+  chosen one is done.
+- The session lists its exercises in the order they were trained: first the
+  exercises with logged sets, by their first set, then the current exercise,
+  then the rest in plan order.
 - The rest timer starts at the completion time of the session's last set and
-  lasts that exercise's rest. Moving forward to the next exercise of the same
-  superset has no rest, and a session with no current exercise has no rest
-  timer.
+  lasts that exercise's rest, or its warm-up rest after a warm-up. Moving
+  forward to the next exercise of the same superset has no rest, and a
+  session with no current exercise has no rest timer.
 - A set is logged only if the session's next order and current exercise are
   still the ones the screen showed, so a stale or repeated tap cannot log a
   set out of order.
 
-On first use, when the device has no exercises, workouts, sessions or sets,
-the app writes a starter library of common barbell, dumbbell and machine
-exercises and two workouts. Their row ids are fixed in `crates/gym`, so two
-devices that both write it produce the same rows.
+On first use, after the device has finished downloading app data from the
+server once since it unlocked, and when it has no exercises, workouts,
+sessions or sets, the app writes a starter library of common barbell,
+dumbbell and machine exercises and two workouts. Their row ids are fixed in
+`crates/gym`, so two devices that both write it produce the same rows.
 
 ## Outside this document
 

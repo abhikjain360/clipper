@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Exercise, Muscle, Recovery, Set, SetKind, ValidationError};
+use crate::{Exercise, Muscle, Recovery, Session, Set, SetKind, ValidationError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +39,7 @@ pub struct MuscleFatigue {
 pub fn fatigue_at(
     now: DateTime<Utc>,
     exercises: &BTreeMap<Uuid, Exercise>,
+    sessions: &BTreeMap<Uuid, Session>,
     sets: &[Set],
     recovery: &[Recovery],
 ) -> Result<Vec<MuscleFatigue>, ValidationError> {
@@ -53,7 +54,10 @@ pub fn fatigue_at(
 
     let mut totals = BTreeMap::<Muscle, f64>::new();
     for set in sets {
-        if set.kind != SetKind::Working || set.completed_at > now {
+        if set.kind != SetKind::Working
+            || set.completed_at > now
+            || !sessions.contains_key(&set.session_id)
+        {
             continue;
         }
         let days_since = (now - set.completed_at).as_seconds_f64() / 86_400.0;

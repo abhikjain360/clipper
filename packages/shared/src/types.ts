@@ -358,6 +358,8 @@ export type ClipperBackend = {
   queryAppData?: (sql: string) => Promise<AppDataRow[]>;
   writeAppData?: (collection: string, rowId: string | null, write: AppDataWrite) => Promise<string>;
   appDataStatus?: () => Promise<AppDataStatus>;
+  appDocumentHistory?: (collection: string, id: string) => Promise<AppDocumentRevision[]>;
+  appDocumentRevision?: (collection: string, id: string, revision: number) => Promise<unknown>;
 };
 
 export type AppDataRow = Record<string, unknown>;
@@ -368,4 +370,11 @@ export type AppDataStatus = {
   pending_changes: number;
   refused_changes: number;
   last_sync_error: string | null;
+};
+
+export type AppDocumentRevision = {
+  revision: number;
+  written_at: string;
+  device_id: string;
+  deleted: boolean;
 };

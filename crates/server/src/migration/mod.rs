@@ -6,6 +6,7 @@ mod m20260826_000003_collab_doc_title;
 mod m20260908_000004_schedule_objects;
 mod m20260908_000005_object_revisions;
 mod m20261007_000006_app_data;
+mod m20261007_000007_app_documents;
 
 pub struct Migrator;
 
@@ -19,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260908_000004_schedule_objects::Migration),
             Box::new(m20260908_000005_object_revisions::Migration),
             Box::new(m20261007_000006_app_data::Migration),
+            Box::new(m20261007_000007_app_documents::Migration),
         ]
     }
 }

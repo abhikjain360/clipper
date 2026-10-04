@@ -1,6 +1,8 @@
 use uuid::Uuid;
 
-use crate::{Exercise, Muscle, MuscleShare, WorkoutExercise, WorkoutTemplate};
+use crate::{
+    DEFAULT_WARM_UP_REST_SECONDS, Exercise, Muscle, MuscleShare, WorkoutExercise, WorkoutTemplate,
+};
 
 pub const BENCH_PRESS: Uuid = starter_id(0x01);
 pub const BACK_SQUAT: Uuid = starter_id(0x02);
@@ -192,6 +194,7 @@ fn planned(
     WorkoutExercise {
         exercise_id,
         warm_up_sets,
+        warm_up_rest_seconds: DEFAULT_WARM_UP_REST_SECONDS,
         target_sets,
         target_reps,
         target_reps_in_reserve: Some(2),

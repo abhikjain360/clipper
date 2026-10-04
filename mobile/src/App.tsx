@@ -46,6 +46,7 @@ import {
   Platform,
   StatusBar,
   TextInput,
+  useWindowDimensions,
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { TamaguiProvider } from "tamagui";
@@ -578,6 +579,8 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
   }
 
   const destinations = navItems.filter((item) => item.value !== "alarms" || alarmsSupported);
+  const screen = useWindowDimensions();
+  const compactNavigation = screen.width < 700 || screen.height < 500;
 
   const navigation = (expanded: boolean) => (
     <YStack flex={1} justify="space-between" py="$2" px="$1.5" gap="$2">
@@ -662,11 +665,27 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
 
   return (
     <XStack flex={1} bg="#101214">
-      <YStack width={64} bg="#171a1d" borderRightColor="#252b31" borderRightWidth={1}>
-        {navigation(false)}
-      </YStack>
+      {!compactNavigation && (
+        <YStack width={64} bg="#171a1d" borderRightColor="#252b31" borderRightWidth={1}>
+          {navigation(false)}
+        </YStack>
+      )}
 
       <YStack flex={1} p="$3" gap="$3">
+        {compactNavigation && (
+          <XStack items="center" gap="$2" mb="$-2">
+            <Button
+              size="$3"
+              chromeless
+              aria-label="Open navigation"
+              icon={<Menu size={22} />}
+              onPress={() => setNavExpanded(true)}
+            />
+            <Text color="#9aa4ad">
+              {destinations.find((item) => item.value === tab)?.label ?? "Clipper"}
+            </Text>
+          </XStack>
+        )}
         {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
 
         {tab === "clipboard" && (

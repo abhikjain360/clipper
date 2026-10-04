@@ -16,6 +16,6 @@ pub use session::{
 };
 pub use starter::{starter_exercises, starter_templates};
 pub use values::{
-    BodyWeight, ConflictRule, Exercise, MuscleShare, Recovery, Session, SessionExercise, Set,
-    SetKind, ValidationError, WorkoutExercise, WorkoutTemplate,
+    BodyWeight, ConflictRule, DEFAULT_WARM_UP_REST_SECONDS, Exercise, MuscleShare, Recovery,
+    Session, SessionExercise, Set, SetKind, ValidationError, WorkoutExercise, WorkoutTemplate,
 };

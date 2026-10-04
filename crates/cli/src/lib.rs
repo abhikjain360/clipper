@@ -5,9 +5,10 @@ use chrono_tz::Tz;
 use clap::{Args, Parser, Subcommand};
 use clipper_daemon_client::{ClientError, Connection};
 use clipper_daemon_types::{
-    ActualsBetweenParams, AppDataWrite, AppState, CreateScheduleItemParams, DaemonCommand,
-    DeleteScheduleObjectParams, DeviceListResult, ExpandScheduleParams, QueryAppDataParams,
-    UpdateScheduleItemParams, WriteAppDataParams,
+    ActualsBetweenParams, AppDataWrite, AppDocumentHistoryParams, AppDocumentRevisionParams,
+    AppState, CreateScheduleItemParams, DaemonCommand, DeleteScheduleObjectParams,
+    DeviceListResult, ExpandScheduleParams, QueryAppDataParams, UpdateScheduleItemParams,
+    WriteAppDataParams,
 };
 use clipper_schedule::{
     AlarmPolicy, BlockDuration, Cadence, Frequency, Recurrence, ScheduleItem, ScheduleItemId,
@@ -39,7 +40,7 @@ pub enum Command {
     Actuals(RangeArgs),
     #[command(about = "List the account's devices, marking this device")]
     Devices,
-    #[command(about = "Query and write app data such as the gym log")]
+    #[command(about = "Query and write app data such as the gym log and the kitchen")]
     Data {
         #[command(subcommand)]
         command: DataCommand,
@@ -51,19 +52,26 @@ pub enum DataCommand {
     #[command(about = "Run one read-only SQL statement and print the rows as JSON")]
     Query { sql: String },
     #[command(
-        about = "Write one row from JSON on stdin, or delete one; print its row id",
-        after_help = "Tables are named after their collection, for example gym.sets. A row id is generated when --id is absent."
+        about = "Write one row or document from JSON on stdin, or delete one; print its id",
+        after_help = "Tables are named after their collection, for example gym.sets. An id is generated when --id is absent. Document collections, such as kitchen.recipes, are written to the server at once, so a document write fails while offline."
     )]
     Write {
         collection: String,
-        #[arg(long, help = "Row id; required with --delete")]
+        #[arg(long, help = "Row or document id; required with --delete")]
         id: Option<Uuid>,
         #[arg(
             long,
             requires = "id",
-            help = "Delete the row instead of reading a value"
+            help = "Delete the row or document instead of reading a value"
         )]
         delete: bool,
+    },
+    #[command(about = "List a document's revisions, or print the value of one revision")]
+    History {
+        collection: String,
+        id: Uuid,
+        #[arg(long, help = "Print the value of this revision")]
+        revision: Option<u64>,
     },
     #[command(about = "Show changes waiting to sync and the last sync error")]
     Status,
@@ -240,6 +248,29 @@ impl Command {
             Self::Data {
                 command: DataCommand::Status,
             } => Ok((DaemonCommand::AppDataStatus, Output::Result)),
+            Self::Data {
+                command:
+                    DataCommand::History {
+                        collection,
+                        id,
+                        revision,
+                    },
+            } => Ok((
+                match revision {
+                    Some(revision) => {
+                        DaemonCommand::AppDocumentRevision(AppDocumentRevisionParams {
+                            collection,
+                            id: id.to_string(),
+                            revision,
+                        })
+                    }
+                    None => DaemonCommand::AppDocumentHistory(AppDocumentHistoryParams {
+                        collection,
+                        id: id.to_string(),
+                    }),
+                },
+                Output::Result,
+            )),
             Self::Schedule {
                 command: ScheduleCommand::Items,
             } => Ok((DaemonCommand::GetState, Output::Items)),

@@ -74,10 +74,18 @@ impl WorkoutTemplate {
     }
 }
 
+pub const DEFAULT_WARM_UP_REST_SECONDS: u32 = 60;
+
+fn default_warm_up_rest_seconds() -> u32 {
+    DEFAULT_WARM_UP_REST_SECONDS
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkoutExercise {
     pub exercise_id: Uuid,
     pub warm_up_sets: u32,
+    #[serde(default = "default_warm_up_rest_seconds")]
+    pub warm_up_rest_seconds: u32,
     pub target_sets: u32,
     pub target_reps: u32,
     pub target_reps_in_reserve: Option<u8>,
@@ -103,12 +111,16 @@ pub struct Session {
     pub template_id: Option<Uuid>,
     pub notes: String,
     pub exercises: Vec<SessionExercise>,
+    #[serde(default)]
+    pub current_exercise_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionExercise {
     pub exercise_id: Uuid,
     pub warm_up_sets: u32,
+    #[serde(default = "default_warm_up_rest_seconds")]
+    pub warm_up_rest_seconds: u32,
     pub target_sets: u32,
     pub target_reps: u32,
     pub target_reps_in_reserve: Option<u8>,
@@ -133,6 +145,7 @@ impl From<WorkoutExercise> for SessionExercise {
         Self {
             exercise_id: planned.exercise_id,
             warm_up_sets: planned.warm_up_sets,
+            warm_up_rest_seconds: planned.warm_up_rest_seconds,
             target_sets: planned.target_sets,
             target_reps: planned.target_reps,
             target_reps_in_reserve: planned.target_reps_in_reserve,
@@ -161,6 +174,13 @@ impl Session {
         }
         validate_distinct_exercises(self.exercises.iter().map(|exercise| exercise.exercise_id))
     }
+
+    pub fn keeping_end_of(mut self, other: &Session) -> Session {
+        if self.ended_at.is_none() {
+            self.ended_at = other.ended_at;
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,7 +204,14 @@ pub struct Set {
 
 impl Set {
     pub const COLLECTION_NAME: &'static str = "gym.sets";
-    pub const CONFLICT_RULE: ConflictRule = ConflictRule::AppendOnly;
+    pub const CONFLICT_RULE: ConflictRule = ConflictRule::LastWriteWins;
+    const ROW_ID_NAMESPACE: Uuid = Uuid::from_u128(0x2c4e_91d7_63a8_4f0b_8d15_e9b2_7a46_c3f1);
+
+    pub fn row_id(session_id: Uuid, order: u32) -> Uuid {
+        let mut name = session_id.as_bytes().to_vec();
+        name.extend_from_slice(&order.to_be_bytes());
+        Uuid::new_v5(&Self::ROW_ID_NAMESPACE, &name)
+    }
 
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.session_id.get_version() != Some(uuid::Version::SortRand) {

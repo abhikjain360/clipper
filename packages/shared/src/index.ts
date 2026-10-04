@@ -7,6 +7,7 @@ export type {
   AppDataRow,
   AppDataStatus,
   AppDataWrite,
+  AppDocumentRevision,
   AppState,
   ClipboardItem,
   ClipboardPayload,

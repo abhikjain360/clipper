@@ -156,7 +156,12 @@ impl Drop for TestProxy {
     }
 }
 
-async fn signed_in(url: &str, data: &Path, name: &str, register: bool) -> Arc<SyncEngine> {
+pub(super) async fn signed_in(
+    url: &str,
+    data: &Path,
+    name: &str,
+    register: bool,
+) -> Arc<SyncEngine> {
     let engine = SyncEngine::new_with_data_dir(url, data.join(name));
     if register {
         engine
@@ -182,7 +187,7 @@ async fn signed_in(url: &str, data: &Path, name: &str, register: bool) -> Arc<Sy
     engine
 }
 
-async fn eventually(description: &str, mut check: impl AsyncFnMut() -> bool) {
+pub(super) async fn eventually(description: &str, mut check: impl AsyncFnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(30), async {
         while !check().await {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -192,7 +197,7 @@ async fn eventually(description: &str, mut check: impl AsyncFnMut() -> bool) {
     .unwrap_or_else(|_| panic!("{description} within thirty seconds"));
 }
 
-async fn query(engine: &SyncEngine, sql: &str) -> Value {
+pub(super) async fn query(engine: &SyncEngine, sql: &str) -> Value {
     Value::Array(
         engine
             .query_app_data(sql)
@@ -249,16 +254,36 @@ async fn delete(engine: &SyncEngine, collection: &str, id: &str) {
         .expect("delete");
 }
 
-fn set(session_id: Uuid, exercise_id: &str, reps: u32) -> Value {
+fn set(session_id: Uuid, exercise_id: &str, order: u32, reps: u32) -> Value {
     json!({
         "session_id": session_id,
         "exercise_id": exercise_id,
-        "order": 1,
+        "order": order,
         "kind": "working",
         "weight_kg": 100.0,
         "reps": reps,
         "reps_in_reserve": 2,
         "completed_at": "2026-10-07T10:00:00Z",
+    })
+}
+
+fn session(exercise_id: &str, ended_at: Option<&str>, notes: &str) -> Value {
+    json!({
+        "started_at": "2026-10-07T10:00:00Z",
+        "ended_at": ended_at,
+        "template_id": null,
+        "notes": notes,
+        "exercises": [{
+            "exercise_id": exercise_id,
+            "warm_up_sets": 0,
+            "warm_up_rest_seconds": 60,
+            "target_sets": 3,
+            "target_reps": 5,
+            "target_reps_in_reserve": 2,
+            "rest_seconds": 180,
+            "superset_with_previous": false,
+            "skipped": false,
+        }],
     })
 }
 
@@ -427,7 +452,7 @@ async fn live_app_data_syncs_resolves_conflicts_and_rejects_tampered_rows() {
 
     let squat = write(&first, "gym.exercises", None, exercise("Squat")).await;
     let session_id = Uuid::now_v7();
-    let logged = write(&first, "gym.sets", None, set(session_id, &squat, 5)).await;
+    let logged = write(&first, "gym.sets", None, set(session_id, &squat, 1, 5)).await;
     let chest = write(
         &first,
         "gym.recovery",
@@ -516,7 +541,7 @@ async fn live_app_data_syncs_resolves_conflicts_and_rejects_tampered_rows() {
         &first,
         "gym.sets",
         Some(&logged),
-        set(session_id, &squat, 6),
+        set(session_id, &squat, 1, 6),
     )
     .await;
     proxy.go_online();
@@ -526,7 +551,7 @@ async fn live_app_data_syncs_resolves_conflicts_and_rejects_tampered_rows() {
     })
     .await;
 
-    let second_set = write(&first, "gym.sets", None, set(session_id, &squat, 8)).await;
+    let second_set = write(&first, "gym.sets", None, set(session_id, &squat, 2, 8)).await;
     eventually("the second device receives the new set", async || {
         field(&second, "gym.sets", &second_set, "reps").await == json!(8)
     })
@@ -536,7 +561,7 @@ async fn live_app_data_syncs_resolves_conflicts_and_rejects_tampered_rows() {
         &second,
         "gym.sets",
         Some(&second_set),
-        set(session_id, &squat, 9),
+        set(session_id, &squat, 2, 9),
     )
     .await;
     delete(&first, "gym.sets", &second_set).await;
@@ -750,7 +775,7 @@ async fn live_app_data_pulls_between_bounded_push_passes() {
     let second = signed_in(&format!("http://{address}"), data, "second", false).await;
     let squat = write(&first, "gym.exercises", None, exercise("Squat")).await;
     let session_id = Uuid::now_v7();
-    let logged = write(&first, "gym.sets", None, set(session_id, &squat, 5)).await;
+    let logged = write(&first, "gym.sets", None, set(session_id, &squat, 1, 5)).await;
     eventually("the second device receives the set", async || {
         field(&second, "gym.sets", &logged, "reps").await == json!(5)
     })
@@ -767,7 +792,7 @@ async fn live_app_data_pulls_between_bounded_push_passes() {
             &second,
             "gym.sets",
             Some(&logged),
-            set(session_id, &squat, reps),
+            set(session_id, &squat, 1, reps),
         )
         .await;
         eventually("the competing edit reaches the server", async || {
@@ -792,4 +817,77 @@ async fn live_app_data_pulls_between_bounded_push_passes() {
             .all(|sends| sends.len() <= 2),
         "a push pass sent more than one retry before pulling: {requests:?}"
     );
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_gym_conflicts_keep_a_session_end_and_settle_one_set_per_order() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data = temp.path();
+    let (_server, address) = start_server(data).await;
+    let url = format!("http://{address}");
+    let proxy = TestProxy::start(address).await;
+    let first = signed_in(&url, data, "first", true).await;
+    let second = signed_in(&proxy.url, data, "second", false).await;
+
+    let squat = write(&first, "gym.exercises", None, exercise("Squat")).await;
+    let session_id = write(&first, "gym.sessions", None, session(&squat, None, "")).await;
+    eventually("the second device receives the open session", async || {
+        field(&second, "gym.sessions", &session_id, "notes").await == json!("")
+    })
+    .await;
+
+    proxy.go_offline(&second).await;
+    let end = "2026-10-07T11:00:00Z";
+    write(
+        &first,
+        "gym.sessions",
+        Some(&session_id),
+        session(&squat, Some(end), ""),
+    )
+    .await;
+    let session_uuid: Uuid = session_id.parse().expect("session id");
+    let first_set = write(&first, "gym.sets", None, set(session_uuid, &squat, 1, 5)).await;
+    write(
+        &second,
+        "gym.sessions",
+        Some(&session_id),
+        session(&squat, None, "edited offline"),
+    )
+    .await;
+    let second_set = write(&second, "gym.sets", None, set(session_uuid, &squat, 1, 7)).await;
+    assert_eq!(first_set, second_set);
+    proxy.go_online();
+
+    eventually(
+        "the later edit wins, the session stays finished and one set holds the order",
+        async || {
+            let mut settled = true;
+            for engine in [&first, &second] {
+                settled &= field(engine, "gym.sessions", &session_id, "ended_at").await
+                    == json!(end)
+                    && field(engine, "gym.sessions", &session_id, "notes").await
+                        == json!("edited offline")
+                    && field(engine, "gym.sets", &first_set, "reps").await == json!(7)
+                    && pending(engine).await == 0;
+            }
+            settled
+        },
+    )
+    .await;
+
+    write(
+        &first,
+        "gym.sessions",
+        Some(&session_id),
+        session(&squat, None, "written without an end"),
+    )
+    .await;
+    assert_eq!(
+        field(&first, "gym.sessions", &session_id, "ended_at").await,
+        json!(end)
+    );
+    first.stop_session_work().await;
+    second.stop_session_work().await;
 }

@@ -28,6 +28,7 @@ fn planned(
     WorkoutExercise {
         exercise_id: id(exercise),
         warm_up_sets,
+        warm_up_rest_seconds: 60,
         target_sets,
         target_reps: 5,
         target_reps_in_reserve: Some(2),
@@ -86,6 +87,7 @@ fn sets_appear_in_stored_order_and_the_next_set_follows_from_stored_rows() {
     let second = logged(12, SQUAT, 3, SetKind::Working, 300);
     let after_warm_up = progress(&session, std::slice::from_ref(&warm_up));
     assert_eq!(current(&after_warm_up), Some((id(SQUAT), SetKind::Working)));
+    assert_eq!(after_warm_up.rest.map(|rest| rest.ends_at), Some(time(120)));
     assert_eq!(after_warm_up.next_order, 2);
 
     let stored = [second.clone(), warm_up.clone(), first.clone()];
@@ -98,6 +100,7 @@ fn sets_appear_in_stored_order_and_the_next_set_follows_from_stored_rows() {
     assert_eq!(squat_sets, [warm_up.id, first.id, second.id]);
     assert_eq!(done.exercises[0].working_done, 2);
     assert_eq!(current(&done), Some((id(BENCH), SetKind::Working)));
+    assert_eq!(done.rest.map(|rest| rest.ends_at), Some(time(480)));
     assert_eq!(done.next_order, 4);
 
     let earlier_order_logged_later = logged(13, SQUAT, 1, SetKind::Working, 900);
@@ -208,4 +211,110 @@ fn skipping_and_moving_exercises_changes_which_exercise_is_next() {
         session.add_working_set(id(BENCH)),
         Err(SessionChangeError::Finished)
     );
+}
+
+#[test]
+fn moving_an_exercise_keeps_superset_groups_together() {
+    let mut session = session(vec![
+        planned(SQUAT, 0, 3, 180, false),
+        planned(BENCH, 0, 3, 90, false),
+        planned(ROW, 0, 3, 90, true),
+    ]);
+    let order = |session: &Session| {
+        session
+            .exercises
+            .iter()
+            .map(|planned| (planned.exercise_id, planned.superset_with_previous))
+            .collect::<Vec<_>>()
+    };
+
+    session.move_exercise(id(ROW), 1).unwrap();
+    assert_eq!(
+        order(&session),
+        [(id(SQUAT), false), (id(ROW), false), (id(BENCH), true)]
+    );
+
+    session.move_exercise(id(ROW), 0).unwrap();
+    assert_eq!(
+        order(&session),
+        [(id(ROW), false), (id(BENCH), true), (id(SQUAT), false)]
+    );
+
+    session.move_exercise(id(SQUAT), 0).unwrap();
+    assert_eq!(
+        order(&session),
+        [(id(SQUAT), false), (id(ROW), false), (id(BENCH), true)]
+    );
+
+    let mut template = WorkoutTemplate {
+        name: "Full body".into(),
+        exercises: vec![
+            planned(SQUAT, 0, 3, 90, false),
+            planned(BENCH, 0, 3, 90, true),
+            planned(ROW, 0, 3, 90, false),
+        ],
+    };
+    template.move_exercise(2, 1);
+    let template_order: Vec<_> = template
+        .exercises
+        .iter()
+        .map(|planned| (planned.exercise_id, planned.superset_with_previous))
+        .collect();
+    assert_eq!(
+        template_order,
+        [(id(ROW), false), (id(SQUAT), false), (id(BENCH), true)]
+    );
+}
+
+#[test]
+fn a_finished_session_stays_finished_when_a_later_edit_without_an_end_wins() {
+    let open = session(vec![planned(SQUAT, 0, 3, 180, false)]);
+    let mut finished = open.clone();
+    finished.finish(time(3600)).unwrap();
+    let mut edited_elsewhere = open.clone();
+    edited_elsewhere.add_working_set(id(SQUAT)).unwrap();
+
+    let merged = edited_elsewhere.clone().keeping_end_of(&finished);
+    assert_eq!(merged.ended_at, Some(time(3600)));
+    assert_eq!(merged.exercises, edited_elsewhere.exercises);
+    assert_eq!(finished.clone().keeping_end_of(&open), finished);
+}
+
+#[test]
+fn switching_to_a_new_exercise_keeps_the_list_in_training_order() {
+    const CRUNCH: u128 = 4;
+    let mut session = Session::blank(time(0));
+    session.add_exercise(id(SQUAT)).unwrap();
+    let squat = logged(10, SQUAT, 1, SetKind::Working, 60);
+    session.add_exercise(id(CRUNCH)).unwrap();
+    session.switch_to(id(CRUNCH)).unwrap();
+
+    let switched = progress(&session, std::slice::from_ref(&squat));
+    let names = |progress: &SessionProgress| {
+        progress
+            .display_order
+            .iter()
+            .map(|index| progress.exercises[*index].plan.exercise_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(current(&switched), Some((id(CRUNCH), SetKind::Working)));
+    assert_eq!(names(&switched), [id(SQUAT), id(CRUNCH)]);
+    assert!(switched.exercises[0].is_open());
+
+    let crunches: Vec<LoggedSet> = (0..3)
+        .map(|offset| {
+            logged(
+                20 + offset,
+                CRUNCH,
+                2 + offset as u32,
+                SetKind::Working,
+                400,
+            )
+        })
+        .collect();
+    let mut sets = vec![squat];
+    sets.extend(crunches);
+    let back = progress(&session, &sets);
+    assert_eq!(current(&back), Some((id(SQUAT), SetKind::Working)));
+    assert_eq!(names(&back), [id(SQUAT), id(CRUNCH)]);
 }

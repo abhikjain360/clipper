@@ -17,7 +17,7 @@ use crate::{
     api_client::ClientError,
     app_data::{
         AppDataKeys, AppDataSession,
-        collections::{self, Collection},
+        collections::{self, Collection, Storage},
         tables::{AppDataTables, QueryRows},
     },
     local_store::StoredAppDataRow,
@@ -36,12 +36,51 @@ impl SyncEngine {
         row_id: Option<&str>,
         write: AppDataWrite,
     ) -> Result<String, ClientError> {
+        let entry = collections::collection(collection).ok_or_else(|| {
+            ClientError::InvalidArgument(format!("unknown app-data collection {collection}"))
+        })?;
+        let write = match write {
+            AppDataWrite::Value(value) => {
+                AppDataWrite::Value((entry.checked_value)(value).map_err(|error| {
+                    ClientError::InvalidArgument(format!("invalid {collection} value: {error}"))
+                })?)
+            }
+            AppDataWrite::Delete => AppDataWrite::Delete,
+        };
+        if entry.storage == Storage::Documents {
+            return self
+                .run_work(None, self.write_app_document(collection, row_id, write))
+                .await;
+        }
         self.run_work(None, self.write_app_data_inner(collection, row_id, write))
             .await
     }
 
     pub async fn app_data_status(&self) -> Result<AppDataStatus, ClientError> {
         self.run_work(None, self.app_data_status_inner()).await
+    }
+
+    pub fn app_data_downloaded(&self) -> bool {
+        self.app_data.downloaded()
+    }
+
+    pub async fn app_data_row_deleted(
+        &self,
+        collection: &str,
+        row_id: Uuid,
+    ) -> Result<bool, ClientError> {
+        let collection = collections::collection(collection).ok_or_else(|| {
+            ClientError::InvalidArgument(format!("unknown app-data collection {collection}"))
+        })?;
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
+        let mut guard = self.app_data.session.lock().await;
+        let session = open_session(&mut guard, epoch)?;
+        let row_key = session.keys.row_key(collection.name, row_id);
+        Ok(self
+            .local_store
+            .app_data_row(&row_key)
+            .await?
+            .is_some_and(|(row, _)| row.deleted))
     }
 
     async fn query_app_data_inner(&self, sql: &str) -> Result<QueryRows, ClientError> {
@@ -77,14 +116,12 @@ impl SyncEngine {
                 })
             })
             .transpose()?;
-        let (row_id, value) = match write {
-            AppDataWrite::Value(value) => (row_id_for(collection, requested, &value)?, Some(value)),
-            AppDataWrite::Delete => (
-                requested.ok_or_else(|| {
-                    ClientError::InvalidArgument("a delete needs a row id".into())
-                })?,
-                None,
-            ),
+        let (value, derived) = match write {
+            AppDataWrite::Value(value) => {
+                let derived = derived_row_id(collection, &value)?;
+                (Some(value), derived)
+            }
+            AppDataWrite::Delete => (None, None),
         };
 
         let epoch = self.history_epoch.load(Ordering::SeqCst);
@@ -92,8 +129,40 @@ impl SyncEngine {
         let (_, device_id, signing_key) = self.current_device_signing_context().await?;
         let mut guard = self.app_data.session.lock().await;
         let session = open_session(&mut guard, epoch)?;
+        let requested_row_exists = match requested {
+            Some(id) if derived.is_some_and(|derived| derived != id) => self
+                .local_store
+                .app_data_row(&session.keys.row_key(collection.name, id))
+                .await?
+                .is_some_and(|(row, _)| !row.deleted),
+            _ => false,
+        };
+        let row_id = row_id_for(
+            collection,
+            requested,
+            derived,
+            value.is_some(),
+            requested_row_exists,
+        )?;
         let row_key = session.keys.row_key(collection.name, row_id);
-        let (revision, replaces_revision) = match self.local_store.app_data_row(&row_key).await? {
+        let stored = self.local_store.app_data_row(&row_key).await?;
+        let value = match (value, collection.merge, &stored) {
+            (Some(value), Some(merge), Some((row, _))) if !row.deleted => {
+                let earlier = session.keys.open(
+                    &row_key,
+                    row.revision,
+                    false,
+                    &row.nonce,
+                    &row.ciphertext,
+                )?;
+                Some(match earlier.value {
+                    Some(earlier) => merge(&value, &earlier).ok().flatten().unwrap_or(value),
+                    None => value,
+                })
+            }
+            (value, _, _) => value,
+        };
+        let (revision, replaces_revision) = match stored {
             None if value.is_none() => {
                 return Err(ClientError::ItemNotFound {
                     id: row_id.to_string(),
@@ -210,6 +279,9 @@ impl SyncEngine {
                     )),
                     Err(error) => Some(error.to_string()),
                 };
+                if pulled.is_ok() {
+                    self.app_data.mark_downloaded();
+                }
                 if let Err(error) = pulled {
                     if self.app_data_sync_ended(epoch, &error).await {
                         return;
@@ -449,6 +521,7 @@ impl SyncEngine {
                             &row_key,
                             change.revision,
                             &writer,
+                            None,
                         )
                         .await?;
                         pushed.resent.push(row_key);
@@ -506,7 +579,7 @@ impl SyncEngine {
                     local.revision
                 )));
             }
-            self.resend_app_data_change_after(session, row_key, 0, writer)
+            self.resend_app_data_change_after(session, row_key, 0, writer, None)
                 .await?;
             return Ok(true);
         };
@@ -533,13 +606,45 @@ impl SyncEngine {
             ours.deleted && !theirs.deleted
         } else {
             collections::collection(&ours.collection).is_some_and(|collection| {
-                collection.conflict_rule == ConflictRule::LastWriteWins
+                collection.storage == Storage::Rows(ConflictRule::LastWriteWins)
                     && written_later(&ours.written_at, &theirs.written_at)
             })
         };
-        if keep_ours {
-            self.resend_app_data_change_after(session, row_key, current.revision, writer)
-                .await?;
+        let merged = match (
+            &ours.value,
+            &theirs.value,
+            collections::collection(&ours.collection).and_then(|collection| collection.merge),
+        ) {
+            (Some(our_value), Some(their_value), Some(merge))
+                if !ours.deleted && !theirs.deleted =>
+            {
+                let (winner, loser) = if keep_ours {
+                    (our_value, their_value)
+                } else {
+                    (their_value, our_value)
+                };
+                merge(winner, loser).ok().flatten()
+            }
+            _ => None,
+        };
+        if keep_ours || merged.is_some() {
+            let replacement = merged.map(|value| AppDataValueEnvelope {
+                written_at: if keep_ours {
+                    ours.written_at.clone()
+                } else {
+                    theirs.written_at.clone()
+                },
+                value: Some(value),
+                ..ours.clone()
+            });
+            self.resend_app_data_change_after(
+                session,
+                row_key,
+                current.revision,
+                writer,
+                replacement,
+            )
+            .await?;
             return Ok(true);
         }
         let row = StoredAppDataRow::from_server(&current)
@@ -555,17 +660,21 @@ impl SyncEngine {
         row_key: &[u8; 32],
         onto_revision: u64,
         writer: &Writer<'_>,
+        replacement: Option<AppDataValueEnvelope>,
     ) -> Result<(), ClientError> {
         let Some((local, Some(_))) = self.local_store.app_data_row(row_key).await? else {
             return Ok(());
         };
-        let envelope = session.keys.open(
-            row_key,
-            local.revision,
-            local.deleted,
-            &local.nonce,
-            &local.ciphertext,
-        )?;
+        let envelope = match replacement {
+            Some(envelope) => envelope,
+            None => session.keys.open(
+                row_key,
+                local.revision,
+                local.deleted,
+                &local.nonce,
+                &local.ciphertext,
+            )?,
+        };
         let revision = onto_revision + 1;
         let row = sealed_row(
             &session.keys,
@@ -603,30 +712,39 @@ fn open_session(
         .ok_or(ClientError::NotAuthenticated)
 }
 
+fn derived_row_id(
+    collection: &Collection,
+    value: &serde_json::Value,
+) -> Result<Option<Uuid>, ClientError> {
+    collection
+        .fixed_row_id
+        .map(|derive| derive(value).map_err(ClientError::InvalidArgument))
+        .transpose()
+}
+
 fn row_id_for(
     collection: &Collection,
     requested: Option<Uuid>,
-    value: &serde_json::Value,
+    derived: Option<Uuid>,
+    writes_value: bool,
+    requested_row_exists: bool,
 ) -> Result<Uuid, ClientError> {
-    (collection.validate)(value).map_err(|error| {
-        ClientError::InvalidArgument(format!("invalid {} value: {error}", collection.name))
-    })?;
-    if let Some(fixed_row_id) = collection.fixed_row_id {
-        let expected = fixed_row_id(value).map_err(ClientError::InvalidArgument)?;
-        if requested.is_some_and(|id| id != expected) {
-            return Err(ClientError::InvalidArgument(format!(
-                "{} rows use the id derived from their value, {expected}",
-                collection.name
-            )));
-        }
-        return Ok(expected);
-    }
-    match requested {
-        Some(id) if id.get_version() == Some(uuid::Version::SortRand) => Ok(id),
-        Some(id) => Err(ClientError::InvalidArgument(format!(
+    match (requested, derived) {
+        (None, _) if !writes_value => Err(ClientError::InvalidArgument(
+            "a delete needs a row id".into(),
+        )),
+        (Some(id), _) if !writes_value => Ok(id),
+        (Some(id), Some(derived)) if id == derived || requested_row_exists => Ok(id),
+        (Some(_), Some(derived)) => Err(ClientError::InvalidArgument(format!(
+            "{} rows use the id derived from their value, {derived}",
+            collection.name
+        ))),
+        (None, Some(derived)) => Ok(derived),
+        (Some(id), None) if id.get_version() == Some(uuid::Version::SortRand) => Ok(id),
+        (Some(id), None) => Err(ClientError::InvalidArgument(format!(
             "row id must be a UUIDv7, got {id}"
         ))),
-        None => Ok(Uuid::now_v7()),
+        (None, None) => Ok(Uuid::now_v7()),
     }
 }
 
@@ -667,7 +785,9 @@ fn show(
     envelope: &AppDataValueEnvelope,
     revision: u64,
 ) -> Result<(), ClientError> {
-    let Some(collection) = collections::collection(&envelope.collection) else {
+    let Some(collection) = collections::collection(&envelope.collection)
+        .filter(|collection| collection.storage != Storage::Documents)
+    else {
         return Ok(());
     };
     let id = envelope.row_id.into_uuid();

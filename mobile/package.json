@@ -11,7 +11,7 @@
     "lint": "oxlint .",
     "preandroid": "pnpm --dir ../packages/mobile-bridge run ubrn:android",
     "start": "expo start",
-    "test": "node --experimental-strip-types --test ../scripts/mobile-resume.test.mjs"
+    "test": "node --experimental-strip-types --test ../scripts/mobile-resume.test.mjs ../scripts/gym-rest-countdown.test.mjs"
   },
   "dependencies": {
     "@clipper/mobile-bridge": "workspace:*",

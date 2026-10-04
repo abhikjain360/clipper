@@ -75,7 +75,7 @@ export function Library({ onError }: { onError: (error: string | null) => void }
   const archived = exercises.filter((exercise) => exercise.archived);
 
   return (
-    <ScrollView flex={1}>
+    <ScrollView flex={1} keyboardShouldPersistTaps="always">
       <YStack gap="$3" pb="$8">
         <XStack gap="$2">
           <Button
@@ -332,13 +332,25 @@ function TemplateEditor({
     if (!draft) return;
     const target = index + offset;
     if (target < 0 || target >= draft.exercises.length) return;
-    const reordered = draft.exercises.map((planned) =>
-      Object.assign({}, planned, { supersetWithPrevious: false }),
-    );
-    const [moved] = reordered.splice(index, 1);
-    if (!moved) return;
-    reordered.splice(target, 0, moved);
-    onChange({ ...draft, exercises: reordered });
+    onChange({
+      ...draft,
+      exercises: gym().gymMoveTemplateExercise(draft.exercises, index, target),
+    });
+  }
+
+  function remove(index: number) {
+    if (!draft) return;
+    const removed = draft.exercises[index];
+    onChange({
+      ...draft,
+      exercises: draft.exercises
+        .filter((_, position) => position !== index)
+        .map((other, position) =>
+          position === 0 || (position === index && !removed?.supersetWithPrevious)
+            ? Object.assign({}, other, { supersetWithPrevious: false })
+            : other,
+        ),
+    });
   }
 
   return (
@@ -374,18 +386,7 @@ function TemplateEditor({
                 size="$3"
                 aria-label="Remove exercise"
                 icon={<Trash2 size={16} color={colors.bad} />}
-                onPress={() =>
-                  onChange({
-                    ...draft,
-                    exercises: draft.exercises
-                      .filter((_, position) => position !== index)
-                      .map((other, position) =>
-                        position === 0
-                          ? Object.assign({}, other, { supersetWithPrevious: false })
-                          : other,
-                      ),
-                  })
-                }
+                onPress={() => remove(index)}
               />
             </XStack>
             <Stepper
@@ -394,6 +395,16 @@ function TemplateEditor({
               max={10}
               onChange={(warmUpSets) => update(index, { warmUpSets })}
             />
+            {planned.warmUpSets > 0 && (
+              <Stepper
+                label="Warm-up rest"
+                value={planned.warmUpRestSeconds}
+                step={15}
+                max={600}
+                format={formatRestSeconds}
+                onChange={(warmUpRestSeconds) => update(index, { warmUpRestSeconds })}
+              />
+            )}
             <Stepper
               label="Working sets"
               value={planned.targetSets}
@@ -471,6 +482,7 @@ function TemplateEditor({
               {
                 exerciseId: exercise.id,
                 warmUpSets: 0,
+                warmUpRestSeconds: 60,
                 targetSets: 3,
                 targetReps: 10,
                 targetRepsInReserve: 2,

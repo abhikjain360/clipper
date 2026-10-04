@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Button, Spinner, XStack, YStack } from "tamagui";
+import { Button, XStack, YStack } from "tamagui";
+import { GymStarterLibrary } from "@clipper/mobile-bridge";
 import { formatBackendError } from "../backend";
 import { BodyWeight } from "./BodyWeight";
 import { Fatigue } from "./Fatigue";
@@ -22,21 +23,26 @@ const sections: { value: Section; label: string }[] = [
 
 export function GymPanel({ onError }: { onError: (error: string | null) => void }) {
   const [section, setSection] = useState<Section>("session");
-  const [ready, setReady] = useState(false);
+  const [libraryWritten, setLibraryWritten] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    async function seed() {
       try {
-        await gym().gymSeedStarterLibrary();
+        const outcome = await gym().gymSeedStarterLibrary();
+        if (cancelled) return;
+        if (outcome === GymStarterLibrary.Written) setLibraryWritten((count) => count + 1);
+        if (outcome === GymStarterLibrary.WaitingForDownload)
+          retry = setTimeout(() => void seed(), 2000);
       } catch (caught) {
         if (!cancelled) onError(formatBackendError(caught));
-      } finally {
-        if (!cancelled) setReady(true);
       }
-    })();
+    }
+    void seed();
     return () => {
       cancelled = true;
+      if (retry) clearTimeout(retry);
     };
   }, [onError]);
 
@@ -54,20 +60,14 @@ export function GymPanel({ onError }: { onError: (error: string | null) => void 
           </Button>
         ))}
       </XStack>
-      {!ready ? (
-        <YStack flex={1} items="center" justify="center">
-          <Spinner />
-        </YStack>
-      ) : (
-        <>
-          {section === "session" && <LiveSession onError={onError} />}
-          {section === "history" && <History onError={onError} />}
-          {section === "weight" && <BodyWeight onError={onError} />}
-          {section === "progress" && <Progress onError={onError} />}
-          {section === "fatigue" && <Fatigue onError={onError} />}
-          {section === "library" && <Library onError={onError} />}
-        </>
-      )}
+      <YStack key={libraryWritten} flex={1}>
+        {section === "session" && <LiveSession onError={onError} />}
+        {section === "history" && <History onError={onError} />}
+        {section === "weight" && <BodyWeight onError={onError} />}
+        {section === "progress" && <Progress onError={onError} />}
+        {section === "fatigue" && <Fatigue onError={onError} />}
+        {section === "library" && <Library onError={onError} />}
+      </YStack>
     </YStack>
   );
 }

@@ -731,7 +731,11 @@ fn revision_anchor(
 
 fn object_kind(text: &str) -> Result<ObjectKind, LocalStoreError> {
     ObjectKind::from_str(text)
-        .map_err(|_| LocalStoreError::EncryptedCache(format!("unknown stored object kind {text}")))
+        .ok()
+        .filter(|kind| *kind != ObjectKind::Unknown)
+        .ok_or_else(|| {
+            LocalStoreError::EncryptedCache(format!("unknown stored object kind {text}"))
+        })
 }
 
 /// Spelled out rather than derived so that adding an anchor kind is a compile

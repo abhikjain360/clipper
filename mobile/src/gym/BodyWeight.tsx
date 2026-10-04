@@ -4,7 +4,16 @@ import { Alert, Keyboard } from "react-native";
 import { Button, H2, ScrollView, Text, XStack, YStack } from "tamagui";
 import type { GymBodyWeight, GymWeeklyBodyWeight } from "@clipper/mobile-bridge";
 import { formatBackendError } from "../backend";
-import { formatDay, formatKg, formatTime, gym, parseWeight } from "./gymClient";
+import {
+  deviceZone,
+  formatDay,
+  formatKg,
+  formatShortDate,
+  formatTime,
+  gym,
+  localDate,
+  parseWeight,
+} from "./gymClient";
 import { colors, GymCard, LineChart, Muted, NumberEntry } from "./GymUi";
 
 export function BodyWeight({ onError }: { onError: (error: string | null) => void }) {
@@ -19,7 +28,7 @@ export function BodyWeight({ onError }: { onError: (error: string | null) => voi
     try {
       const [list, weekly] = await Promise.all([
         gym().gymBodyWeights(),
-        gym().gymWeeklyBodyWeight(),
+        gym().gymWeeklyBodyWeight(deviceZone()),
       ]);
       setEntries(list);
       setWeeks(weekly);
@@ -89,20 +98,17 @@ export function BodyWeight({ onError }: { onError: (error: string | null) => voi
               <>
                 <LineChart
                   points={weeks.map((week) => ({
-                    x: Date.parse(`${week.weekStart}T00:00:00Z`),
+                    x: localDate(week.weekStart).getTime(),
                     y: week.averageKg,
                   }))}
                   formatY={(value) => `${formatKg(Math.round(value * 10) / 10)}`}
-                  formatX={(value) =>
-                    new Date(value).toLocaleDateString(undefined, {
-                      month: "short",
-                      day: "numeric",
-                    })
-                  }
+                  formatX={(value) => formatShortDate(new Date(value))}
                 />
                 {weeks.toReversed().map((week) => (
                   <XStack key={week.weekStart} justify="space-between">
-                    <Text color={colors.muted}>{`Week of ${week.weekStart}`}</Text>
+                    <Text
+                      color={colors.muted}
+                    >{`Week of ${formatShortDate(localDate(week.weekStart))}`}</Text>
                     <Text>
                       {`${formatKg(Math.round(week.averageKg * 10) / 10)} kg`}
                       {week.changeKg === undefined

@@ -9,6 +9,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 chrono.workspace = true
+chrono-tz.workspace = true
 clipper-app-types = { workspace = true, features = ["uniffi"] }
 clipper-client.workspace = true
 clipper-gym.workspace = true

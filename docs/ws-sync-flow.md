@@ -23,11 +23,14 @@ outside the newest `clipboard.max_items`. Clients then remove their local copy.
 The user cannot delete a clipboard item, so clipboard items never produce
 delete events.
 
-Files and schedule objects stay until the user deletes them. They do not
-disappear because old event history was pruned; each reconnect rebuilds them
-from the server's object listing.
+Files, schedule objects and app documents stay until the user deletes them.
+They do not disappear because old event history was pruned; each reconnect
+rebuilds them from the server's object listing. App documents are the records
+of document collections in [app-data.md](app-data.md); the browser client does
+not sync them and ignores their events.
 
-Files and schedule objects have revisions. Each edit appends a new signed
+Files, schedule objects and app documents have revisions. Each edit appends a
+new signed
 revision, and the newest published revision is the object's head. A delete
 appends a tombstone revision, and a later revision can restore the object.
 Purging removes the whole chain from the server. `object-envelopes.md`
@@ -40,6 +43,9 @@ an object without a sequence number, because ordering and snapshot sweeps
 depend on it.
 
 Collab docs follow different rules; see "Collab Docs" below.
+
+A client skips a listed object or a live event whose kind it does not know, so
+a server that has a newer kind does not break an older client's listings.
 
 ## Connection Start
 
@@ -115,8 +121,8 @@ object is an anchor row with nothing else. The browser keeps the same records in
 file permissions.
 
 Stored records hold only encrypted material: metadata ciphertext, payload
-descriptors, the signed envelope, and for clipboard and schedule objects the
-payload ciphertext. Decrypted display state lives only in memory and is rebuilt
+descriptors, the signed envelope, and for clipboard and schedule objects and
+app documents the payload ciphertext (for an app document, its first payload). Decrypted display state lives only in memory and is rebuilt
 by decrypting the stored ciphertext when the client starts.
 
 Visible lists come only from present objects:
@@ -138,7 +144,8 @@ When this device creates an object:
 4. The client stores the object as present only after it knows the sequence
    number.
 
-When this device revises or deletes a file or schedule object, it signs a
+When this device revises or deletes a file, schedule object or app document,
+it signs a
 revision that names the head it holds as its parent. The server accepts the
 revision only if that parent is still the head, and otherwise answers with a
 revision conflict. The response returns the new sequence number. A tombstone
@@ -157,8 +164,8 @@ If the response to a create is lost after the server committed:
 ## Live Create And Update Events
 
 The server sends a `created` event when an object is created, and when a
-revision restores a deleted object. For a file or schedule object, an `updated`
-event means a new head was published. The client handles both the same way:
+revision restores a deleted object. For a file, schedule object or app
+document, an `updated` event means a new head was published. The client handles both the same way:
 
 1. If the object is gone with a later sequence number than the event, ignore the
    event: the delete came after it.
@@ -176,8 +183,10 @@ event means a new head was published. The client handles both the same way:
 8. If every check passes, store the object as present.
 
 For a clipboard object the fetch downloads and decrypts the payload. For a
-schedule object it downloads and decrypts the record payload. For a file it
-decrypts the metadata only; the user starts the download of the file itself.
+schedule object it downloads and decrypts the record payload. For an app
+document it downloads and decrypts the first payload, the document's value. For
+a file it decrypts the metadata only; the user starts the download of the file
+itself.
 
 An `updated` event for a clipboard object is logged and ignored, because
 clipboard items have no revisions. An `updated` event for a collab doc means it
@@ -194,20 +203,20 @@ If the fetch fails:
 ## Live Delete Events
 
 The server sends a `deleted` event when a tombstone revision is published for a
-file or schedule object, and when a collab doc is deleted. Purging an object
+file, schedule object or app document, and when a collab doc is deleted. Purging an object
 that is already tombstoned sends no event, because every client dropped it when
 the tombstone arrived. Clipboard items never produce delete events.
 
-When the client receives a `deleted` event for a file, schedule object or collab
-doc:
+When the client receives a `deleted` event for a file, schedule object, app
+document or collab doc:
 
 1. If the local record has a later sequence number, ignore the event. With the
    same sequence number, only a tombstone for an object already stored as gone
    is checked and kept, under the rules in step 3.
 2. Otherwise drop the cached content and payload ciphertext, and remove the
    object from the visible lists.
-3. Store the object as gone with the delete's sequence number. For a file or
-   schedule object the event carries the signed tombstone; the client checks
+3. Store the object as gone with the delete's sequence number. For a file,
+   schedule object or app document the event carries the signed tombstone; the client checks
    it against the event and the held anchor and keeps it as a Tombstone
    anchor. A missing or failing tombstone leaves an Absent anchor on the held
    head.
@@ -217,10 +226,11 @@ doc:
 
 A `deleted` event for any other kind is logged and ignored.
 
-## File And Schedule Snapshots
+## File, Schedule And App Document Snapshots
 
 After receiving the stream start, the client lists all files, and separately
-all schedule objects, whose sequence number is at or before it.
+all schedule objects and all app documents, whose sequence number is at or
+before it.
 
 1. The client asks for pages of objects in sequence-number order, bounded by the
    stream start (`created_seq_lte = stream_start_seq`). Each page must continue
@@ -228,7 +238,8 @@ all schedule objects, whose sequence number is at or before it.
    fails the snapshot.
 2. For each listed object, the client skips it if a later delete is recorded.
 3. Otherwise the client verifies the envelope, checks the revision against the
-   anchor, and decrypts the metadata, plus the payload for a schedule object.
+   anchor, and decrypts the metadata, plus the payload for a schedule object or
+   an app document.
 4. The client stores the object as present and marks it seen in the current
    generation.
 5. The client continues until the last page.

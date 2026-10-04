@@ -341,6 +341,15 @@ pub struct AppDataStatus {
     pub last_sync_error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AppDocumentRevision {
+    pub revision: u64,
+    pub written_at: String,
+    pub device_id: String,
+    pub deleted: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

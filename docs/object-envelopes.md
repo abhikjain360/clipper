@@ -1,6 +1,7 @@
 # Signed Object Envelopes
 
-Encrypted clipboard, file, and schedule objects use envelope version 1. An
+Encrypted clipboard, file, schedule and app document objects use envelope
+version 1 (app documents are described in [app-data.md](app-data.md)). An
 object has a stable id and an append-only chain of immutable revisions. The
 wire types are `ObjectEnvelopeBody`, `ObjectEnvelopePayload`, and
 `ObjectEnvelope` in `crates/api-types`; cryptographic construction lives in

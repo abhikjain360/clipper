@@ -66,3 +66,20 @@ export function parseCount(text: string): number | undefined {
   const value = Number.parseInt(text.trim(), 10);
   return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
+
+export function deviceZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+export function localDate(isoDate: string): Date {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  return new Date(year ?? 1970, (month ?? 1) - 1, day ?? 1);
+}
+
+export function formatShortDate(date: Date): string {
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}

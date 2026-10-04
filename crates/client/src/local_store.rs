@@ -34,6 +34,8 @@ use zeroize::Zeroizing;
 
 #[cfg(not(target_family = "wasm"))]
 pub(crate) use self::app_data::StoredAppDataRow;
+#[cfg(not(target_family = "wasm"))]
+use crate::app_data::documents::{self, AppDocument};
 use crate::{
     api_client::{decrypt_clipboard_meta, decrypt_clipboard_payload, decrypt_file_meta_bytes},
     schedule::{ScheduleRecord, actual_view, decrypt_schedule_payload, item_view, source_view},
@@ -71,6 +73,8 @@ pub enum LocalObjectData {
     File(LocalFileRecord),
     Collab(LocalCollabRecord),
     Schedule(LocalScheduleRecord),
+    #[cfg(not(target_family = "wasm"))]
+    AppDocument(LocalAppDocumentRecord),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +100,21 @@ pub struct LocalFileRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalScheduleRecord {
     pub record: ScheduleRecord,
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalAppDocumentRecord {
+    pub collection: String,
+    pub revision: u64,
+    pub value: serde_json::Value,
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeldAppDocument {
+    Present { collection: String, head: LocalHead },
+    Deleted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +266,8 @@ pub struct LocalVisibleState {
     pub calendar_sources: Vec<CalendarSourceView>,
     pub running_actual: Option<ActualView>,
     pub running_plan: Option<clipper_schedule::PlannedRef>,
+    #[cfg(not(target_family = "wasm"))]
+    pub app_documents: Vec<AppDocument>,
 }
 
 #[derive(Debug)]
@@ -643,6 +664,130 @@ impl LocalStore {
         encrypted: &EncryptedInlineObject,
         sync_meta: StoredObjectSyncMeta,
     ) -> Result<(), LocalStoreError> {
+        self.persist_inline_present_encrypted_inner(
+            identity,
+            ObjectKind::Schedule,
+            LocalObjectData::Schedule(LocalScheduleRecord { record }),
+            encrypted,
+            sync_meta,
+        )
+        .await
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn persist_local_app_document_present_encrypted(
+        &self,
+        identity: StoredObjectIdentity<'_>,
+        document: LocalAppDocumentRecord,
+        encrypted: &EncryptedInlineObject,
+        created_seq: i64,
+        visible_clipboard_limit: usize,
+    ) -> Result<LocalVisibleState, LocalStoreError> {
+        validate_item_id(identity.object_id)?;
+        let sync = self.sync.lock().await;
+        self.persist_inline_present_encrypted_inner(
+            identity,
+            ObjectKind::AppDocument,
+            LocalObjectData::AppDocument(document),
+            encrypted,
+            StoredObjectSyncMeta {
+                created_seq,
+                event_seq: created_seq,
+                seen_generation: Some(sync.generation),
+            },
+        )
+        .await?;
+        self.visible_state_inner(visible_clipboard_limit).await
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn persist_snapshot_app_document_present_encrypted(
+        &self,
+        identity: StoredObjectIdentity<'_>,
+        document: LocalAppDocumentRecord,
+        encrypted: &EncryptedInlineObject,
+        created_seq: i64,
+        generation: u64,
+        visible_clipboard_limit: usize,
+    ) -> Result<Option<LocalVisibleState>, LocalStoreError> {
+        validate_item_id(identity.object_id)?;
+        let sync = self.sync.lock().await;
+        if sync.generation != generation {
+            return Ok(None);
+        }
+        if let Err(error) = self
+            .persist_inline_present_encrypted_inner(
+                identity,
+                ObjectKind::AppDocument,
+                LocalObjectData::AppDocument(document),
+                encrypted,
+                StoredObjectSyncMeta {
+                    created_seq,
+                    event_seq: created_seq,
+                    seen_generation: Some(generation),
+                },
+            )
+            .await
+        {
+            self.keep_retained_revision(identity.object_id, generation, error)
+                .await?;
+            return Ok(None);
+        }
+        self.visible_state_inner(visible_clipboard_limit)
+            .await
+            .map(Some)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn held_app_document(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<HeldAppDocument>, LocalStoreError> {
+        let object_id = validate_item_id(object_id)?;
+        let _sync = self.sync.lock().await;
+        let head = match self.stored_object_record(&object_id).await? {
+            Some(StoredObjectRecord::Present(record)) if record.kind == ObjectKind::AppDocument => {
+                local_head_from_present(&record)?
+            }
+            Some(StoredObjectRecord::Deleted(record))
+                if record.kind == ObjectKind::AppDocument
+                    && record.revision_anchor.is_some_and(|anchor| {
+                        matches!(anchor.kind, StoredRevisionAnchorKind::Tombstone)
+                    }) =>
+            {
+                return Ok(Some(HeldAppDocument::Deleted));
+            }
+            _ => return Ok(None),
+        };
+        let memory = self.memory.lock().await;
+        Ok(
+            match memory.records.get(&object_id).map(|record| &record.data) {
+                Some(LocalObjectData::AppDocument(document)) => Some(HeldAppDocument::Present {
+                    collection: document.collection.clone(),
+                    head,
+                }),
+                _ => None,
+            },
+        )
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn visible_state(
+        &self,
+        visible_clipboard_limit: usize,
+    ) -> Result<LocalVisibleState, LocalStoreError> {
+        let _sync = self.sync.lock().await;
+        self.visible_state_inner(visible_clipboard_limit).await
+    }
+
+    async fn persist_inline_present_encrypted_inner(
+        &self,
+        identity: StoredObjectIdentity<'_>,
+        kind: ObjectKind,
+        data: LocalObjectData,
+        encrypted: &EncryptedInlineObject,
+        sync_meta: StoredObjectSyncMeta,
+    ) -> Result<(), LocalStoreError> {
         let object_id = identity.object_id;
         self.validate_encrypted_revision_advance(object_id, &encrypted.object.envelope.body)
             .await?;
@@ -662,11 +807,11 @@ impl LocalStore {
             created_seq: sync_meta.created_seq,
             created_at: identity.created_at.to_string(),
             source_device_id: identity.source_device_id.to_string(),
-            data: LocalObjectData::Schedule(LocalScheduleRecord { record }),
+            data,
         };
         let stored_record = StoredObjectRecord::Present(Box::new(StoredPresentObjectRecord {
             id: object_id.to_string(),
-            kind: ObjectKind::Schedule,
+            kind,
             seen_generation: sync_meta.seen_generation,
             event_seq: sync_meta.event_seq,
             created_seq: sync_meta.created_seq,
@@ -1528,7 +1673,91 @@ impl LocalStore {
                 .decrypt_schedule_record(record, encryption_key)
                 .await
                 .map(Some),
+            #[cfg(not(target_family = "wasm"))]
+            ObjectKind::AppDocument => self
+                .decrypt_app_document_record(record, encryption_key)
+                .await
+                .map(Some),
+            #[cfg(target_family = "wasm")]
+            ObjectKind::AppDocument => Ok(None),
+            ObjectKind::Unknown => Ok(None),
         }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    async fn decrypt_app_document_record(
+        &self,
+        record: &StoredPresentObjectRecord,
+        encryption_key: &[u8; 32],
+    ) -> Result<LocalObjectRecord, LocalStoreError> {
+        let cache_error =
+            |error: crypto::CryptoError| LocalStoreError::EncryptedCache(error.to_string());
+        let encrypted = present_encrypted_object(record)?;
+        let meta = documents::decrypt_meta(
+            &encrypted.meta_nonce,
+            &encrypted.meta_ciphertext,
+            encryption_key,
+            &encrypted.envelope.body,
+        )
+        .map_err(cache_error)?;
+        let payload = encrypted
+            .envelope
+            .body
+            .payloads
+            .first()
+            .and_then(|first| {
+                encrypted
+                    .payloads
+                    .iter()
+                    .find(|payload| payload.id == first.id)
+            })
+            .ok_or_else(|| {
+                LocalStoreError::EncryptedCache("a document has no cached value".into())
+            })?;
+        let Some(ciphertext) = self.stored_object_payload_ciphertext(&record.id).await? else {
+            return Err(LocalStoreError::EncryptedCache(
+                "missing document payload".into(),
+            ));
+        };
+        verify_payload_ciphertext(payload, &ciphertext)?;
+        let value = documents::decrypt_value(
+            &payload.nonce,
+            &ciphertext,
+            encryption_key,
+            &encrypted.envelope.body,
+            payload.id,
+        )
+        .map_err(cache_error)?;
+        Ok(LocalObjectRecord {
+            id: record.id.clone(),
+            seen_generation: record.seen_generation,
+            event_seq: record.event_seq,
+            created_seq: record.created_seq,
+            created_at: encrypted.created_at.clone(),
+            source_device_id: encrypted.source_device_id.clone(),
+            data: LocalObjectData::AppDocument(LocalAppDocumentRecord {
+                collection: meta.collection,
+                revision: encrypted.envelope.body.revision,
+                value,
+            }),
+        })
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn app_documents_inner(records: &[LocalObjectRecord]) -> Vec<AppDocument> {
+        records
+            .iter()
+            .filter_map(|record| match &record.data {
+                LocalObjectData::AppDocument(document) => Some(AppDocument {
+                    id: record.id.clone(),
+                    collection: document.collection.clone(),
+                    revision: document.revision,
+                    written_at: record.created_at.clone(),
+                    value: document.value.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Rebuild a schedule record from its stored ciphertext.
@@ -1756,9 +1985,7 @@ impl LocalStore {
                 LocalObjectData::Schedule(schedule) => {
                     Some((record.id.clone(), schedule.record.clone()))
                 }
-                LocalObjectData::Clipboard(_)
-                | LocalObjectData::File(_)
-                | LocalObjectData::Collab(_) => None,
+                _ => None,
             })
             .collect()
     }
@@ -1890,6 +2117,8 @@ impl LocalStore {
             ),
             running_plan: running.as_ref().and_then(|(_, planned)| *planned),
             running_actual: running.map(|(view, _)| view),
+            #[cfg(not(target_family = "wasm"))]
+            app_documents: Self::app_documents_inner(&records),
             stamp: self.visible_stamp.fetch_add(1, atomic::Ordering::SeqCst) + 1,
         })
     }

@@ -1111,6 +1111,7 @@ dependencies = [
  "clipper-app-types",
  "clipper-core",
  "clipper-gym",
+ "clipper-kitchen",
  "clipper-schedule",
  "futures-util",
  "getrandom 0.4.3",
@@ -1263,8 +1264,21 @@ name = "clipper-gym"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "clipper-kitchen"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
  "thiserror 2.0.21",
  "uuid",
 ]
@@ -1275,6 +1289,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
+ "chrono-tz",
  "clipper-app-types",
  "clipper-client",
  "clipper-gym",

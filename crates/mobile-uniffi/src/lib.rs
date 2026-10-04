@@ -2,8 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clipper_app_types::{
-    ActualView, AlarmView, AppDataStatus, AppDataWrite, AppState, ClipboardPayload, CollabItem,
-    DeviceInfo, IngestReport, LogoutOutcome, OccurrenceView,
+    ActualView, AlarmView, AppDataStatus, AppDataWrite, AppDocumentRevision, AppState,
+    ClipboardPayload, CollabItem, DeviceInfo, IngestReport, LogoutOutcome, OccurrenceView,
 };
 use clipper_client::{
     api_client::ClientError,
@@ -412,6 +412,27 @@ impl MobileClipperClient {
 
     pub async fn app_data_status(&self) -> Result<AppDataStatus, MobileError> {
         Ok(self.engine.app_data_status().await?)
+    }
+
+    pub async fn app_document_history(
+        &self,
+        collection: String,
+        id: String,
+    ) -> Result<Vec<AppDocumentRevision>, MobileError> {
+        Ok(self.engine.app_document_history(&collection, &id).await?)
+    }
+
+    pub async fn app_document_revision(
+        &self,
+        collection: String,
+        id: String,
+        revision: u64,
+    ) -> Result<String, MobileError> {
+        let value = self
+            .engine
+            .app_document_revision(&collection, &id, revision)
+            .await?;
+        serde_json::to_string(&value).map_err(|error| MobileError::Client(error.to_string()))
     }
 }
 

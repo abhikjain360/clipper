@@ -94,6 +94,9 @@ pub async fn init_object(
 ) -> Result<Postcard<ObjectInitResponse>, ApiError> {
     let object_id = req.id.into_uuid();
     let object_id_text = req.id.to_string();
+    if req.kind == ObjectKind::Unknown {
+        return Err(ApiError::from_code(ApiErrorCode::InvalidObjectKind));
+    }
     if req.meta_ciphertext.len() > state.config().limits.max_object_meta_ciphertext_bytes {
         return Err(ApiError::from_code_with_message(
             ApiErrorCode::PayloadTooLarge,
@@ -245,7 +248,11 @@ pub async fn init_object(
         //
         // Schedule objects never expire. A plan for next year is not stale data,
         // and an actual is a permanent record of time spent.
-        ObjectKind::File | ObjectKind::Collab | ObjectKind::Schedule => None,
+        ObjectKind::File
+        | ObjectKind::Collab
+        | ObjectKind::Schedule
+        | ObjectKind::AppDocument
+        | ObjectKind::Unknown => None,
     };
     // Response data derived from the request, computed before the request is
     // moved into the transaction closure.
@@ -1360,8 +1367,8 @@ pub async fn revise_object(
 /// well. The same set gates deletes: only these kinds tombstone and purge.
 fn kind_supports_revisions(kind: ObjectKind) -> bool {
     match kind {
-        ObjectKind::File | ObjectKind::Schedule => true,
-        ObjectKind::Clipboard | ObjectKind::Collab => false,
+        ObjectKind::File | ObjectKind::Schedule | ObjectKind::AppDocument => true,
+        ObjectKind::Clipboard | ObjectKind::Collab | ObjectKind::Unknown => false,
     }
 }
 
@@ -1651,10 +1658,13 @@ pub async fn list_objects(
         .kind
         .as_deref()
         .map(|kind| {
-            kind.parse::<ObjectKind>().map_err(|_| {
-                debug!(kind, "Rejected unknown object kind in list query");
-                ApiError::from_code(ApiErrorCode::InvalidObjectKind)
-            })
+            kind.parse::<ObjectKind>()
+                .ok()
+                .filter(|kind| *kind != ObjectKind::Unknown)
+                .ok_or_else(|| {
+                    debug!(kind, "Rejected unknown object kind in list query");
+                    ApiError::from_code(ApiErrorCode::InvalidObjectKind)
+                })
         })
         .transpose()?;
     let after = query.after;

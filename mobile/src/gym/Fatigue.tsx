@@ -78,7 +78,7 @@ export function Fatigue({ onError }: { onError: (error: string | null) => void }
   }
 
   return (
-    <ScrollView flex={1}>
+    <ScrollView flex={1} keyboardShouldPersistTaps="always">
       <YStack gap="$3" pb="$8">
         <XStack items="center" justify="space-between">
           <H2 size="$6">Fatigue</H2>

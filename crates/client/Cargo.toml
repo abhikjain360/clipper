@@ -35,6 +35,7 @@ web-time = "1.1.0"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 clipper-gym.workspace = true
+clipper-kitchen.workspace = true
 rand.workspace = true
 # The local store is SQLite. `bundled` compiles SQLite from source so no
 # platform has to supply one — Android in particular has no usable system

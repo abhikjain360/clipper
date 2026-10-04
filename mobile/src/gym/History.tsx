@@ -59,7 +59,7 @@ export function History({ onError }: { onError: (error: string | null) => void }
   }
 
   return (
-    <ScrollView flex={1}>
+    <ScrollView flex={1} keyboardShouldPersistTaps="always">
       <YStack gap="$3" pb="$8">
         <H2 size="$6">History</H2>
         {sessions.length === 0 && <Muted>No workouts logged yet</Muted>}
@@ -170,7 +170,7 @@ function SessionDetail({
   }
 
   return (
-    <ScrollView flex={1}>
+    <ScrollView flex={1} keyboardShouldPersistTaps="always">
       <YStack gap="$3" pb="$8">
         <XStack items="center" gap="$2">
           <Button

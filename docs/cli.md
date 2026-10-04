@@ -29,6 +29,9 @@ clipper data query "SELECT id, value FROM gym.sets ORDER BY written_at DESC LIMI
 clipper data write gym.body_weight < weighing.json
 clipper data write gym.exercises --id <row-id> < exercise.json
 clipper data write gym.sets --id <row-id> --delete
+clipper data write kitchen.recipes --id <document-id> < recipe.json
+clipper data history kitchen.recipes <document-id>
+clipper data history kitchen.recipes <document-id> --revision 2
 clipper data status
 ```
 
@@ -52,8 +55,10 @@ clipper data status
 
 App data is described in [app-data.md](app-data.md). Each collection, such as
 `gym.sets`, is a table of the same name with the columns `id`, `revision`,
-`written_at` and `value`. `value` is the row's JSON text; read fields with
-SQLite's JSON functions, for example `json_extract(value, '$.reps')`.
+`written_at` and `value`. `value` is the record's JSON text; read fields with
+SQLite's JSON functions, for example `json_extract(value, '$.reps')`. Row
+collections and document collections, such as `kitchen.recipes`, are queried
+the same way.
 
 - `data query` runs one read-only SQL statement and returns an array of
   objects keyed by column name. A statement that writes, a second statement,
@@ -64,10 +69,20 @@ SQLite's JSON functions, for example `json_extract(value, '$.reps')`.
   id derived from their muscle. `--id` replaces an existing row.
 - `data write <collection> --id <row-id> --delete` deletes a row and reads
   nothing from stdin. A deleted row cannot be written again.
+- For a document collection, `data write` saves to the server at once and
+  fails while offline. `--id` revises the document this device holds. If
+  another write revised it first, the write fails; query the document again
+  and reapply the change.
+- A refused value prints its field path and the rule, for example
+  `steps[3].text: {onion} does not match any ingredient id`.
+- `data history <collection> <document-id>` returns an array of
+  `{revision, written_at, device_id, deleted}`, oldest first. With
+  `--revision <n>` it returns that revision's value instead. Both need the
+  server.
 - `data status` returns `{pending_changes, refused_changes, last_sync_error}`.
-  Writes are saved locally first and sent when the daemon is online, so a
-  write succeeds offline and shows up in `pending_changes` until the server
-  accepts it.
+  Row writes are saved locally first and sent when the daemon is online, so a
+  row write succeeds offline and shows up in `pending_changes` until the
+  server accepts it.
 
 An alarm can include `target_device` with an ID from `devices`. Omit it to ring
 on all Android phones. A target can be a phone or a Mac; only that device rings.

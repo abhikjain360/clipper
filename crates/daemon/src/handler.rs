@@ -544,6 +544,24 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                     Ok(status) => json_success(id, status),
                     Err(error) => client_error(id, error),
                 },
+                DaemonCommand::AppDocumentHistory(params) => {
+                    match engine
+                        .app_document_history(&params.collection, &params.id)
+                        .await
+                    {
+                        Ok(revisions) => json_success(id, revisions),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::AppDocumentRevision(params) => {
+                    match engine
+                        .app_document_revision(&params.collection, &params.id, params.revision)
+                        .await
+                    {
+                        Ok(value) => json_success(id, value),
+                        Err(error) => client_error(id, error),
+                    }
+                }
                 DaemonCommand::Authenticate(_)
                 | DaemonCommand::Login(_)
                 | DaemonCommand::Register(_)

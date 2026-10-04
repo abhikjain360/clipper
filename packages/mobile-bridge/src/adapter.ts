@@ -205,6 +205,15 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): M
         last_sync_error: status.lastSyncError ?? null,
       };
     },
+    appDocumentHistory: async (collection, id) =>
+      (await client.appDocumentHistory(collection, id)).map((revision) => ({
+        revision: numberFromBigInt(revision.revision),
+        written_at: revision.writtenAt,
+        device_id: revision.deviceId,
+        deleted: revision.deleted,
+      })),
+    appDocumentRevision: async (collection, id, revision) =>
+      JSON.parse(await client.appDocumentRevision(collection, id, BigInt(revision))) as unknown,
   };
 }
 

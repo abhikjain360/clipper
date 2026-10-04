@@ -1,15 +1,13 @@
 [package]
-name = "clipper-gym"
+name = "clipper-kitchen"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
 
 [dependencies]
 chrono.workspace = true
-chrono-tz.workspace = true
 serde.workspace = true
-thiserror.workspace = true
-uuid = { workspace = true, features = ["serde", "v5"] }
-
-[dev-dependencies]
 serde_json.workspace = true
+serde_path_to_error.workspace = true
+thiserror.workspace = true
+uuid = { workspace = true, features = ["serde"] }

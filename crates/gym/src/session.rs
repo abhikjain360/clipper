@@ -1,7 +1,10 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use uuid::Uuid;
 
-use crate::{LastSessionSets, Session, SessionExercise, Set, SetKind, WorkoutTemplate};
+use crate::{
+    DEFAULT_WARM_UP_REST_SECONDS, LastSessionSets, Session, SessionExercise, Set, SetKind,
+    WorkoutExercise, WorkoutTemplate,
+};
 
 pub const ADDED_EXERCISE_SETS: u32 = 3;
 pub const ADDED_EXERCISE_REPS: u32 = 10;
@@ -92,6 +95,7 @@ pub struct RestTimer {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionProgress {
     pub exercises: Vec<ExerciseProgress>,
+    pub display_order: Vec<usize>,
     pub current: Option<usize>,
     pub rest: Option<RestTimer>,
     pub next_order: u32,
@@ -151,29 +155,37 @@ impl SessionProgress {
 
         let blocks = superset_blocks(&exercises);
         if session.ended_at.is_some() {
+            let display_order = display_order(&exercises, None);
             return Self {
                 exercises,
+                display_order,
                 current: None,
                 rest: None,
                 next_order,
             };
         }
-        let current = current_exercise(&exercises, &blocks);
+        let current = current_exercise(&exercises, &blocks, session.current_exercise_id);
         let rest = current.and(sets.last()).and_then(|last| {
             let position = exercises
                 .iter()
                 .position(|progress| progress.plan.exercise_id == last.set.exercise_id)?;
             let superset_hop = current
                 .is_some_and(|current| current > position && blocks[current] == blocks[position]);
-            let rest_seconds = exercises[position].plan.rest_seconds;
+            let plan = &exercises[position].plan;
+            let rest_seconds = match last.set.kind {
+                SetKind::WarmUp => plan.warm_up_rest_seconds,
+                SetKind::Working => plan.rest_seconds,
+            };
             (!superset_hop && rest_seconds > 0).then(|| RestTimer {
                 exercise_id: last.set.exercise_id,
                 started_at: last.set.completed_at,
                 ends_at: last.set.completed_at + TimeDelta::seconds(i64::from(rest_seconds)),
             })
         });
+        let display_order = display_order(&exercises, current);
         Self {
             exercises,
+            display_order,
             current,
             rest,
             next_order,
@@ -189,6 +201,7 @@ fn unplanned(exercise_id: Uuid) -> SessionExercise {
     SessionExercise {
         exercise_id,
         warm_up_sets: 0,
+        warm_up_rest_seconds: DEFAULT_WARM_UP_REST_SECONDS,
         target_sets: 0,
         target_reps: 0,
         target_reps_in_reserve: None,
@@ -214,7 +227,52 @@ fn superset_blocks(exercises: &[ExerciseProgress]) -> Vec<usize> {
     blocks
 }
 
-fn current_exercise(exercises: &[ExerciseProgress], blocks: &[usize]) -> Option<usize> {
+fn display_order(exercises: &[ExerciseProgress], current: Option<usize>) -> Vec<usize> {
+    let mut started: Vec<(u32, usize)> = exercises
+        .iter()
+        .enumerate()
+        .filter_map(|(index, progress)| {
+            progress
+                .sets
+                .iter()
+                .map(|logged| logged.set.order)
+                .min()
+                .map(|first| (first, index))
+        })
+        .collect();
+    started.sort_unstable();
+    let mut order: Vec<usize> = started.into_iter().map(|(_, index)| index).collect();
+    if let Some(current) = current
+        && !order.contains(&current)
+    {
+        order.push(current);
+    }
+    for index in 0..exercises.len() {
+        if !order.contains(&index) {
+            order.push(index);
+        }
+    }
+    order
+}
+
+fn open_in_block(exercises: &[ExerciseProgress], blocks: &[usize], block: usize) -> Option<usize> {
+    (0..exercises.len())
+        .filter(|index| blocks[*index] == block && exercises[*index].is_open())
+        .min_by_key(|index| (exercises[*index].working_done, *index))
+}
+
+fn current_exercise(
+    exercises: &[ExerciseProgress],
+    blocks: &[usize],
+    chosen: Option<Uuid>,
+) -> Option<usize> {
+    if let Some(chosen) = chosen.and_then(|id| {
+        exercises.iter().position(|progress| {
+            progress.planned && progress.plan.exercise_id == id && progress.is_open()
+        })
+    }) {
+        return open_in_block(exercises, blocks, blocks[chosen]);
+    }
     let mut start = 0;
     while start < exercises.len() {
         let end = (start..exercises.len())
@@ -247,6 +305,7 @@ impl Session {
             template_id: None,
             notes: String::new(),
             exercises: Vec::new(),
+            current_exercise_id: None,
         }
     }
 
@@ -266,6 +325,7 @@ impl Session {
                 .copied()
                 .map(SessionExercise::from)
                 .collect(),
+            current_exercise_id: None,
         }
     }
 
@@ -278,6 +338,7 @@ impl Session {
         self.exercises.push(SessionExercise {
             exercise_id,
             warm_up_sets: 0,
+            warm_up_rest_seconds: DEFAULT_WARM_UP_REST_SECONDS,
             target_sets: ADDED_EXERCISE_SETS,
             target_reps: ADDED_EXERCISE_REPS,
             target_reps_in_reserve: Some(ADDED_EXERCISE_REPS_IN_RESERVE),
@@ -295,14 +356,21 @@ impl Session {
     ) -> Result<(), SessionChangeError> {
         self.ensure_open()?;
         let from = self.position(exercise_id)?;
-        let mut moved = self.exercises.remove(from);
-        if !moved.superset_with_previous
-            && let Some(next) = self.exercises.get_mut(from)
-        {
-            next.superset_with_previous = false;
-        }
-        moved.superset_with_previous = false;
-        self.exercises.insert(to.min(self.exercises.len()), moved);
+        move_keeping_supersets(
+            &mut self.exercises,
+            from,
+            to,
+            |planned| planned.superset_with_previous,
+            |planned, joins| planned.superset_with_previous = joins,
+        );
+        Ok(())
+    }
+
+    pub fn switch_to(&mut self, exercise_id: Uuid) -> Result<(), SessionChangeError> {
+        self.ensure_open()?;
+        let position = self.position(exercise_id)?;
+        self.exercises[position].skipped = false;
+        self.current_exercise_id = Some(exercise_id);
         Ok(())
     }
 
@@ -354,4 +422,65 @@ impl Session {
             .position(|planned| planned.exercise_id == exercise_id)
             .ok_or(SessionChangeError::ExerciseNotInSession(exercise_id))
     }
+}
+
+impl WorkoutTemplate {
+    pub fn move_exercise(&mut self, from: usize, to: usize) {
+        move_keeping_supersets(
+            &mut self.exercises,
+            from,
+            to,
+            |planned: &WorkoutExercise| planned.superset_with_previous,
+            |planned, joins| planned.superset_with_previous = joins,
+        );
+    }
+}
+
+fn move_keeping_supersets<T: Copy>(
+    items: &mut Vec<T>,
+    from: usize,
+    to: usize,
+    joins_previous: impl Fn(&T) -> bool,
+    set_joins_previous: impl Fn(&mut T, bool),
+) {
+    if from >= items.len() || items.is_empty() {
+        return;
+    }
+    let to = to.min(items.len() - 1);
+    let mut groups: Vec<Vec<T>> = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        match groups.last_mut() {
+            Some(group) if index > 0 && joins_previous(item) => group.push(*item),
+            _ => groups.push(vec![*item]),
+        }
+    }
+    let locate = |position: usize| {
+        let mut start = 0;
+        for (group, members) in groups.iter().enumerate() {
+            if position < start + members.len() {
+                return (group, position - start);
+            }
+            start += members.len();
+        }
+        (groups.len() - 1, 0)
+    };
+    let (from_group, from_offset) = locate(from);
+    let (to_group, to_offset) = locate(to);
+    if from_group == to_group {
+        let members = &mut groups[from_group];
+        let item = members.remove(from_offset);
+        members.insert(to_offset, item);
+    } else {
+        let members = groups.remove(from_group);
+        groups.insert(to_group, members);
+    }
+    *items = groups
+        .into_iter()
+        .flat_map(|members| {
+            members.into_iter().enumerate().map(|(offset, mut item)| {
+                set_joins_previous(&mut item, offset > 0);
+                item
+            })
+        })
+        .collect();
 }

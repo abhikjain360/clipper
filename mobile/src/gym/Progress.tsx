@@ -80,7 +80,7 @@ export function Progress({ onError }: { onError: (error: string | null) => void 
   const best = points?.reduce((top, point) => Math.max(top, point.kg), 0) ?? 0;
 
   return (
-    <ScrollView flex={1}>
+    <ScrollView flex={1} keyboardShouldPersistTaps="always">
       <YStack gap="$3" pb="$8">
         <H2 size="$6">Progress</H2>
         <XStack items="center" gap="$2">

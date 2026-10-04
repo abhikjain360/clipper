@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 /// incompatibly — the desktop app and the daemon are separate binaries, and an
 /// old daemon can outlive an app update (it is reparented to PID 1, so it keeps
 /// running until killed).
-pub const IPC_AUTH_VERSION: u32 = 6;
+pub const IPC_AUTH_VERSION: u32 = 7;
 pub const IPC_AUTH_NONCE_BYTES: usize = 32;
 pub const IPC_AUTH_TAG_BYTES: usize = 32;
 
@@ -100,6 +100,8 @@ pub enum DaemonCommand {
     QueryAppData(QueryAppDataParams),
     WriteAppData(WriteAppDataParams),
     AppDataStatus,
+    AppDocumentHistory(AppDocumentHistoryParams),
+    AppDocumentRevision(AppDocumentRevisionParams),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -310,6 +312,19 @@ pub struct WriteAppDataParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteAppDataResult {
     pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppDocumentHistoryParams {
+    pub collection: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppDocumentRevisionParams {
+    pub collection: String,
+    pub id: String,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

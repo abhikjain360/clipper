@@ -1440,19 +1440,18 @@ Each entry has:
 
 ### 150. The gym starter library is written by the first device that opens the gym
 
-- **Status:** decided; implemented in the working tree.
+- **Status:** fixed in the working tree.
 - **Where:** `crates/gym/src/starter.rs`,
-  `crates/mobile-uniffi/src/gym.rs` (`gym_seed_starter_library`).
-- **What happens:** the Android gym area writes 22 starter exercises and two
-  workouts when the device has no exercises, workouts, sessions or sets. The
-  rows use fixed ids, so two devices that both write the library produce the
-  same rows. A newly signed-in device that opens the gym before its first
-  app-data download finishes still sees empty tables and writes the library
-  again. Last write wins then replaces the user's later edits to a starter
-  exercise or workout with the starter values. Logged sets are not affected.
-- **Decision:** accept for now. Seeding only after a completed first download
-  needs the engine to report that download, which the app-data status does not
-  do yet.
+  `crates/mobile-uniffi/src/gym.rs` (`gym_seed_starter_library`),
+  `crates/client/src/app_data_sync.rs` (`app_data_downloaded`).
+- **What happened:** a newly signed-in device that opened the gym before its
+  first app-data download saw empty tables and wrote the starter library
+  again, and last write wins then replaced the user's edits to starter
+  exercises and workouts.
+- **Decision:** the app writes the starter library only after the device has
+  finished one app-data download since it unlocked, and only when it has no
+  exercises, workouts, sessions or sets. Until then the gym asks again every
+  two seconds.
 
 ## Code and features
 

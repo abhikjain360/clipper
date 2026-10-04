@@ -46,6 +46,9 @@ use crate::{
 #[cfg(not(target_family = "wasm"))]
 #[path = "app_data_sync.rs"]
 mod app_data_sync;
+#[cfg(not(target_family = "wasm"))]
+#[path = "app_document_sync.rs"]
+mod app_document_sync;
 #[path = "calendar_import.rs"]
 mod calendar_import;
 #[path = "schedule_context.rs"]
@@ -669,8 +672,9 @@ impl SyncEngine {
 
         #[cfg(not(target_family = "wasm"))]
         {
-            if let Err(error) = self.open_app_data(epoch, &cache_key).await {
-                warn!("Failed to open local app data: {error}");
+            match self.open_app_data(epoch, &cache_key).await {
+                Ok(()) => self.show_held_app_documents().await,
+                Err(error) => warn!("Failed to open local app data: {error}"),
             }
             let engine = Arc::clone(self);
             self.spawn_session_work(epoch, engine.app_data_sync_loop(epoch));
@@ -2386,6 +2390,26 @@ impl SyncEngine {
                     )
                     .await
             }
+            #[cfg(not(target_family = "wasm"))]
+            ObjectKind::AppDocument => {
+                let (document, encrypted) = self
+                    .decrypt_app_document_item(api, item, encryption_key)
+                    .await?;
+                let _session = self.hold_session_for_write(epoch).await?;
+                self.local_store
+                    .persist_local_app_document_present_encrypted(
+                        StoredObjectIdentity {
+                            object_id: &object_id,
+                            created_at: &item.created_at,
+                            source_device_id: &item.source_device_id.to_string(),
+                        },
+                        document,
+                        &encrypted,
+                        item.created_seq,
+                        RECENT_CLIPBOARD_LIMIT,
+                    )
+                    .await
+            }
             _ => return Err(object_envelope_error("object kind cannot be revised")),
         };
         self.publish_accepted_write(&object_id, item.revision, persisted)
@@ -3426,6 +3450,8 @@ impl SyncEngine {
                 view.break_reminders = record.as_item().is_some_and(|item| item.break_reminders);
             }
         }
+        #[cfg(not(target_family = "wasm"))]
+        let (stamp, documents) = (visible.stamp, std::mem::take(&mut visible.app_documents));
         {
             let mut state = self.state.write().await;
             // Nothing to show without a session, and a straggling snapshot from
@@ -3447,6 +3473,8 @@ impl SyncEngine {
             state.calendar_sources = visible.calendar_sources;
             state.running_actual = visible.running_actual;
         }
+        #[cfg(not(target_family = "wasm"))]
+        self.show_app_documents(stamp, &documents).await;
         self.bump_version();
     }
 
@@ -3502,6 +3530,22 @@ impl SyncEngine {
                     .await;
             }
         });
+
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let document_engine = Arc::clone(self);
+            self.spawn_session_work(self.history_epoch.load(Ordering::SeqCst), async move {
+                if let Err(error) = document_engine
+                    .snapshot_app_documents(generation, stream_start_seq)
+                    .await
+                {
+                    warn!("Document snapshot failed: {}", error);
+                    document_engine
+                        .end_refused_session_for(generation, &error)
+                        .await;
+                }
+            });
+        }
     }
 
     async fn handle_ws_text(
@@ -3512,6 +3556,22 @@ impl SyncEngine {
         match serde_json::from_str::<WsServerMessage>(text) {
             Ok(WsServerMessage::HelloAck { .. }) => {
                 debug!("Ignoring duplicate WS hello_ack");
+            }
+            Ok(WsServerMessage::Event {
+                object_kind: ObjectKind::Unknown,
+                seq,
+                ..
+            }) => {
+                debug!(
+                    seq,
+                    "Ignoring an event for an object kind this build does not know"
+                );
+            }
+            Ok(WsServerMessage::Event {
+                object_kind: ObjectKind::AppDocument,
+                ..
+            }) if cfg!(target_family = "wasm") => {
+                debug!("Ignoring a document event in the browser");
             }
             Ok(WsServerMessage::Event {
                 seq,
@@ -3543,7 +3603,8 @@ impl SyncEngine {
                     // local copy with what comes back.
                     ObjectEventType::Updated
                         if object_kind == ObjectKind::File
-                            || object_kind == ObjectKind::Schedule =>
+                            || object_kind == ObjectKind::Schedule
+                            || object_kind == ObjectKind::AppDocument =>
                     {
                         self.handle_updated_object_event(generation, object_kind, object_id, seq)
                             .await?;
@@ -3562,7 +3623,8 @@ impl SyncEngine {
                     ObjectEventType::Deleted
                         if object_kind == ObjectKind::File
                             || object_kind == ObjectKind::Collab
-                            || object_kind == ObjectKind::Schedule =>
+                            || object_kind == ObjectKind::Schedule
+                            || object_kind == ObjectKind::AppDocument =>
                     {
                         self.handle_deleted_event(
                             generation,
@@ -4214,6 +4276,14 @@ impl SyncEngine {
             // Routed to `materialize_collab` above before any network call; an
             // explicit arm keeps the match total without re-handling it.
             ObjectKind::Collab => {}
+            #[cfg(not(target_family = "wasm"))]
+            ObjectKind::AppDocument => {
+                self.persist_listed_app_document(api, &item, &encryption_key, generation)
+                    .await?;
+            }
+            #[cfg(target_family = "wasm")]
+            ObjectKind::AppDocument => {}
+            ObjectKind::Unknown => {}
         }
         Ok(())
     }
@@ -5458,6 +5528,10 @@ mod schedule_integration_tests;
 mod app_data_integration_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
+#[path = "app_document_integration_tests.rs"]
+mod app_document_integration_tests;
+
+#[cfg(all(test, not(target_family = "wasm")))]
 #[path = "offline_resume_tests.rs"]
 mod offline_resume_tests;
 
@@ -5798,7 +5872,9 @@ mod tests {
                 ObjectKind::Clipboard => engine.snapshot_clipboard(generation, 10).await,
                 ObjectKind::Schedule => engine.snapshot_schedule(generation, 10).await,
                 ObjectKind::File => engine.snapshot_files(generation, 10).await,
-                ObjectKind::Collab => unreachable!(),
+                ObjectKind::Collab | ObjectKind::AppDocument | ObjectKind::Unknown => {
+                    unreachable!()
+                }
             }
             .unwrap();
             server.abort();
@@ -6505,6 +6581,7 @@ mod tests {
             calendar_sources: Vec::new(),
             running_actual: None,
             running_plan: None,
+            app_documents: Vec::new(),
         }
     }
 

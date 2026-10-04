@@ -52,6 +52,7 @@ fn session(started_at: DateTime<Utc>) -> Session {
         template_id: None,
         notes: String::new(),
         exercises: Vec::new(),
+        current_exercise_id: None,
     }
 }
 
@@ -61,11 +62,17 @@ fn fatigue(
     recovery: &[Recovery],
     muscle: Muscle,
 ) -> MuscleFatigue {
-    fatigue_at(now, &BTreeMap::from([(id(1), exercise())]), sets, recovery)
-        .unwrap()
-        .into_iter()
-        .find(|row| row.muscle == muscle)
-        .unwrap()
+    fatigue_at(
+        now,
+        &BTreeMap::from([(id(1), exercise())]),
+        &BTreeMap::from([(id(2), session(now))]),
+        sets,
+        recovery,
+    )
+    .unwrap()
+    .into_iter()
+    .find(|row| row.muscle == muscle)
+    .unwrap()
 }
 
 #[test]
@@ -109,7 +116,7 @@ fn fatigue_rises_with_recent_hard_sets_and_reaches_zero_after_recovery() {
 }
 
 #[test]
-fn fatigue_ignores_warm_ups_future_sets_and_old_sets_and_caps_the_total() {
+fn fatigue_ignores_warm_ups_future_old_and_orphaned_sets_and_caps_the_total() {
     let now = time(10, 7);
     let mut warm_up = working_set(id(2), now);
     warm_up.kind = SetKind::WarmUp;
@@ -117,6 +124,7 @@ fn fatigue_ignores_warm_ups_future_sets_and_old_sets_and_caps_the_total() {
         warm_up,
         working_set(id(2), now + TimeDelta::seconds(1)),
         working_set(id(2), now - TimeDelta::days(15)),
+        working_set(id(20), now),
     ];
     assert_eq!(fatigue(now, &ignored, &[], Muscle::Chest).score, 0);
     let sets = vec![working_set(id(2), now); 8];
@@ -242,7 +250,7 @@ fn weekly_averages_use_monday_boundaries_and_consecutive_week_changes() {
             kg: 78.0,
         },
     ];
-    let weeks = weekly_body_weight(&entries).unwrap();
+    let weeks = weekly_body_weight(&entries, chrono_tz::UTC).unwrap();
     assert_eq!(weeks.len(), 4);
     assert_eq!(
         weeks[0].week_start,
@@ -262,7 +270,7 @@ fn weekly_averages_use_monday_boundaries_and_consecutive_week_changes() {
     assert_eq!(weeks[2].change_kg, None);
     assert_eq!(weeks[3].average_kg, 78.0);
     assert_eq!(weeks[3].change_kg, Some(-1.0));
-    assert!(weekly_body_weight(&[]).unwrap().is_empty());
+    assert!(weekly_body_weight(&[], chrono_tz::UTC).unwrap().is_empty());
 }
 
 #[test]
@@ -281,7 +289,7 @@ fn weekly_averages_cross_years_without_splitting_a_week() {
             kg: 83.0,
         },
     ];
-    let weeks = weekly_body_weight(&entries).unwrap();
+    let weeks = weekly_body_weight(&entries, chrono_tz::UTC).unwrap();
     assert_eq!(weeks.len(), 2);
     assert_eq!(
         weeks[0].week_start,
@@ -294,4 +302,26 @@ fn weekly_averages_cross_years_without_splitting_a_week() {
     );
     assert_eq!(weeks[1].average_kg, 83.0);
     assert_eq!(weeks[1].change_kg, Some(2.0));
+}
+
+#[test]
+fn weekly_averages_follow_the_local_calendar_week() {
+    let sunday_evening_in_new_york = BodyWeight {
+        time: Utc.with_ymd_and_hms(2026, 10, 5, 2, 0, 0).unwrap(),
+        kg: 80.0,
+    };
+    let local = weekly_body_weight(
+        std::slice::from_ref(&sunday_evening_in_new_york),
+        chrono_tz::America::New_York,
+    )
+    .unwrap();
+    assert_eq!(
+        local[0].week_start,
+        NaiveDate::from_ymd_opt(2026, 9, 28).unwrap()
+    );
+    let utc = weekly_body_weight(&[sunday_evening_in_new_york], chrono_tz::UTC).unwrap();
+    assert_eq!(
+        utc[0].week_start,
+        NaiveDate::from_ymd_opt(2026, 10, 5).unwrap()
+    );
 }

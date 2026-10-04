@@ -33,9 +33,11 @@ import {
   SetEditor,
 } from "./GymUi";
 import { armRestEnd, askToNotifyRestEnd, stopRestEnd } from "./restAlarm";
+import { restSecondsLeft } from "./restCountdown";
 
 export function LiveSession({ onError }: { onError: (error: string | null) => void }) {
   const [view, setView] = useState<GymSession | null | undefined>(undefined);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [templates, setTemplates] = useState<GymTemplate[]>([]);
   const [exercises, setExercises] = useState<GymExercise[]>([]);
   const [now, setNow] = useState(Date.now);
@@ -59,13 +61,15 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
         gym().gymExercises(),
       ]);
       if (generation !== loadGeneration.current) return;
+      setNow(Date.now());
       setView(open ?? null);
       setTemplates(templateList);
       setExercises(exerciseList);
+      setLoadFailed(false);
     } catch (caught) {
       if (generation !== loadGeneration.current) return;
       onError(formatBackendError(caught));
-      setView((previous) => (previous === undefined ? null : previous));
+      setLoadFailed(true);
     }
   }, [onError]);
 
@@ -136,7 +140,9 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
       repsInReserve: reserve,
     };
     void askToNotifyRestEnd();
-    void run(() => gym().gymCompleteSet(sessionId, exerciseId, nextKind, order, values));
+    void run(async () =>
+      armRestEnd(await gym().gymCompleteSet(sessionId, exerciseId, nextKind, order, values)),
+    );
   }
 
   function finish(session: GymSession) {
@@ -155,8 +161,15 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
 
   if (view === undefined) {
     return (
-      <YStack flex={1} items="center" justify="center">
-        <Spinner />
+      <YStack flex={1} items="center" justify="center" gap="$3">
+        {loadFailed ? (
+          <>
+            <Muted>The workout could not be loaded.</Muted>
+            <Button onPress={() => void load()}>Try again</Button>
+          </>
+        ) : (
+          <Spinner />
+        )}
       </YStack>
     );
   }
@@ -181,13 +194,12 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
       .filter((exercise) => exercise.planned && !exercise.skipped)
       .map((exercise) => exercise.exerciseId),
   );
-  const currentIndex = session.exercises.findIndex(
-    (exercise) => exercise.exerciseId === session.currentExerciseId,
+  const upcoming = session.exercises.filter(
+    (exercise) =>
+      exercise.planIndex !== undefined &&
+      exercise.sets.length === 0 &&
+      exercise.exerciseId !== session.currentExerciseId,
   );
-  let currentBlockStart = currentIndex;
-  while (currentBlockStart > 0 && session.exercises[currentBlockStart]?.supersetWithPrevious) {
-    currentBlockStart -= 1;
-  }
 
   return (
     <ScrollView flex={1} keyboardShouldPersistTaps="always">
@@ -219,7 +231,7 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
                 <Text fontSize={20} fontWeight="700">
                   {current.name}
                 </Text>
-                <SupersetNote exercises={session.exercises} index={currentIndex} />
+                <SupersetNote exercises={session.exercises} exerciseId={current.exerciseId} />
                 <Muted>{targetSummary(current)}</Muted>
                 {current.lastTime.length > 0 && (
                   <Muted>Last time: {current.lastTime.map(formatSet).join(", ")}</Muted>
@@ -312,39 +324,37 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
               Add exercise
             </Button>
           </XStack>
-          {session.exercises.map((exercise, index) => (
-            <PlanRow
-              key={exercise.exerciseId}
-              exercise={exercise}
-              isCurrent={exercise.exerciseId === session.currentExerciseId}
-              canMoveUp={exercise.planned && index > 0}
-              canMoveDown={exercise.planned && session.exercises[index + 1]?.planned === true}
-              canDoNow={
-                exercise.planned && !exercise.done && currentIndex >= 0 && index > currentIndex
-              }
-              busy={busy}
-              onMove={(to) =>
-                void run(() => gym().gymMoveExercise(session.id, exercise.exerciseId, to))
-              }
-              onDoNow={() =>
-                void run(() =>
-                  gym().gymMoveExercise(
-                    session.id,
-                    exercise.exerciseId,
-                    Math.max(currentBlockStart, 0),
-                  ),
-                )
-              }
-              onSkip={(skipped) =>
-                void run(() => gym().gymSkipExercise(session.id, exercise.exerciseId, skipped))
-              }
-              onAddSet={() =>
-                void run(() => gym().gymAddWorkingSet(session.id, exercise.exerciseId))
-              }
-              onEdit={(set, number) => setEditing({ set, number })}
-              index={index}
-            />
-          ))}
+          {session.exercises.map((exercise) => {
+            const position = upcoming.indexOf(exercise);
+            return (
+              <PlanRow
+                key={exercise.exerciseId}
+                exercise={exercise}
+                isCurrent={exercise.exerciseId === session.currentExerciseId}
+                moveUpTo={position > 0 ? upcoming[position - 1]?.planIndex : undefined}
+                moveDownTo={position >= 0 ? upcoming[position + 1]?.planIndex : undefined}
+                canDoNow={
+                  exercise.planned &&
+                  !exercise.done &&
+                  exercise.exerciseId !== session.currentExerciseId
+                }
+                busy={busy}
+                onMove={(to) =>
+                  void run(() => gym().gymMoveExercise(session.id, exercise.exerciseId, to))
+                }
+                onDoNow={() =>
+                  void run(() => gym().gymSwitchExercise(session.id, exercise.exerciseId))
+                }
+                onSkip={(skipped) =>
+                  void run(() => gym().gymSkipExercise(session.id, exercise.exerciseId, skipped))
+                }
+                onAddSet={() =>
+                  void run(() => gym().gymAddWorkingSet(session.id, exercise.exerciseId))
+                }
+                onEdit={(set, number) => setEditing({ set, number })}
+              />
+            );
+          })}
         </YStack>
       </YStack>
 
@@ -397,7 +407,7 @@ function StartWorkout({
 }) {
   const names = new Map(exercises.map((exercise) => [exercise.id, exercise.name]));
   return (
-    <ScrollView flex={1}>
+    <ScrollView flex={1} keyboardShouldPersistTaps="always">
       <YStack gap="$3" pb="$8">
         <H2 size="$6">Start a workout</H2>
         {templates.length === 0 && <Muted>No workouts yet. Add one in the Library.</Muted>}
@@ -450,21 +460,34 @@ function RestCard({ startedAt, endsAt, now }: { startedAt: number; endsAt: numbe
           color={resting ? colors.accent : colors.good}
           aria-label={resting ? "Rest remaining" : "Time since rest ended"}
         >
-          {resting ? formatClock(remaining + 999) : `+${formatMinutes(-remaining)}`}
+          {resting
+            ? formatClock(restSecondsLeft(startedAt, endsAt, now) * 1000)
+            : `+${formatMinutes(-remaining)}`}
         </Text>
       </XStack>
     </GymCard>
   );
 }
 
-function SupersetNote({ exercises, index }: { exercises: GymSessionExercise[]; index: number }) {
+function SupersetNote({
+  exercises,
+  exerciseId,
+}: {
+  exercises: GymSessionExercise[];
+  exerciseId: string;
+}) {
+  const planned: GymSessionExercise[] = [];
+  for (const exercise of exercises) {
+    if (exercise.planIndex !== undefined) planned[exercise.planIndex] = exercise;
+  }
+  const index = planned.findIndex((exercise) => exercise.exerciseId === exerciseId);
   if (index < 0) return null;
   let start = index;
-  while (start > 0 && exercises[start]?.supersetWithPrevious) start -= 1;
+  while (start > 0 && planned[start]?.supersetWithPrevious) start -= 1;
   let end = index;
-  while (exercises[end + 1]?.supersetWithPrevious) end += 1;
+  while (planned[end + 1]?.supersetWithPrevious) end += 1;
   if (start === end) return null;
-  const partners = exercises
+  const partners = planned
     .slice(start, end + 1)
     .filter((_, offset) => start + offset !== index)
     .map((exercise) => exercise.name);
@@ -542,10 +565,9 @@ function SetRows({
 
 function PlanRow({
   exercise,
-  index,
   isCurrent,
-  canMoveUp,
-  canMoveDown,
+  moveUpTo,
+  moveDownTo,
   canDoNow,
   busy,
   onMove,
@@ -555,10 +577,9 @@ function PlanRow({
   onEdit,
 }: {
   exercise: GymSessionExercise;
-  index: number;
   isCurrent: boolean;
-  canMoveUp: boolean;
-  canMoveDown: boolean;
+  moveUpTo: number | undefined;
+  moveDownTo: number | undefined;
   canDoNow: boolean;
   busy: boolean;
   onMove: (to: number) => void;
@@ -596,20 +617,24 @@ function PlanRow({
             </Text>
             <Muted>{`${working}/${exercise.targetSets} sets${status}`}</Muted>
           </YStack>
-          <Button
-            size="$3"
-            aria-label={`Move ${exercise.name} up`}
-            icon={<ChevronUp size={18} />}
-            disabled={busy || !canMoveUp}
-            onPress={() => onMove(index - 1)}
-          />
-          <Button
-            size="$3"
-            aria-label={`Move ${exercise.name} down`}
-            icon={<ChevronDown size={18} />}
-            disabled={busy || !canMoveDown}
-            onPress={() => onMove(index + 1)}
-          />
+          {moveUpTo !== undefined && (
+            <Button
+              size="$3"
+              aria-label={`Move ${exercise.name} up`}
+              icon={<ChevronUp size={18} />}
+              disabled={busy}
+              onPress={() => onMove(moveUpTo)}
+            />
+          )}
+          {moveDownTo !== undefined && (
+            <Button
+              size="$3"
+              aria-label={`Move ${exercise.name} down`}
+              icon={<ChevronDown size={18} />}
+              disabled={busy}
+              onPress={() => onMove(moveDownTo)}
+            />
+          )}
         </XStack>
         {open && (
           <YStack gap="$2">
@@ -630,14 +655,16 @@ function PlanRow({
                 <Button size="$3" icon={<Plus size={14} />} disabled={busy} onPress={onAddSet}>
                   Add set
                 </Button>
-                <Button
-                  size="$3"
-                  icon={exercise.skipped ? <RotateCcw size={14} /> : <SkipForward size={14} />}
-                  disabled={busy}
-                  onPress={() => onSkip(!exercise.skipped)}
-                >
-                  {exercise.skipped ? "Unskip" : "Skip"}
-                </Button>
+                {(exercise.skipped || !exercise.done) && (
+                  <Button
+                    size="$3"
+                    icon={exercise.skipped ? <RotateCcw size={14} /> : <SkipForward size={14} />}
+                    disabled={busy}
+                    onPress={() => onSkip(!exercise.skipped)}
+                  >
+                    {exercise.skipped ? "Unskip" : "Skip"}
+                  </Button>
+                )}
               </XStack>
             )}
           </YStack>
@@ -650,7 +677,10 @@ function PlanRow({
 function targetSummary(exercise: GymSessionExercise): string {
   const reserve =
     exercise.targetRepsInReserve === undefined ? "" : ` @ ${exercise.targetRepsInReserve} RIR`;
-  const warmUps = exercise.warmUpSets > 0 ? `${exercise.warmUpSets} warm-up + ` : "";
+  const warmUps =
+    exercise.warmUpSets > 0
+      ? `${exercise.warmUpSets} warm-up (rest ${formatRestSeconds(exercise.warmUpRestSeconds)}) + `
+      : "";
   return `${warmUps}${exercise.targetSets} × ${exercise.targetReps}${reserve} · rest ${formatRestSeconds(exercise.restSeconds)}`;
 }
 

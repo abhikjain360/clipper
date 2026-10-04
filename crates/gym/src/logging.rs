@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -96,11 +97,12 @@ pub struct WeeklyBodyWeight {
 
 pub fn weekly_body_weight(
     entries: &[BodyWeight],
+    zone: Tz,
 ) -> Result<Vec<WeeklyBodyWeight>, ValidationError> {
     let mut weeks = BTreeMap::<NaiveDate, (f64, usize)>::new();
     for entry in entries {
         entry.validate()?;
-        let week = entry.time.iso_week();
+        let week = entry.time.with_timezone(&zone).iso_week();
         let start = NaiveDate::from_isoywd_opt(week.year(), week.week(), Weekday::Mon)
             .ok_or(ValidationError::WeekStartOutOfRange)?;
         let (average, count) = weeks.entry(start).or_default();

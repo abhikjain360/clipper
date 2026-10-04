@@ -24,9 +24,21 @@ not sync app data.
 
 ## Collections
 
-Field names inside values are snake_case, like other Clipper types. Each Rust
-type gives lists and flags a default, so a writer can leave out an empty list
-or a flag at its default.
+Field names inside values are snake_case, like other Clipper types. The Rust
+types, their checks and the collection names are in `crates/kitchen`. Each type
+gives lists and flags a default, so a writer can leave out an empty list or a
+flag at its default. A value with a field the type does not have is refused,
+so a misspelt field cannot be dropped without notice.
+
+A date is accepted only as `YYYY-MM-DD` and a time only as RFC 3339 with a `T`
+between date and time, such as `2026-10-07T18:30:00Z` or with an offset. The
+stored value is the Rust type's own encoding of the value, not the text that
+was written:
+
+- every list and flag is present, at its default when it was left out;
+- an optional field that was left out or written as `null` is absent;
+- a time is in UTC with milliseconds, such as `2026-10-07T18:30:00.000Z`, so
+  stored dates and times sort correctly as text.
 
 ### kitchen.recipes (document collection)
 
@@ -54,6 +66,8 @@ A value decodes only if:
 - active minutes do not exceed total minutes;
 - `created_on` is a date and no text field is empty.
 
+`kitchen.recipes` has no indexed fields.
+
 Sessions and plans refer to a recipe by its document id. If two writes to one
 recipe race, the later one fails with a revision conflict; Claude reads the
 recipe again and reapplies its change.
@@ -80,12 +94,17 @@ One cooking session per row:
   session started from, so step indexes and step times refer to the steps as
   they were then;
 - `servings`, `started_at` and, once finished, `finished_at`;
-- `steps_done`: the index and time of each ticked step;
-- `gathered`: the ids of ticked ingredients;
-- `timers`: the step timers that are set, each with its step and timer index,
-  the device it rings on, and `ends_at` while running or `remaining_ms` while
-  paused. A running timer whose end has passed is done;
+- `steps_done`: the index and time of each ticked step, as `step` and
+  `done_at`; a step appears at most once;
+- `gathered`: the ids of ticked ingredients, each at most once;
+- `timers`: the step timers that are set, each with its `step` and `timer`
+  index, the `device_id` it rings on, and `ends_at` while running or
+  `remaining_ms` while paused, never both. A step and timer pair appears at
+  most once. A running timer whose end has passed is done;
 - optional `notes` on how it went.
+
+`recipe` is a UUIDv7, `recipe_revision` and `servings` are at least 1, and
+`finished_at` is not before `started_at`.
 
 Indexed by `recipe`. The checklist and the timers are part of the session, so
 they survive a restart, show on every device and start empty for each cook.
@@ -93,10 +112,10 @@ One person cooks on one device at a time, so last write wins is enough.
 
 ### kitchen.plans (row collection, last write wins)
 
-One row per planned recipe: `recipe` (document id) and `block`, the `item_id`
-and `occurrence_key` of a block occurrence as `clipper schedule occurrences`
-returns them. An occurrence keeps its key when the block is moved, so a plan
-follows its block. Indexed by `recipe`. Only Claude writes plans.
+One row per planned recipe: `recipe` (document id) and `block`, an object with
+the `item_id` and `occurrence_key` of a block occurrence as `clipper schedule
+occurrences` returns them. An occurrence keeps its key when the block is moved,
+so a plan follows its block. Indexed by `recipe`. Only Claude writes plans.
 
 ### Outside Clipper
 
@@ -119,8 +138,8 @@ Mac. Writing a recipe also needs the server.
   To change a recipe, Claude queries its value into a scratch file, edits it
   and writes it back under the same id.
 - A refused value comes back with the field path and the rule, for example
-  `steps[3].text: {onion} does not match any ingredient id`. Claude fixes it
-  and writes again.
+  `steps[3].text: {onion} does not match any ingredient id`. List indexes in a
+  path count from 0. Claude fixes it and writes again.
 - Checks across rows are queries in the cook skill, run after pantry edits:
   names listed twice, and sessions or plans whose recipe no longer exists.
 - The newest `written_at` in `kitchen.pantry` is when the pantry was last

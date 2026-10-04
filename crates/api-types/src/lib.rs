@@ -366,6 +366,13 @@ pub struct ScheduleMeta {
 /// Current [`ScheduleMeta::version`].
 pub const SCHEDULE_PAYLOAD_VERSION: u16 = 1;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppDocumentMeta {
+    pub collection: String,
+    pub document_id: ObjectId,
+    pub schema_version: u64,
+}
+
 // -- Objects --
 
 #[derive(
@@ -384,6 +391,9 @@ pub enum ObjectKind {
     /// The discriminant lives in the encrypted meta instead, as
     /// [`ScheduleRecordKind`].
     Schedule,
+    AppDocument,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(
@@ -1410,5 +1420,54 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_listing_page_keeps_decoding_past_a_kind_this_build_does_not_know() {
+        let item = |id: u8| {
+            let body = ObjectEnvelopeBody {
+                object_id: ObjectId::from(Uuid::from_bytes([id; 16])),
+                object_type: ObjectKind::AppDocument,
+                envelope_version: OBJECT_ENVELOPE_VERSION,
+                revision: 1,
+                parent_hash: None,
+                source_device_id: DeviceId::from(Uuid::from_bytes([3; 16])),
+                created_at: "2026-10-07T10:00:00Z".to_string(),
+                operation: ObjectEnvelopeOperation::Create,
+                meta_nonce: vec![0; XCHACHA20_NONCE_BYTES],
+                sha256_meta_ciphertext: vec![0; SHA256_BYTES],
+                payloads: Vec::new(),
+            };
+            ObjectListItem {
+                id: body.object_id,
+                kind: ObjectKind::AppDocument,
+                revision: 1,
+                created_seq: i64::from(id),
+                meta_nonce: body.meta_nonce.clone(),
+                meta_ciphertext: vec![7; 40],
+                payloads: Vec::new(),
+                created_at: body.created_at.clone(),
+                source_device_id: body.source_device_id,
+                source_device_signing_public_key: None,
+                envelope: ObjectEnvelope {
+                    body,
+                    signature: vec![0; 64],
+                },
+            }
+        };
+        let page = ObjectListResponse {
+            items: vec![item(1), item(2)],
+            next_after: None,
+        };
+        let mut bytes = postcard::to_allocvec(&page).unwrap();
+        let first_kind = 1 + 1 + 16;
+        assert_eq!(bytes[first_kind], 4);
+        bytes[first_kind] = 9;
+
+        let decoded: ObjectListResponse = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.items[0].kind, ObjectKind::Unknown);
+        assert_eq!(decoded.items[1].kind, ObjectKind::AppDocument);
+        assert_eq!(decoded.items[1].id, page.items[1].id);
+        assert_eq!(decoded.items[1].created_seq, 2);
     }
 }

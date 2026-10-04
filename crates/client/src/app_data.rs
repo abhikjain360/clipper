@@ -1,4 +1,5 @@
 pub(crate) mod collections;
+pub(crate) mod documents;
 pub(crate) mod tables;
 
 use std::sync::{
@@ -141,6 +142,7 @@ pub(crate) struct AppDataHandle {
     pub wake: Notify,
     pull_requested: AtomicBool,
     last_applied: AtomicI64,
+    downloaded: AtomicBool,
 }
 
 impl AppDataHandle {
@@ -171,9 +173,18 @@ impl AppDataHandle {
         self.last_applied.store(sequence, Ordering::SeqCst);
     }
 
+    pub fn mark_downloaded(&self) {
+        self.downloaded.store(true, Ordering::SeqCst);
+    }
+
+    pub fn downloaded(&self) -> bool {
+        self.downloaded.load(Ordering::SeqCst)
+    }
+
     pub async fn close(&self) {
         *self.session.lock().await = None;
         self.pull_requested.store(false, Ordering::SeqCst);
         self.last_applied.store(0, Ordering::SeqCst);
+        self.downloaded.store(false, Ordering::SeqCst);
     }
 }

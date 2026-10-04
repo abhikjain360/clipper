@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use clipper_app_types::AppDataWrite;
 use clipper_gym::{
     BodyWeight, Exercise, FatigueBand, LoggedSet, Muscle, MuscleGroup, MuscleShare, Recovery,
@@ -57,6 +58,13 @@ pub enum FatigueBand {
     VeryHigh,
 }
 
+#[derive(uniffi::Enum)]
+pub enum GymStarterLibrary {
+    Written,
+    NotNeeded,
+    WaitingForDownload,
+}
+
 #[derive(uniffi::Record)]
 pub struct GymMuscleInfo {
     pub muscle: Muscle,
@@ -90,6 +98,7 @@ pub struct GymExerciseInput {
 pub struct GymPlannedExercise {
     pub exercise_id: String,
     pub warm_up_sets: u32,
+    pub warm_up_rest_seconds: u32,
     pub target_sets: u32,
     pub target_reps: u32,
     pub target_reps_in_reserve: Option<u8>,
@@ -122,7 +131,9 @@ pub struct GymSessionExercise {
     pub exercise_id: String,
     pub name: String,
     pub planned: bool,
+    pub plan_index: Option<u32>,
     pub warm_up_sets: u32,
+    pub warm_up_rest_seconds: u32,
     pub target_sets: u32,
     pub target_reps: u32,
     pub target_reps_in_reserve: Option<u8>,
@@ -207,6 +218,26 @@ pub struct GymMuscleFatigue {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl MobileClipperClient {
+    pub fn gym_move_template_exercise(
+        &self,
+        exercises: Vec<GymPlannedExercise>,
+        from: u32,
+        to: u32,
+    ) -> Result<Vec<GymPlannedExercise>, MobileError> {
+        let mut template = WorkoutTemplate {
+            name: String::new(),
+            exercises: exercises
+                .into_iter()
+                .map(planned_value)
+                .collect::<Result<_, _>>()?,
+        };
+        template.move_exercise(
+            usize::try_from(from).unwrap_or(usize::MAX),
+            usize::try_from(to).unwrap_or(usize::MAX),
+        );
+        Ok(template.exercises.into_iter().map(planned_view).collect())
+    }
+
     pub fn gym_muscles(&self) -> Vec<GymMuscleInfo> {
         Muscle::ALL
             .into_iter()
@@ -219,8 +250,11 @@ impl MobileClipperClient {
             .collect()
     }
 
-    pub async fn gym_seed_starter_library(&self) -> Result<bool, MobileError> {
+    pub async fn gym_seed_starter_library(&self) -> Result<GymStarterLibrary, MobileError> {
         let _writing = GYM_WRITES.lock().await;
+        if !self.engine.app_data_downloaded() {
+            return Ok(GymStarterLibrary::WaitingForDownload);
+        }
         let existing = self
             .engine
             .query_app_data(
@@ -229,7 +263,7 @@ impl MobileClipperClient {
             )
             .await?;
         if !existing.is_empty() {
-            return Ok(false);
+            return Ok(GymStarterLibrary::NotNeeded);
         }
         for (id, exercise) in starter_exercises() {
             self.put(Exercise::COLLECTION_NAME, Some(id), &exercise)
@@ -239,7 +273,7 @@ impl MobileClipperClient {
             self.put(WorkoutTemplate::COLLECTION_NAME, Some(id), &template)
                 .await?;
         }
-        Ok(true)
+        Ok(GymStarterLibrary::Written)
     }
 
     pub async fn gym_exercises(&self) -> Result<Vec<GymExercise>, MobileError> {
@@ -315,18 +349,8 @@ impl MobileClipperClient {
             name: name.trim().to_string(),
             exercises: exercises
                 .into_iter()
-                .map(|planned| {
-                    Ok(WorkoutExercise {
-                        exercise_id: parse_id(&planned.exercise_id)?,
-                        warm_up_sets: planned.warm_up_sets,
-                        target_sets: planned.target_sets,
-                        target_reps: planned.target_reps,
-                        target_reps_in_reserve: planned.target_reps_in_reserve,
-                        rest_seconds: planned.rest_seconds,
-                        superset_with_previous: planned.superset_with_previous,
-                    })
-                })
-                .collect::<Result<_, MobileError>>()?,
+                .map(planned_value)
+                .collect::<Result<_, _>>()?,
         };
         Ok(self
             .put(WorkoutTemplate::COLLECTION_NAME, id, &template)
@@ -430,8 +454,8 @@ impl MobileClipperClient {
         kind: SetKind,
         expected_order: u32,
         values: GymSetValues,
-    ) -> Result<String, MobileError> {
-        let _writing = GYM_WRITES.lock().await;
+    ) -> Result<GymSession, MobileError> {
+        let writing = GYM_WRITES.lock().await;
         let session_id = parse_id(&session_id)?;
         let exercise_id = parse_id(&exercise_id)?;
         let session: Session = self.row(Session::COLLECTION_NAME, session_id).await?;
@@ -448,20 +472,30 @@ impl MobileClipperClient {
                     .into(),
             ));
         }
+        let mut order = progress.next_order;
+        while self
+            .engine
+            .app_data_row_deleted(Set::COLLECTION_NAME, Set::row_id(session_id, order))
+            .await?
+        {
+            order = order
+                .checked_add(1)
+                .ok_or_else(|| MobileError::Client("this session has no free set order".into()))?;
+        }
         let set = Set {
             session_id,
             exercise_id,
-            order: progress.next_order,
+            order,
             kind,
             weight_kg: values.weight_kg,
             reps: values.reps,
             reps_in_reserve: values.reps_in_reserve,
             completed_at: Utc::now(),
         };
-        Ok(self
-            .put(Set::COLLECTION_NAME, None, &set)
-            .await?
-            .to_string())
+        self.put(Set::COLLECTION_NAME, None, &set).await?;
+        drop(writing);
+        let sessions = self.sessions().await?;
+        self.session_view(session_id, session, &sessions).await
     }
 
     pub async fn gym_edit_set(
@@ -515,6 +549,16 @@ impl MobileClipperClient {
             session.move_exercise(exercise_id, to)
         })
         .await
+    }
+
+    pub async fn gym_switch_exercise(
+        &self,
+        session_id: String,
+        exercise_id: String,
+    ) -> Result<(), MobileError> {
+        let exercise_id = parse_id(&exercise_id)?;
+        self.change_session(&session_id, |session| session.switch_to(exercise_id))
+            .await
     }
 
     pub async fn gym_skip_exercise(
@@ -586,14 +630,20 @@ impl MobileClipperClient {
             .await
     }
 
-    pub async fn gym_weekly_body_weight(&self) -> Result<Vec<GymWeeklyBodyWeight>, MobileError> {
+    pub async fn gym_weekly_body_weight(
+        &self,
+        zone: String,
+    ) -> Result<Vec<GymWeeklyBodyWeight>, MobileError> {
+        let zone: Tz = zone
+            .parse()
+            .map_err(|_| MobileError::Client(format!("{zone} is not a known time zone")))?;
         let entries: Vec<BodyWeight> = self
             .rows::<BodyWeight>("SELECT id, value FROM gym.body_weight")
             .await?
             .into_iter()
             .map(|(_, entry)| entry)
             .collect();
-        Ok(weekly_body_weight(&entries)
+        Ok(weekly_body_weight(&entries, zone)
             .map_err(|error| MobileError::Client(error.to_string()))?
             .into_iter()
             .map(|week| GymWeeklyBodyWeight {
@@ -637,19 +687,22 @@ impl MobileClipperClient {
             .map(|(_, set)| set)
             .collect();
         let recovery = self.recovery().await?;
-        Ok(fatigue_at(Utc::now(), &exercises, &sets, &recovery)
-            .map_err(|error| MobileError::Client(error.to_string()))?
-            .into_iter()
-            .map(|fatigue| GymMuscleFatigue {
-                muscle: fatigue.muscle,
-                display_name: fatigue.muscle.display_name().to_string(),
-                group: fatigue.muscle.group(),
-                score: fatigue.score,
-                band: fatigue.band,
-                recovery_days: fatigue.recovery_days,
-                default_recovery_days: fatigue.muscle.default_recovery_days(),
-            })
-            .collect())
+        let sessions = self.sessions().await?;
+        Ok(
+            fatigue_at(Utc::now(), &exercises, &sessions, &sets, &recovery)
+                .map_err(|error| MobileError::Client(error.to_string()))?
+                .into_iter()
+                .map(|fatigue| GymMuscleFatigue {
+                    muscle: fatigue.muscle,
+                    display_name: fatigue.muscle.display_name().to_string(),
+                    group: fatigue.muscle.group(),
+                    score: fatigue.score,
+                    band: fatigue.band,
+                    recovery_days: fatigue.recovery_days,
+                    default_recovery_days: fatigue.muscle.default_recovery_days(),
+                })
+                .collect(),
+        )
     }
 
     pub async fn gym_set_recovery_days(
@@ -853,14 +906,18 @@ impl MobileClipperClient {
                 ends_at_millis: millis(rest.ends_at),
             }),
             exercises: progress
-                .exercises
+                .display_order
                 .iter()
-                .zip(last_times)
-                .map(|(exercise, last_time)| GymSessionExercise {
+                .map(|index| (*index, &progress.exercises[*index], &last_times[*index]))
+                .map(|(index, exercise, last_time)| GymSessionExercise {
                     exercise_id: exercise.plan.exercise_id.to_string(),
                     name: exercise_name(&names, exercise.plan.exercise_id),
                     planned: exercise.planned,
+                    plan_index: exercise
+                        .planned
+                        .then(|| u32::try_from(index).unwrap_or(u32::MAX)),
                     warm_up_sets: exercise.plan.warm_up_sets,
+                    warm_up_rest_seconds: exercise.plan.warm_up_rest_seconds,
                     target_sets: exercise.plan.target_sets,
                     target_reps: exercise.plan.target_reps,
                     target_reps_in_reserve: exercise.plan.target_reps_in_reserve,
@@ -874,6 +931,7 @@ impl MobileClipperClient {
                         .map(|logged| set_view(logged.id, &logged.set))
                         .collect(),
                     last_time: last_time
+                        .as_ref()
                         .map(|last| {
                             last.sets
                                 .iter()
@@ -899,12 +957,26 @@ fn planned_view(planned: WorkoutExercise) -> GymPlannedExercise {
     GymPlannedExercise {
         exercise_id: planned.exercise_id.to_string(),
         warm_up_sets: planned.warm_up_sets,
+        warm_up_rest_seconds: planned.warm_up_rest_seconds,
         target_sets: planned.target_sets,
         target_reps: planned.target_reps,
         target_reps_in_reserve: planned.target_reps_in_reserve,
         rest_seconds: planned.rest_seconds,
         superset_with_previous: planned.superset_with_previous,
     }
+}
+
+fn planned_value(planned: GymPlannedExercise) -> Result<WorkoutExercise, MobileError> {
+    Ok(WorkoutExercise {
+        exercise_id: parse_id(&planned.exercise_id)?,
+        warm_up_sets: planned.warm_up_sets,
+        warm_up_rest_seconds: planned.warm_up_rest_seconds,
+        target_sets: planned.target_sets,
+        target_reps: planned.target_reps,
+        target_reps_in_reserve: planned.target_reps_in_reserve,
+        rest_seconds: planned.rest_seconds,
+        superset_with_previous: planned.superset_with_previous,
+    })
 }
 
 fn set_view(id: Uuid, set: &Set) -> GymSet {

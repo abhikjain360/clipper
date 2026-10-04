@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{
@@ -10,7 +13,10 @@ use rusqlite::{
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use super::collections::{COLLECTIONS, Collection};
+use super::{
+    collections::{self, COLLECTIONS, Collection, Storage},
+    documents::AppDocument,
+};
 
 const QUERY_TIME_LIMIT: Duration = Duration::from_secs(5);
 const PROGRESS_CHECK_OPERATIONS: i32 = 1_000;
@@ -19,6 +25,8 @@ pub(crate) type QueryRows = Vec<Map<String, Value>>;
 
 pub(crate) struct AppDataTables {
     connection: Connection,
+    documents_stamp: u64,
+    shown_documents: HashMap<Uuid, (&'static Collection, u64)>,
 }
 
 impl AppDataTables {
@@ -51,7 +59,57 @@ impl AppDataTables {
                 ))?;
             }
         }
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            documents_stamp: 0,
+            shown_documents: HashMap::new(),
+        })
+    }
+
+    pub fn show_documents(
+        &mut self,
+        stamp: u64,
+        documents: &[AppDocument],
+    ) -> rusqlite::Result<()> {
+        if stamp <= self.documents_stamp {
+            return Ok(());
+        }
+        self.documents_stamp = stamp;
+        let mut shown = HashMap::with_capacity(documents.len());
+        for document in documents {
+            let Some(collection) = collections::collection(&document.collection)
+                .filter(|collection| collection.storage == Storage::Documents)
+            else {
+                continue;
+            };
+            let Ok(id) = document.id.parse::<Uuid>() else {
+                continue;
+            };
+            match self.shown_documents.get(&id) {
+                Some((held, revision))
+                    if held.name == collection.name && *revision == document.revision => {}
+                held => {
+                    if let Some((held, _)) = held.filter(|(held, _)| held.name != collection.name) {
+                        self.remove(held, id)?;
+                    }
+                    self.put(
+                        collection,
+                        id,
+                        document.revision,
+                        &document.written_at,
+                        &document.value,
+                    )?;
+                }
+            }
+            shown.insert(id, (collection, document.revision));
+        }
+        for (id, (collection, _)) in &self.shown_documents {
+            if !shown.contains_key(id) {
+                self.remove(collection, *id)?;
+            }
+        }
+        self.shown_documents = shown;
+        Ok(())
     }
 
     pub fn put(
