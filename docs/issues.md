@@ -722,7 +722,7 @@ Each entry has:
 
 ### 124. The calendar value cap misses semicolon-separated values
 
-- **Status:** fixing
+- **Status:** fixed in `90e4a4a`
 - **Severity:** medium. Entry 9 was incomplete.
 - **Where:** `crates/schedule/src/ingest.rs`, `validate_value_count`.
 - **What happens:** the parser also splits values on `;` for `X-` properties,
@@ -1064,7 +1064,7 @@ Each entry has:
 
 ### 119. A revise fails with a 500 while another connection writes
 
-- **Status:** fixing
+- **Status:** fixed in `90e4a4a`
 - **Severity:** medium. Introduced by the head check in `0c7d68c`.
 - **Where:** `crates/server/src/routes/objects.rs`, `revise_object`.
 - **What happens:** the revise transaction reads before it writes, so SQLite
@@ -1072,10 +1072,12 @@ Each entry has:
   lock, instead of waiting. A timer stop, edit or delete fails whenever another
   device writes at the same moment.
 - **Decision:** fix (Claude): take the write lock before the first read.
+  The shared route helper, registration, login and cleanup now take the lock
+  before reading. Completion and purge already write first.
 
 ### 120. The desktop IPC connection can hang for good
 
-- **Status:** fixing
+- **Status:** fixed in `90e4a4a`
 - **Severity:** medium-low. Partly on main (the serial loop had the same hang
   with one slot).
 - **Where:** `crates/daemon/src/handler.rs`; `web/src-tauri/src/daemon_client.rs`.
@@ -1086,40 +1088,66 @@ Each entry has:
   daemon's read loop exits, the socket stays half open.
 - **Decision:** fix (Claude): the desktop app reads while it writes, Logout
   skips the slot limit, and the daemon closes the socket when its read loop
-  ends.
+  ends. A request beyond the eighth waits for a slot in its own task, so the
+  read loop always keeps reading.
 
 ### 121. Lost replies to deletes, and gateway errors, skip recovery
 
-- **Status:** fixing
+- **Status:** fixed in `90e4a4a`
 - **Severity:** low-medium. Not on main.
 - **Where:** `crates/client/src/engine.rs`, `write_schedule_record_for_session`
   recovery and `write_tombstone`.
 - **What happens:** recovery from a lost reply ran only on a dropped
   connection or a 409. A reply lost behind the Cloudflare tunnel arrives as a
-  502-527, and a retried timer start then made a second timer. A lost delete
-  reply left every retry failing with 409 until Refresh.
+  502, 503, 504 or 520-527, and a retried timer start then made a second timer.
+  A lost delete reply left every retry failing with 409 until Refresh.
 - **Decision:** fix (Claude): treat gateway errors as ambiguous and give
-  deletes the same re-read recovery.
+  deletes the same re-read recovery. The authenticated head getter includes
+  tombstones. Recovery accepts an exact matching write as this device's write;
+  a competing head follows normal verification and anchor rules.
 
 ### 122. Calendar feed copies left behind
 
-- **Status:** fixing for an upload whose source save never reached the
-  server; open for a sync cancelled by logout between the upload and the save.
+- **Status:** fixed in `90e4a4a` for an upload whose source save never
+  reached the server. Open for a sync cancelled by logout
+  between the upload and the save.
 - **Severity:** low. Not on main.
 - **Where:** `crates/client/src/calendar_import.rs`, `sync_calendar_source`.
 - **What happens:** the raw feed upload stays in Files and counts toward quota
   when the source save never commits.
-- **Decision:**
+- **Decision:** remove the raw upload after an ambiguous save failure only
+  when an authenticated re-read confirms the old source head. Logout
+  cancellation cleanup is outside this fix.
 
 ### 123. A series ending on 9999-12-31 never expands
 
-- **Status:** fixing
+- **Status:** fixed in `90e4a4a`
 - **Severity:** low. Not on main.
 - **Where:** `crates/schedule/src/recurrence.rs`, `until_scan_bound`.
 - **What happens:** the scan bound adds a day and reaches year 10000, which the
   recurrence library refuses.
 - **Decision:** fix (Claude): clamp the bound to the end of year 9999.
 
+### 125. The revision-head doc comment describes the wrong function
+
+- **Status:** fixed in `90e4a4a`
+- **Severity:** low.
+- **Where:** `crates/server/src/routes/objects.rs`.
+- **What happens:** the comment describing the returned kind, tombstone flag
+  and head revision was attached to the function that checks a proposed head.
+- **Decision:** move the existing comment to `head_revision_for_write`.
+
+### 126. The live schedule test overflowed the default test-thread stack
+
+- **Status:** fixed in `90e4a4a`
+- **Severity:** low in tests; the same large futures sat inside every
+  operation's caller in the apps.
+- **Where:** `crates/client/src/engine.rs`, `run_work`.
+- **What happened:** `run_work` took each operation's future as a parameter of
+  an `async fn`, so the whole operation was stored inline in its caller. The
+  live test's future outgrew the 2 MiB default stack and aborted.
+- **Decision:** fix (Claude): `run_work` boxes the operation as soon as it is
+  called, so a caller holds only a pointer.
 ## Product decisions
 
 ### 25. A changed occurrence without its series rejects the whole import
@@ -1181,8 +1209,9 @@ Each entry has:
 - **Where:** `crates/client/src/calendar_import.rs`.
 - **What happens:** a pending batch resumes on every refresh and cannot be
   cancelled, and it blocks removing its source or raw file. A crash between the
-  raw-file upload and the pending manifest leaves an unreferenced file in Files
-  that nothing removes. Overrides that pointed at a purged import cannot be
+  raw-file upload and the pending manifest, including logout cancellation,
+  leaves an unreferenced file in Files that nothing removes. Overrides that
+  pointed at a purged import cannot be
   reattached.
 - **Recommendation:** a cancel action for a pending batch, cleanup of raw files
   no manifest references, and a reattach flow for overrides.
