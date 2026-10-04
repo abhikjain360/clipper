@@ -12,6 +12,80 @@ use clipper_schedule::{
     WeekdaySet, parse_ics, parse_imported_recurrence_rules,
 };
 
+#[test]
+fn a_feed_with_two_calendar_blocks_keeps_the_events_of_both() {
+    let block = |uid| {
+        format!(
+            "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:{uid}\nDTSTART:20260907T090000Z\nEND:VEVENT\nEND:VCALENDAR\n"
+        )
+    };
+    let first = block("first");
+    let second = block("second");
+    let outcome = parse_ics(
+        &format!("{first}{second}"),
+        SourceId(uuid_fixture()),
+        import_fixture(),
+    )
+    .unwrap();
+    assert_eq!(outcome.events.len(), 2);
+    assert!(outcome.skipped.is_empty());
+    let duplicated_end = format!(
+        "{}END:VEVENT\nBEGIN:VEVENT\nUID:second\nDTSTART:20260907T100000Z\nEND:VEVENT\nEND:VCALENDAR\n",
+        first.strip_suffix("END:VCALENDAR\n").unwrap()
+    );
+    assert!(parse_ics(&duplicated_end, SourceId(uuid_fixture()), import_fixture()).is_err());
+}
+
+#[test]
+fn recurrence_numbers_are_checked_after_every_property_name_separator() {
+    for separator in [":", ",X:", "=X:"] {
+        for number in ["INTERVAL=65538", "COUNT=4294967296"] {
+            let feed = format!(
+                "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:rule\nDTSTART:20260907T090000Z\nRRULE{separator}FREQ=DAILY;{number}\nEND:VEVENT\nEND:VCALENDAR\n"
+            );
+            assert!(
+                parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()).is_err(),
+                "{separator} {number}"
+            );
+        }
+    }
+}
+
+#[test]
+fn too_many_empty_values_are_refused_before_calendar_parsing() {
+    for property in ["CATEGORIES", "EXDATE"] {
+        let feed = format!(
+            "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:empty\nDTSTART:20260907T090000Z\n{property}:{}\nEND:VEVENT\nEND:VCALENDAR\n",
+            ",".repeat(500_000)
+        );
+        assert!(matches!(
+            parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()),
+            Err(clipper_schedule::IngestError::LimitExceeded(
+                "too many calendar values"
+            ))
+        ));
+    }
+}
+
+#[test]
+fn exact_windows_fixed_offset_names_import_at_their_offsets() {
+    for (name, zone) in [
+        ("UTC-11", Tz::Etc__GMTPlus11),
+        ("UTC-02", Tz::Etc__GMTPlus2),
+        ("UTC+12", Tz::Etc__GMTMinus12),
+        ("UTC+13", Tz::Etc__GMTMinus13),
+    ] {
+        let feed = format!(
+            "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:offset\nDTSTART;TZID={name}:20260907T090000\nEND:VEVENT\nEND:VCALENDAR\n"
+        );
+        let outcome = parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()).unwrap();
+        assert!(outcome.skipped.is_empty(), "{name}");
+        assert!(
+            matches!(outcome.events[0].span, ScheduleSpan::Timed { start: TimedStart::Zoned { zone: actual, .. }, .. } if actual == zone)
+        );
+    }
+}
+
 const FEED: &str = "\
 BEGIN:VCALENDAR\r\n\
 VERSION:2.0\r\n\

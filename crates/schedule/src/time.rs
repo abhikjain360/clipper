@@ -10,7 +10,9 @@
 
 use std::num::NonZeroU32;
 
-use chrono::{DateTime, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeDelta, TimeZone, Utc};
+use chrono::{
+    DateTime, Datelike, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeDelta, TimeZone, Utc,
+};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -24,11 +26,15 @@ use serde::{Deserialize, Serialize};
 pub enum TimedStart {
     /// Wall-clock time with no zone. Follows the observer, so 07:00 stays
     /// 07:00 in every zone. Alarms use this.
-    Floating(NaiveDateTime),
+    Floating(#[serde(deserialize_with = "deserialize_date")] NaiveDateTime),
     /// Wall-clock time pinned to an IANA zone. Does not follow the observer.
     /// Stores the local time rather than an instant, so a 09:00 Berlin meeting
     /// is still 09:00 after a DST transition.
-    Zoned { local: NaiveDateTime, zone: Tz },
+    Zoned {
+        #[serde(deserialize_with = "deserialize_date")]
+        local: NaiveDateTime,
+        zone: Tz,
+    },
 }
 
 impl TimedStart {
@@ -47,7 +53,11 @@ impl TimedStart {
             Self::Floating(local) => (*local, observer),
             Self::Zoned { local, zone } => (*local, *zone),
         };
-        resolve_local(zone, local).ok_or(TimeError::UnresolvableLocalTime { local, zone })
+        validate_date(&local)?;
+        let instant =
+            resolve_local(zone, local).ok_or(TimeError::UnresolvableLocalTime { local, zone })?;
+        validate_date(&instant)?;
+        Ok(instant)
     }
 }
 
@@ -64,6 +74,7 @@ pub enum ScheduleSpan {
         duration: BlockDuration,
     },
     AllDay {
+        #[serde(deserialize_with = "deserialize_date")]
         start: NaiveDate,
         days: NonZeroU32,
     },
@@ -86,6 +97,7 @@ impl ScheduleSpan {
                 )
             }
             Self::AllDay { start, days } => {
+                validate_date(start)?;
                 let begin_local = start
                     .and_hms_opt(0, 0, 0)
                     .expect("midnight is always valid");
@@ -94,6 +106,7 @@ impl ScheduleSpan {
                     .ok_or(TimeError::DateOverflow)?
                     .and_hms_opt(0, 0, 0)
                     .expect("midnight is always valid");
+                validate_date(&end_local)?;
                 TimeRange::new(
                     resolve_local(observer, begin_local).ok_or(
                         TimeError::UnresolvableLocalTime {
@@ -171,6 +184,8 @@ impl TryFrom<TimeRangeFields> for TimeRange {
 
 impl TimeRange {
     pub fn new(start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Self, TimeError> {
+        validate_date(&start)?;
+        validate_date(&end)?;
         if end <= start {
             return Err(TimeError::InvalidRange { start, end });
         }
@@ -210,17 +225,53 @@ fn resolve_local(zone: Tz, local: NaiveDateTime) -> Option<DateTime<Utc>> {
     // transitions wrong (Lord Howe), and a four-hour search ceiling cannot
     // cross Samoa's skipped date.
     const SEARCH_MINUTES: i64 = 48 * 60;
-    let before = (1..=SEARCH_MINUTES)
-        .find_map(|minutes| one_local(zone, local - TimeDelta::minutes(minutes)))?;
-    let after = (1..=SEARCH_MINUTES)
-        .find_map(|minutes| one_local(zone, local + TimeDelta::minutes(minutes)))?;
+    let before = (1..=SEARCH_MINUTES).find_map(|minutes| {
+        local
+            .checked_sub_signed(TimeDelta::minutes(minutes))
+            .and_then(|value| one_local(zone, value))
+    })?;
+    let after = (1..=SEARCH_MINUTES).find_map(|minutes| {
+        local
+            .checked_add_signed(TimeDelta::minutes(minutes))
+            .and_then(|value| one_local(zone, value))
+    })?;
     let offset_change =
         i64::from(after.offset().fix().local_minus_utc() - before.offset().fix().local_minus_utc());
     if offset_change <= 0 {
         return None;
     }
-    one_local(zone, local + TimeDelta::seconds(offset_change))
-        .map(|resolved| resolved.with_timezone(&Utc))
+    one_local(
+        zone,
+        local.checked_add_signed(TimeDelta::seconds(offset_change))?,
+    )
+    .map(|resolved| resolved.with_timezone(&Utc))
+}
+
+pub(crate) fn validate_date(value: &impl Datelike) -> Result<(), TimeError> {
+    let year = value.year();
+    if (1..=9999).contains(&year) {
+        Ok(())
+    } else {
+        Err(TimeError::YearOutOfRange(year))
+    }
+}
+
+pub(crate) fn deserialize_date<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Datelike,
+{
+    let value = T::deserialize(deserializer)?;
+    validate_date(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+pub(crate) fn local_in_zone(instant: DateTime<Utc>, zone: Tz) -> Result<NaiveDateTime, TimeError> {
+    let offset = zone.offset_from_utc_datetime(&instant.naive_utc()).fix();
+    instant
+        .naive_utc()
+        .checked_add_signed(TimeDelta::seconds(i64::from(offset.local_minus_utc())))
+        .ok_or(TimeError::DateOverflow)
 }
 
 /// Resolve a wall-clock time that exists in `zone`, taking the earlier instant
@@ -235,6 +286,8 @@ fn one_local(zone: Tz, local: NaiveDateTime) -> Option<DateTime<Tz>> {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TimeError {
+    #[error("year {0} is outside the supported range 1..=9999")]
+    YearOutOfRange(i32),
     #[error("time range start {start} must be before end {end}")]
     InvalidRange {
         start: DateTime<Utc>,

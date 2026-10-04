@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 
 mod imported_rule;
 
+use crate::time::{TimeError, deserialize_date, local_in_zone, validate_date};
+
 /// The complete repeat behaviour of a block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -43,6 +45,7 @@ impl Recurrence {
         import: ObjectId,
         uid: impl Into<String>,
     ) -> Result<Self, RecurrenceError> {
+        validate_date(&local_start)?;
         imported_rule::convert(rule.into(), local_start, import, uid.into())
     }
 }
@@ -82,7 +85,7 @@ impl ValidatedRrule {
         // One probe, in the shape expansion actually uses: a UTC wall-clock
         // DTSTART and an UNTIL rewritten to match it. Probing another shape
         // would accept rules that then fail on every expansion.
-        let probe_rule = until_wall_clock(&trimmed, Tz::UTC).0;
+        let probe_rule = until_wall_clock(&trimmed, Tz::UTC)?.0;
         let probe_start = probe_rule
             .split(';')
             .find_map(|part| {
@@ -117,42 +120,50 @@ impl ValidatedRrule {
 ///
 /// DATE and floating values keep wall-clock meaning and return no cutoff.
 /// Every other part is left alone.
-pub(crate) fn until_wall_clock(rule: &str, zone: Tz) -> (String, Option<DateTime<Utc>>) {
+pub(crate) fn until_wall_clock(
+    rule: &str,
+    zone: Tz,
+) -> Result<(String, Option<DateTime<Utc>>), TimeError> {
     let mut cutoff = None;
     let text = rule
         .split(';')
         .map(|part| match part.split_once('=') {
             Some((key, value)) if key.eq_ignore_ascii_case("UNTIL") => {
-                let (wall, instant) = until_value_wall_clock(value, zone);
+                let (wall, instant) = until_value_wall_clock(value, zone)?;
                 if instant.is_some() {
                     cutoff = instant;
                 }
-                format!("{key}={wall}")
+                Ok(format!("{key}={wall}"))
             }
-            _ => part.to_string(),
+            _ => Ok(part.to_string()),
         })
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>, TimeError>>()?
         .join(";");
-    (text, cutoff)
+    Ok((text, cutoff))
 }
 
-fn until_value_wall_clock(value: &str, zone: Tz) -> (String, Option<DateTime<Utc>>) {
+fn until_value_wall_clock(
+    value: &str,
+    zone: Tz,
+) -> Result<(String, Option<DateTime<Utc>>), TimeError> {
     if let Some(instant) = value
         .strip_suffix(['Z', 'z'])
         .and_then(|text| NaiveDateTime::parse_from_str(text, "%Y%m%dT%H%M%S").ok())
     {
         let instant = Utc.from_utc_datetime(&instant);
-        let bound = until_scan_bound(instant, zone);
-        return (bound.format("%Y%m%dT%H%M%SZ").to_string(), Some(instant));
+        let bound = until_scan_bound(instant, zone)?;
+        return Ok((bound.format("%Y%m%dT%H%M%SZ").to_string(), Some(instant)));
     }
-    if NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S").is_ok() {
-        return (format!("{value}Z"), None);
+    if let Ok(local) = NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S") {
+        validate_date(&local)?;
+        return Ok((format!("{value}Z"), None));
     }
-    if NaiveDate::parse_from_str(value, "%Y%m%d").is_ok() {
-        return (format!("{value}T235959Z"), None);
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y%m%d") {
+        validate_date(&date)?;
+        return Ok((format!("{value}T235959Z"), None));
     }
     // Not a shape this understands. Leave it for the parser to reject.
-    (value.to_string(), None)
+    Ok((value.to_string(), None))
 }
 
 /// The loose wall-clock bound `rrule` scans to for an instant `UNTIL`: the
@@ -163,9 +174,14 @@ fn until_value_wall_clock(value: &str, zone: Tz) -> (String, Option<DateTime<Utc
 /// still fails to resolve past the cutoff's wall clock is skipped without
 /// failing the expansion. Candidates that resolve are always judged on the
 /// instant, never on the wall clock.
-pub(crate) fn until_scan_bound(instant: DateTime<Utc>, zone: Tz) -> NaiveDateTime {
-    let wall = instant.with_timezone(&zone).naive_local();
-    wall.checked_add_days(Days::new(1)).unwrap_or(wall)
+pub(crate) fn until_scan_bound(
+    instant: DateTime<Utc>,
+    zone: Tz,
+) -> Result<NaiveDateTime, TimeError> {
+    let wall = local_in_zone(instant, zone)?;
+    validate_date(&instant)?;
+    wall.checked_add_days(Days::new(1))
+        .ok_or(TimeError::DateOverflow)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -545,7 +561,7 @@ pub enum RecurrenceEnd {
     /// After this many occurrences in total, counting the first.
     After(NonZeroU32),
     /// Up to and including this instant.
-    On(DateTime<Utc>),
+    On(#[serde(deserialize_with = "deserialize_date")] DateTime<Utc>),
 }
 
 impl RecurrenceEnd {
@@ -558,6 +574,8 @@ impl RecurrenceEnd {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecurrenceError {
+    #[error(transparent)]
+    Time(#[from] TimeError),
     #[error("a recurrence rule must be ASCII")]
     NonAsciiRule,
     #[error("a recurrence rule cannot be empty")]
