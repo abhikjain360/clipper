@@ -234,7 +234,7 @@ Each entry has:
 ### 36. Reconnects downloaded held payloads and invalidations reset the backoff
 
 - **Status:** payload downloads reduced in `1d519d3`; cache eligibility fixed
-  in the working tree; not committed.
+  in `7e0a7cc`.
   Invalidation backoff remains open.
 - **Severity:** medium (also costs an honest server). On main.
 - **Where:** `crates/client/src/engine.rs`, clipboard and schedule snapshots
@@ -785,7 +785,7 @@ Each entry has:
 
 ### 178. Pending calendar deltas must keep events and alarms visible
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `5884469` and `b837f14`.
 - **Severity:** high; interruption could hide all occurrences and alarms.
 - **Where:** shared calendar membership, display and alarm planning.
 - **Decision:** accept a written event listed in a pending delta when its
@@ -919,7 +919,7 @@ Each entry has:
 
 ### 167. Clipboard reconciliation could deadlock the shared store
 
-- **Status:** fixed in `df1be25`; regression strengthened in the working tree.
+- **Status:** fixed in `df1be25`; regression strengthened in `14f303a`.
 - **Severity:** high. Found in `7597c27` on a desktop with imported calendars.
 - **Where:** the clipboard snapshot's buffered futures in the client engine.
 - **What happened:** buffered cache and revision checks acquired the store's
@@ -941,7 +941,7 @@ Each entry has:
 
 ### 166. Reconnect skip checks read and hashed every held payload
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `7597c27`.
 - **Severity:** medium. Found in `7e0a7cc`.
 - **Where:** local store cache eligibility and calendar source reuse.
 - **What happened:** every reconnect loaded and hashed held payload ciphertext
@@ -1014,7 +1014,7 @@ Each entry has:
 
 ### 158. A stale keychain copy could restore a different account
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `b417e0d`.
 - **Severity:** medium. Found in `39a94d2`.
 - **Where:** daemon session store and non-secret profile.
 - **What happened:** protected credentials for account A could survive failed
@@ -1027,7 +1027,7 @@ Each entry has:
 
 ### 159. A failed cache hydration could hide step timers from the first alarm plan
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `b417e0d`.
 - **Severity:** low. Found in `39a94d2`.
 - **Where:** client authentication and cached document publication.
 - **What happened:** the state notification preceded loading held recipes. If
@@ -1038,7 +1038,7 @@ Each entry has:
 
 ### 160. A transient keychain write failure disabled an otherwise valid saved session
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `b417e0d`.
 - **Severity:** low. Found in `39a94d2`.
 - **Where:** daemon session confirmation persistence.
 - **What happened:** a locked store or denied prompt at the six-hour write set
@@ -1049,7 +1049,7 @@ Each entry has:
 
 ### 161. The clipboard QA option rejected numeric environment values
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `b417e0d`.
 - **Severity:** low. Found in `39a94d2`.
 - **Where:** daemon option parsing and `AGENTS.md`.
 - **What happened:** `CLIPPER_DISABLE_CLIPBOARD_WATCHING=1` failed parsing.
@@ -1655,7 +1655,7 @@ Each entry has:
 
 ### 152. Concurrent occurrence overrides hid the whole series
 
-- **Status:** fixed in the working tree.
+- **Status:** fixed in `2549943`.
 - **Severity:** high (P1). On main in `607f56a`.
 - **Where:** `crates/client/src/schedule_changes.rs`,
   `crates/client/src/schedule_context.rs`, `crates/client/src/local_store.rs`.
@@ -1672,7 +1672,7 @@ Each entry has:
 
 ### 153. Deleting a series left its occurrence overrides live
 
-- **Status:** fixed in the working tree.
+- **Status:** fixed in `2549943`.
 - **Severity:** medium. On main in `607f56a`.
 - **Where:** `crates/client/src/engine.rs`, `delete_schedule_object_inner`;
   `crates/client/src/schedule_changes.rs`, restore and override cleanup.
@@ -1875,7 +1875,7 @@ Each entry has:
 
 ### 150. The gym starter library is written by the first device that opens the gym
 
-- **Status:** fixed in the working tree.
+- **Status:** fixed in `e8870d3`.
 - **Where:** `crates/gym/src/starter.rs`,
   `crates/mobile-uniffi/src/gym.rs` (`gym_seed_starter_library`),
   `crates/client/src/app_data_sync.rs` (`app_data_downloaded`).
@@ -1950,7 +1950,7 @@ Each entry has:
 
 ### 140. Desktop break reminders need an app that stays running
 
-- **Status:** decided; implemented in the working tree.
+- **Status:** decided; implemented in `5240cb0`.
 - **Where:** `web/src-tauri/src/lib.rs`, `web/src-tauri/src/notifications.rs`.
 - **What happens:** closing the last desktop window previously exited Tauri.
   The daemon is a plain helper executable, including in development, and its
@@ -1969,7 +1969,7 @@ Each entry has:
 
 ### 141. Alarm targets use registered device IDs
 
-- **Status:** decided; implemented in the working tree.
+- **Status:** decided; implemented in `5240cb0`.
 - **Where:** `crates/schedule/src/alarm.rs`, `crates/client/src/engine.rs`,
   `web/src-tauri/src/alarms.rs`, `web/src/SchedulePanel.tsx`, `crates/cli`.
 - **Decision:** an absent target keeps alarms on all Android phones. A target
@@ -1988,7 +1988,7 @@ Each entry has:
 
 ### 142. Desktop notification startup and delivery had regressions
 
-- **Status:** fixed in the working tree.
+- **Status:** fixed in `5240cb0`.
 - **Where:** `web/src-tauri/src/lib.rs`, `web/src-tauri/src/alarms.rs`,
   `crates/daemon-types/src/protocol.rs`, `crates/app-types/src/lib.rs`.
 - **What happened:** desktop startup read managed state before Tauri's Ready
