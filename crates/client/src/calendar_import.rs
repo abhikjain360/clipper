@@ -61,13 +61,16 @@ impl SyncEngine {
         let cached: Option<Vec<u8>> = None;
         let (ciphertext, downloaded) = match cached {
             Some(bytes) if verify_payload_hash(payload, &bytes).is_ok() => (bytes, false),
-            _ => (
-                self.api_for_session(epoch)
-                    .await?
-                    .download_object_payload(&id, &payload.id.to_string(), payload.ciphertext_size)
-                    .await?,
-                true,
-            ),
+            _ => match self
+                .api_for_session(epoch)
+                .await?
+                .download_object_payload(&id, &payload.id.to_string(), payload.ciphertext_size)
+                .await
+            {
+                Ok(bytes) => (bytes, true),
+                Err(ClientError::Api { status: 404, .. }) => return Ok(None),
+                Err(error) => return Err(error),
+            },
         };
         verify_payload_hash(payload, &ciphertext)?;
         let key_guard = self.encryption_key.read().await;
