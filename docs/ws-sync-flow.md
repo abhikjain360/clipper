@@ -243,6 +243,9 @@ A later copy is kept, even if its content is the same.
 The Mac watcher persists the last captured or installed change count and boot
 time separately from ownership. It skips that pasteboard entry after restart
 or login and waits for the profile cache and ownership to load before polling.
+Captured entries are saved only after a successful upload. Failed uploads are
+retried while the pasteboard still holds that entry. Sending an already captured
+entry returns its existing item ID.
 Only a local purge or an explicit delete received live or during reconciliation
 clears an owned OS clipboard entry. TTL expiry and the newest-100 limit do not.
 

@@ -2485,6 +2485,14 @@ Each entry has:
 - **Handling:** disable component analysis. Release builds require the clipboard
   module's release lint, with NewApi fatal and errors aborting the build.
 
+### 196. Failed Mac clipboard captures were permanently skipped
+
+- **Status:** fixed, uncommitted
+- **Where:** `crates/client/src/engine.rs` and `clipboard_watcher_macos.rs`.
+- **Fix:** save captured counts only after successful uploads and retry failed
+  captures without a new pasteboard change. Sending an already captured entry
+  returns its owned item ID. Deleted entries retain their capture checkpoint.
+
 ## Docs
 
 ### 29. Doc claims the code did not satisfy

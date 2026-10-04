@@ -16,6 +16,7 @@ use objc2_foundation::NSString;
 use tracing::{debug, info, warn};
 
 use crate::{
+    api_client::ClientError,
     clipboard_privacy,
     engine::{MAX_CLIPBOARD_PAYLOAD_BYTES, SyncEngine},
 };
@@ -59,50 +60,54 @@ fn run_clipboard_watcher(rt: tokio::runtime::Handle, engine: Arc<SyncEngine>) {
     loop {
         std::thread::sleep(Duration::from_millis(500));
 
-        // Check if still logged in
-        let capture = rt.block_on(engine.clipboard_capture_state());
-        let Some(capture) = capture else {
-            // Stay alive but idle rather than stopping. The watcher thread runs
-            // for the lifetime of the process and is login-gated, which removes a
-            // start/stop race on WATCHER_STARTED: a login landing between this
-            // check and a `store(false)` could otherwise observe the flag still
-            // set, skip starting a new watcher, and then the exiting thread would
-            // clear it — leaving the user logged in with no watcher. Reset the
-            // change counter so a later login re-reads the pasteboard fresh.
-            last_change_count = -1;
-            continue;
-        };
-
         let pasteboard = NSPasteboard::generalPasteboard();
-        if skip_captured_pasteboard(&pasteboard, capture, &mut last_change_count) {
-            continue;
-        }
-
-        match read_clipboard(&mut last_change_count) {
-            Some(payload) if !payload.bytes.is_empty() => {
-                debug!(
-                    mime_type = payload.mime_type,
-                    bytes = payload.bytes.len(),
-                    "Detected macOS clipboard change",
-                );
-                let engine = engine.clone();
-                rt.block_on(async {
-                    match engine
-                        .capture_macos_clipboard_payload(
-                            payload.count,
-                            payload.mime_type,
-                            &payload.bytes,
-                        )
-                        .await
-                    {
-                        Ok(id) => info!(clipboard_id = %id, "Uploaded macOS clipboard change"),
-                        Err(e) => warn!("Clipboard upload failed: {}", e),
-                    }
-                });
-            }
-            _ => {}
+        match rt.block_on(poll_pasteboard(
+            &engine,
+            &pasteboard,
+            &mut last_change_count,
+        )) {
+            Ok(Some(id)) => info!(clipboard_id = %id, "Uploaded macOS clipboard change"),
+            Ok(None) => {}
+            Err(error) => warn!("Clipboard upload failed: {}", error),
         }
     }
+}
+
+pub(crate) async fn poll_pasteboard(
+    engine: &SyncEngine,
+    pasteboard: &NSPasteboard,
+    last_change_count: &mut isize,
+) -> Result<Option<String>, ClientError> {
+    let Some(capture) = engine.clipboard_capture_state().await else {
+        *last_change_count = -1;
+        return Ok(None);
+    };
+    if skip_captured_pasteboard(pasteboard, capture, last_change_count) {
+        return Ok(None);
+    }
+    let Some(payload) = read_pasteboard(pasteboard, last_change_count) else {
+        return Ok(None);
+    };
+    if payload.bytes.is_empty() {
+        return Ok(None);
+    }
+    debug!(
+        mime_type = payload.mime_type,
+        bytes = payload.bytes.len(),
+        "Detected macOS clipboard change",
+    );
+    let result = engine
+        .capture_macos_clipboard_payload_if_current(
+            payload.count,
+            payload.mime_type,
+            &payload.bytes,
+            || pasteboard.changeCount(),
+        )
+        .await;
+    if result.is_err() {
+        *last_change_count = -1;
+    }
+    result
 }
 
 fn skip_captured_pasteboard(

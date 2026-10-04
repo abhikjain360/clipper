@@ -2836,6 +2836,183 @@ async fn live_clipboard_purge_removes_payloads_online_and_after_reconciliation()
     offline.stop_session_work().await;
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_clipboard_macos_offline_copy_uploads_after_reconnect_and_restart() {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+    use objc2_foundation::NSString;
+
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let url = format!("http://{address}");
+    let registered = register_proxy_engine(&url, &temp.path().join("registration")).await;
+    let data = temp.path().join("client");
+    let engine = copy_session(&registered, &url, &data).await;
+    engine
+        .show_cached_state(
+            engine
+                .local_store
+                .visible_state(RECENT_CLIPBOARD_LIMIT)
+                .await,
+        )
+        .await;
+    let name = NSString::from_str(&format!("clipper-test-{}", uuid::Uuid::now_v7()));
+    let pasteboard = NSPasteboard::pasteboardWithName(&name);
+    let mut seen = -1;
+    for text in ["offline copy", "offline copy before restart"] {
+        pasteboard.clearContents();
+        assert!(
+            pasteboard
+                .setString_forType(&NSString::from_str(text), unsafe { NSPasteboardTypeString })
+        );
+        let previous = engine.local_store.clipboard_capture().await.unwrap();
+        engine.offline.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            crate::clipboard_watcher::poll_pasteboard(&engine, &pasteboard, &mut seen).await,
+            Err(ClientError::Offline)
+        ));
+        assert_eq!(
+            engine.local_store.clipboard_capture().await.unwrap(),
+            previous
+        );
+        assert_eq!(
+            engine.local_store.clipboard_ownership().await.unwrap(),
+            *engine.macos_clipboard.lock().await
+        );
+        let resumed = if text.ends_with("restart") {
+            let resumed = copy_session(&engine, &url, &data).await;
+            let key = resumed.current_encryption_key().await.unwrap();
+            resumed
+                .show_cached_state(
+                    resumed
+                        .local_store
+                        .hydrate_ciphertext_cache(&key, RECENT_CLIPBOARD_LIMIT)
+                        .await,
+                )
+                .await;
+            seen = -1;
+            resumed
+        } else {
+            engine.reconnect_now().await.unwrap();
+            Arc::clone(&engine)
+        };
+        let id = crate::clipboard_watcher::poll_pasteboard(&resumed, &pasteboard, &mut seen)
+            .await
+            .unwrap()
+            .expect("the unchanged offline copy uploads");
+        assert_eq!(
+            resumed.clipboard_payload(&id).await.unwrap().bytes,
+            text.as_bytes()
+        );
+        assert_eq!(
+            resumed.local_store.clipboard_capture().await.unwrap(),
+            Some((
+                pasteboard.changeCount(),
+                crate::clipboard_watcher::boot_time().unwrap()
+            ))
+        );
+        assert!(
+            crate::clipboard_watcher::poll_pasteboard(&resumed, &pasteboard, &mut seen)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        resumed.delete_clipboard(&id).await.unwrap();
+        seen = -1;
+        assert!(
+            crate::clipboard_watcher::poll_pasteboard(&resumed, &pasteboard, &mut seen)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resumed
+                .capture_macos_clipboard_payload_if_current(
+                    pasteboard.changeCount(),
+                    "text/plain",
+                    text.as_bytes(),
+                    || pasteboard.changeCount()
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resumed
+                .api
+                .list_objects(Some(ObjectKind::Clipboard), None, None, None)
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        if !Arc::ptr_eq(&engine, &resumed) {
+            resumed.stop_session_work().await;
+        }
+    }
+    pasteboard.clearContents();
+    registered.stop_session_work().await;
+    engine.stop_session_work().await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_clipboard_macos_send_already_captured_content_returns_existing_item() {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+    use objc2_foundation::NSString;
+
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let url = format!("http://{address}");
+    let engine = register_proxy_engine(&url, &temp.path().join("client")).await;
+    let name = NSString::from_str(&format!("clipper-test-{}", uuid::Uuid::now_v7()));
+    let pasteboard = NSPasteboard::pasteboardWithName(&name);
+    pasteboard.clearContents();
+    assert!(
+        pasteboard.setString_forType(&NSString::from_str("captured content"), unsafe {
+            NSPasteboardTypeString
+        })
+    );
+    let id = crate::clipboard_watcher::poll_pasteboard(&engine, &pasteboard, &mut -1)
+        .await
+        .unwrap()
+        .unwrap();
+    engine
+        .send_clipboard_payload("text/plain", b"newer item")
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            engine
+                .capture_macos_clipboard_payload_if_current(
+                    pasteboard.changeCount(),
+                    "text/plain",
+                    b"captured content",
+                    || pasteboard.changeCount(),
+                )
+                .await
+                .unwrap(),
+            Some(id.clone())
+        );
+    }
+    assert_eq!(
+        engine
+            .api
+            .list_objects(Some(ObjectKind::Clipboard), None, None, None)
+            .await
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    pasteboard.clearContents();
+    engine.stop_session_work().await;
+}
+
 async fn copy_session(engine: &SyncEngine, url: &str, data: &Path) -> Arc<SyncEngine> {
     let copy = SyncEngine::new_with_data_dir(url, data);
     copy.api.restore_token(engine.api.token().unwrap());

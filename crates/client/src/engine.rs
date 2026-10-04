@@ -894,8 +894,8 @@ impl SyncEngine {
 
     #[cfg(target_os = "macos")]
     async fn remember_clipboard_capture(&self, count: isize, boot: i64) -> Result<(), ClientError> {
-        *self.macos_capture.lock().await = Some((count, boot));
         self.local_store.save_clipboard_capture(count, boot).await?;
+        *self.macos_capture.lock().await = Some((count, boot));
         Ok(())
     }
 
@@ -905,13 +905,30 @@ impl SyncEngine {
         count: isize,
         mime_type: &str,
         data: &[u8],
-    ) -> Result<String, ClientError> {
+    ) -> Result<Option<String>, ClientError> {
+        self.capture_macos_clipboard_payload_if_current(
+            count,
+            mime_type,
+            data,
+            crate::clipboard_watcher::change_count,
+        )
+        .await
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) async fn capture_macos_clipboard_payload_if_current(
+        &self,
+        count: isize,
+        mime_type: &str,
+        data: &[u8],
+        current_count: impl FnOnce() -> isize,
+    ) -> Result<Option<String>, ClientError> {
         let _write = self.clipboard_write.lock().await;
         let epoch = self.history_epoch.load(Ordering::SeqCst);
         if !self.clipboard_ready.load(Ordering::SeqCst) {
             return Err(ClientError::Other("Clipboard cache is loading".into()));
         }
-        if crate::clipboard_watcher::change_count() != count {
+        if current_count() != count {
             return Err(ClientError::Other(
                 "Clipboard changed before capture".into(),
             ));
@@ -919,17 +936,24 @@ impl SyncEngine {
         let boot = crate::clipboard_watcher::boot_time()
             .ok_or_else(|| ClientError::Other("Clipboard boot time is unavailable".into()))?;
         if *self.macos_capture.lock().await == Some((count, boot)) {
-            return Err(ClientError::Other("Clipboard already captured".into()));
+            return Ok(self
+                .macos_clipboard
+                .lock()
+                .await
+                .as_ref()
+                .filter(|(_, held_count, held_boot)| *held_count == count && *held_boot == boot)
+                .map(|(id, _, _)| id.clone()));
         }
-        self.remember_clipboard_capture(count, boot).await?;
         let id = self.capture_clipboard_payload(mime_type, data).await?;
         let _active = self.hold_session_for_write(epoch).await?;
         let mut held = self.macos_clipboard.lock().await;
-        *held = Some((id.clone(), count, boot));
+        let ownership = (id.clone(), count, boot);
         self.local_store
-            .save_clipboard_ownership(held.as_ref())
+            .save_clipboard_ownership(Some(&ownership))
             .await?;
-        Ok(id)
+        *held = Some(ownership);
+        self.remember_clipboard_capture(count, boot).await?;
+        Ok(Some(id))
     }
 
     pub async fn send_current_clipboard(&self) -> Result<Option<String>, ClientError> {
@@ -944,7 +968,6 @@ impl SyncEngine {
             }
             self.capture_macos_clipboard_payload(count, mime_type, &bytes)
                 .await
-                .map(Some)
         }
         #[cfg(target_os = "linux")]
         {
