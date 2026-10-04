@@ -705,7 +705,7 @@ Each entry has:
 
 ### 117. Logout lets the old session's work keep running
 
-- **Status:** fixing
+- **Status:** fixed in `d8372c0`
 - **Severity:** high as a class. Five review passes found bugs of this shape
   (entries 3 to 6 among them); each was patched with a session check.
 - **Where:** `crates/client/src/engine.rs` and every shell: the daemon, wasm,
@@ -891,7 +891,7 @@ Each entry has:
 
 ### 74. Logout waits for an in-flight calendar sync
 
-- **Status:** open; checked in code
+- **Status:** fixed in `d8372c0`: a calendar sync is listed as running work, and Cancel stops it
 - **Severity:** low. Not on main.
 - **Where:** `crates/client/src/engine.rs`, `calendar_write` held across the
   feed fetch.
