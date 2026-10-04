@@ -150,19 +150,20 @@ export function SchedulePanel({
     const resizeSidebar = (width: number) =>
         setSidebarWidth(Math.round(Math.max(300, Math.min(maxSidebarWidth, width))));
     const [editing, setEditing] = useState<ScheduleItemView | null>(null);
-    const viewKey = `clipper.schedule.view:${encodeURIComponent(state.session?.server_url ?? "")}:${encodeURIComponent(state.session?.username ?? "")}`;
+    const viewKey = `clipper.schedule.mode:${encodeURIComponent(state.session?.server_url ?? "")}:${encodeURIComponent(state.session?.username ?? "")}`;
     const [mode, setMode] = useState<"calendar" | "next">(() => {
         try {
-            return localStorage.getItem(viewKey) === "next" ? "next" : "calendar";
+            return localStorage.getItem(viewKey) === "calendar" ? "calendar" : "next";
         } catch {
-            return "calendar";
+            return "next";
         }
     });
-    useEffect(() => {
+    const chooseMode = (value: "calendar" | "next") => {
+        setMode(value);
         try {
-            localStorage.setItem(viewKey, mode);
+            localStorage.setItem(viewKey, value);
         } catch {}
-    }, [viewKey, mode]);
+    };
     const [now, setNow] = useState(Date.now);
     useEffect(() => {
         if (mode !== "next") return;
@@ -288,11 +289,11 @@ export function SchedulePanel({
                                 disableDeactivation
                                 aria-label="Schedule view"
                                 onValueChange={(value) => {
-                                    if (value === "calendar" || value === "next") setMode(value);
+                                    if (value === "calendar" || value === "next") chooseMode(value);
                                 }}
                             >
                                 <XStack>
-                                    {(["calendar", "next"] as const).map((option) => (
+                                    {(["next", "calendar"] as const).map((option) => (
                                         <ToggleGroup.Item
                                             activeStyle={{}}
                                             asChild
