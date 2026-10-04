@@ -2,6 +2,7 @@ use clipper_gym::{
     BodyWeight, ConflictRule, Exercise, Recovery, Session, Set, ValidationError, WorkoutTemplate,
 };
 use clipper_kitchen::{CookingSession, Equipment, KitchenValue, PantryItem, Plan, Recipe};
+use clipper_schedule::DoneMark;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use uuid::Uuid;
@@ -40,6 +41,23 @@ impl Collection {
 }
 
 pub(crate) const COLLECTIONS: &[Collection] = &[
+    Collection {
+        name: DoneMark::COLLECTION_NAME,
+        schema_version: 1,
+        storage: Storage::Rows(ConflictRule::LastWriteWins),
+        indexed_fields: &["item_id", "occurrence_key", "done"],
+        checked_value: |value| {
+            let mark: DoneMark = decoded(&value)?;
+            let recurrence_id = crate::schedule::parse_occurrence_key(&mark.occurrence_key)
+                .ok_or_else(|| "invalid occurrence key".to_string())?;
+            if crate::schedule::occurrence_key(&recurrence_id) != mark.occurrence_key {
+                return Err("occurrence key must use its canonical form".into());
+            }
+            serde_json::to_value(mark).map_err(|error| error.to_string())
+        },
+        fixed_row_id: Some(|value| decoded::<DoneMark>(value).map(|mark| mark.row_id())),
+        merge: None,
+    },
     Collection {
         name: Exercise::COLLECTION_NAME,
         schema_version: 1,

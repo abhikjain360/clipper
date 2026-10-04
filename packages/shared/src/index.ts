@@ -1,4 +1,6 @@
 export { calendarRefreshDue, calendarSyncLabel } from "./calendar";
+export { occurrenceId, occurrenceHidden, loadDoneMarks, writeDoneMark } from "./schedule-done";
+export type { DoneMark } from "./schedule-done";
 export {
   palette,
   statusSurfaces,

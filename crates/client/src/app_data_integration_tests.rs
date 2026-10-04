@@ -28,6 +28,57 @@ const TABLES: [&str; 6] = [
     "gym.recovery",
 ];
 
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn schedule_done_marks_sync_and_undo_wins_an_offline_conflict() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data = temp.path();
+    let (_server, address) = start_server(data).await;
+    let url = format!("http://{address}");
+    let proxy = TestProxy::start(address).await;
+    let phone = signed_in(&url, data, "phone", true).await;
+    let desktop = signed_in(&proxy.url, data, "desktop", false).await;
+    let item_id = Uuid::new_v4();
+    let mark = json!({"item_id": item_id, "occurrence_key": "date:2026-10-08", "done": true});
+    let id = write(&phone, "schedule.done", None, mark.clone()).await;
+    let expected: clipper_schedule::DoneMark = serde_json::from_value(mark.clone()).unwrap();
+    assert_eq!(id, expected.row_id().to_string());
+    eventually("the desktop receives the phone's done mark", async || {
+        field(&desktop, "schedule.done", &id, "done").await == json!(1)
+    })
+    .await;
+    let next = write(
+        &phone,
+        "schedule.done",
+        None,
+        json!({"item_id": item_id, "occurrence_key": "date:2026-10-09", "done": true}),
+    )
+    .await;
+    assert_ne!(id, next);
+    proxy.go_offline(&desktop).await;
+    write(&phone, "schedule.done", None, mark.clone()).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let undo = json!({"item_id": item_id, "occurrence_key": "date:2026-10-08", "done": false});
+    assert_eq!(write(&desktop, "schedule.done", None, undo).await, id);
+    proxy.go_online();
+    eventually(
+        "undo reaches both devices and wins the older mark",
+        async || {
+            field(&phone, "schedule.done", &id, "done").await == json!(0)
+                && field(&desktop, "schedule.done", &id, "done").await == json!(0)
+                && pending(&desktop).await == 0
+        },
+    )
+    .await;
+    assert_eq!(
+        field(&phone, "schedule.done", &next, "done").await,
+        json!(1)
+    );
+    phone.stop_session_work().await;
+    desktop.stop_session_work().await;
+}
+
 type HeldSends = tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>;
 
 struct TestProxy {

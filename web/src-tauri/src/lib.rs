@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 mod alarms;
+mod app_data;
 #[cfg(any(target_os = "macos", test))]
 mod break_reminders;
 mod daemon_client;
@@ -169,6 +170,8 @@ pub fn run() {
             update_schedule_item,
             delete_schedule_object,
             expand_schedule,
+            app_data::query_app_data,
+            app_data::write_app_data,
             start_actual,
             stop_actual,
             actuals_between,

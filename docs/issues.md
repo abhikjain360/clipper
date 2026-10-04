@@ -766,6 +766,19 @@ Each entry has:
 
 ## Bugs
 
+### 184. The reconnect snapshot test exceeds its deadline during local checks
+
+- **Status:** open.
+- **Severity:** low; can fail the workspace test command.
+- **Where:** `crates/client/src/sync_request_tests.rs`,
+  `reconnect_snapshots_of_held_objects_request_only_list_pages`.
+- **What happens:** the schedule snapshot of 501 objects can exceed its
+  15-second deadline during local Mac workspace checks with concurrent builds.
+  It failed in both a default run and a run limited to two test threads, then
+  passed in isolation in eight seconds. A later complete workspace run with
+  two test threads also passed.
+- **Decision:** investigate the snapshot cost and test deadline separately.
+
 ### 183. Both apps had dim text and hard-to-see controls
 
 - **Status:** fixed in the working tree; uncommitted

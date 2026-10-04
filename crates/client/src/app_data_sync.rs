@@ -750,7 +750,13 @@ fn row_id_for(
             "a delete needs a row id".into(),
         )),
         (Some(id), _) if !writes_value => Ok(id),
-        (Some(id), Some(derived)) if id == derived || requested_row_exists => Ok(id),
+        (Some(id), Some(derived))
+            if id == derived
+                || (requested_row_exists
+                    && collection.name != clipper_schedule::DoneMark::COLLECTION_NAME) =>
+        {
+            Ok(id)
+        }
         (Some(_), Some(derived)) => Err(ClientError::InvalidArgument(format!(
             "{} rows use the id derived from their value, {derived}",
             collection.name
@@ -846,4 +852,40 @@ fn check_page(page: &AppDataChangesPage, after: i64) -> Result<(), ClientError> 
 
 fn table_error(error: rusqlite::Error) -> ClientError {
     ClientError::LocalStore(format!("app-data tables: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn done_marks_keep_their_occurrence_identity_even_when_the_row_exists() {
+        let collection =
+            collections::collection(clipper_schedule::DoneMark::COLLECTION_NAME).unwrap();
+        let mark = clipper_schedule::DoneMark {
+            item_id: Uuid::new_v4(),
+            occurrence_key: "date:2026-10-08".into(),
+            done: true,
+        };
+        let id = mark.row_id();
+        assert_eq!(
+            row_id_for(collection, None, Some(id), true, false).unwrap(),
+            id
+        );
+        assert_eq!(
+            row_id_for(collection, Some(id), Some(id), true, true).unwrap(),
+            id
+        );
+        let mut other = mark;
+        other.occurrence_key = "date:2026-10-09".into();
+        assert!(row_id_for(collection, Some(id), Some(other.row_id()), true, true).is_err());
+        assert!(
+            (collection.checked_value)(serde_json::json!({
+                "item_id": other.item_id,
+                "occurrence_key": "invalid",
+                "done": true,
+            }))
+            .is_err()
+        );
+    }
 }

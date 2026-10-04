@@ -1,4 +1,11 @@
-import { palette, statusSurfaces } from "@clipper/shared";
+import {
+  palette,
+  statusSurfaces,
+  occurrenceId,
+  occurrenceHidden,
+  loadDoneMarks,
+  writeDoneMark,
+} from "@clipper/shared";
 import {
   AlarmClock,
   Calendar,
@@ -793,6 +800,8 @@ function SchedulePanel({
   const [now, setNow] = useState(Date.now);
   const [occurrences, setOccurrences] = useState<OccurrenceView[]>([]);
   const [kitchenPlans, setKitchenPlans] = useState<KitchenPlan[]>([]);
+  const [doneMarks, setDoneMarks] = useState<Set<string>>(new Set());
+  const [showDone, setShowDone] = useState<Set<string>>(new Set());
   const [actuals, setActuals] = useState<ActualView[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -822,7 +831,7 @@ function SchedulePanel({
     const generation = ++loadGeneration.current;
     setLoading(true);
     try {
-      const [expanded, recorded, plans] = await Promise.all([
+      const [expanded, recorded, plans, marks] = await Promise.all([
         backend.expandSchedule(from, to, zone),
         backend.actualsBetween(from, to),
         backend
@@ -832,6 +841,7 @@ function SchedulePanel({
             if (generation === loadGeneration.current) onError(formatBackendError(caught));
             return [];
           }),
+        loadDoneMarks(backend),
       ]);
       if (generation !== loadGeneration.current) return;
       expanded.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
@@ -839,6 +849,7 @@ function SchedulePanel({
       setOccurrences(expanded);
       setKitchenPlans(plans);
       setActuals(recorded);
+      setDoneMarks(marks);
     } catch (caught) {
       if (generation === loadGeneration.current) onError(formatBackendError(caught));
     } finally {
@@ -876,6 +887,28 @@ function SchedulePanel({
       await action();
       setNow(Date.now());
       onState(await backend.getState());
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  async function markOccurrence(occurrence: OccurrenceView, done: boolean) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    onError(null);
+    try {
+      await writeDoneMark(backend, occurrence, done);
+      setDoneMarks((current) => {
+        const next = new Set(current);
+        if (done) next.add(occurrenceId(occurrence));
+        else next.delete(occurrenceId(occurrence));
+        return next;
+      });
+      await loadSchedule();
     } catch (caught) {
       onError(formatBackendError(caught));
     } finally {
@@ -931,6 +964,14 @@ function SchedulePanel({
               overlapsScheduleDay(occurrence, day, now),
             );
             const recorded = actuals.filter((actual) => overlapsScheduleDay(actual, day, now));
+            const key = day.start.toISOString();
+            const hidden = planned.filter((occurrence) =>
+              occurrenceHidden(occurrence, doneMarks, now),
+            );
+            const visible = planned.filter(
+              (occurrence) => !occurrenceHidden(occurrence, doneMarks, now),
+            );
+            const shown = showDone.has(key) ? [...visible, ...hidden] : visible;
             return (
               <ListCard key={day.start.toISOString()}>
                 <YStack gap="$3">
@@ -943,13 +984,17 @@ function SchedulePanel({
                       timeZone: zone,
                     })}
                   </Text>
-                  {planned.length === 0 && !loading && (
+                  {shown.length === 0 && !loading && (
                     <Paragraph size="$2" color={palette.secondary}>
                       Nothing scheduled
                     </Paragraph>
                   )}
-                  {planned.map((occurrence) => (
-                    <YStack key={`${occurrence.item_id}:${occurrence.occurrence_key}`} gap="$1">
+                  {shown.map((occurrence) => (
+                    <YStack
+                      key={occurrenceId(occurrence)}
+                      gap="$1"
+                      opacity={occurrenceHidden(occurrence, doneMarks, now) ? 0.65 : 1}
+                    >
                       <Text color={occurrence.cancelled ? palette.secondary : undefined}>
                         {occurrence.title}
                       </Text>
@@ -988,24 +1033,53 @@ function SchedulePanel({
                             </Text>
                           </Button>
                         ))}
-                      {occurrence.cancelled ? (
-                        <Text fontSize={12} color={palette.danger}>
-                          Cancelled
-                        </Text>
-                      ) : (
+                      <XStack gap="$2" items="center">
+                        {occurrence.cancelled ? (
+                          <Text fontSize={12} color={palette.danger}>
+                            Cancelled
+                          </Text>
+                        ) : (
+                          <Button
+                            theme="blue"
+                            size="$3"
+                            disabled={busy}
+                            onPress={() =>
+                              void changeTimer(() => backend.startActual(occurrence.plan_context))
+                            }
+                          >
+                            Start
+                          </Button>
+                        )}
                         <Button
-                          theme="blue"
                           size="$3"
                           disabled={busy}
                           onPress={() =>
-                            void changeTimer(() => backend.startActual(occurrence.plan_context))
+                            void markOccurrence(
+                              occurrence,
+                              !doneMarks.has(occurrenceId(occurrence)),
+                            )
                           }
                         >
-                          Start
+                          {doneMarks.has(occurrenceId(occurrence)) ? "Undo" : "Done"}
                         </Button>
-                      )}
+                      </XStack>
                     </YStack>
                   ))}
+                  <Button
+                    size="$3"
+                    aria-pressed={showDone.has(key)}
+                    theme={showDone.has(key) ? "blue" : undefined}
+                    onPress={() =>
+                      setShowDone((current) => {
+                        const next = new Set(current);
+                        if (next.has(key)) next.delete(key);
+                        else next.add(key);
+                        return next;
+                      })
+                    }
+                  >
+                    Show done ({hidden.length})
+                  </Button>
                   <Text fontWeight="600" color={palette.secondary}>
                     Recorded time
                   </Text>

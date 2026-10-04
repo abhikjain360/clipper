@@ -427,6 +427,46 @@ quotas. Updating or deleting an existing row does not consume another row.
 The POST body limit is 200 times the configured ciphertext cap plus 64 KiB
 for the batch's remaining fields.
 
+## Schedule done marks
+
+`schedule.done` is a row collection with last-write-wins conflicts and schema
+version 1. Each value has this shape:
+
+```json
+{
+  "item_id": "019a6312-6680-7000-8000-000000000001",
+  "occurrence_key": "date:2026-10-08",
+  "done": true
+}
+```
+
+`item_id` is the occurrence's stable schedule series id or imported event id.
+`occurrence_key` is the canonical key returned by schedule expansion: the
+original recurrence id, including when an override moves the occurrence. The
+row id is UUIDv5 with `item_id` as its namespace and the UTF-8 occurrence key as
+its name. Devices writing the same occurrence therefore write the same row.
+Titles, source names, resolved start/end times, timezone, plan context and
+object revisions are not part of its key. Other occurrences have other rows.
+
+Marking Done writes `done: true`; Undo writes `done: false` to the same row.
+Do not delete a row to undo it: app-data deletes are permanent. The collection
+indexes `item_id`, `occurrence_key` and `done`.
+
+The phone schedule list and desktop Next view hide an occurrence when its
+mark is true or its end time is at or before the current clock time. Starting
+does not hide it. Each day's Show done toggle includes both marked and ended
+occurrences. Undo only removes the explicit mark; an ended occurrence remains
+in Show done. The desktop calendar dims those same occurrences. These display
+rules do not alter alarms, schedule definitions or recorded time.
+
+Local agents can read marks with
+`clipper data query 'SELECT * FROM schedule.done'` and set them with
+`clipper data write schedule.done`, passing the JSON value above on stdin and
+no row id. Set `done` to false to undo a mark. The collection derives the row id
+for both writes. An explicit row id must match the value's occurrence, even
+when editing an existing row. The browser's existing lack of app-data support
+also applies to done marks.
+
 ## Gym collections
 
 The gym logger is the first app on app data. Its collections:

@@ -1,5 +1,13 @@
 import { Button } from "./tamagui.config";
-import { palette, scheduleColors, statusSurfaces } from "@clipper/shared";
+import {
+    palette,
+    scheduleColors,
+    statusSurfaces,
+    occurrenceId,
+    occurrenceHidden,
+    loadDoneMarks,
+    writeDoneMark,
+} from "@clipper/shared";
 import { CalendarDatePicker } from "./CalendarDatePicker";
 import { calendarWindow, movePeriod, periodStart, type CalendarView } from "./calendar-view";
 import { EventHover } from "./EventHover";
@@ -167,7 +175,6 @@ export function SchedulePanel({
     };
     const [now, setNow] = useState(Date.now);
     useEffect(() => {
-        if (mode !== "next") return;
         const update = () => setNow(Date.now());
         update();
         const timer = setInterval(update, 1000);
@@ -178,7 +185,7 @@ export function SchedulePanel({
             document.removeEventListener("visibilitychange", update);
             window.removeEventListener("focus", update);
         };
-    }, [mode]);
+    }, []);
     const today = startOfDay(new Date(now)).getTime();
     const [view, setView] = useState<CalendarView>("week");
     const [selectedDate, setSelectedDate] = useState(() => startOfDay(new Date()));
@@ -195,9 +202,25 @@ export function SchedulePanel({
     const [loading, setLoading] = useState(false);
     const loadGeneration = useRef(0);
     const [starting, setStarting] = useState(false);
+    const [doneMarks, setDoneMarks] = useState<Set<string>>(new Set());
+    const [marking, setMarking] = useState(false);
+    const markingRef = useRef(false);
+    const [canMarkDone, setCanMarkDone] = useState(false);
     const refresh = useMemo(
         () => ({}),
-        [state, items, sources, running, mode, view, selectedDate, occurrences, actuals, plans],
+        [
+            state,
+            items,
+            sources,
+            running,
+            mode,
+            view,
+            selectedDate,
+            occurrences,
+            actuals,
+            plans,
+            doneMarks,
+        ],
     );
     const hover = useCalendarHover(refresh);
     const closeHover = hover.close;
@@ -208,7 +231,7 @@ export function SchedulePanel({
         setLoading(true);
         try {
             const backend = await clipperBackend();
-            const [expanded, logged, kitchenPlans] = await Promise.all([
+            const [expanded, logged, kitchenPlans, marks] = await Promise.all([
                 backend.expandSchedule(
                     weekStart.toISOString(),
                     weekEnd.toISOString(),
@@ -222,12 +245,15 @@ export function SchedulePanel({
                           return [];
                       })
                     : Promise.resolve([]),
+                loadDoneMarks(backend),
             ]);
             if (generation === loadGeneration.current) {
                 closeHover();
                 setOccurrences(expanded);
                 setActuals(logged);
                 setPlans(kitchenPlans);
+                setDoneMarks(marks);
+                setCanMarkDone(Boolean(backend.writeAppData));
             }
         } catch (caught) {
             if (generation === loadGeneration.current) onError(formatBackendError(caught));
@@ -255,6 +281,29 @@ export function SchedulePanel({
             onError(formatBackendError(caught));
         } finally {
             setStarting(false);
+        }
+    }
+
+    async function markOccurrence(occurrence: OccurrenceView, done: boolean) {
+        if (markingRef.current) return;
+        markingRef.current = true;
+        setMarking(true);
+        onError(null);
+        try {
+            const backend = await clipperBackend();
+            await writeDoneMark(backend, occurrence, done);
+            setDoneMarks((current) => {
+                const next = new Set(current);
+                if (done) next.add(occurrenceId(occurrence));
+                else next.delete(occurrenceId(occurrence));
+                return next;
+            });
+            await loadWeek();
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        } finally {
+            markingRef.current = false;
+            setMarking(false);
         }
     }
 
@@ -410,6 +459,9 @@ export function SchedulePanel({
                                 loading={loading}
                                 starting={starting}
                                 onStart={startOccurrence}
+                                doneMarks={doneMarks}
+                                marking={marking || !canMarkDone}
+                                onDone={markOccurrence}
                             />
                         ) : view === "month" ? (
                             <MonthGrid
@@ -423,6 +475,8 @@ export function SchedulePanel({
                                     setSelectedDate(day);
                                     setView("day");
                                 }}
+                                doneMarks={doneMarks}
+                                now={now}
                             />
                         ) : (
                             <WeekGrid
@@ -432,6 +486,8 @@ export function SchedulePanel({
                                 plans={plans}
                                 actuals={actuals}
                                 onStart={startOccurrence}
+                                doneMarks={doneMarks}
+                                now={now}
                             />
                         )}
                     </CalendarHoverContext.Provider>
@@ -537,6 +593,9 @@ function NextList({
     loading,
     starting,
     onStart,
+    doneMarks,
+    marking,
+    onDone,
 }: {
     start: Date;
     occurrences: OccurrenceView[];
@@ -546,7 +605,11 @@ function NextList({
     loading: boolean;
     starting: boolean;
     onStart: (occurrence: OccurrenceView) => void;
+    doneMarks: ReadonlySet<string>;
+    marking: boolean;
+    onDone: (occurrence: OccurrenceView, done: boolean) => void;
 }) {
+    const [showDone, setShowDone] = useState<Set<string>>(new Set());
     const days = useMemo(
         () => Array.from({ length: 7 }, (_, index) => addDays(start, index)),
         [start],
@@ -567,6 +630,14 @@ function NextList({
                     overlapsDay(occurrence, day, now),
                 );
                 const dayRecorded = recorded.filter((actual) => overlapsDay(actual, day, now));
+                const key = day.toISOString();
+                const hidden = dayPlanned.filter((occurrence) =>
+                    occurrenceHidden(occurrence, doneMarks, now),
+                );
+                const visible = dayPlanned.filter(
+                    (occurrence) => !occurrenceHidden(occurrence, doneMarks, now),
+                );
+                const shown = showDone.has(key) ? [...visible, ...hidden] : visible;
                 return (
                     <Card
                         key={day.toISOString()}
@@ -583,15 +654,16 @@ function NextList({
                                 day: "numeric",
                             })}
                         </Text>
-                        {dayPlanned.length === 0 && !loading && (
+                        {shown.length === 0 && !loading && (
                             <Paragraph size="$2" color={palette.secondary}>
                                 Nothing scheduled
                             </Paragraph>
                         )}
-                        {dayPlanned.map((occurrence) => (
+                        {shown.map((occurrence) => (
                             <YStack
                                 key={`${occurrence.item_id}:${occurrence.occurrence_key}`}
                                 gap="$1"
+                                opacity={occurrenceHidden(occurrence, doneMarks, now) ? 0.65 : 1}
                             >
                                 <Text color={occurrence.cancelled ? palette.secondary : undefined}>
                                     {occurrence.title}
@@ -611,23 +683,53 @@ function NextList({
                                     </Text>
                                 )}
                                 <ScheduleRecipes occurrence={occurrence} plans={plans} />
-                                {occurrence.cancelled ? (
-                                    <Text fontSize={12} color={palette.danger}>
-                                        Cancelled
-                                    </Text>
-                                ) : (
+                                <XStack gap="$2" items="center">
+                                    {occurrence.cancelled ? (
+                                        <Text fontSize={12} color={palette.danger}>
+                                            Cancelled
+                                        </Text>
+                                    ) : (
+                                        <Button
+                                            theme="blue"
+                                            size="$3"
+                                            self="flex-start"
+                                            disabled={starting}
+                                            onPress={() => onStart(occurrence)}
+                                        >
+                                            Start
+                                        </Button>
+                                    )}
                                     <Button
-                                        theme="blue"
                                         size="$3"
-                                        self="flex-start"
-                                        disabled={starting}
-                                        onPress={() => onStart(occurrence)}
+                                        disabled={marking}
+                                        onPress={() =>
+                                            onDone(
+                                                occurrence,
+                                                !doneMarks.has(occurrenceId(occurrence)),
+                                            )
+                                        }
                                     >
-                                        Start
+                                        {doneMarks.has(occurrenceId(occurrence)) ? "Undo" : "Done"}
                                     </Button>
-                                )}
+                                </XStack>
                             </YStack>
                         ))}
+                        <Button
+                            size="$3"
+                            self="flex-start"
+                            aria-pressed={showDone.has(key)}
+                            theme={showDone.has(key) ? "blue" : undefined}
+                            onPress={() =>
+                                setShowDone((current) => {
+                                    const next = new Set(current);
+                                    if (next.has(key)) next.delete(key);
+                                    else next.add(key);
+                                    return next;
+                                })
+                            }
+                        >
+                            Show done ({hidden.length})
+                        </Button>
                         <Text fontWeight="600" color={palette.secondary}>
                             Recorded time
                         </Text>
@@ -667,6 +769,8 @@ function MonthGrid({
     plans,
     actuals,
     onDay,
+    doneMarks,
+    now,
 }: {
     start: Date;
     end: Date;
@@ -675,6 +779,8 @@ function MonthGrid({
     plans: KitchenPlan[];
     actuals: ActualView[];
     onDay: (day: Date) => void;
+    doneMarks: ReadonlySet<string>;
+    now: number;
 }) {
     const days: Date[] = [];
     for (let day = start; day < end; day = addDays(day, 1)) days.push(day);
@@ -713,7 +819,13 @@ function MonthGrid({
                                     title={event.title}
                                     detail={event.all_day ? "All day" : clockRange(event)}
                                 >
-                                    <div>
+                                    <div
+                                        style={{
+                                            opacity: occurrenceHidden(event, doneMarks, now)
+                                                ? 0.65
+                                                : 1,
+                                        }}
+                                    >
                                         <button
                                             className="month-event"
                                             onClick={() => onDay(day)}
@@ -745,6 +857,8 @@ function WeekGrid({
     plans,
     actuals,
     onStart,
+    doneMarks,
+    now,
 }: {
     dayCount: number;
     weekStart: Date;
@@ -752,6 +866,8 @@ function WeekGrid({
     plans: KitchenPlan[];
     actuals: ActualView[];
     onStart: (occurrence: OccurrenceView) => void;
+    doneMarks: ReadonlySet<string>;
+    now: number;
 }) {
     const days = useMemo(
         () => Array.from({ length: dayCount }, (_, index) => addDays(weekStart, index)),
@@ -879,7 +995,14 @@ function WeekGrid({
                                 {allDay
                                     .filter((occurrence) => overlapsDay(occurrence, day))
                                     .map((occurrence) => (
-                                        <YStack key={`${occurrence.item_id}-${occurrence.start}`}>
+                                        <YStack
+                                            key={occurrenceId(occurrence)}
+                                            opacity={
+                                                occurrenceHidden(occurrence, doneMarks, now)
+                                                    ? 0.65
+                                                    : 1
+                                            }
+                                        >
                                             <OccurrenceChip occurrence={occurrence} />
                                             <ScheduleRecipes
                                                 occurrence={occurrence}
@@ -939,6 +1062,7 @@ function WeekGrid({
                                     onStart={onStart}
                                     lane={lane}
                                     lanes={lanes}
+                                    dimmed={occurrenceHidden(occurrence, doneMarks, now)}
                                 />
                             ))}
                             {day.getTime() === today && (
@@ -998,6 +1122,7 @@ function TimedBlock({
     onStart,
     lane,
     lanes,
+    dimmed,
 }: {
     occurrence: OccurrenceView;
     plans: KitchenPlan[];
@@ -1005,6 +1130,7 @@ function TimedBlock({
     onStart: (occurrence: OccurrenceView) => void;
     lane: number;
     lanes: number;
+    dimmed: boolean;
 }) {
     const { top, height } = bandGeometry(occurrence, day);
     const drawnHeight = Math.max(4, height - 2);
@@ -1035,6 +1161,7 @@ function TimedBlock({
                     backgroundColor: color.fill,
                     border: `1px solid ${color.accent}`,
                     borderLeft: `3px solid ${color.accent}`,
+                    opacity: dimmed ? 0.65 : 1,
                 }}
                 aria-label={label}
                 role="button"

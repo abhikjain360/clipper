@@ -76,6 +76,9 @@ export function tauriBackend(): ClipperBackend {
         deleteScheduleObject: (objectId) => invoke<void>("delete_schedule_object", { objectId }),
         expandSchedule: (from, to, observerZone) =>
             invoke<OccurrenceView[]>("expand_schedule", { from, to, observerZone }),
+        queryAppData: (sql) => invoke("query_app_data", { sql }),
+        writeAppData: (collection, rowId, write) =>
+            invoke<string>("write_app_data", { collection, rowId, write }),
         createCollabDoc: () => invoke<CollabItem>("create_collab_doc"),
         deleteCollabDoc: (objectId) => invoke<void>("delete_collab_doc", { objectId }),
         renameCollabDoc: (objectId, title) =>
