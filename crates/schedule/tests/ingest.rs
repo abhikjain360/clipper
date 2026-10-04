@@ -13,6 +13,35 @@ use clipper_schedule::{
 };
 
 #[test]
+fn import_windows_include_overlapping_series_moved_and_cancelled_occurrences() {
+    use chrono::{TimeDelta, TimeZone, Utc};
+    use clipper_schedule::{RecurrenceEngine, ingest::ImportWindow};
+
+    let now = Utc.with_ymd_and_hms(2026, 10, 8, 0, 0, 0).unwrap();
+    let window = ImportWindow::around(now);
+    assert_eq!(window.start, now - TimeDelta::days(14));
+    assert_eq!(window.end, now + TimeDelta::days(90));
+    let text = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:recurring\r\nDTSTART:20000101T090000Z\r\nRRULE:FREQ=DAILY;BYHOUR=9,17\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:ended\r\nDTSTART:20200101T090000Z\r\nRRULE:FREQ=DAILY;COUNT=2\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:moved\r\nDTSTART:20200101T090000Z\r\nRRULE:FREQ=DAILY;COUNT=1\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:moved\r\nRECURRENCE-ID:20200101T090000Z\r\nDTSTART:20261009T090000Z\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:cancelled\r\nDTSTART:20261009T090000Z\r\nRRULE:FREQ=DAILY;COUNT=1\r\nEXDATE:20261009T090000Z\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:boundary\r\nDTSTART:20270106T000000Z\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:overlap\r\nDTSTART:20260923T230000Z\r\nDTEND:20260924T010000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let import = uuid::Uuid::nil().into();
+    let outcome = parse_ics(text, SourceId::new(), import).unwrap();
+    assert!(outcome.skipped.is_empty());
+    let engine = RecurrenceEngine::with_imported_rules(
+        parse_imported_recurrence_rules(text, import).unwrap(),
+    );
+    for event in outcome.events {
+        assert_eq!(
+            event.overlaps(&window, &engine).unwrap(),
+            matches!(
+                event.uid.as_str(),
+                "recurring" | "moved" | "cancelled" | "overlap"
+            ),
+            "{}",
+            event.uid
+        );
+    }
+}
+
+#[test]
 fn large_recurring_invitations_stay_small_and_use_the_owners_reply() {
     use chrono::{TimeDelta, TimeZone, Utc};
     use clipper_schedule::{

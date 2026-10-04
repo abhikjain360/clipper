@@ -3184,6 +3184,8 @@ impl SyncEngine {
             active_import: None,
             pending_imports: Vec::new(),
             retired_imports: Vec::new(),
+            retained_imports: Vec::new(),
+            event_ids: Default::default(),
         })))
         .await
     }
@@ -7750,6 +7752,8 @@ mod adversarial_history_tests {
             active_import: None,
             pending_imports: Vec::new(),
             retired_imports: Vec::new(),
+            retained_imports: Vec::new(),
+            event_ids: Default::default(),
         }))
     }
 

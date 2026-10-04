@@ -1,15 +1,10 @@
 //! Calendar sources, and the events pulled from them.
 //!
-//! An ingested event holds the provider's own fields. Only the sync worker
-//! writes them and Clipper never edits them. The user's plan for an ingested
-//! event is a separate record, so a refresh can replace the original wholesale
-//! without touching anything the user wrote.
-//!
 //! Parsing lives here because it is pure. Fetching needs I/O, so it belongs to
 //! whichever client holds the source.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     num::NonZeroU32,
 };
 
@@ -77,7 +72,6 @@ pub struct CalendarSource {
     pub alarms_on: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_device: Option<DeviceId>,
-    /// Only this complete batch contributes events to the current calendar.
     pub active_import: Option<CalendarImport>,
     /// A staged batch to resume after an interrupted upload.
     #[serde(
@@ -88,6 +82,10 @@ pub struct CalendarSource {
     pub pending_imports: Vec<CalendarImport>,
     /// Superseded batches awaiting irreversible cleanup.
     pub retired_imports: Vec<RetiredImport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained_imports: Vec<CalendarImport>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub event_ids: BTreeMap<Uuid, ObjectId>,
 }
 
 /// One source fetch, stored once as an encrypted file, with its parsed event objects.
@@ -99,6 +97,31 @@ pub struct CalendarImport {
     pub events: Vec<clipper_api_types::ObjectId>,
     #[serde(default)]
     pub content_hash: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<ImportWindow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hashes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<ObjectId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportWindow {
+    #[serde(deserialize_with = "crate::time::deserialize_date")]
+    pub start: chrono::DateTime<chrono::Utc>,
+    #[serde(deserialize_with = "crate::time::deserialize_date")]
+    pub end: chrono::DateTime<chrono::Utc>,
+}
+
+impl ImportWindow {
+    pub fn around(now: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            start: now - chrono::TimeDelta::days(14),
+            end: now + chrono::TimeDelta::days(90),
+        }
+    }
 }
 
 fn alarms_on_by_default() -> bool {
@@ -125,11 +148,14 @@ where
 pub struct RetiredImport {
     pub object_id: clipper_api_types::ObjectId,
     pub events: Vec<clipper_api_types::ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta: Option<Box<CalendarImport>>,
 }
 
 impl From<CalendarImport> for RetiredImport {
     fn from(batch: CalendarImport) -> Self {
         Self {
+            delta: batch.window.as_ref().map(|_| Box::new(batch.clone())),
             object_id: batch.object_id,
             events: batch.events,
         }
@@ -139,10 +165,16 @@ impl From<CalendarImport> for RetiredImport {
 impl CalendarSource {
     pub fn contains_event(&self, object_id: &str, event: &IngestedEvent) -> bool {
         self.id == event.source
-            && self.active_import.as_ref().is_some_and(|batch| {
+            && self.imports().any(|batch| {
                 event.belongs_to_import(batch.object_id)
                     && batch.events.iter().any(|id| id.to_string() == object_id)
             })
+    }
+
+    pub fn imports(&self) -> impl Iterator<Item = &CalendarImport> {
+        self.active_import
+            .iter()
+            .chain(self.retained_imports.iter())
     }
 }
 
@@ -155,8 +187,6 @@ pub enum SourceKind {
 /// An event as the provider describes it. Read-only in Clipper.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IngestedEvent {
-    /// Stable identity derived from `(source, uid)`. Storage still gives each
-    /// batch its own object ids when an import snapshot is replaced.
     pub id: Uuid,
     pub source: SourceId,
     /// The snapshot of the complete original feed. With `uid` it names the
@@ -164,6 +194,8 @@ pub struct IngestedEvent {
     /// one-off still works without it; a [`Recurrence::Imported`] cannot
     /// expand until its rule is read back out of this snapshot.
     pub import: Option<clipper_api_types::ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_fetched_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The provider's own identifier. Stable across edits, and the same in
     /// every calendar that carries the meeting.
     pub uid: String,
@@ -203,6 +235,35 @@ pub struct Attendance {
 }
 
 impl IngestedEvent {
+    pub fn overlaps(
+        &self,
+        window: &ImportWindow,
+        engine: &crate::RecurrenceEngine,
+    ) -> Result<bool, crate::engine::EngineError> {
+        let item = crate::ScheduleItem {
+            id: ScheduleItemId(self.id),
+            title: self.title.clone(),
+            span: self.span.clone(),
+            recurrence: self.recurrence.clone(),
+            reference: None,
+            alarm: None,
+            break_reminders: false,
+        };
+        let expansion = crate::engine::Expansion {
+            window: crate::TimeRange::new(window.start, window.end)?,
+            observer: Tz::UTC,
+        };
+        let overrides: Vec<_> = self
+            .overrides
+            .iter()
+            .filter(|entry| !matches!(entry.change, OverrideChange::Cancelled))
+            .cloned()
+            .collect();
+        Ok(!engine
+            .overlapping_occurrences(&item, &overrides, &expansion)?
+            .is_empty())
+    }
+
     pub fn rings(&self, owner: Option<&str>) -> bool {
         invitation_rings(
             self.status,
@@ -818,6 +879,7 @@ fn event_from_component(
         id,
         source,
         import: Some(import),
+        import_fetched_at: None,
         title: text_property(component, "SUMMARY").unwrap_or_else(|| "(no title)".to_string()),
         description: text_property(component, "DESCRIPTION"),
         span,

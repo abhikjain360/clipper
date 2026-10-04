@@ -14,6 +14,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
 
+#[path = "calendar_delta_tests.rs"]
+mod delta_tests;
+
 pub(super) struct TestServer(Child);
 
 impl Drop for TestServer {
@@ -1070,7 +1073,7 @@ pub(super) async fn start_server(data: &Path) -> (TestServer, std::net::SocketAd
     let address = listener.local_addr().expect("address");
     drop(listener);
     std::fs::write(data.join("config.toml"), format!(
-        "[server]\ndata_dir = {:?}\naddr = {:?}\n[rate_limit]\nauth_per_client_per_minute = 200\nauth_per_username_per_minute = 200\n",
+        "[server]\ndata_dir = {:?}\naddr = {:?}\n[rate_limit]\nauth_per_client_per_minute = 200\nauth_per_username_per_minute = 200\napi_per_client_per_minute = 100000\napi_per_user_per_minute = 100000\n",
         data.join("server").to_str().expect("path"), address.to_string()
     )).expect("config");
     assert!(
@@ -3064,7 +3067,7 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
         .expect("source");
     assert_eq!(
         first
-            .sync_calendar_source(&source)
+            .sync_calendar_source_in_window(&source, "2026-09-08T00:00:00Z".parse().unwrap())
             .await
             .expect("first sync")
             .added,
@@ -3107,7 +3110,7 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
     let original_feed = feed.read().await.clone();
     *feed.write().await = "not the pending calendar".into();
     first
-        .sync_calendar_source(&source)
+        .sync_calendar_source_in_window(&source, "2026-09-08T00:00:00Z".parse().unwrap())
         .await
         .expect_err("recover pending import, then reject the newly fetched invalid feed");
     *feed.write().await = original_feed;
@@ -3133,7 +3136,7 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
     );
     assert_eq!(
         first
-            .sync_calendar_source(&source)
+            .sync_calendar_source_in_window(&source, "2026-09-08T00:00:00Z".parse().unwrap())
             .await
             .expect("replacement sync")
             .unchanged,
@@ -3171,7 +3174,7 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
         "DTEND:20260908T100000Z\r\nRRULE:FREQ=DAILY;COUNT=3\r\nEXDATE:20260909T090000Z\r\nRDATE:20260909T120000Z",
     );
     first
-        .sync_calendar_source(&source)
+        .sync_calendar_source_in_window(&source, "2026-09-08T00:00:00Z".parse().unwrap())
         .await
         .expect("provider overrides");
     let recurring = first
@@ -3211,15 +3214,16 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
         .replace("SUMMARY:Planning", "SUMMARY:Updated planning");
     *feed.write().await = updated_feed;
     let updated = first
-        .sync_calendar_source(&source)
+        .sync_calendar_source_in_window(&source, "2026-09-08T00:00:00Z".parse().unwrap())
         .await
         .expect("updated feed");
-    assert_eq!(updated.added, 1);
-    assert_eq!(updated.tombstoned, 1);
+    assert_eq!(updated.added, 0);
+    assert_eq!(updated.updated, 1);
+    assert_eq!(updated.tombstoned, 0);
     first.schedule_history.lock().await.clear();
     assert!(
-        first.recorded_plan(&provider_actual).await.is_err(),
-        "the imported plan revision was permanently purged"
+        first.recorded_plan(&provider_actual).await.is_ok(),
+        "the imported plan revision remains readable after an edit"
     );
     assert!(
         first
@@ -3247,6 +3251,7 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
         .push(clipper_schedule::ingest::RetiredImport {
             object_id: uuid::Uuid::new_v4().into(),
             events: vec![provider_actual.parse().expect("actual object id")],
+            delta: None,
         });
     first
         .write_schedule_record(
@@ -3257,7 +3262,10 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
         .await
         .expect("store malformed retired manifest");
     assert!(
-        first.sync_calendar_source(&source).await.is_err(),
+        first
+            .sync_calendar_source_in_window(&source, "2026-09-08T00:00:00Z".parse().unwrap())
+            .await
+            .is_err(),
         "cleanup must reject an Actual named by a malformed import manifest"
     );
     assert!(
@@ -3298,7 +3306,12 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
         })
         .expect("active import before failed refresh");
     *feed.write().await = valid_feed.replace("DTSTART:20260908T090000Z", "DTSTART:invalid");
-    assert!(first.sync_calendar_source(&source).await.is_err());
+    assert!(
+        first
+            .sync_calendar_source_in_window(&source, "2026-09-08T00:00:00Z".parse().unwrap())
+            .await
+            .is_err()
+    );
     let active_after_failure = first
         .local_store
         .schedule_records_with_ids()
@@ -3323,7 +3336,12 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
             .any(|event| event.title == "Updated planning" && !event.cancelled)
     );
     *feed.write().await = "not a calendar".into();
-    assert!(first.sync_calendar_source(&source).await.is_err());
+    assert!(
+        first
+            .sync_calendar_source_in_window(&source, "2026-09-08T00:00:00Z".parse().unwrap())
+            .await
+            .is_err()
+    );
     *feed.write().await = valid_feed;
     first
         .delete_file(&active_before_failure.object_id.to_string())
@@ -3338,11 +3356,11 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
             .any(|event| event.title == "Updated planning")
     );
     let after_raw_delete = first
-        .sync_calendar_source(&source)
+        .sync_calendar_source_in_window(&source, "2026-09-08T00:00:00Z".parse().unwrap())
         .await
         .expect("replacement after raw-only deletion");
-    assert_eq!(after_raw_delete.added, 1);
-    assert_eq!(after_raw_delete.tombstoned, 1);
+    assert_eq!(after_raw_delete.added, 0);
+    assert_eq!(after_raw_delete.tombstoned, 0);
     let active_after_raw_delete = first
         .local_store
         .schedule_records_with_ids()
@@ -3371,7 +3389,7 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
         .await
         .expect("independent source");
     first
-        .sync_calendar_source(&personal_source)
+        .sync_calendar_source_in_window(&personal_source, "2026-09-08T00:00:00Z".parse().unwrap())
         .await
         .expect("independent source sync");
     assert!(
@@ -3403,7 +3421,10 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
         .expect("unsupported source");
     assert_eq!(
         first
-            .sync_calendar_source(&unsupported_source)
+            .sync_calendar_source_in_window(
+                &unsupported_source,
+                "2026-09-08T00:00:00Z".parse().unwrap()
+            )
             .await
             .expect("unsupported source sync")
             .added,
@@ -3741,6 +3762,10 @@ fn imported_source_readiness_requires_a_complete_active_batch() {
         fetched_at: Utc::now(),
         content_hash: Vec::new(),
         events: vec![event_id],
+        window: None,
+        uids: Vec::new(),
+        hashes: Vec::new(),
+        removed: Vec::new(),
     };
     let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:ready\r\nSUMMARY:Ready\r\nDTSTART:20260908T090000Z\r\nDTEND:20260908T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
     let mut event = clipper_schedule::parse_ics(feed, source_id, raw_id)
@@ -3768,6 +3793,8 @@ fn imported_source_readiness_requires_a_complete_active_batch() {
                 active_import,
                 pending_imports: pending_import.into_iter().collect(),
                 retired_imports: Vec::new(),
+                retained_imports: Vec::new(),
+                event_ids: Default::default(),
             }))
         };
     let complete = vec![

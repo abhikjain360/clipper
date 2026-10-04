@@ -766,9 +766,28 @@ Each entry has:
 
 ## Bugs
 
-### 167. Clipboard reconciliation could deadlock the shared store
+### 168. Calendar refreshes replaced every event and rewrote history
 
 - **Status:** fixed in the working tree; not committed.
+- **Severity:** medium; large imported calendars made refreshes expensive.
+- **Where:** calendar ingest and client import staging, activation and cleanup.
+- **What happened:** each changed feed created a complete new batch with new
+  storage IDs, then purged the previous events. One changed meeting rewrote
+  the entire calendar, including the owner's 1,246-event work history.
+- **Decision:** reconcile occurrences from the past 14 days to the next 90 days.
+  Recurring series and provider overrides count when they overlap the window.
+  Write only eligible new or changed events and tombstone eligible missing UIDs.
+  Never rewrite or delete outside-window history during refresh.
+- **Fix:** derive new event IDs from source and UID; preserve existing batch IDs
+  through encrypted aliases. Retain unchanged events and their original raw
+  snapshots. Rebase competing deltas when another device activates a feed;
+  per-event ordering and verified cleanup repair late losing writes. Tests
+  count requests, import 100 eligible events from 1,246, migrate all 1,246 IDs,
+  advance the window on unchanged feeds, and cover competing and late uploads.
+
+### 167. Clipboard reconciliation could deadlock the shared store
+
+- **Status:** fixed in `df1be25`; regression strengthened in the working tree.
 - **Severity:** high. Found in `7597c27` on a desktop with imported calendars.
 - **Where:** the clipboard snapshot's buffered futures in the client engine.
 - **What happened:** buffered cache and revision checks acquired the store's
@@ -784,6 +803,9 @@ Each entry has:
   A regression holds the database lock during a reconnect, then checks that
   reconciliation, schedule expansion and writes finish. It covers both complete
   and missing payload metadata, requiring verified downloads in the latter case.
+  Reconciliation runs on its own Tokio task; the test only releases contention
+  and waits under a timeout. Running this test with the engine from `df1be25^`
+  fails at the reconciliation timeout. Restoring the current engine passes.
 
 ### 166. Reconnect skip checks read and hashed every held payload
 
@@ -838,7 +860,7 @@ Each entry has:
 
 ### 162. Large calendar imports spent requests on unchanged and newly staged objects
 
-- **Status:** fixed in `1d519d3`; cache eligibility follow-up in entry 164.
+- **Status:** fixed in `1d519d3`; follow-ups in entries 164, 166 and 168.
 - **Severity:** medium.
 - **Where:** client snapshots and `calendar_import.rs`.
 - **What happened:** reconnecting with 1,246 held work events needed roughly
@@ -1259,12 +1281,15 @@ Each entry has:
 
 ### 79. A calendar of about 3,300 events can no longer be refreshed
 
-- **Status:** open; the 256 KiB cap is checked, the event count is not
+- **Status:** open; windowed deltas reduce refresh growth (entry 168), but the
+  source manifest still has a 256 KiB cap.
 - **Where:** `crates/client/src/engine.rs`,
   `MAX_SCHEDULE_PAYLOAD_CIPHERTEXT_BYTES`; the calendar source record.
-- **What happens:** the source record lists the event ids of its active,
-  pending and retired batches, about 39 bytes each. A refresh holds two
-  batches, so a large calendar exceeds the cap.
+- **What happens:** the source lists active, retained, pending and retired
+  memberships, delta UIDs and hashes, and legacy ID aliases. Refresh no longer
+  duplicates the full calendar, but large histories or many retained snapshots
+  can still exceed the cap. The old estimate of 3,300 events is no longer a
+  fixed threshold; manifest size depends on these fields.
 - **Recommendation:** raise the cap for source records, or move each batch's
   member list into its own object.
 - **Decision:**

@@ -129,6 +129,8 @@ async fn logout_lists_a_calendar_sync_and_cancels_it_without_waiting_for_the_ser
         active_import: None,
         pending_imports: Vec::new(),
         retired_imports: Vec::new(),
+        retained_imports: Vec::new(),
+        event_ids: Default::default(),
         enabled: true,
         owner_email: None,
         alarms_on: true,

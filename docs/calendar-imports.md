@@ -1,69 +1,80 @@
 # Calendar import snapshots
 
-Each changed refresh replaces one source's imported calendar. Recordings,
-locally authored schedules and locally authored occurrence overrides are separate
-objects and are never deleted by import cleanup. Different sources are independent;
-the same meeting or feed imported through two sources is intentionally duplicated.
+Each refresh reconciles one source within a rolling window: the past 14 days
+through the next 90 days, measured from fetch completion in UTC. An event or
+recurring series is in the window when at least one occurrence overlaps it.
+Provider moves, extra dates and cancellations are included when deciding scope.
+Zoned events use their own timezones; floating and all-day events use UTC for
+this import boundary.
+
+Within the window, new events are created, changed events get a revision, and
+events removed from the feed get a tombstone. Unchanged events keep their IDs,
+revisions and snapshot references. Events entirely outside the window are left
+untouched as history, including when they change or disappear from the feed.
+A present UID that moves entirely outside the window also leaves the stored
+event untouched.
+
+Recordings, locally authored schedules and locally authored occurrence overrides
+are separate objects and are never deleted by refresh cleanup. Different sources
+are independent; the same meeting or feed imported through two sources is
+intentionally duplicated.
 
 ## Stored representation
 
-- The complete original UTF-8 ICS response is uploaded once as an encrypted File
-  object (`calendar-import-<source>-<time>.ics`). It includes provider fields,
-  timezone definitions and override components that the normalized model does
-  not retain. It can be downloaded from Files. There is no plaintext server copy.
-- Each parsed `IngestedEvent` carries `import: ObjectId` plus its provider UID.
-  Together they locate the original series in that exact raw snapshot; a provider
-  override is further identified by its original recurrence ID. Fields not
-  normalized remain in the snapshot, rather than being individually duplicated.
+- A staged refresh uploads the complete original UTF-8 ICS response once as an
+  encrypted File (`calendar-import-<source>-<time>.ics`). It includes events
+  outside the window, provider fields, timezone definitions and override
+  components that the normalized model does not retain. It can be downloaded
+  from Files. There is no plaintext server copy.
+- Each parsed `IngestedEvent` carries its source, provider UID and original
+  `import: ObjectId`. Provider overrides use their original recurrence ID.
+  New object IDs are derived from source and UID, independently of snapshots.
+  Overrides stay bundled with their series and have stable IDs derived from the
+  event and recurrence position. A returning tombstoned event reuses its ID.
+- Existing whole-batch imports retain every storage ID. The first delta refresh
+  records aliases from source/UID identity to those existing IDs in the encrypted
+  source. It revises eligible events in place and keeps all outside-window history
+  and unchanged events. Aliases remain after tombstones so returning events do
+  not duplicate the old objects.
+- `active_import` records the newest completed refresh: raw File ID, fetch time,
+  window, changed event IDs, UIDs, normalized hashes, and removed IDs.
+  `retained_imports` owns unchanged events and history from earlier snapshots.
+  Each live event belongs to exactly one active or retained snapshot. Raw files
+  remain while any live event still refers to them.
+- Full-feed and per-event hashes include normalized titles, descriptions, spans,
+  recurrence, provider overrides, status, organizer, attendance, the owner's
+  PARTSTAT and alarm offsets. Unsupported recurrence rules are included.
+  Snapshot IDs and import ordering times are excluded, as are provider fetch
+  timestamps such as DTSTAMP and LAST-MODIFIED. Event order and alarm order
+  do not affect the comparison.
 - Supported RRULEs become typed `Cadence` values only when conversion preserves
-  every clause. An unsupported recurrence is persisted only as the import and
-  provider UID; at runtime the client resolves its rule from that import's raw
-  ICS file. This keeps the snapshot as the full original source without
-  persisting a recurrence string. A missing raw file never falls back to a
-  one-off: the affected event is omitted and a warning is shown. Imported
-  events remain read-only even when their cadence is understood.
-  The recurrence reference must match its event's import and UID. Snapshot
-  resolution accepts only the original file revision, so editing a file cannot
-  silently reinterpret the events that reference it.
+  every clause. An unsupported recurrence stores only its import and UID; the
+  client resolves its rule from that snapshot's original file revision.
+  Editing a raw file cannot reinterpret its events. A missing raw file never
+  turns a recurring event into a one-off: the affected event is omitted with a
+  warning. Eligible unsupported events with missing raw files are repaired from
+  the next valid feed.
 - Native clients cache complete encrypted raw files needed for rule resolution
-  in the local SQLite store, allowing offline expansion after hydration.
-  The browser keeps only a bounded in-memory cache and may need to download the
-  file again after a reload.
-- `CalendarSource.active_import` contains the raw File ID, fetch time and parsed
-  event object IDs. A new batch uses new storage IDs derived from the snapshot ID
-  and UID. Domain event IDs remain source/UID-derived. Old revision references
-  never retarget to a new batch merely because the UID matches.
-- Each batch also contains a hash of the normalized events and unsupported
-  recurrence rules. Snapshot IDs are replaced with a fixed ID when calculating
-  this hash, and events and alarm offsets are sorted. Provider fetch
-  timestamps such as DTSTAMP and LAST-MODIFIED are excluded. Titles, descriptions,
-  spans, recurrence, provider overrides, status, organizer, attendance and the owner's PARTSTAT and
-  alarm offsets are included.
-- Parsed events store whether attendees exist and the owner's own PARTSTAT.
-  Other attendee addresses and replies remain only in the raw file. Overrides
-  store attendance only when they contain ATTENDEE lines; otherwise they use
-  the master's attendance. Large attendee lists are not copied into moved instances.
-- `pending_imports` records uploads that can be resumed. Concurrent devices can
-  stage separate batches. `retired_imports` records the raw file ID and event
-  IDs of superseded batches whose irreversible cleanup needs to finish.
+  in SQLite, allowing offline expansion after hydration. The browser has a
+  bounded in-memory rule cache and can need another download after reload.
+- Parsed events store whether attendees exist and the owner's PARTSTAT.
+  Other attendee addresses and replies remain in the raw file. Overrides store
+  attendance only when they contain ATTENDEE lines; otherwise they inherit
+  the master's attendance.
+- `pending_imports` records resumable refreshes. `retired_imports` records
+  superseded or unreferenced snapshots awaiting cleanup. A retired delta retains
+  enough information to repair late writes without deleting shared event IDs.
+  Events also carry their import's fetch time for per-object ordering.
 - The encrypted source stores `owner_email`, `alarms_on` and optional
-  `target_device`. An absent target is omitted from stored JSON and means all
-  phones, preserving existing sources. A target is one registered device ID,
-  which can name a phone or a Mac. The target and alarm switch are shared
-  across devices and preserved when imports are refreshed or replaced. For a
-  `calendar.google.com/calendar/ical/` or `www.google.com/calendar/ical/` URL,
-  the owner is the URL-decoded first
-  path segment after `/calendar/ical/`, when it contains an email address. Other
-  feeds have an unknown owner. The owner is derived on add and refresh. The
-  source's alarm setting defaults to on and is shared across devices.
-- The source view exposes `alarms_on`, `target_device` and the active batch's
-  shared `fetched_at`.
-  Each device persists its successful fetch completion times locally. The view's
-  `checked_at` is the later of that local check time and the shared fetch time.
-  “Last synced” labels and hourly refresh limits use `checked_at`. An unchanged
-  fetch advances the local check time without writing anything to the server.
-  Logout clears the device's local check times. Times more than five minutes
-  ahead of the current device's clock make a source due for refresh.
+  `target_device`. These settings survive refreshes. An absent target means all
+  phones. For Google calendar ICS URLs, the owner is the decoded first path
+  segment after `/calendar/ical/`, when it contains an email address. Other
+  feeds have an unknown owner. Alarms default to on.
+- The source view exposes the active fetch time. Each device also saves successful
+  fetch completion times locally. `checked_at` is the later of those times;
+  “Last synced” and hourly refresh limits use it. Unchanged fetches advance this
+  local time without server writes. Logout clears it. Times more than five
+  minutes ahead of the current device's clock make a source due for refresh.
 
 ## Imported alarms
 
@@ -85,7 +96,7 @@ not qualify. Without a qualifying alarm, the lead is five minutes.
 Moved occurrences ring relative to their new start, and cancelled occurrences
 do not ring. A provider override can change attendance, status or alarms;
 omitted fields inherit the master's values. Alarm labels use the event title.
-Only complete active batches ring. Turning off `alarms_on` silences the entire
+Only complete active and retained imports ring. Turning off `alarms_on` silences the entire
 source without hiding its events or clearing its target. An untargeted source
 rings on all phones and stays silent on Macs. A targeted source rings only on
 that device: phone plans exclude other devices' sources, and the desktop's
@@ -101,57 +112,46 @@ imported alarms with user-authored alarms. Local agents can use
 
 ## Refresh and failure behavior
 
-1. Read the current source head and retry cleanup of already-retired batches.
-   Finish each saved pending batch from its raw file. A batch whose saved data
-   cannot be reproduced is retired through verified cleanup. This includes a
-   changed normalized hash, different staged events, unreadable or unparsable
-   raw data, and records that exceed the size limit. Network errors, timeouts,
-   server failures and lost replies stop the refresh and leave recovery for
-   another attempt. Then fetch a new response,
-   including for a manual Sync. A recovered batch never substitutes for the new
-   response. Record the fetch completion time locally before parsing or uploading.
-2. Parse and validate the entire response. Any skipped/unreadable event, duplicate
-   UID, invalid feed, oversized event or oversized source manifest rejects the
-   replacement, and the active batch stays active. An explicitly valid
-   empty calendar is a valid replacement and removes the previous events.
-3. Compare the normalized result with the active batch. If it matches and the
-   active raw file is available, return an `IngestReport` with `feed_unchanged`
-   true and `unchanged` equal to the event count. This also identifies an
-   unchanged empty calendar. No raw file, event object or source revision is
-   written for the unchanged response. Recovery and retired-batch cleanup are
-   separate work and can still write. If the active raw file was deleted, a
-   fresh snapshot restores it even when the events match.
-4. Upload the raw file and append the batch to the pending manifest. Source
-   conflicts are retried against the authenticated current head, retaining all
-   other pending batches and source settings. Upload/verify every event
-   in the pending batch. Deterministic object IDs allow resuming accepted writes
-   after a lost response; an existing event must match the complete expected data.
-   A freshly staged batch creates its deterministic event IDs directly without
-   an existence GET for each event. A create conflict still reads and verifies
-   the existing event against the complete expected data. Resuming a pending
-   batch keeps the existence and data checks.
-5. Publish one source revision that removes this pending batch and compares its
-   fetch time with the active batch. A later fetch activates and retires the
-   previous batch. An earlier fetch is retired without replacing the active
-   batch, and its report sets `superseded`. Equal fetch times are ordered by
-   raw snapshot UUID, so devices make the same choice. Source conflicts cause
-   another authenticated read and comparison; the existing source settings and
-   other pending/retired batches are retained. Other devices can receive records out of order:
-   they hide an incomplete active batch and show a warning until it is complete.
-   A fetch time more than five minutes ahead of this device's clock cannot beat
-   its fresh replacement. An unchanged response still writes nothing to the
-   server, including when the active batch's fetch time is in the future.
-6. Tombstone and permanently purge retired imported event objects and raw
-   file. Only verified imported targets from that source/batch qualify. Cleanup
-   is retried on the next refresh if it fails. There is no server transaction
-   covering all objects; the active manifest controls visibility. Concurrent
-   cleanup retries competing tombstones and removes only the batch entries it
-   finished, retaining newer entries and event IDs added during cleanup.
-   A missing retired payload is already purged. A signed tombstone identical
-   to the retained anchor is already deleted. These outcomes complete cleanup;
-   they do not weaken rollback, body identity or parent-link checks. Source
-   reads overtaken by a newer authenticated head retry before updating the
-   manifest.
+1. Read and authenticate the current source. Retry retired cleanup and saved
+   in-window tombstones. Finish pending batches from their raw files, then fetch
+   a new response even after recovery. Unreadable or inconsistent pending data
+   is retired through verified cleanup. Network failures leave it for retry.
+   Record fetch completion locally before parsing or uploading.
+2. Validate the complete response before changing events. Duplicate UIDs,
+   skipped or unreadable events and size-limit failures reject the refresh.
+   An explicitly valid empty feed removes only held events that overlap the
+   current window; outside-window history stays.
+3. Compare eligible events with the held imports. Write only new or changed
+   events; tombstone only missing UIDs whose stored occurrences overlap the
+   window. An unchanged full feed with an available active raw file and no
+   event delta writes nothing. Recompute eligibility on every fetch: events
+   can enter the window even when the feed bytes do not change. A changed
+   response containing only outside-window edits can replace the raw snapshot
+   and source manifest without rewriting any event.
+4. Upload the complete raw file and append the pending delta using the current
+   authenticated source head. Preserve other pending batches and source settings
+   when retrying conflicts. New deterministic IDs are created directly without
+   an existence GET per event. Conflicts, updates and resumed writes authenticate
+   the current object and retain revision and continuity checks.
+5. Apply the delta and activate it through a source revision. A later fetch wins;
+   equal fetch times are ordered by raw snapshot UUID. A fetch more than five
+   minutes ahead cannot win. If another device activates a batch during upload,
+   recompute the delta against that batch before retrying activation. This also
+   handles devices that changed different events from the same older baseline.
+   Per-event fetch ordering prevents older writers overwriting newer content.
+6. Move unchanged events and history into retained snapshot groups. Tombstone
+   removed in-window events, preserving immutable revisions. Purge a superseded
+   raw file only when no active, retained or pending group references it.
+   Late writes from losing refreshes are restored to the winning content or
+   tombstoned within its window. Outside-window events remain history.
+   Retry unfinished cleanup on the next refresh.
+
+There is no server transaction covering all objects. The source manifest
+controls visibility: devices hide an incomplete imported view and show a warning
+until its required records arrive. Cleanup authenticates source ownership, object
+identity, revisions and parent links. It never targets recordings, authored plans
+or authored overrides. Concurrent cleanup removes only the retired entries it
+finished and preserves entries added while it was running.
 
 Source reads during a refresh still fetch current metadata and verify its
 signature, revision and continuity. If that head matches this session's
@@ -167,60 +167,45 @@ shared localStorage without changing this tab's memory. Source reads then
 download the current payload; writes derived from an older in-memory record
 retain that record's own head so the server can reject a conflicting write.
 
-A device uploading a batch can discover that another device has finished and
-retired it. If the batch is still active, upload errors remain errors. If it
-has been superseded, the uploader restores its retired entry before cleanup,
-including when another device already removed that entry. Late event writes
-are then purged through the same verified cleanup path. On refresh, hydrated
-imported events whose batch is absent from the current source are registered
-for cleanup. Their source and snapshot IDs survive in the encrypted events,
-so a crash before restoring the retired entry does not lose those targets.
+A device can finish a batch after another device has superseded it and removed
+its retired entry. The late uploader restores that entry before cleanup.
+Hydrated events unclaimed by the current source are also registered for cleanup,
+so a crash does not lose their source and snapshot provenance. A cleanup retry
+cannot overwrite content from a newer pending refresh.
 
 Refresh and source/file deletion are serialized locally with authentication
-changes, so a batch cannot cross an account switch. Concurrent devices may resume
-the same pending batch or stage independent batches. Fetch times use each
-device's UTC clock; differences within the five-minute tolerance still affect
-ordering. An unchanged check updates no shared ordering state. A slowly uploaded
-older feed can therefore activate after another device's unchanged check until
-the next refresh. Nothing deduplicates
-events across sources. Duplicate master UIDs within one feed are rejected.
+changes. Concurrent devices can resume the same batch or stage independent
+batches. UTC clock differences within the five-minute tolerance still affect
+ordering. An unchanged check writes no shared ordering state, so a slowly
+uploaded older feed can activate after another device's unchanged check until
+the next refresh. See issues 136 and 139.
 
-Pending batches must finish or be retired before their source or raw files can be removed.
-An import cannot be cancelled. The previous active batch stays in use while the pending
-one uploads. A crash or an ambiguous network failure between the raw-file upload
-and publishing the pending manifest leaves a raw file that no manifest
-references; it activates no events, and nothing removes it. Cleanup verifies the
-original event's source, snapshot and UID without requiring the full event
-format to remain readable. It uses authenticated current heads for tombstones,
-while retaining revision checks. Recovery for unreferenced raw files is open; see
-`docs/issues.md`, entry 92.
+Pending batches must finish or retire before their source or raw files can be
+removed. A crash or ambiguous failure between raw-file upload and pending
+manifest publication can leave an unreferenced raw file. It activates no events;
+automatic recovery of such files remains open in issue 92.
 
-The raw feed is limited to 8 MiB. Parsed records and source manifests must fit the
-existing 256 KiB encrypted schedule-record limit; they are checked before staging.
-A very large feed can therefore be rejected even if its raw bytes fit. This is a
-bounded manifest, not an unlimited calendar database.
+Raw feeds are limited to 8 MiB. Event records and source manifests, including
+retained groups and legacy ID aliases, must fit the 256 KiB encrypted
+schedule-record limit. This remains a bounded manifest.
 
 ## Deletion and historical references
 
-The calendar UI explains consequences and asks for confirmation:
+- **Delete original feed:** purges the active raw File only. Stored one-off and
+  typed-cadence events remain. Unsupported recurrence that needs this file is
+  omitted with a warning. Other retained snapshots are unaffected.
+- **Refresh calendar:** revises eligible changed events and tombstones removed
+  eligible events. It preserves history, unchanged events and their raw files.
+- **Remove calendar:** purges all of that source's active and retained imported
+  objects and raw files, then tombstones the source. Other sources, recordings,
+  local plans and local overrides remain.
 
-- **Delete original feed:** permanently purges only the active raw File. One-off
-  events, events with a stored `Cadence`, and recordings remain. Events whose
-  unsupported recurrence needs the raw file are omitted and the UI reports a
-  warning; they are never treated as one-off events. The source and event
-  references are unchanged.
-- **Replace import:** permanently purges the previous batch's raw file and parsed
-  event objects after the replacement is active.
-- **Remove calendar:** purges that source's imported batches, then tombstones the
-  source. Other sources and all recordings/local plans/local overrides remain.
+Recordings pin exact plan revisions. Delta updates and tombstones keep these
+revisions available; lookup never substitutes the latest event. Explicit calendar
+removal purges imported objects, after which historical-plan lookup can report
+unavailable. Captured recording times and planned bounds remain. Another device's
+decrypted history can remain cached until eviction or logout.
 
-A recording pins the exact imported plan revision it originally used. After that
-plan is purged, historical-plan lookup reports unavailable instead of substituting
-an event from a newer import. Captured recording times and planned bounds remain
-in the recording. History that another device already decrypted can stay cached
-there until eviction or logout; purge does not erase another device's memory.
-
-Standalone overrides keep their old base references. They are not reattached to
-a new imported batch, and there is no UI to reattach them.
-Deleting a raw file through Files also purges it when a locally available source
-manifest identifies it as an import; ordinary file deletion writes a tombstone.
+Standalone overrides keep their exact base references. Stable event IDs do not
+retarget revision pins. Files deletion also recognizes retained imports and
+purges their raw files; ordinary file deletion writes a tombstone.

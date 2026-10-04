@@ -10,6 +10,9 @@ use crate::api_client::CalendarImportError;
 
 type Records = [(String, ScheduleRecord, LocalHead)];
 
+#[path = "calendar_delta.rs"]
+mod delta;
+
 pub(super) struct CachedImportRules {
     epoch: u64,
     import: ObjectId,
@@ -143,13 +146,16 @@ pub(super) fn ready_sources(records: &Records) -> HashSet<SourceId> {
         .iter()
         .filter_map(|(_, record, _)| record.as_source())
         .filter(|source| {
-            source.active_import.as_ref().is_some_and(|batch| {
+            source.active_import.as_ref().is_some_and(|_| {
                 let mut seen = HashSet::new();
-                batch.events.iter().all(|id| {
-                    seen.insert(*id)
-                        && events.get(id.to_string().as_str()).is_some_and(|event| {
-                            event.source == source.id && event.belongs_to_import(batch.object_id)
-                        })
+                source.imports().all(|batch| {
+                    batch.events.iter().all(|id| {
+                        seen.insert(*id)
+                            && events.get(id.to_string().as_str()).is_some_and(|event| {
+                                event.source == source.id
+                                    && event.belongs_to_import(batch.object_id)
+                            })
+                    })
                 })
             })
         })
@@ -189,7 +195,7 @@ impl SyncEngine {
     pub async fn sync_calendar_source(&self, object_id: &str) -> Result<IngestReport, ClientError> {
         self.run_work(
             Some("Syncing a calendar".into()),
-            self.sync_calendar_source_inner(object_id),
+            self.sync_calendar_source_inner(object_id, None),
         )
         .await
     }
@@ -197,6 +203,7 @@ impl SyncEngine {
     async fn sync_calendar_source_inner(
         &self,
         object_id: &str,
+        window: Option<clipper_schedule::ingest::ImportWindow>,
     ) -> Result<IngestReport, ClientError> {
         self.set_calendar_work_label("Syncing", object_id).await;
         let _write = self.calendar_write.lock().await;
@@ -248,10 +255,16 @@ impl SyncEngine {
         if self.history_epoch.load(Ordering::SeqCst) != epoch {
             return Err(ClientError::NotAuthenticated);
         }
-        if source
-            .active_import
-            .as_ref()
-            .is_some_and(|batch| batch.content_hash == content_hash)
+        let window =
+            window.unwrap_or_else(|| clipper_schedule::ingest::ImportWindow::around(fetched_at));
+        let delta = self
+            .plan_calendar_delta(source.clone(), &outcome, &window)
+            .await?;
+        if delta.is_empty()
+            && source
+                .active_import
+                .as_ref()
+                .is_some_and(|batch| batch.content_hash == content_hash)
             && self
                 .local_store
                 .import_file_object(
@@ -266,13 +279,13 @@ impl SyncEngine {
                 .is_some()
         {
             return Ok(IngestReport {
-                unchanged: outcome.events.len() as u32,
+                unchanged: delta.unchanged(),
                 feed_unchanged: true,
                 ..Default::default()
             });
         }
         let batch = self
-            .stage_calendar_import(object_id, &text, fetched_at)
+            .stage_calendar_delta(object_id, &text, fetched_at, delta)
             .await?;
         self.finish_new_calendar_import(object_id, &text, &batch)
             .await
@@ -314,6 +327,7 @@ impl SyncEngine {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn stage_calendar_import(
         &self,
         object_id: &str,
@@ -334,6 +348,10 @@ impl SyncEngine {
             fetched_at,
             events: vec![probe_id; outcome.events.len()],
             content_hash: content_hash.clone(),
+            window: None,
+            uids: Vec::new(),
+            hashes: Vec::new(),
+            removed: Vec::new(),
         };
         let mut probe_source = source.clone();
         probe_source.pending_imports.push(probe.clone());
@@ -368,6 +386,10 @@ impl SyncEngine {
                 .map(|event| uuid::Uuid::new_v5(&snapshot_uuid, event.uid.as_bytes()).into())
                 .collect(),
             content_hash,
+            window: None,
+            uids: Vec::new(),
+            hashes: Vec::new(),
+            removed: Vec::new(),
         };
         loop {
             if source
@@ -418,6 +440,9 @@ impl SyncEngine {
         batch: &CalendarImport,
         new_batch: bool,
     ) -> Result<IngestReport, ClientError> {
+        if batch.window.is_some() {
+            return self.finish_calendar_delta(object_id, text, batch).await;
+        }
         let (source, _) = self.read_calendar_source(object_id).await?;
         if !source
             .pending_imports
@@ -727,13 +752,14 @@ impl SyncEngine {
                 "Import event identity mismatch".into(),
             ));
         }
-        if source {
+        {
             let expected = self.verify_listed_head(item).await?;
             if let Some(record) = self
                 .local_store
                 .schedule_record_at_head(id, expected)
                 .await?
-                && record.as_source().is_some()
+                && ((source && record.as_source().is_some())
+                    || (!source && record.as_ingested().is_some()))
             {
                 return Ok(Some(record));
             }
@@ -826,13 +852,13 @@ impl SyncEngine {
             if !(meta.record == ScheduleRecordKind::Ingested
                 && event.record == "ingested"
                 && event.source == source
-                && event.import == batch
-                && ObjectId::from(uuid::Uuid::new_v5(
-                    &uuid::Uuid::from(batch),
+                && (ObjectId::from(uuid::Uuid::new_v5(
+                    &uuid::Uuid::from(event.import),
                     event.uid.as_bytes(),
                 ))
                 .to_string()
-                    == id)
+                    == id
+                    || IngestedEvent::derive_id(source, &event.uid).to_string() == id))
             {
                 return Err(ClientError::InvalidArgument(
                     "Import cleanup target is not an event from this batch".into(),
@@ -937,10 +963,7 @@ impl SyncEngine {
                     continue;
                 };
                 if event.source != source.id
-                    || source
-                        .active_import
-                        .as_ref()
-                        .is_some_and(|batch| batch.object_id == batch_id)
+                    || source.contains_event(event_id, event)
                     || source
                         .pending_imports
                         .iter()
@@ -953,6 +976,23 @@ impl SyncEngine {
                                 .any(|event| event.to_string() == *event_id)
                     })
                 {
+                    continue;
+                }
+                if event.import_fetched_at.is_some()
+                    || source
+                        .active_import
+                        .as_ref()
+                        .is_some_and(|batch| batch.window.is_some())
+                {
+                    let mut orphan = event.clone();
+                    orphan.import_fetched_at.get_or_insert_with(|| {
+                        source
+                            .imports()
+                            .find(|batch| batch.object_id == batch_id)
+                            .map(|batch| batch.fetched_at)
+                            .unwrap_or(chrono::DateTime::UNIX_EPOCH)
+                    });
+                    self.track_delta_orphan(id, event_id, &orphan).await?;
                     continue;
                 }
                 let expected_id: ObjectId =
@@ -977,6 +1017,7 @@ impl SyncEngine {
                     source.retired_imports.push(RetiredImport {
                         object_id: batch_id,
                         events: vec![expected_id],
+                        delta: None,
                     });
                 }
                 changed = true;
@@ -995,6 +1036,16 @@ impl SyncEngine {
     }
 
     async fn cleanup_calendar_imports(&self, id: &str) -> Result<(), ClientError> {
+        let (source, _) = self.read_calendar_source(id).await?;
+        if let Some(batch) = source
+            .active_import
+            .as_ref()
+            .filter(|batch| batch.window.is_some())
+        {
+            for event in &batch.removed {
+                self.tombstone_delta_event(id, event, batch).await?;
+            }
+        }
         self.track_retired_events(id).await?;
         let (mut source, head) = self.calendar_source(id).await?;
         if source.retired_imports.is_empty() {
@@ -1002,10 +1053,13 @@ impl SyncEngine {
         }
         let records = self.local_store.schedule_records_with_heads().await?;
         for batch in &source.retired_imports {
+            if let Some(delta) = &batch.delta {
+                self.cleanup_calendar_delta(id, delta).await?;
+                continue;
+            }
             if source
-                .active_import
-                .as_ref()
-                .is_some_and(|active| active.object_id == batch.object_id)
+                .imports()
+                .any(|active| active.object_id == batch.object_id)
                 || source
                     .pending_imports
                     .iter()
@@ -1082,8 +1136,11 @@ impl SyncEngine {
         }
         if let Some(batch) = source.active_import.take() {
             source.retired_imports.push(batch.into());
-            self.save_calendar_source(id, &source, head).await?;
         }
+        for batch in source.retained_imports.drain(..) {
+            source.retired_imports.push(batch.into());
+        }
+        self.save_calendar_source(id, &source, head).await?;
         self.cleanup_calendar_imports(id).await
     }
 
@@ -1096,8 +1153,7 @@ impl SyncEngine {
             .filter_map(|(_, record)| record.as_source())
             .any(|source| {
                 source
-                    .active_import
-                    .iter()
+                    .imports()
                     .map(|batch| batch.object_id)
                     .chain(source.retired_imports.iter().map(|batch| batch.object_id))
                     .any(|batch_id| batch_id.to_string() == id)

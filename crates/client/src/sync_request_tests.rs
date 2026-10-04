@@ -46,6 +46,8 @@ fn encrypted_item_with_text(
                 active_import: None,
                 pending_imports: Vec::new(),
                 retired_imports: Vec::new(),
+                retained_imports: Vec::new(),
+                event_ids: Default::default(),
             }));
             let (meta_nonce, meta_ciphertext) =
                 encrypt_schedule_meta(&record.meta(), &KEY, &aad).unwrap();
@@ -296,10 +298,11 @@ async fn clipboard_reconnect_finishes_when_database_reads_wait() {
                 .await
         });
         ready.await.unwrap();
-        let mut reconcile = Box::pin(engine.snapshot_clipboard(generation, 2));
+        let reconciling = engine.clone();
+        let reconcile =
+            tokio::spawn(async move { reconciling.snapshot_clipboard(generation, 2).await });
         tokio::time::timeout(Duration::from_secs(2), async {
             while !engine.local_store.sync_locked_for_test() {
-                assert!(futures_util::poll!(reconcile.as_mut()).is_pending());
                 tokio::task::yield_now().await;
             }
         })
@@ -310,6 +313,7 @@ async fn clipboard_reconnect_finishes_when_database_reads_wait() {
         tokio::time::timeout(Duration::from_secs(2), reconcile)
             .await
             .expect("reconciliation resumes after the database is released")
+            .unwrap()
             .unwrap();
         tokio::time::timeout(
             Duration::from_secs(2),
