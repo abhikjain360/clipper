@@ -277,7 +277,7 @@ pub fn ingested_as_series(event: &clipper_schedule::IngestedEvent) -> ScheduleIt
         id: clipper_schedule::ScheduleItemId(event.id),
         title: event.title.clone(),
         span: event.span.clone(),
-        recurrence: event.recurrence.clone(),
+        recurrence: event.resolved_recurrence(),
         reference: None,
         alarm: None,
     }

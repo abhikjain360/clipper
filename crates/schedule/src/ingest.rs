@@ -58,6 +58,7 @@ impl std::fmt::Display for SourceId {
 /// Stored as an encrypted object. An iCalendar feed URL is the credential for
 /// that feed, so it must never be server-visible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "store::StoredSource", into = "store::StoredSource")]
 pub struct CalendarSource {
     pub id: SourceId,
     /// What the user calls it: "Work", "Gmail", "Zoho".
@@ -86,7 +87,15 @@ pub struct CalendarSource {
     pub retained_imports: Vec<CalendarImport>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub event_ids: BTreeMap<Uuid, ObjectId>,
+    pub import_anchor: Option<ObjectId>,
+    pub delta_state: bool,
+    pub removing: bool,
+    pub superseded: HashMap<ObjectId, ObjectId>,
+    pub pending_retirements: HashSet<ObjectId>,
 }
+
+#[path = "import_store.rs"]
+mod store;
 
 /// One source fetch, stored once as an encrypted file, with its parsed event objects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,11 +159,14 @@ pub struct RetiredImport {
     pub events: Vec<clipper_api_types::ObjectId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Box<CalendarImport>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<ObjectId>,
 }
 
 impl From<CalendarImport> for RetiredImport {
     fn from(batch: CalendarImport) -> Self {
         Self {
+            superseded_by: None,
             delta: batch.window.as_ref().map(|_| Box::new(batch.clone())),
             object_id: batch.object_id,
             events: batch.events,
@@ -165,10 +177,22 @@ impl From<CalendarImport> for RetiredImport {
 impl CalendarSource {
     pub fn contains_event(&self, object_id: &str, event: &IngestedEvent) -> bool {
         self.id == event.source
+            && event
+                .import
+                .is_some_and(|import| event.belongs_to_import(import))
             && self.imports().any(|batch| {
-                event.belongs_to_import(batch.object_id)
+                (event.snapshot() == Some(batch.object_id)
+                    || (batch.window.is_none() && event.belongs_to_import(batch.object_id)))
                     && batch.events.iter().any(|id| id.to_string() == object_id)
             })
+    }
+
+    pub fn can_cleanup(&self, batch: &RetiredImport) -> bool {
+        self.removing
+            || (self.active_import.is_some()
+                && batch
+                    .superseded_by
+                    .is_some_and(|winner| self.superseded.get(&batch.object_id) == Some(&winner)))
     }
 
     pub fn imports(&self) -> impl Iterator<Item = &CalendarImport> {
@@ -189,13 +213,11 @@ pub enum SourceKind {
 pub struct IngestedEvent {
     pub id: Uuid,
     pub source: SourceId,
-    /// The snapshot of the complete original feed. With `uid` it names the
-    /// original series and its provider overrides. A typed cadence or a
-    /// one-off still works without it; a [`Recurrence::Imported`] cannot
-    /// expand until its rule is read back out of this snapshot.
     pub import: Option<clipper_api_types::ObjectId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_fetched_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_import: Option<ObjectId>,
     /// The provider's own identifier. Stable across edits, and the same in
     /// every calendar that carries the meeting.
     pub uid: String,
@@ -235,6 +257,40 @@ pub struct Attendance {
 }
 
 impl IngestedEvent {
+    pub fn snapshot(&self) -> Option<ObjectId> {
+        self.raw_import.or(self.import)
+    }
+
+    pub fn resolved_recurrence(&self) -> Recurrence {
+        let mut recurrence = self.recurrence.clone();
+        if let Recurrence::Imported { import, .. } = &mut recurrence
+            && let Some(raw) = self.snapshot()
+        {
+            *import = raw;
+        }
+        recurrence
+    }
+
+    pub fn window_check(
+        &self,
+        window: &ImportWindow,
+    ) -> Result<Option<bool>, crate::engine::EngineError> {
+        if !matches!(self.recurrence, Recurrence::Imported { .. }) {
+            return self
+                .overlaps(window, &crate::RecurrenceEngine::new())
+                .map(Some);
+        }
+        let mut once = self.clone();
+        once.recurrence = Recurrence::Once;
+        if once.overlaps(window, &crate::RecurrenceEngine::new())? {
+            return Ok(Some(true));
+        }
+        if self.overrides.is_empty() && self.span.resolve(Tz::UTC)?.start() >= window.end {
+            return Ok(Some(false));
+        }
+        Ok(None)
+    }
+
     pub fn overlaps(
         &self,
         window: &ImportWindow,
@@ -244,7 +300,7 @@ impl IngestedEvent {
             id: ScheduleItemId(self.id),
             title: self.title.clone(),
             span: self.span.clone(),
-            recurrence: self.recurrence.clone(),
+            recurrence: self.resolved_recurrence(),
             reference: None,
             alarm: None,
             break_reminders: false,
@@ -880,6 +936,7 @@ fn event_from_component(
         source,
         import: Some(import),
         import_fetched_at: None,
+        raw_import: None,
         title: text_property(component, "SUMMARY").unwrap_or_else(|| "(no title)".to_string()),
         description: text_property(component, "DESCRIPTION"),
         span,

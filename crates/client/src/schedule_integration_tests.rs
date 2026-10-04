@@ -1545,6 +1545,16 @@ async fn live_calendar_import_reads_and_cleanup_survive_replacement() {
         }
         .to_string();
         let item = first.api.get_object_revision(&id, 1).await.unwrap();
+        let (mut removing, head) = slow.read_calendar_source(&source_id).await.unwrap();
+        removing.removing = true;
+        removing.delta_state = true;
+        slow.write_schedule_record(
+            &source_id,
+            ScheduleRecord::Source(Box::new(removing)),
+            EnvelopePlacement::Revise(head),
+        )
+        .await
+        .unwrap();
         let path = if historical {
             format!(
                 "GET /api/objects/{id}/revisions/1/payloads/{} HTTP/1.1",
@@ -2176,7 +2186,12 @@ async fn live_calendar_unusable_pending_batches_are_retired_before_fresh_fetches
         let (record, _) = load_schedule_object(&engine, &source_id).await;
         let source = record.as_source().unwrap();
         assert!(source.pending_imports.is_empty());
-        assert!(source.retired_imports.is_empty());
+        assert!(
+            source
+                .retired_imports
+                .iter()
+                .all(|batch| !source.can_cleanup(batch))
+        );
         assert_ne!(
             source.active_import.as_ref().unwrap().object_id,
             batch.object_id
@@ -3246,12 +3261,16 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
             (id == source).then(|| record.as_source().cloned().map(|source| (source, head)))?
         })
         .expect("source to test cleanup ownership");
+    let retired_id = uuid::Uuid::new_v4().into();
+    let winner = poisoned_source.active_import.as_ref().unwrap().object_id;
+    poisoned_source.superseded.insert(retired_id, winner);
     poisoned_source
         .retired_imports
         .push(clipper_schedule::ingest::RetiredImport {
-            object_id: uuid::Uuid::new_v4().into(),
+            object_id: retired_id,
             events: vec![provider_actual.parse().expect("actual object id")],
             delta: None,
+            superseded_by: Some(winner),
         });
     first
         .write_schedule_record(
@@ -3795,6 +3814,11 @@ fn imported_source_readiness_requires_a_complete_active_batch() {
                 retired_imports: Vec::new(),
                 retained_imports: Vec::new(),
                 event_ids: Default::default(),
+                import_anchor: None,
+                delta_state: false,
+                removing: false,
+                superseded: Default::default(),
+                pending_retirements: Default::default(),
             }))
         };
     let complete = vec![

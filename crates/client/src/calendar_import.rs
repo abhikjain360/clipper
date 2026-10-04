@@ -151,10 +151,9 @@ pub(super) fn ready_sources(records: &Records) -> HashSet<SourceId> {
                 source.imports().all(|batch| {
                     batch.events.iter().all(|id| {
                         seen.insert(*id)
-                            && events.get(id.to_string().as_str()).is_some_and(|event| {
-                                event.source == source.id
-                                    && event.belongs_to_import(batch.object_id)
-                            })
+                            && events
+                                .get(id.to_string().as_str())
+                                .is_some_and(|event| source.contains_event(&id.to_string(), event))
                     })
                 })
             })
@@ -317,7 +316,7 @@ impl SyncEngine {
                     .iter()
                     .any(|retired| retired.object_id == batch.object_id)
             {
-                source.retired_imports.push(batch.clone().into());
+                delta::retire_import(&mut source, batch.clone());
             }
             match self.save_calendar_source(id, &source, head).await {
                 Ok(_) => return Ok(()),
@@ -527,6 +526,9 @@ impl SyncEngine {
                     superseded: source.active_import.as_ref() != Some(batch),
                     ..Default::default()
                 };
+                if !source.delta_state {
+                    break;
+                }
                 if !report.superseded
                     || source
                         .retired_imports
@@ -535,7 +537,7 @@ impl SyncEngine {
                 {
                     break;
                 }
-                source.retired_imports.push(batch.clone().into());
+                delta::retire_import(&mut source, batch.clone());
             } else {
                 source
                     .pending_imports
@@ -552,13 +554,16 @@ impl SyncEngine {
                     ..Default::default()
                 };
                 if loses {
-                    source.retired_imports.push(batch.clone().into());
+                    delta::retire_import(&mut source, batch.clone());
                 } else {
                     report.added = events.len() as u32;
+                    source.delta_state = true;
+                    source.import_anchor = Some(batch.object_id);
                     if let Some(previous) = source.active_import.replace(batch.clone()) {
                         report.tombstoned = previous.events.len() as u32;
-                        source.retired_imports.push(previous.into());
+                        delta::retire_import(&mut source, previous);
                     }
+                    delta::complete_retirements(&mut source, batch.object_id);
                 }
             }
             match self.save_calendar_source(object_id, &source, head).await {
@@ -802,6 +807,47 @@ impl SyncEngine {
         source: SourceId,
         batch: ObjectId,
     ) -> Result<(), ClientError> {
+        let source_id = self
+            .local_store
+            .schedule_records_with_ids()
+            .await
+            .into_iter()
+            .find_map(|(id, record)| {
+                record
+                    .as_source()
+                    .filter(|record| record.id == source)
+                    .map(|_| id)
+            });
+        let Some(source_id) = source_id else {
+            return Ok(());
+        };
+        let (current, _) = self.read_calendar_source(&source_id).await?;
+        let raw_is_held = kind == ObjectKind::File
+            && self
+                .local_store
+                .schedule_records_with_ids()
+                .await
+                .iter()
+                .any(|(_, record)| {
+                    record.as_ingested().is_some_and(|event| {
+                        event.source == source && event.snapshot() == Some(batch)
+                    })
+                });
+        if !current.removing
+            && (raw_is_held
+                || !current.superseded.contains_key(&batch)
+                || (kind == ObjectKind::File && current.import_anchor == Some(batch))
+                || current.imports().any(|active| {
+                    active.object_id == batch
+                        || active.events.iter().any(|event| event.to_string() == id)
+                })
+                || current
+                    .pending_imports
+                    .iter()
+                    .any(|pending| pending.object_id == batch))
+        {
+            return Ok(());
+        }
         let historical = match self.api.get_object_revision(id, 1).await {
             Ok(item) => item,
             Err(ClientError::Api { status: 404, .. }) => return Ok(()),
@@ -959,10 +1005,11 @@ impl SyncEngine {
                 let Some(event) = record.as_ingested() else {
                     continue;
                 };
-                let Some(batch_id) = event.import else {
+                let Some(batch_id) = event.snapshot() else {
                     continue;
                 };
-                if event.source != source.id
+                if (!source.removing && !source.superseded.contains_key(&batch_id))
+                    || event.source != source.id
                     || source.contains_event(event_id, event)
                     || source
                         .pending_imports
@@ -1018,6 +1065,7 @@ impl SyncEngine {
                         object_id: batch_id,
                         events: vec![expected_id],
                         delta: None,
+                        superseded_by: source.superseded.get(&batch_id).copied(),
                     });
                 }
                 changed = true;
@@ -1053,6 +1101,9 @@ impl SyncEngine {
         }
         let records = self.local_store.schedule_records_with_heads().await?;
         for batch in &source.retired_imports {
+            if !source.can_cleanup(batch) {
+                continue;
+            }
             if let Some(delta) = &batch.delta {
                 self.cleanup_calendar_delta(id, delta).await?;
                 continue;
@@ -1073,7 +1124,9 @@ impl SyncEngine {
                 let event_id = event_id.to_string();
                 if let Some((_, record, _)) = records.iter().find(|(id, _, _)| id == &event_id)
                     && !record.as_ingested().is_some_and(|event| {
-                        event.source == source.id && event.import == Some(batch.object_id)
+                        event.source == source.id
+                            && (event.snapshot() == Some(batch.object_id)
+                                || (source.removing && event.belongs_to_import(batch.object_id)))
                     })
                 {
                     return Err(ClientError::InvalidArgument(
@@ -1096,7 +1149,12 @@ impl SyncEngine {
             )
             .await?;
         }
-        let cleaned = source.retired_imports.clone();
+        let cleaned: Vec<_> = source
+            .retired_imports
+            .iter()
+            .filter(|batch| source.can_cleanup(batch))
+            .cloned()
+            .collect();
         let mut head = head;
         loop {
             source
@@ -1134,11 +1192,54 @@ impl SyncEngine {
                 "Finish the pending calendar import before removing this source".into(),
             ));
         }
+        source.removing = true;
+        source.delta_state = true;
         if let Some(batch) = source.active_import.take() {
             source.retired_imports.push(batch.into());
         }
         for batch in source.retained_imports.drain(..) {
             source.retired_imports.push(batch.into());
+        }
+        for (event_id, record) in self.local_store.schedule_records_with_ids().await {
+            if let Some(event) = record.as_ingested()
+                && event.source == source.id
+                && let Some(raw) = event.snapshot()
+            {
+                let event_id = event_id.parse().map_err(|source| ClientError::InvalidId {
+                    kind: "import event id",
+                    source,
+                })?;
+                if let Some(batch) = source
+                    .retired_imports
+                    .iter_mut()
+                    .find(|batch| batch.object_id == raw)
+                {
+                    if !batch.events.contains(&event_id) {
+                        batch.events.push(event_id);
+                        batch.delta = None;
+                    }
+                } else {
+                    source.retired_imports.push(RetiredImport {
+                        object_id: raw,
+                        events: vec![event_id],
+                        delta: None,
+                        superseded_by: None,
+                    });
+                }
+            }
+        }
+        if let Some(anchor) = source.import_anchor
+            && !source
+                .retired_imports
+                .iter()
+                .any(|batch| batch.object_id == anchor)
+        {
+            source.retired_imports.push(RetiredImport {
+                object_id: anchor,
+                events: Vec::new(),
+                delta: None,
+                superseded_by: None,
+            });
         }
         self.save_calendar_source(id, &source, head).await?;
         self.cleanup_calendar_imports(id).await
@@ -1153,10 +1254,13 @@ impl SyncEngine {
             .filter_map(|(_, record)| record.as_source())
             .any(|source| {
                 source
-                    .imports()
-                    .map(|batch| batch.object_id)
-                    .chain(source.retired_imports.iter().map(|batch| batch.object_id))
-                    .any(|batch_id| batch_id.to_string() == id)
+                    .import_anchor
+                    .is_some_and(|anchor| anchor.to_string() == id)
+                    || source
+                        .imports()
+                        .map(|batch| batch.object_id)
+                        .chain(source.retired_imports.iter().map(|batch| batch.object_id))
+                        .any(|batch_id| batch_id.to_string() == id)
             }))
     }
 }

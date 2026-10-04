@@ -766,9 +766,47 @@ Each entry has:
 
 ## Bugs
 
-### 168. Calendar refreshes replaced every event and rewrote history
+### 171. Older calendar clients could purge retained history
 
 - **Status:** fixed in the working tree; not committed.
+- **Severity:** high; found before deploying `14f303a`.
+- **Where:** calendar source serialization and import cleanup.
+- **What happened:** older readers ignored retained groups and treated their
+  events as abandoned. Older saves stripped the new fields, after which newer
+  cleanup could infer abandonment from missing membership.
+- **Fix:** expose one stable import ID and complete live membership to older
+  readers. Keep actual snapshots and delta groups in a separate encrypted
+  manifest. Purge only with recorded supersession by a completed import, or
+  explicit calendar-removal intent. Missing or stripped evidence means keep.
+  An old-struct round-trip test preserves all 1,246 legacy IDs and raw snapshots,
+  makes no DELETE requests, and updates one event without duplicating history.
+
+### 170. Deleted original feeds blocked calendar refresh permanently
+
+- **Status:** fixed in the working tree; not committed.
+- **Severity:** high; found before deploying `14f303a`.
+- **Where:** calendar delta planning and cleanup.
+- **What happened:** stored unsupported recurrence required a deleted raw
+  snapshot before the window check, so every subsequent refresh failed.
+- **Fix:** check cheap bounds first. An unavailable stored recurrence is
+  conservatively eligible for rewrite or tombstoning. A server-backed test
+  deletes original snapshots, then refreshes changed and removed events.
+
+### 169. Calendar scope ignored stored occurrences
+
+- **Status:** fixed in the working tree; not committed.
+- **Severity:** high; stale occurrences could keep ringing alarms.
+- **Where:** calendar delta eligibility.
+- **What happened:** only the incoming definition determined eligibility.
+  Moves out of the window, ended rules and cancelled moved overrides left the
+  stored in-window occurrences unchanged.
+- **Fix:** reconcile when either definition overlaps the window. Tests cover
+  a moved meeting, a new UNTIL before the window, a series ended more than
+  14 days earlier, and a cancelled override with an outside original position.
+
+### 168. Calendar refreshes replaced every event and rewrote history
+
+- **Status:** fixed in `14f303a`; review fixes in entries 169–171.
 - **Severity:** medium; large imported calendars made refreshes expensive.
 - **Where:** calendar ingest and client import staging, activation and cleanup.
 - **What happened:** each changed feed created a complete new batch with new

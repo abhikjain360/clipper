@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "calendar_review_tests.rs"]
+mod review_tests;
+
 async fn held_event(engine: &SyncEngine, id: &str) -> Result<Option<ScheduleRecord>, ClientError> {
     match engine.api.get_object(id).await {
         Ok(_) => Ok(Some(load_schedule_object(engine, id).await.0)),
@@ -495,13 +498,13 @@ async fn live_calendar_delta_cleans_late_writes_without_erasing_history() {
         second.api.get_object_revision(&old_id, 1).await.is_ok(),
         "history remains available"
     );
-    assert!(matches!(
+    assert!(
         second
             .api
             .get_object_revision(&older.object_id.to_string(), 1)
-            .await,
-        Err(ClientError::Api { status: 404, .. })
-    ));
+            .await
+            .is_ok()
+    );
     let event = held_event(&second, &newer.events[0].to_string())
         .await
         .unwrap()
@@ -642,7 +645,10 @@ async fn live_calendar_delta_replaces_event_ordering_from_a_clock_too_far_ahead(
     assert!(report.skipped.is_empty(), "{:?}", report.skipped);
     let event = held_event(&engine, &event_id).await.unwrap().unwrap();
     assert_eq!(event.as_ingested().unwrap().title, "Fresh");
-    assert_eq!(event.as_ingested().unwrap().import, Some(batch.object_id));
+    assert_eq!(
+        event.as_ingested().unwrap().snapshot(),
+        Some(batch.object_id)
+    );
     assert_eq!(
         engine
             .read_calendar_source(&id)

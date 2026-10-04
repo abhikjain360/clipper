@@ -3,7 +3,9 @@
 Each refresh reconciles one source within a rolling window: the past 14 days
 through the next 90 days, measured from fetch completion in UTC. An event or
 recurring series is in the window when at least one occurrence overlaps it.
-Provider moves, extra dates and cancellations are included when deciding scope.
+The stored definition and the incoming definition both count when deciding
+scope. Either one overlapping the window makes the event eligible. Provider
+moves, extra dates and cancellations are included.
 Zoned events use their own timezones; floating and all-day events use UTC for
 this import boundary.
 
@@ -11,8 +13,10 @@ Within the window, new events are created, changed events get a revision, and
 events removed from the feed get a tombstone. Unchanged events keep their IDs,
 revisions and snapshot references. Events entirely outside the window are left
 untouched as history, including when they change or disappear from the feed.
-A present UID that moves entirely outside the window also leaves the stored
-event untouched.
+A meeting moved out of the window is updated so its old occurrence disappears.
+An ended series replaces its previously unbounded rule. A cancelled provider
+override removes a stored move into the window even when its original position
+is outside it.
 
 Recordings, locally authored schedules and locally authored occurrence overrides
 are separate objects and are never deleted by refresh cleanup. Different sources
@@ -26,8 +30,11 @@ intentionally duplicated.
   outside the window, provider fields, timezone definitions and override
   components that the normalized model does not retain. It can be downloaded
   from Files. There is no plaintext server copy.
-- Each parsed `IngestedEvent` carries its source, provider UID and original
-  `import: ObjectId`. Provider overrides use their original recurrence ID.
+- Each parsed `IngestedEvent` carries its source, provider UID and a stable
+  `import: ObjectId` identifying the source's first import. `raw_import`, when
+  present, identifies the snapshot containing this event's actual definition.
+  Unsupported rules resolve from `raw_import`, falling back to `import`.
+  Provider overrides use their original recurrence ID.
   New object IDs are derived from source and UID, independently of snapshots.
   Overrides stay bundled with their series and have stable IDs derived from the
   event and recurrence position. A returning tombstoned event reuses its ID.
@@ -36,11 +43,23 @@ intentionally duplicated.
   source. It revises eligible events in place and keeps all outside-window history
   and unchanged events. Aliases remain after tombstones so returning events do
   not duplicate the old objects.
-- `active_import` records the newest completed refresh: raw File ID, fetch time,
+- The encrypted `delta.active` manifest records the newest completed refresh: raw File ID, fetch time,
   window, changed event IDs, UIDs, normalized hashes, and removed IDs.
-  `retained_imports` owns unchanged events and history from earlier snapshots.
+  `delta.retained` owns unchanged events and history from earlier snapshots.
   Each live event belongs to exactly one active or retained snapshot. Raw files
   remain while any live event still refers to them.
+- The top-level `active_import` is the compatibility view for older clients.
+  Its ID stays fixed and its membership includes every live event, including
+  retained history. Every event's `import` and stored imported-rule ID use that
+  same ID. Pending and retired delta groups stay inside `delta`, so an older
+  reader cannot mistake them for whole-batch replacements. The anchor raw file
+  is kept until explicit deletion or calendar removal.
+- Completed refreshes record which snapshots they supersede. Cleanup requires
+  this positive evidence. The evidence remains after cleanup so late uploads
+  can be recognized. A source saved by an older client can lose the `delta`
+  fields; missing evidence means keep events and raw files. Existing event
+  records rebuild ID aliases on the next refresh. Explicit calendar removal
+  records its own removal intent before purging.
 - Full-feed and per-event hashes include normalized titles, descriptions, spans,
   recurrence, provider overrides, status, organizer, attendance, the owner's
   PARTSTAT and alarm offsets. Unsupported recurrence rules are included.
@@ -123,7 +142,11 @@ imported alarms with user-authored alarms. Local agents can use
    current window; outside-window history stays.
 3. Compare eligible events with the held imports. Write only new or changed
    events; tombstone only missing UIDs whose stored occurrences overlap the
-   window. An unchanged full feed with an available active raw file and no
+   window. Check typed recurrence and simple bounds before resolving raw rules.
+   If a stored rule cannot be expanded because its raw snapshot is missing,
+   conservatively treat it as eligible: rewrite it from the feed or tombstone
+   it if absent. This also restores an unchanged unsupported rule after
+   **Delete original feed**. An unchanged full feed with an available active raw file and no
    event delta writes nothing. Recompute eligibility on every fetch: events
    can enter the window even when the feed bytes do not change. A changed
    response containing only outside-window edits can replace the raw snapshot
@@ -141,7 +164,8 @@ imported alarms with user-authored alarms. Local agents can use
    Per-event fetch ordering prevents older writers overwriting newer content.
 6. Move unchanged events and history into retained snapshot groups. Tombstone
    removed in-window events, preserving immutable revisions. Purge a superseded
-   raw file only when no active, retained or pending group references it.
+   raw file only with recorded supersession evidence and when no active,
+   retained or pending group references it. Keep the compatibility anchor.
    Late writes from losing refreshes are restored to the winning content or
    tombstoned within its window. Outside-window events remain history.
    Retry unfinished cleanup on the next refresh.
@@ -169,8 +193,9 @@ retain that record's own head so the server can reject a conflicting write.
 
 A device can finish a batch after another device has superseded it and removed
 its retired entry. The late uploader restores that entry before cleanup.
-Hydrated events unclaimed by the current source are also registered for cleanup,
-so a crash does not lose their source and snapshot provenance. A cleanup retry
+Hydrated events unclaimed by the current source are registered for cleanup only
+when that source records their snapshot as superseded. Missing membership alone
+does not authorize deletion. A cleanup retry
 cannot overwrite content from a newer pending refresh.
 
 Refresh and source/file deletion are serialized locally with authentication

@@ -48,6 +48,11 @@ fn encrypted_item_with_text(
                 retired_imports: Vec::new(),
                 retained_imports: Vec::new(),
                 event_ids: Default::default(),
+                import_anchor: None,
+                delta_state: false,
+                removing: false,
+                superseded: Default::default(),
+                pending_retirements: Default::default(),
             }));
             let (meta_nonce, meta_ciphertext) =
                 encrypt_schedule_meta(&record.meta(), &KEY, &aad).unwrap();

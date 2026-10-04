@@ -3186,6 +3186,11 @@ impl SyncEngine {
             retired_imports: Vec::new(),
             retained_imports: Vec::new(),
             event_ids: Default::default(),
+            import_anchor: None,
+            delta_state: false,
+            removing: false,
+            superseded: Default::default(),
+            pending_retirements: Default::default(),
         })))
         .await
     }
@@ -7754,6 +7759,11 @@ mod adversarial_history_tests {
             retired_imports: Vec::new(),
             retained_imports: Vec::new(),
             event_ids: Default::default(),
+            import_anchor: None,
+            delta_state: false,
+            removing: false,
+            superseded: Default::default(),
+            pending_retirements: Default::default(),
         }))
     }
 

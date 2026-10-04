@@ -30,6 +30,7 @@ fn event_hash(event: &IngestedEvent, rule: Option<&str>) -> Result<String, Clien
     let mut event = event.clone();
     event.import = Some(uuid::Uuid::nil().into());
     event.import_fetched_at = None;
+    event.raw_import = None;
     if let clipper_schedule::Recurrence::Imported { import, .. } = &mut event.recurrence {
         *import = uuid::Uuid::nil().into();
     }
@@ -41,11 +42,12 @@ fn event_hash(event: &IngestedEvent, rule: Option<&str>) -> Result<String, Clien
         .collect())
 }
 
-fn set_import(event: &mut IngestedEvent, batch: &CalendarImport) {
-    event.import = Some(batch.object_id);
+fn set_import(event: &mut IngestedEvent, batch: &CalendarImport, anchor: ObjectId) {
+    event.import = Some(anchor);
+    event.raw_import = (anchor != batch.object_id).then_some(batch.object_id);
     event.import_fetched_at = Some(batch.fetched_at);
     if let clipper_schedule::Recurrence::Imported { import, .. } = &mut event.recurrence {
-        *import = batch.object_id;
+        *import = anchor;
     }
 }
 
@@ -72,6 +74,13 @@ fn activate_delta(source: &mut CalendarSource, batch: &CalendarImport) {
     if let Some(previous) = source.active_import.take() {
         source.retained_imports.push(previous);
     }
+    for previous in &source.retained_imports {
+        if previous.events.iter().any(|id| changed.contains(id)) {
+            source
+                .superseded
+                .insert(previous.object_id, batch.object_id);
+        }
+    }
     for previous in &mut source.retained_imports {
         remove_events(previous, &changed);
     }
@@ -79,6 +88,8 @@ fn activate_delta(source: &mut CalendarSource, batch: &CalendarImport) {
     for previous in source.retained_imports.drain(..) {
         if previous.events.is_empty() {
             let mut retired = RetiredImport::from(previous);
+            retired.superseded_by = Some(batch.object_id);
+            source.superseded.insert(retired.object_id, batch.object_id);
             retired.events.clear();
             if let Some(delta) = &mut retired.delta {
                 delta.events.clear();
@@ -92,6 +103,28 @@ fn activate_delta(source: &mut CalendarSource, batch: &CalendarImport) {
     }
     source.retained_imports = retained;
     source.active_import = Some(batch.clone());
+    complete_retirements(source, batch.object_id);
+}
+
+pub(super) fn complete_retirements(source: &mut CalendarSource, winner: ObjectId) {
+    for retired in &mut source.retired_imports {
+        if source.pending_retirements.remove(&retired.object_id) {
+            retired.superseded_by = Some(winner);
+            source.superseded.insert(retired.object_id, winner);
+        }
+    }
+}
+
+pub(super) fn retire_import(source: &mut CalendarSource, batch: CalendarImport) {
+    source.delta_state = true;
+    let mut retired = RetiredImport::from(batch);
+    retired.superseded_by = source.active_import.as_ref().map(|active| active.object_id);
+    if let Some(winner) = retired.superseded_by {
+        source.superseded.insert(retired.object_id, winner);
+    } else {
+        source.pending_retirements.insert(retired.object_id);
+    }
+    source.retired_imports.push(retired);
 }
 
 fn loses(batch: &CalendarImport, source: &CalendarSource) -> bool {
@@ -106,6 +139,27 @@ fn loses(batch: &CalendarImport, source: &CalendarSource) -> bool {
 }
 
 impl SyncEngine {
+    async fn event_in_scope(
+        &self,
+        event: &IngestedEvent,
+        window: &ImportWindow,
+    ) -> Result<bool, ClientError> {
+        if let Some(overlaps) = event
+            .window_check(window)
+            .map_err(|error| ClientError::InvalidArgument(error.to_string()))?
+        {
+            return Ok(overlaps);
+        }
+        match self.recurrence_engine(&event.resolved_recurrence()).await {
+            Ok(engine) => event
+                .overlaps(window, &engine)
+                .map_err(|error| ClientError::InvalidArgument(error.to_string())),
+            Err(error) => {
+                warn!(uid = %event.uid, %error, "Calendar recurrence unavailable; reconciling the event conservatively");
+                Ok(true)
+            }
+        }
+    }
     #[cfg(test)]
     pub(in crate::engine) async fn sync_calendar_source_in_window(
         &self,
@@ -133,6 +187,28 @@ impl SyncEngine {
             .await?;
         self.stage_calendar_delta(id, text, fetched_at, delta).await
     }
+    async fn import_outcome(
+        &self,
+        raw: ObjectId,
+        source: &CalendarSource,
+    ) -> Result<Option<clipper_schedule::IngestOutcome>, ClientError> {
+        let bytes = match self.download_file_bytes(&raw.to_string()).await {
+            Ok(bytes) => bytes,
+            Err(ClientError::Api { status: 404, .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if self
+            .local_store
+            .import_file_object(&raw.to_string())
+            .await?
+            .is_none_or(|object| object.envelope.body.revision != 1)
+        {
+            return Ok(None);
+        }
+        let text = String::from_utf8(bytes).map_err(|_| CalendarImportError::InvalidText)?;
+        Ok(Some(validated_feed(&text, source)?))
+    }
+
     async fn imported_events(
         &self,
         source: &CalendarSource,
@@ -143,6 +219,7 @@ impl SyncEngine {
             .await
             .into_iter()
             .collect();
+        let mut snapshots = HashMap::new();
         let mut held = HashMap::new();
         for batch in source.imports() {
             if batch.window.is_some()
@@ -151,60 +228,48 @@ impl SyncEngine {
             {
                 return Err(CalendarImportError::FeedChanged.into());
             }
-            let complete = batch.events.iter().all(|id| {
-                records
-                    .get(&id.to_string())
-                    .and_then(ScheduleRecord::as_ingested)
-                    .is_some_and(|event| {
-                        event.source == source.id
-                            && event.belongs_to_import(batch.object_id)
-                            && !matches!(
-                                event.recurrence,
-                                clipper_schedule::Recurrence::Imported { .. }
-                            )
-                    })
-            });
-            let parsed = if complete || batch.events.is_empty() {
-                None
-            } else {
-                match self.download_file_bytes(&batch.object_id.to_string()).await {
-                    Ok(bytes) => {
-                        if self
-                            .local_store
-                            .import_file_object(&batch.object_id.to_string())
-                            .await?
-                            .is_none_or(|object| object.envelope.body.revision != 1)
-                        {
-                            return Err(CalendarImportError::FeedChanged.into());
-                        }
-                        let text = String::from_utf8(bytes)
-                            .map_err(|_| CalendarImportError::InvalidText)?;
-                        let outcome = validated_feed(&text, source)?;
-                        if !batch.content_hash.is_empty()
-                            && feed_hash(&outcome)? != batch.content_hash
-                        {
-                            return Err(CalendarImportError::FeedChanged.into());
-                        }
-                        Some(outcome)
-                    }
-                    Err(ClientError::Api { status: 404, .. }) => None,
-                    Err(error) => return Err(error),
-                }
-            };
             for (index, id) in batch.events.iter().enumerate() {
-                let event = records
+                let stored = records
                     .get(&id.to_string())
                     .and_then(ScheduleRecord::as_ingested)
                     .filter(|event| {
-                        event.source == source.id && event.belongs_to_import(batch.object_id)
-                    })
-                    .cloned()
-                    .or_else(|| {
-                        parsed
-                            .as_ref()?
-                            .events
-                            .iter()
-                            .find(|event| {
+                        event.source == source.id
+                            && event
+                                .import
+                                .is_some_and(|import| event.belongs_to_import(import))
+                            && (event.snapshot() == Some(batch.object_id)
+                                || (batch.window.is_none()
+                                    && event.belongs_to_import(batch.object_id)))
+                    });
+                let raw = stored
+                    .and_then(IngestedEvent::snapshot)
+                    .unwrap_or(batch.object_id);
+                if (stored.is_none()
+                    || stored.is_some_and(|event| {
+                        matches!(
+                            event.recurrence,
+                            clipper_schedule::Recurrence::Imported { .. }
+                        )
+                    }))
+                    && !snapshots.contains_key(&raw)
+                {
+                    snapshots.insert(raw, self.import_outcome(raw, source).await?);
+                }
+                let parsed = snapshots.get(&raw).and_then(Option::as_ref);
+                if batch.window.is_some()
+                    && raw == batch.object_id
+                    && let Some(parsed) = parsed
+                    && !batch.content_hash.is_empty()
+                    && feed_hash(parsed)? != batch.content_hash
+                {
+                    return Err(CalendarImportError::FeedChanged.into());
+                }
+                let event = if let Some(event) = stored {
+                    event.clone()
+                } else {
+                    let mut event = parsed
+                        .and_then(|outcome| {
+                            outcome.events.iter().find(|event| {
                                 if batch.window.is_some() {
                                     event.uid == batch.uids[index]
                                 } else {
@@ -212,36 +277,36 @@ impl SyncEngine {
                                         &uuid::Uuid::from(batch.object_id),
                                         event.uid.as_bytes(),
                                     )) == *id
+                                        || ObjectId::from(event.id) == *id
+                                        || source.event_ids.get(&event.id) == Some(id)
                                 }
                             })
-                            .cloned()
-                    })
-                    .ok_or(CalendarImportError::EventChanged)?;
-                let hash = {
-                    let rule = parsed.as_ref().and_then(|outcome| {
-                        outcome
-                            .rules
-                            .iter()
-                            .find(|(uid, _)| *uid == event.uid)
-                            .map(|(_, rule)| rule.as_str())
-                    });
-                    if rule.is_none()
-                        && matches!(
-                            event.recurrence,
-                            clipper_schedule::Recurrence::Imported { .. }
-                        )
-                    {
-                        String::new()
-                    } else {
-                        event_hash(&event, rule)?
-                    }
+                        })
+                        .cloned()
+                        .ok_or(CalendarImportError::EventChanged)?;
+                    set_import(
+                        &mut event,
+                        batch,
+                        source.import_anchor.unwrap_or(batch.object_id),
+                    );
+                    event
                 };
-                let mut event = event;
-                event.import = Some(batch.object_id);
-                if let clipper_schedule::Recurrence::Imported { import, .. } = &mut event.recurrence
-                {
-                    *import = batch.object_id;
-                }
+                let rule = parsed.and_then(|outcome| {
+                    outcome
+                        .rules
+                        .iter()
+                        .find(|(uid, _)| *uid == event.uid)
+                        .map(|(_, rule)| rule.as_str())
+                });
+                let hash = if rule.is_none()
+                    && matches!(
+                        event.recurrence,
+                        clipper_schedule::Recurrence::Imported { .. }
+                    ) {
+                    String::new()
+                } else {
+                    event_hash(&event, rule)?
+                };
                 if held
                     .insert(
                         event.uid.clone(),
@@ -287,10 +352,18 @@ impl SyncEngine {
             .map(|event| event.uid.as_str())
             .collect();
         for event in &outcome.events {
-            if !event
+            let old = held.get(&event.uid);
+            let incoming = event
                 .overlaps(window, &engine)
-                .map_err(|error| ClientError::InvalidArgument(error.to_string()))?
-            {
+                .map_err(|error| ClientError::InvalidArgument(error.to_string()))?;
+            let stored = if incoming {
+                false
+            } else if let Some(old) = old {
+                self.event_in_scope(&old.event, window).await?
+            } else {
+                false
+            };
+            if !incoming && !stored {
                 continue;
             }
             let rule = outcome
@@ -299,9 +372,16 @@ impl SyncEngine {
                 .find(|(uid, _)| *uid == event.uid)
                 .map(|(_, rule)| rule.as_str());
             let hash = event_hash(event, rule)?;
-            let old = held.get(&event.uid);
-            let raw_available = match old.map(|held| &held.event.recurrence) {
-                Some(clipper_schedule::Recurrence::Imported { import, .. }) => self
+            let raw_available = match old
+                .filter(|old| {
+                    matches!(
+                        old.event.recurrence,
+                        clipper_schedule::Recurrence::Imported { .. }
+                    )
+                })
+                .and_then(|old| old.event.snapshot())
+            {
+                Some(import) => self
                     .local_store
                     .import_file_object(&import.to_string())
                     .await?
@@ -324,12 +404,7 @@ impl SyncEngine {
             if uids.contains(event.event.uid.as_str()) {
                 continue;
             }
-            let engine = self.recurrence_engine(&event.event.recurrence).await?;
-            if event
-                .event
-                .overlaps(window, &engine)
-                .map_err(|error| ClientError::InvalidArgument(error.to_string()))?
-            {
+            if self.event_in_scope(&event.event, window).await? {
                 removed.push(event.id);
             }
         }
@@ -372,10 +447,29 @@ impl SyncEngine {
         };
         for (_, event, _) in &delta.events {
             let mut event = event.clone();
-            set_import(&mut event, &batch);
+            set_import(
+                &mut event,
+                &batch,
+                delta
+                    .source
+                    .import_anchor
+                    .or_else(|| {
+                        delta
+                            .source
+                            .active_import
+                            .as_ref()
+                            .map(|batch| batch.object_id)
+                    })
+                    .unwrap_or(batch.object_id),
+            );
             check_record_size(&ScheduleRecord::Ingested(Box::new(event)))?;
         }
         let mut probe = delta.source.clone();
+        probe.delta_state = true;
+        probe.import_anchor = probe
+            .import_anchor
+            .or_else(|| probe.active_import.as_ref().map(|batch| batch.object_id))
+            .or(Some(batch.object_id));
         probe.pending_imports.push(batch.clone());
         check_record_size(&ScheduleRecord::Source(Box::new(probe.clone())))?;
         probe.pending_imports.pop();
@@ -399,6 +493,8 @@ impl SyncEngine {
             })?;
         loop {
             let (mut source, head) = self.read_calendar_source(id).await?;
+            source.delta_state = true;
+            source.import_anchor.get_or_insert(batch.object_id);
             let SourceKind::Ics { url } = &source.kind;
             source.owner_email = url::Url::parse(url).ok().and_then(|url| owner_email(&url));
             source.event_ids.extend(delta.source.event_ids.clone());
@@ -434,13 +530,16 @@ impl SyncEngine {
                     .active_import
                     .as_ref()
                     .is_none_or(|active| active.object_id != batch.object_id);
+                if !source.delta_state {
+                    break;
+                }
                 if report.superseded
                     && !source
                         .retired_imports
                         .iter()
                         .any(|retired| retired.object_id == batch.object_id)
                 {
-                    source.retired_imports.push(batch.clone().into());
+                    retire_import(&mut source, batch.clone());
                     match self.save_calendar_source(id, &source, head).await {
                         Ok(_) => {}
                         Err(ClientError::Api { status: 409, .. }) => continue,
@@ -553,7 +652,11 @@ impl SyncEngine {
                     {
                         return Err(CalendarImportError::EventChanged.into());
                     }
-                    set_import(&mut event, &batch);
+                    set_import(
+                        &mut event,
+                        &batch,
+                        source.import_anchor.unwrap_or(batch.object_id),
+                    );
                     let result = async {
                         if !rules_loaded
                             && matches!(
@@ -580,7 +683,7 @@ impl SyncEngine {
                                 let key = self.current_encryption_key().await?;
                                 self.retain_downloaded_file(&object, &key, epoch).await?;
                             }
-                            self.recurrence_engine(&event.recurrence).await?;
+                            self.recurrence_engine(&event.resolved_recurrence()).await?;
                             rules_loaded = true;
                         }
                         let new = !source
@@ -626,7 +729,7 @@ impl SyncEngine {
                 .pending_imports
                 .retain(|pending| pending.object_id != batch.object_id);
             if report.superseded {
-                source.retired_imports.push(batch.clone().into());
+                retire_import(&mut source, batch.clone());
             } else {
                 activate_delta(&mut source, &batch);
             }
@@ -703,13 +806,13 @@ impl SyncEngine {
                 if &current == event {
                     return Ok(true);
                 }
-                if replaced_import.is_some_and(|import| current.import != Some(import)) {
+                if replaced_import.is_some_and(|import| current.snapshot() != Some(import)) {
                     return Ok(true);
                 }
                 if replaced_import.is_none()
                     && current.import_fetched_at.is_some_and(|time| {
                         time <= chrono::Utc::now() + chrono::TimeDelta::minutes(5)
-                            && (time, current.import.map(uuid::Uuid::from))
+                            && (time, current.snapshot().map(uuid::Uuid::from))
                                 > (batch.fetched_at, Some(uuid::Uuid::from(batch.object_id)))
                     })
                 {
@@ -774,20 +877,16 @@ impl SyncEngine {
                 || source.contains_event(&id.to_string(), &event)
                 || event.import_fetched_at.is_some_and(|time| {
                     time <= chrono::Utc::now() + chrono::TimeDelta::minutes(5)
-                        && (time, event.import.map(uuid::Uuid::from))
+                        && (time, event.snapshot().map(uuid::Uuid::from))
                             > (batch.fetched_at, Some(uuid::Uuid::from(batch.object_id)))
                 })
             {
                 return Ok(());
             }
-            if let Some(window) = &batch.window {
-                let engine = self.recurrence_engine(&event.recurrence).await?;
-                if !event
-                    .overlaps(window, &engine)
-                    .map_err(|error| ClientError::InvalidArgument(error.to_string()))?
-                {
-                    return Ok(());
-                }
+            if let Some(window) = &batch.window
+                && !self.event_in_scope(&event, window).await?
+            {
+                return Ok(());
             }
             match self
                 .write_tombstone_at(&id.to_string(), ObjectKind::Schedule, Some(head))
@@ -819,7 +918,7 @@ impl SyncEngine {
         id: &str,
         event: &IngestedEvent,
     ) -> Result<(), ClientError> {
-        let raw = event.import.ok_or(CalendarImportError::EventChanged)?;
+        let raw = event.snapshot().ok_or(CalendarImportError::EventChanged)?;
         let fetched_at = event
             .import_fetched_at
             .ok_or(CalendarImportError::EventChanged)?;
@@ -829,7 +928,8 @@ impl SyncEngine {
         })?;
         loop {
             let (mut source, head) = self.read_calendar_source(source_id).await?;
-            if source.contains_event(id, event)
+            if !source.superseded.contains_key(&raw)
+                || source.contains_event(id, event)
                 || source
                     .pending_imports
                     .iter()
@@ -851,7 +951,9 @@ impl SyncEngine {
                 hashes: vec![event_hash(event, None)?],
                 removed: Vec::new(),
             };
-            source.retired_imports.push(batch.into());
+            let mut retired = RetiredImport::from(batch);
+            retired.superseded_by = source.superseded.get(&raw).copied();
+            source.retired_imports.push(retired);
             match self.save_calendar_source(source_id, &source, head).await {
                 Ok(_) => return Ok(()),
                 Err(ClientError::Api { status: 409, .. }) => {}
@@ -917,7 +1019,7 @@ impl SyncEngine {
             if event.source != source.id {
                 return Err(CalendarImportError::EventChanged.into());
             }
-            if event.import != Some(batch.object_id)
+            if event.snapshot() != Some(batch.object_id)
                 || source.contains_event(&id.to_string(), &event)
             {
                 continue;
@@ -926,11 +1028,7 @@ impl SyncEngine {
                 .window
                 .clone()
                 .unwrap_or_else(|| ImportWindow::around(active.fetched_at));
-            let engine = self.recurrence_engine(&event.recurrence).await?;
-            if !event
-                .overlaps(&window, &engine)
-                .map_err(|error| ClientError::InvalidArgument(error.to_string()))?
-            {
+            if !self.event_in_scope(&event, &window).await? {
                 self.retain_delta_history(source_id, batch, index).await?;
                 continue;
             }
