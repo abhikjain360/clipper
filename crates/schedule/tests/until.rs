@@ -101,8 +101,6 @@ fn spring_forward_expansion() -> Expansion {
     }
 }
 
-/// Oct 25 02:30 Berlin is in the fall-back fold and takes the earlier instant,
-/// 00:30Z, which is before the 01:15Z cutoff, so Oct 25 stays in.
 #[test]
 fn instant_until_expands_through_the_last_day_of_year_9999() {
     let item = cadence_item(
@@ -124,6 +122,8 @@ fn instant_until_expands_through_the_last_day_of_year_9999() {
     );
 }
 
+/// Oct 25 02:30 Berlin is in the fall-back fold and takes the earlier instant,
+/// 00:30Z, which is before the 01:15Z cutoff, so Oct 25 stays in.
 #[test]
 fn instant_until_includes_fold_day_before_the_cutoff() {
     let item = cadence_item(

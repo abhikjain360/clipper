@@ -191,39 +191,6 @@ impl SyncEngine {
         Ok(new_head)
     }
 
-    async fn calendar_source_save_is_uncommitted(
-        &self,
-        epoch: u64,
-        object_id: &str,
-        source_id: SourceId,
-        old_head: LocalHead,
-    ) -> Result<bool, ClientError> {
-        let SessionCredentials {
-            api,
-            encryption_key,
-            ..
-        } = self.credentials_for_session(epoch).await?;
-        let item = api.get_object_head(object_id).await?;
-        if item.id.to_string() != object_id || item.kind != ObjectKind::Schedule {
-            return Err(ClientError::UnexpectedResponse(
-                "Calendar source returned mismatched identity".into(),
-            ));
-        }
-        verify_object_head_envelope(&item)?;
-        if item.revision != old_head.revision
-            || crypto::object_envelope_parent_hash(&item.envelope.body)? != old_head.parent_hash
-        {
-            return Ok(false);
-        }
-        let (record, _) = self
-            .decrypt_schedule_object_item(&api, &item, &encryption_key)
-            .await?;
-        let _session = self.hold_session_for_write(epoch).await?;
-        Ok(record
-            .as_source()
-            .is_some_and(|source| source.id == source_id))
-    }
-
     /// Replaces the source's entire imported view.
     ///
     /// A parse or staging failure leaves the previous view active. Each batch
@@ -340,25 +307,7 @@ impl SyncEngine {
             match self.save_calendar_source(object_id, &source, head).await {
                 Ok(saved) => head = saved,
                 Err(error) => {
-                    let rejected = matches!(error, ClientError::Api { status: 409, .. });
-                    let uncommitted = if ambiguous_write_error(&error) {
-                        match self
-                            .calendar_source_save_is_uncommitted(epoch, object_id, source.id, head)
-                            .await
-                        {
-                            Ok(uncommitted) => uncommitted,
-                            Err(recovery_error) => {
-                                warn!(
-                                    object_id,
-                                    "Failed to check calendar upload cleanup: {recovery_error}"
-                                );
-                                false
-                            }
-                        }
-                    } else {
-                        false
-                    };
-                    if (rejected || uncommitted)
+                    if matches!(error, ClientError::Api { status: 409, .. })
                         && let Err(cleanup_error) = self
                             .purge_import_object(
                                 &raw_id,
