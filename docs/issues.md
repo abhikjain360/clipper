@@ -1270,9 +1270,12 @@ Each entry has:
 - **Status:** open
 - **Where:** schedule domain and web composer.
 - **What happens:** single-occurrence overrides exist in the model but have no
-  editing UI. "This and future" needs series-split rules that are not defined.
-  Expansion always uses the latest definition.
-- **Decision:**
+  editing UI. They can now be created, moved, cancelled and removed through
+  the daemon and CLI. "This and future" needs series-split rules that are not
+  defined. Expansion always uses the latest definition.
+- **Decision:** single-occurrence changes use standalone signed and synced
+  override objects with their own revisions. The editing UI and "this and
+  later" remain open; no series splitting is implemented.
 
 ### 90. Editing recorded time
 

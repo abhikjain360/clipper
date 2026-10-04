@@ -54,6 +54,8 @@ mod calendar_import;
 #[cfg(not(target_family = "wasm"))]
 #[path = "kitchen.rs"]
 mod kitchen;
+#[path = "schedule_changes.rs"]
+mod schedule_changes;
 #[path = "schedule_context.rs"]
 mod schedule_context;
 use schedule_context::revision_ref;
@@ -2621,6 +2623,7 @@ impl SyncEngine {
         item: ScheduleItem,
         expected_revision: u64,
     ) -> Result<String, ClientError> {
+        let _write = self.calendar_write.lock().await;
         let records = self.local_store.schedule_records_with_heads().await?;
         let existing = records
             .iter()

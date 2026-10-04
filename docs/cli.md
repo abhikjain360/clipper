@@ -22,6 +22,9 @@ clipper schedule items
 clipper schedule occurrences --from 2026-10-12 --to 2026-10-19 --zone Europe/Berlin
 clipper schedule add < item.json
 clipper schedule update <object-id> --revision <n> < replacement.json
+clipper schedule cancel <item-object-id> --occurrence <occurrence_key>
+clipper schedule move <item-object-id> --occurrence <occurrence_key> --to 2026-10-14T11:00 --duration 60
+clipper schedule restore <item-object-id> --occurrence <occurrence_key>
 clipper schedule delete <object-id>
 clipper actuals --from 2026-10-12 --to 2026-10-19
 clipper schedule add --help
@@ -50,7 +53,26 @@ clipper data status
 - A revision conflict fails. Read `items` again and review the new definition
   before saving another replacement.
 - `delete` returns `null` on success.
-- `occurrences` and `actuals` return the daemon's result arrays.
+- `occurrences` returns the daemon's result array with `object_id` added to
+  each occurrence. This is the stored item's ID; `item_id` is the domain
+  series ID. `occurrence_key` identifies one occurrence within that series.
+- `actuals` returns the daemon's result array.
+- `cancel`, `move` and `restore` change one occurrence of a locally authored
+  item and return `null`. Use its `object_id` and `occurrence_key` from
+  `occurrences`. Keep the original key when moving an occurrence again or
+  restoring it. Save the key before cancelling; cancelled occurrences are
+  omitted from the output.
+- `move --to` accepts a local datetime. A zoned block uses its stored IANA
+  zone; a floating block keeps floating wall-clock time. The same daylight-saving
+  rules apply as for other schedule times. Moving requires a timed block.
+- `move --duration` accepts positive minutes. Omit it to retain the current
+  occurrence duration, or the series duration if the occurrence is cancelled.
+- `restore` removes the standalone override and returns the occurrence to its
+  series timing and duration. Restoring an occurrence without an override
+  succeeds without changing it.
+- These changes are signed, encrypted schedule revisions and sync to other
+  devices. Occurrence output and alarms use the changed timing. The series
+  definition stays the same.
 
 ## App data
 

@@ -7,12 +7,12 @@ use clipper_daemon_client::{ClientError, Connection};
 use clipper_daemon_types::{
     ActualsBetweenParams, AppDataWrite, AppDocumentHistoryParams, AppDocumentRevisionParams,
     AppState, CreateScheduleItemParams, DaemonCommand, DeleteScheduleObjectParams,
-    DeviceListResult, ExpandScheduleParams, QueryAppDataParams, UpdateScheduleItemParams,
-    WriteAppDataParams,
+    DeviceListResult, ExpandScheduleParams, MoveOccurrenceParams, OccurrenceParams, OccurrenceView,
+    QueryAppDataParams, UpdateScheduleItemParams, WriteAppDataParams,
 };
 use clipper_schedule::{
-    AlarmPolicy, BlockDuration, Cadence, Frequency, Recurrence, ScheduleItem, ScheduleItemId,
-    ScheduleSpan, TimeRange, TimedStart, WeekdaySet,
+    AlarmPolicy, BlockDuration, Cadence, Frequency, PlannedRef, Recurrence, ScheduleItem,
+    ScheduleItemId, ScheduleSpan, TimeRange, TimedStart, WeekdaySet,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -102,6 +102,34 @@ pub enum ScheduleCommand {
         #[arg(long, help = "Current revision from schedule items")]
         revision: u64,
     },
+    #[command(about = "Cancel one occurrence")]
+    Cancel {
+        object_id: Uuid,
+        #[arg(long, help = "Occurrence key from schedule occurrences")]
+        occurrence: String,
+    },
+    #[command(about = "Move or retime one timed occurrence; keep the block's timezone policy")]
+    Move {
+        object_id: Uuid,
+        #[arg(long, help = "Occurrence key from schedule occurrences")]
+        occurrence: String,
+        #[arg(
+            long,
+            help = "Local datetime in the block's zone; YYYY-MM-DDTHH:MM[:SS]"
+        )]
+        to: String,
+        #[arg(
+            long,
+            help = "Positive duration in minutes; defaults to the occurrence's current duration"
+        )]
+        duration: Option<u32>,
+    },
+    #[command(about = "Remove one occurrence's override and return to the series rule")]
+    Restore {
+        object_id: Uuid,
+        #[arg(long, help = "Occurrence key from schedule occurrences")]
+        occurrence: String,
+    },
     #[command(about = "Delete one schedule object")]
     Delete { object_id: Uuid },
 }
@@ -148,6 +176,13 @@ struct Item {
 }
 
 #[derive(Serialize)]
+struct Occurrence {
+    object_id: String,
+    #[serde(flatten)]
+    occurrence: OccurrenceView,
+}
+
+#[derive(Serialize)]
 struct Device {
     id: String,
     name: String,
@@ -157,6 +192,7 @@ struct Device {
 
 enum Output {
     Items,
+    Occurrences,
     Devices,
     Saved,
     Result,
@@ -172,6 +208,21 @@ impl Command {
         let (command, result_kind) = self.request(input)?;
         let result = connection.send(command).await?;
         let result = match result_kind {
+            Output::Occurrences => {
+                let occurrences: Vec<OccurrenceView> = decode_result(result)?;
+                let occurrences = occurrences
+                    .into_iter()
+                    .map(|occurrence| {
+                        let context: PlannedRef = serde_json::from_str(&occurrence.plan_context)
+                            .map_err(|error| Error::Result(error.to_string()))?;
+                        Ok(Occurrence {
+                            object_id: context.schedule.object_id.to_string(),
+                            occurrence,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                serde_json::to_value(occurrences)?
+            }
             Output::Devices => {
                 let result: DeviceListResult = decode_result(result)?;
                 serde_json::to_value(
@@ -293,7 +344,7 @@ impl Command {
                         to: range.end().to_rfc3339(),
                         observer_zone: zone.name().into(),
                     }),
-                    Output::Result,
+                    Output::Occurrences,
                 ))
             }
             Self::Schedule {
@@ -328,6 +379,53 @@ impl Command {
                     Output::Saved,
                 ))
             }
+            Self::Schedule {
+                command:
+                    ScheduleCommand::Cancel {
+                        object_id,
+                        occurrence,
+                    },
+            } => Ok((
+                DaemonCommand::CancelOccurrence(OccurrenceParams {
+                    object_id: object_id.to_string(),
+                    occurrence_key: occurrence,
+                }),
+                Output::Result,
+            )),
+            Self::Schedule {
+                command:
+                    ScheduleCommand::Move {
+                        object_id,
+                        occurrence,
+                        to,
+                        duration,
+                    },
+            } => {
+                let to = parse_local_datetime(&to)?;
+                let duration = duration.map(BlockDuration::from_minutes).transpose()?;
+                Ok((
+                    DaemonCommand::MoveOccurrence(MoveOccurrenceParams {
+                        object_id: object_id.to_string(),
+                        occurrence_key: occurrence,
+                        to: to.format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
+                        duration,
+                    }),
+                    Output::Result,
+                ))
+            }
+            Self::Schedule {
+                command:
+                    ScheduleCommand::Restore {
+                        object_id,
+                        occurrence,
+                    },
+            } => Ok((
+                DaemonCommand::RestoreOccurrence(OccurrenceParams {
+                    object_id: object_id.to_string(),
+                    occurrence_key: occurrence,
+                }),
+                Output::Result,
+            )),
             Self::Schedule {
                 command: ScheduleCommand::Delete { object_id },
             } => Ok((
@@ -376,18 +474,21 @@ fn parse_date(value: &str, zone: Tz) -> Result<DateTime<Utc>, Error> {
     let local = NaiveDate::parse_from_str(value, "%Y-%m-%d")
         .ok()
         .and_then(|date| date.and_hms_opt(0, 0, 0))
-        .or_else(|| {
-            [
-                "%Y-%m-%dT%H:%M:%S%.f",
-                "%Y-%m-%dT%H:%M",
-                "%Y-%m-%d %H:%M:%S%.f",
-                "%Y-%m-%d %H:%M",
-            ]
-            .into_iter()
-            .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())
-        })
+        .or_else(|| parse_local_datetime(value).ok())
         .ok_or_else(|| Error::Date(value.into()))?;
     Ok(TimedStart::Zoned { local, zone }.resolve(zone)?)
+}
+
+fn parse_local_datetime(value: &str) -> Result<NaiveDateTime, Error> {
+    [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M",
+    ]
+    .into_iter()
+    .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())
+    .ok_or_else(|| Error::Date(value.into()))
 }
 
 fn example_help() -> String {

@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 /// incompatibly — the desktop app and the daemon are separate binaries, and an
 /// old daemon can outlive an app update (it is reparented to PID 1, so it keeps
 /// running until killed).
-pub const IPC_AUTH_VERSION: u32 = 9;
+pub const IPC_AUTH_VERSION: u32 = 10;
 pub const IPC_AUTH_NONCE_BYTES: usize = 32;
 pub const IPC_AUTH_TAG_BYTES: usize = 32;
 
@@ -90,6 +90,9 @@ pub enum DaemonCommand {
     /// drift from another.
     CreateScheduleItem(CreateScheduleItemParams),
     UpdateScheduleItem(UpdateScheduleItemParams),
+    CancelOccurrence(OccurrenceParams),
+    MoveOccurrence(MoveOccurrenceParams),
+    RestoreOccurrence(OccurrenceParams),
     DeleteScheduleObject(DeleteScheduleObjectParams),
     ExpandSchedule(ExpandScheduleParams),
     DesktopAlarms(ExpandScheduleParams),
@@ -248,6 +251,20 @@ pub struct UpdateScheduleItemParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteScheduleObjectParams {
     pub object_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OccurrenceParams {
+    pub object_id: String,
+    pub occurrence_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveOccurrenceParams {
+    pub object_id: String,
+    pub occurrence_key: String,
+    pub to: String,
+    pub duration: Option<clipper_schedule::BlockDuration>,
 }
 
 /// Ask for every occurrence in a window.

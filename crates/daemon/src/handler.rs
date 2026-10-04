@@ -488,6 +488,49 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 DaemonCommand::UpdateScheduleItem(params) => {
                     cmd_update_schedule_item(id, params, &engine).await
                 }
+                DaemonCommand::CancelOccurrence(params) => {
+                    match engine
+                        .cancel_occurrence(&params.object_id, &params.occurrence_key)
+                        .await
+                    {
+                        Ok(()) => DaemonResponse::success(id, None),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::MoveOccurrence(params) => {
+                    let to = match params.to.parse::<chrono::NaiveDateTime>() {
+                        Ok(to) => to,
+                        Err(error) => {
+                            return client_error(
+                                id,
+                                ClientError::InvalidArgument(format!(
+                                    "Invalid local datetime: {error}"
+                                )),
+                            );
+                        }
+                    };
+                    match engine
+                        .move_occurrence(
+                            &params.object_id,
+                            &params.occurrence_key,
+                            to,
+                            params.duration,
+                        )
+                        .await
+                    {
+                        Ok(()) => DaemonResponse::success(id, None),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::RestoreOccurrence(params) => {
+                    match engine
+                        .restore_occurrence(&params.object_id, &params.occurrence_key)
+                        .await
+                    {
+                        Ok(()) => DaemonResponse::success(id, None),
+                        Err(error) => client_error(id, error),
+                    }
+                }
                 DaemonCommand::DeleteScheduleObject(params) => {
                     cmd_delete_schedule_object(id, params.object_id, &engine).await
                 }

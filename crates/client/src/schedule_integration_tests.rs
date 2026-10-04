@@ -51,6 +51,314 @@ fn server_command(binary: &Path, data: &Path) -> Command {
 
 #[tokio::test]
 #[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_single_occurrence_changes_sync_and_move_alarms() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let url = format!("http://{address}");
+    let engine = SyncEngine::new_with_data_dir(&url, temp.path().join("first"));
+    engine
+        .register_with_platform(
+            "test-invite",
+            "occurrences",
+            "test-passphrase",
+            "First",
+            "test",
+        )
+        .await
+        .unwrap();
+    let tomorrow = Utc::now()
+        .with_timezone(&chrono_tz::Europe::Berlin)
+        .date_naive()
+        .succ_opt()
+        .unwrap();
+    let local = tomorrow.and_hms_opt(9, 0, 0).unwrap();
+    let item = ScheduleItem {
+        break_reminders: false,
+        id: ScheduleItemId::new(),
+        title: "Daily planning".into(),
+        span: ScheduleSpan::Timed {
+            start: TimedStart::Zoned {
+                local,
+                zone: chrono_tz::Europe::Berlin,
+            },
+            duration: BlockDuration::from_minutes(45).unwrap(),
+        },
+        recurrence: Recurrence::Every(clipper_schedule::Cadence::each(
+            clipper_schedule::Frequency::Daily,
+        )),
+        reference: None,
+        alarm: Some(AlarmPolicy::minutes_before(5)),
+    };
+    let id = engine.create_schedule_item(item.clone()).await.unwrap();
+    let from = TimedStart::Zoned {
+        local: tomorrow.and_hms_opt(0, 0, 0).unwrap(),
+        zone: chrono_tz::Europe::Berlin,
+    }
+    .resolve(chrono_tz::UTC)
+    .unwrap();
+    let to = from + chrono::TimeDelta::days(3);
+    let original = engine
+        .expand_schedule(&from.to_rfc3339(), &to.to_rfc3339(), "Europe/Berlin")
+        .await
+        .unwrap();
+    assert_eq!(original.len(), 3);
+    let cancelled_key = &original[0].occurrence_key;
+    let moved_key = &original[1].occurrence_key;
+    let invalid_key = occurrence_key(&clipper_schedule::RecurrenceId::Instant(
+        from + chrono::TimeDelta::minutes(1),
+    ));
+    assert!(engine.cancel_occurrence(&id, &invalid_key).await.is_err());
+    assert!(
+        engine
+            .move_occurrence(&id, "bad-key", local, None)
+            .await
+            .is_err()
+    );
+    engine.cancel_occurrence(&id, cancelled_key).await.unwrap();
+    let moved_local = local + chrono::TimeDelta::days(1) + chrono::TimeDelta::hours(2);
+    engine
+        .move_occurrence(
+            &id,
+            moved_key,
+            moved_local,
+            Some(BlockDuration::from_minutes(90).unwrap()),
+        )
+        .await
+        .unwrap();
+    let changed = engine
+        .expand_schedule(&from.to_rfc3339(), &to.to_rfc3339(), "Europe/Berlin")
+        .await
+        .unwrap();
+    assert_eq!(changed.len(), 2);
+    assert!(
+        !changed
+            .iter()
+            .any(|entry| &entry.occurrence_key == cancelled_key)
+    );
+    let moved = changed
+        .iter()
+        .find(|entry| &entry.occurrence_key == moved_key)
+        .unwrap();
+    let moved_start = TimedStart::Zoned {
+        local: moved_local,
+        zone: chrono_tz::Europe::Berlin,
+    }
+    .resolve(chrono_tz::UTC)
+    .unwrap();
+    assert_eq!(
+        moved.start,
+        moved_start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    assert_eq!(
+        moved.end,
+        (moved_start + chrono::TimeDelta::minutes(90))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    assert!(moved.overridden);
+    let context: clipper_schedule::PlannedRef = serde_json::from_str(&moved.plan_context).unwrap();
+    assert_eq!(context.schedule.object_id.to_string(), id);
+    let first_override = context.override_revision.unwrap();
+    assert_eq!(first_override.revision, 1);
+    let alarms = engine.next_alarms(96, "Europe/Berlin").await.unwrap();
+    assert!(
+        !alarms
+            .iter()
+            .any(|alarm| &alarm.occurrence_key == cancelled_key)
+    );
+    let alarm = alarms
+        .iter()
+        .find(|alarm| &alarm.occurrence_key == moved_key)
+        .unwrap();
+    assert_eq!(
+        alarm.occurrence_start_millis,
+        moved_start.timestamp_millis()
+    );
+    assert_eq!(
+        alarm.fire_at_millis,
+        (moved_start - chrono::TimeDelta::minutes(5)).timestamp_millis()
+    );
+    let later_local = moved_local + chrono::TimeDelta::hours(1);
+    engine
+        .move_occurrence(&id, moved_key, later_local, None)
+        .await
+        .unwrap();
+    let changed = engine
+        .expand_schedule(&from.to_rfc3339(), &to.to_rfc3339(), "Europe/Berlin")
+        .await
+        .unwrap();
+    let moved = changed
+        .iter()
+        .find(|entry| &entry.occurrence_key == moved_key)
+        .unwrap();
+    let context: clipper_schedule::PlannedRef = serde_json::from_str(&moved.plan_context).unwrap();
+    let revised_override = context.override_revision.unwrap();
+    assert_eq!(revised_override.object_id, first_override.object_id);
+    assert_eq!(revised_override.revision, 2);
+    assert_eq!(
+        context.span.end() - context.span.start(),
+        chrono::TimeDelta::minutes(90)
+    );
+    let second = SyncEngine::new_with_data_dir(&url, temp.path().join("second"));
+    second
+        .login_with_platform("test-passphrase", "occurrences", "Second", "test")
+        .await
+        .unwrap();
+    wait_for(&second, |state| state.schedule_items.len() == 1).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let synced = second
+                .expand_schedule(&from.to_rfc3339(), &to.to_rfc3339(), "Europe/Berlin")
+                .await
+                .unwrap();
+            if synced.len() == 2
+                && synced
+                    .iter()
+                    .any(|entry| entry.start == moved.start && entry.overridden)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+    engine.restore_occurrence(&id, cancelled_key).await.unwrap();
+    engine.restore_occurrence(&id, moved_key).await.unwrap();
+    engine.restore_occurrence(&id, moved_key).await.unwrap();
+    let restored = engine
+        .expand_schedule(&from.to_rfc3339(), &to.to_rfc3339(), "Europe/Berlin")
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&restored).unwrap(),
+        serde_json::to_value(&original).unwrap()
+    );
+    let alarms = engine.next_alarms(96, "Europe/Berlin").await.unwrap();
+    assert!(
+        alarms
+            .iter()
+            .any(|alarm| &alarm.occurrence_key == cancelled_key)
+    );
+    let original_start = chrono::DateTime::parse_from_rfc3339(&original[1].start).unwrap();
+    assert_eq!(
+        alarms
+            .iter()
+            .find(|alarm| &alarm.occurrence_key == moved_key)
+            .unwrap()
+            .occurrence_start_millis,
+        original_start.timestamp_millis()
+    );
+    assert_eq!(
+        engine
+            .local_head(&first_override.object_id.to_string())
+            .await
+            .unwrap()
+            .revision,
+        3
+    );
+    let mut edited = item;
+    edited.span = ScheduleSpan::Timed {
+        start: TimedStart::Floating(local),
+        duration: BlockDuration::from_minutes(30).unwrap(),
+    };
+    engine.update_schedule_item(&id, edited, 1).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_occurrence_changes_preserve_floating_and_precise_identities() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let engine = SyncEngine::new_with_data_dir(
+        format!("http://{address}").as_str(),
+        temp.path().join("client"),
+    );
+    engine
+        .register_with_platform(
+            "test-invite",
+            "identities",
+            "test-passphrase",
+            "Test",
+            "test",
+        )
+        .await
+        .unwrap();
+    let local: chrono::NaiveDateTime = "2026-10-12T09:00:00.000000123".parse().unwrap();
+    for start in [
+        TimedStart::Floating(local),
+        TimedStart::Zoned {
+            local,
+            zone: chrono_tz::Europe::Berlin,
+        },
+    ] {
+        let item = ScheduleItem {
+            break_reminders: false,
+            id: ScheduleItemId::new(),
+            title: "Precise block".into(),
+            span: ScheduleSpan::Timed {
+                start,
+                duration: BlockDuration::from_minutes(45).unwrap(),
+            },
+            recurrence: Recurrence::Once,
+            reference: None,
+            alarm: None,
+        };
+        let id = engine.create_schedule_item(item.clone()).await.unwrap();
+        let original = engine
+            .expand_schedule("2026-10-12T00:00:00Z", "2026-10-14T00:00:00Z", "Asia/Tokyo")
+            .await
+            .unwrap();
+        let original = original
+            .iter()
+            .find(|entry| entry.item_id == item.id.to_string())
+            .unwrap();
+        let key = &original.occurrence_key;
+        engine.cancel_occurrence(&id, key).await.unwrap();
+        engine
+            .move_occurrence(&id, key, "2026-10-13T11:00:00".parse().unwrap(), None)
+            .await
+            .unwrap();
+        let moved = engine
+            .expand_schedule("2026-10-12T00:00:00Z", "2026-10-14T00:00:00Z", "Asia/Tokyo")
+            .await
+            .unwrap();
+        let moved = moved
+            .iter()
+            .find(|entry| entry.item_id == item.id.to_string())
+            .unwrap();
+        assert_eq!(&moved.occurrence_key, key);
+        let expected = match &item.span {
+            ScheduleSpan::Timed {
+                start: TimedStart::Floating(_),
+                ..
+            } => "2026-10-13T02:00:00Z",
+            _ => "2026-10-13T09:00:00Z",
+        };
+        assert_eq!(moved.start, expected);
+        let context: clipper_schedule::PlannedRef =
+            serde_json::from_str(&moved.plan_context).unwrap();
+        assert_eq!(context.override_revision.unwrap().revision, 2);
+        engine.restore_occurrence(&id, key).await.unwrap();
+        let restored = engine
+            .expand_schedule("2026-10-12T00:00:00Z", "2026-10-14T00:00:00Z", "Asia/Tokyo")
+            .await
+            .unwrap();
+        let restored = restored
+            .iter()
+            .find(|entry| entry.item_id == item.id.to_string())
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
+        engine.delete_schedule_object(&id).await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
 async fn live_schedule_revisions_timers_feeds_and_two_devices() {
     crate::ensure_crypto_provider();
     let temp = tempfile::tempdir().expect("tempdir");

@@ -1,7 +1,8 @@
 use std::{path::Path, process::Command as ProcessCommand};
 
 use chrono::DateTime;
-use clipper_cli::{Command, Error, RangeArgs, ScheduleCommand};
+use clap::Parser;
+use clipper_cli::{Cli, Command, Error, RangeArgs, ScheduleCommand};
 use clipper_daemon_client::Connection;
 use clipper_daemon_types::{
     ActualView, ApiErrorCode, AppState, AuthChallenge, AuthenticateResult, AuthenticatedSession,
@@ -10,8 +11,8 @@ use clipper_daemon_types::{
     ipc_daemon_auth_message,
 };
 use clipper_schedule::{
-    BlockDuration, Expansion, Recurrence, RecurrenceEngine, ScheduleItem, ScheduleItemId,
-    ScheduleSpan, TimeRange, TimedStart,
+    BlockDuration, Expansion, ObjectRevisionRef, PlannedRef, Recurrence, RecurrenceEngine,
+    ScheduleItem, ScheduleItemId, ScheduleSpan, TimeRange, TimedStart,
 };
 use hmac::{Hmac, Mac};
 use serde_json::Value;
@@ -125,6 +126,28 @@ async fn schedule_changes_use_authenticated_connections_and_reject_stale_writes(
         assert_eq!(occurrences.as_array().unwrap().len(), 1);
         assert_eq!(occurrences[0]["title"], "Updated planning");
         assert_eq!(occurrences[0]["item_id"], series_id.to_string());
+        assert_eq!(occurrences[0]["object_id"], object_id.to_string());
+        let occurrence_key = occurrences[0]["occurrence_key"].as_str().unwrap();
+        let object_id_text = object_id.to_string();
+        for args in [
+            vec!["cancel", &object_id_text, "--occurrence", occurrence_key],
+            vec![
+                "move",
+                &object_id_text,
+                "--occurrence",
+                occurrence_key,
+                "--to",
+                "2026-10-12 11:00",
+                "--duration",
+                "60",
+            ],
+            vec!["restore", &object_id_text, "--occurrence", occurrence_key],
+        ] {
+            let command = Cli::try_parse_from(["clipper", "schedule"].into_iter().chain(args))
+                .unwrap()
+                .command;
+            assert_eq!(execute(&path, command, b"").await.unwrap(), Value::Null);
+        }
         let actuals = execute(&path, Command::Actuals(range()), b"")
             .await
             .unwrap();
@@ -193,13 +216,13 @@ async fn serve(listener: UnixListener) {
     let object_id = Uuid::new_v4().to_string();
     let mut stored: Option<ScheduleItem> = None;
     let mut revision = 0;
-    for session in 0..12 {
+    for session in 0..15 {
         let (stream, _) = listener.accept().await.unwrap();
         let (read, mut write) = stream.into_split();
         let mut reader = BufReader::new(read);
         let nonce = vec![3; IPC_AUTH_NONCE_BYTES];
         let challenge = DaemonEvent::auth_challenge(AuthChallenge {
-            protocol_version: if session == 11 {
+            protocol_version: if session == 14 {
                 IPC_AUTH_VERSION - 1
             } else {
                 IPC_AUTH_VERSION
@@ -210,7 +233,7 @@ async fn serve(listener: UnixListener) {
             .write_all(format!("{}\n", serde_json::to_string(&challenge).unwrap()).as_bytes())
             .await
             .unwrap();
-        if session == 11 {
+        if session == 14 {
             let mut line = String::new();
             assert_eq!(reader.read_line(&mut line).await.unwrap(), 0);
             continue;
@@ -228,7 +251,7 @@ async fn serve(listener: UnixListener) {
         let mut mac = Hmac::<Sha256>::new_from_slice(&SECRET).unwrap();
         mac.update(&ipc_daemon_auth_message(&nonce, &auth.client_nonce));
         let mut tag = mac.finalize().into_bytes().to_vec();
-        if session == 10 {
+        if session == 13 {
             tag[0] ^= 1;
         }
         let response = DaemonResponse::success(
@@ -245,7 +268,7 @@ async fn serve(listener: UnixListener) {
             .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
             .await
             .unwrap();
-        if session == 10 {
+        if session == 13 {
             line.clear();
             assert_eq!(reader.read_line(&mut line).await.unwrap(), 0);
             continue;
@@ -292,7 +315,7 @@ async fn serve(listener: UnixListener) {
                     .collect();
                 Ok(Some(
                     serde_json::to_value(AppState {
-                        session: (session != 8).then(AuthenticatedSession::default),
+                        session: (session != 11).then(AuthenticatedSession::default),
                         schedule_items,
                         ..Default::default()
                     })
@@ -317,6 +340,23 @@ async fn serve(listener: UnixListener) {
                     .into_iter()
                     .map(|occurrence| OccurrenceView {
                         item_id: occurrence.item.to_string(),
+                        occurrence_key: format!(
+                            "instant:{}",
+                            occurrence.span.start().timestamp_millis()
+                        ),
+                        plan_context: serde_json::to_string(&PlannedRef {
+                            item: occurrence.item,
+                            recurrence_id: occurrence.recurrence_id,
+                            schedule: ObjectRevisionRef {
+                                object_id: object_id.parse().unwrap(),
+                                revision,
+                                body_hash: [0; 32],
+                            },
+                            override_revision: None,
+                            observer: params.observer_zone.parse().unwrap(),
+                            span: occurrence.span,
+                        })
+                        .unwrap(),
                         title: item.title.clone(),
                         start: occurrence.span.start().to_rfc3339(),
                         end: occurrence.span.end().to_rfc3339(),
@@ -325,7 +365,19 @@ async fn serve(listener: UnixListener) {
                     .collect();
                 Ok(Some(serde_json::to_value(occurrences).unwrap()))
             }
-            DaemonCommand::ActualsBetween(_) if session == 9 => {
+            DaemonCommand::CancelOccurrence(params) | DaemonCommand::RestoreOccurrence(params) => {
+                assert_eq!(params.object_id, object_id);
+                assert_eq!(params.occurrence_key, "instant:1791788400000");
+                Ok(None)
+            }
+            DaemonCommand::MoveOccurrence(params) => {
+                assert_eq!(params.object_id, object_id);
+                assert_eq!(params.occurrence_key, "instant:1791788400000");
+                assert_eq!(params.to, "2026-10-12T11:00:00");
+                assert_eq!(params.duration.unwrap().minutes(), 60);
+                Ok(None)
+            }
+            DaemonCommand::ActualsBetween(_) if session == 12 => {
                 Err(ErrorResponse::new(ApiErrorCode::Unknown, "Not logged in"))
             }
             DaemonCommand::ActualsBetween(params) => {
