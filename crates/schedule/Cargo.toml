@@ -12,7 +12,7 @@ rrule.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 uuid = { workspace = true, features = ["js", "serde", "v4", "v5"] }
-calcard = "0.3.13"
+calcard = "0.3.14"
 
 [dev-dependencies]
 uuid = { workspace = true, features = ["v4", "v5"] }
