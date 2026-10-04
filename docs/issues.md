@@ -1443,6 +1443,55 @@ Each entry has:
 - **Decision:** keep desktop hourly and Android foreground refresh. Refresh and
   alarm-window renewal while the Android app stays closed remain open.
 
+### 140. Desktop break reminders need an app that stays running
+
+- **Status:** decided; implemented in the working tree.
+- **Where:** `web/src-tauri/src/lib.rs`, `web/src-tauri/src/notifications.rs`.
+- **What happens:** closing the last desktop window previously exited Tauri.
+  The daemon is a plain helper executable, including in development, and its
+  existing build signature uses its own linker-generated identifier without a
+  bound Info.plist. Its Tokio entrypoint has no Cocoa run loop. Its notification
+  delivery has not been verified. Tauri's notification plugin
+  reports permission as granted on desktop without asking macOS.
+- **Decision:** use Apple's UserNotifications API in the packaged Mac app.
+  Closing its window hides it; Dock activation reopens it. Quit stops reminders.
+  Ask permission on the first marked timer or upcoming alarm targeted at this
+  Mac and disable delivery for that app run
+  after denial. Unbundled development binaries do not deliver notifications.
+  Sign the complete bundle after inserting the daemon. Local builds use ad-hoc
+  signing with the app's bundle identifier unless a signing identity is supplied.
+  Verify permission and banners in the installed build after review.
+
+### 141. Alarm targets use registered device IDs
+
+- **Status:** decided; implemented in the working tree.
+- **Where:** `crates/schedule/src/alarm.rs`, `crates/client/src/engine.rs`,
+  `web/src-tauri/src/alarms.rs`, `web/src/SchedulePanel.tsx`, `crates/cli`.
+- **Decision:** an absent target keeps alarms on all Android phones. A target
+  restricts delivery to that registered device. Mac targets use notifications
+  with sound in the running Tauri app, including with its window closed.
+  Imported alarms keep their phone behaviour. A removed device does not cause
+  fallback delivery; its saved target remains visible in the composer.
+  `clipper devices` lists IDs, names, platforms and the current device.
+  Stopping an alarm from another device remains out of scope. Verify sound,
+  permission and delivery with the window closed in the installed build.
+
+### 142. Desktop notification startup and delivery had regressions
+
+- **Status:** fixed in the working tree.
+- **Where:** `web/src-tauri/src/lib.rs`, `web/src-tauri/src/alarms.rs`,
+  `crates/daemon-types/src/protocol.rs`, `crates/app-types/src/lib.rs`.
+- **What happened:** desktop startup read managed state before Tauri's Ready
+  event ran setup, causing a launch panic. Failed alarm queries advanced the
+  delivery cursor past due alarms. The IPC version did not reject daemons that
+  lacked the new alarm and reminder fields. Omitting a false reminder flag
+  prevented ActualView binary decoding.
+- **Fix:** start notification loops in setup after managing the daemon client
+  and retain the delegate until the app exits. Keep the cursor on query failure
+  and retry after five seconds. IPC version 5 rejects older daemons. Always
+  serialize the view's reminder flag. Behaviour tests cover query recovery and
+  binary decoding with reminders enabled or disabled.
+
 ### 136. Calendar fetch ordering depends on device clocks
 
 - **Status:** open
@@ -1473,7 +1522,8 @@ Each entry has:
   alarm switch. Native apps offer manual Sync. Android supports adding,
   refreshing and removing calendars through UniFFI, and recalculates registered
   alarms after engine state changes, including imported batches and source
-  alarm settings. Desktop has no alarm registration or notification path.
+  alarm settings. Desktop does not deliver imported alarms; user-authored
+  alarms can target a Mac and use notifications with sound.
 - **Decision:** desktop refreshes hourly while logged in and Android refreshes
   on launch and foreground. Browser feeds refresh through a native app; the
   browser shows the desktop refresh note and no Sync button.

@@ -1623,6 +1623,7 @@ impl LocalStore {
             } else {
                 "Unplanned".to_string()
             };
+            let mut break_reminders = false;
             // Current content is also historical content when the complete pin
             // matches. This avoids a placeholder on ordinary offline restarts.
             if let Some(planned) = actual.planned
@@ -1637,8 +1638,14 @@ impl LocalStore {
                 && id == planned.item
             {
                 title = name.to_string();
+                break_reminders = schedule
+                    .record
+                    .as_item()
+                    .is_some_and(|item| item.break_reminders);
             }
-            return Some((actual_view(&record.id, actual, &title), actual.planned));
+            let mut view = actual_view(&record.id, actual, &title);
+            view.break_reminders = break_reminders;
+            return Some((view, actual.planned));
         }
         None
     }

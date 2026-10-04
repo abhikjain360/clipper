@@ -188,6 +188,8 @@ pub struct ActualView {
     /// RFC 3339 UTC, or empty while the timer is still running.
     pub end: String,
     pub running: bool,
+    #[serde(default)]
+    pub break_reminders: bool,
 }
 
 /// One alarm the platform should register.
@@ -321,4 +323,23 @@ pub struct ClipboardPayload {
     pub mime_type: String,
     pub bytes: Vec<u8>,
     pub text: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn running_timers_decode_from_binary_with_or_without_reminders() {
+        for break_reminders in [false, true] {
+            let actual = ActualView {
+                running: true,
+                break_reminders,
+                ..Default::default()
+            };
+            let encoded = postcard::to_allocvec(&actual).unwrap();
+            let (_, remaining) = postcard::take_from_bytes::<ActualView>(&encoded).unwrap();
+            assert!(remaining.is_empty());
+        }
+    }
 }

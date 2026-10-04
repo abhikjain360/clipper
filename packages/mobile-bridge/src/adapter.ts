@@ -264,6 +264,7 @@ function mapActualView(actual: NativeActualView): ActualView {
     id: actual.id,
     item_id: actual.itemId,
     running: actual.running,
+    break_reminders: actual.breakReminders,
     start: actual.start,
     title: actual.title,
   };

@@ -15,6 +15,7 @@ fn starts(
     imported_rules: ImportedRuleResolver,
 ) -> Vec<chrono::DateTime<Utc>> {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "import comparison".into(),
         span: ScheduleSpan::Timed {

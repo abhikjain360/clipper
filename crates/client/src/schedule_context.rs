@@ -242,19 +242,27 @@ impl SyncEngine {
         Ok(())
     }
 
-    pub(super) async fn actual_title(&self, actual: &clipper_schedule::ActualRecord) -> String {
+    pub(super) async fn actual_details(
+        &self,
+        actual: &clipper_schedule::ActualRecord,
+    ) -> (String, bool) {
         let Some(planned) = actual.planned else {
-            return UNPLANNED_TITLE.into();
+            return (UNPLANNED_TITLE.into(), false);
         };
         match self.schedule_revision(planned.schedule).await {
             Ok(record) => record
                 .planned_title()
                 .filter(|(id, _)| *id == planned.item)
-                .map(|(_, title)| title.to_string())
-                .unwrap_or_else(|| "Historical plan unavailable".into()),
+                .map(|(_, title)| {
+                    (
+                        title.to_string(),
+                        record.as_item().is_some_and(|item| item.break_reminders),
+                    )
+                })
+                .unwrap_or_else(|| ("Historical plan unavailable".into(), false)),
             Err(error) => {
                 warn!(%error, "Could not load the actual's historical plan");
-                "Historical plan unavailable".into()
+                ("Historical plan unavailable".into(), false)
             }
         }
     }

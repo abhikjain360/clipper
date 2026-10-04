@@ -1309,6 +1309,7 @@ async fn calendar_sync_retries_keep_one_snapshot_and_latest_source_settings() {
 
 async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &str, data: &Path) {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "Floating workout".into(),
         span: ScheduleSpan::Timed {
@@ -2330,6 +2331,7 @@ async fn exercise_revision_aware_plans(engine: &SyncEngine) {
         OverrideId, PlannedRef, RecurrenceId,
     };
     let mut item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "Original historical title".into(),
         span: ScheduleSpan::Timed {

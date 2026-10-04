@@ -1,0 +1,32 @@
+[package]
+name = "clipper-cli"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+
+[[bin]]
+name = "clipper"
+path = "src/main.rs"
+
+[dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
+clap.workspace = true
+clipper-daemon-client.workspace = true
+clipper-daemon-types.workspace = true
+clipper-schedule.workspace = true
+dirs.workspace = true
+iana-time-zone.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+hmac.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+zeroize.workspace = true

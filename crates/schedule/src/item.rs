@@ -74,6 +74,8 @@ pub struct ScheduleItem {
     /// When this block rings. Absent means silent.
     #[serde(default)]
     pub alarm: Option<crate::alarm::AlarmPolicy>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub break_reminders: bool,
 }
 
 impl ScheduleItem {

@@ -232,6 +232,16 @@
           };
         in
         {
+          clipper = {
+            program = "clipper";
+            description = "Read and write the local daemon schedule";
+            runtimeInputs = [ toolchains.stable ];
+            env = stableEnv;
+            text = ''
+              exec cargo run --quiet --locked -p clipper-cli -- "$@"
+            '';
+          };
+
           fmt = {
             program = "clipper-fmt";
             description = "Format all Clipper sources";

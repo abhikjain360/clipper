@@ -228,6 +228,7 @@ fn local_midnight_window(zone: Tz, from: (i32, u32, u32), to: (i32, u32, u32)) -
 
 fn timed_item(start: TimedStart, recurrence: Recurrence) -> ScheduleItem {
     ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "adversarial".to_string(),
         span: ScheduleSpan::Timed {
@@ -545,6 +546,7 @@ fn floating_series_on_a_skipped_date_shifts_to_the_next_valid_instant() {
 #[test]
 fn all_day_series_on_a_skipped_date_reports_a_zero_length_day() {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "apia".to_string(),
         span: ScheduleSpan::AllDay {
@@ -580,6 +582,7 @@ fn all_day_series_on_a_skipped_date_reports_a_zero_length_day() {
 #[test]
 fn series_starting_before_a_skipped_date_expands_a_later_window() {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "apia".to_string(),
         span: ScheduleSpan::AllDay {
@@ -641,6 +644,7 @@ fn pre_filter_keeps_a_day_before_candidate_resolving_into_the_window() {
 #[test]
 fn pre_filter_skips_a_day_after_candidates_without_resolving_them() {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "apia".to_string(),
         span: ScheduleSpan::AllDay {
@@ -682,6 +686,7 @@ fn all_day_series_keeps_every_date_across_a_midnight_gap() {
     ] {
         let first = NaiveDate::from_ymd_opt(from.0, from.1, from.2).expect("valid date");
         let item = ScheduleItem {
+            break_reminders: false,
             id: ScheduleItemId::new(),
             title: "every day".to_string(),
             span: ScheduleSpan::AllDay {
@@ -1312,6 +1317,7 @@ fn occurrence_starting_exactly_at_window_start_is_included() {
 #[test]
 fn occurrence_ending_exactly_at_window_start_is_excluded_everywhere() {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "touching".to_string(),
         span: ScheduleSpan::Timed {
@@ -1343,6 +1349,7 @@ fn occurrence_ending_exactly_at_window_start_is_excluded_everywhere() {
 #[test]
 fn overnight_event_needs_overlap_expansion() {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "overnight".to_string(),
         span: ScheduleSpan::Timed {
@@ -1369,6 +1376,7 @@ fn overnight_event_needs_overlap_expansion() {
 #[test]
 fn multi_day_all_day_overlaps_each_covered_window() {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "conference".to_string(),
         span: ScheduleSpan::AllDay {
@@ -1468,6 +1476,7 @@ END:VCALENDAR\r\n";
         .expect("the event parses");
     let rules = parse_imported_recurrence_rules(feed, import).expect("the rule resolves");
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: event.title,
         span: event.span,
@@ -1616,6 +1625,7 @@ fn very_old_daily_series_hits_the_historical_scan_limit() {
 
 fn alarmed_daily_utc() -> ScheduleItem {
     ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "standup".to_string(),
         span: ScheduleSpan::Timed {
@@ -1745,6 +1755,7 @@ where
 
 fn sample_item() -> ScheduleItem {
     ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "sample".to_string(),
         span: ScheduleSpan::Timed {

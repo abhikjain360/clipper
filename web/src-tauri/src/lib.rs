@@ -1,10 +1,15 @@
+#[cfg(target_os = "macos")]
+mod alarms;
+#[cfg(any(target_os = "macos", test))]
+mod break_reminders;
 mod daemon_client;
 mod daemon_spawn;
-mod ipc_secret;
+#[cfg(target_os = "macos")]
+mod notifications;
 
 use std::{
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 use clipper_app_types::{
@@ -38,7 +43,7 @@ const PRIVATE_DIR_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 
 struct DesktopBackend {
-    daemon: DaemonClient,
+    daemon: Arc<DaemonClient>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -108,10 +113,15 @@ type CommandResult<T> = Result<T, CommandError>;
 pub fn run() {
     init_tracing();
 
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    #[cfg(target_os = "macos")]
+    let notification_delegate = notifications::initialize(&context.config().identifier);
+    #[cfg(target_os = "macos")]
+    let notifications_enabled = notification_delegate.is_some();
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
+        .setup(move |app| {
             let daemon_data_dir = dirs::data_dir()
                 .ok_or("could not determine data directory")?
                 .join("Clipper");
@@ -121,7 +131,15 @@ pub fn run() {
             let (daemon, daemon_fut) = DaemonClient::new_with_future(daemon_data_dir);
             tauri::async_runtime::spawn(daemon_fut);
 
-            app.manage(DesktopBackend { daemon });
+            let daemon = Arc::new(daemon);
+            app.manage(DesktopBackend {
+                daemon: Arc::clone(&daemon),
+            });
+            #[cfg(target_os = "macos")]
+            if notifications_enabled {
+                tauri::async_runtime::spawn(alarms::run(Arc::clone(&daemon)));
+                tauri::async_runtime::spawn(break_reminders::run(daemon));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -161,8 +179,32 @@ pub fn run() {
             list_devices,
             remove_device,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Tauri application");
+        .on_window_event(|window, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Err(error) = window.hide() {
+                    tracing::warn!(%error, "Could not hide the Clipper window");
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (window, event);
+        })
+        .build(context)
+        .expect("error while building Tauri application");
+    app.run(|app, event| {
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = event
+            && let Some(window) = app.get_webview_window("main")
+        {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (app, event);
+    });
+    #[cfg(target_os = "macos")]
+    drop(notification_delegate);
 }
 
 fn init_tracing() {

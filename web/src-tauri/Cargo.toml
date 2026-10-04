@@ -12,16 +12,17 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build.workspace = true
 
 [dependencies]
+chrono.workspace = true
 clipper-app-types.workspace = true
 clipper-schedule.workspace = true
 clipper-client.workspace = true
+clipper-daemon-client.workspace = true
 clipper-daemon-types.workspace = true
 dirs.workspace = true
-hmac.workspace = true
+iana-time-zone.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tauri.workspace = true
 tauri-plugin-clipboard-manager.workspace = true
 tauri-plugin-dialog.workspace = true
@@ -31,8 +32,26 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 zeroize.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSBundle",
+    "NSError",
+    "NSObject",
+    "NSString",
+] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "UNNotification",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework.workspace = true

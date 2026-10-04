@@ -48,6 +48,7 @@ import type {
     ActualView,
     AppState,
     CalendarSourceView,
+    DeviceInfo,
     OccurrenceView,
     ScheduleItem,
     ScheduleItemView,
@@ -1435,6 +1436,11 @@ function ScheduleComposer({
     const [intervalText, setIntervalText] = useState("1");
     const [alarm, setAlarm] = useState(false);
     const [alarmLead, setAlarmLead] = useState("0");
+    const [alarmDevice, setAlarmDevice] = useState("");
+    const [devices, setDevices] = useState<DeviceInfo[]>([]);
+    const [devicesLoading, setDevicesLoading] = useState(false);
+    const [devicesError, setDevicesError] = useState<string | null>(null);
+    const [breakReminders, setBreakReminders] = useState(false);
     // The series id survives an edit, so overrides and logged time keep
     // pointing at the same series. Only the object carrying it changes.
     const [seriesId, setSeriesId] = useState<string | null>(null);
@@ -1443,6 +1449,27 @@ function ScheduleComposer({
     const [recurrenceChanged, setRecurrenceChanged] = useState(false);
     const [allDayDays, setAllDayDays] = useState("1");
     const [zone, setZone] = useState(observerZone);
+
+    useEffect(() => {
+        if (!open || !alarm) return;
+        let cancelled = false;
+        setDevicesLoading(true);
+        setDevicesError(null);
+        void clipperBackend()
+            .then((backend) => backend.listDevices())
+            .then((registered) => {
+                if (!cancelled) setDevices(registered);
+            })
+            .catch((error) => {
+                if (!cancelled) setDevicesError(formatBackendError(error));
+            })
+            .finally(() => {
+                if (!cancelled) setDevicesLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [open, alarm]);
 
     // Load an existing block into the form, once per block.
     //
@@ -1477,6 +1504,8 @@ function ScheduleComposer({
         setTitle(parsed.title);
         setAlarm(parsed.alarm != null);
         setAlarmLead(String(parsed.alarm?.minutes_before ?? 0));
+        setAlarmDevice(parsed.alarm?.target_device ?? "");
+        setBreakReminders(parsed.break_reminders ?? false);
         setRepeat(repeatChoiceOf(parsed.recurrence));
         setIntervalText(
             String(parsed.recurrence.kind === "every" ? parsed.recurrence.interval : 1),
@@ -1579,8 +1608,12 @@ function ScheduleComposer({
                             original.current?.recurrence ?? null,
                         ),
                 reference: original.current?.reference ?? null,
+                break_reminders: breakReminders,
                 alarm: alarm
-                    ? { minutes_before: Math.max(0, Number.parseInt(alarmLead, 10) || 0) }
+                    ? {
+                          minutes_before: Math.max(0, Number.parseInt(alarmLead, 10) || 0),
+                          ...(alarmDevice ? { target_device: alarmDevice } : {}),
+                      }
                     : null,
             };
             const backend = await clipperBackend();
@@ -1608,6 +1641,8 @@ function ScheduleComposer({
 
     function reset() {
         setTitle("");
+        setAlarmDevice("");
+        setBreakReminders(false);
         setSeriesId(null);
         original.current = null;
         setSpanChanged(false);
@@ -1700,17 +1735,57 @@ function ScheduleComposer({
                     </XStack>
                 </Toggle>
                 {alarm && (
-                    <Field label="Minutes before">
-                        <Input value={alarmLead} onChangeText={setAlarmLead} width={110} />
-                    </Field>
+                    <>
+                        <Field label="Minutes before">
+                            <Input value={alarmLead} onChangeText={setAlarmLead} width={110} />
+                        </Field>
+                        <Field label="Ring on">
+                            <select
+                                value={alarmDevice}
+                                onChange={(event) => setAlarmDevice(event.target.value)}
+                            >
+                                <option value="">All phones</option>
+                                {devices.map((device) => (
+                                    <option key={device.id} value={device.id}>
+                                        {device.name} ({device.platform})
+                                    </option>
+                                ))}
+                                {alarmDevice &&
+                                    !devices.some((device) => device.id === alarmDevice) && (
+                                        <option value={alarmDevice}>
+                                            Saved device (unavailable)
+                                        </option>
+                                    )}
+                            </select>
+                        </Field>
+                        {devicesLoading && <Spinner size="small" />}
+                    </>
                 )}
             </XStack>
             {alarm && (
                 <Paragraph fontSize={12} color="#8b949e">
-                    Alarms ring on Android only, where an exact alarm can survive a reboot and sound
-                    through Do Not Disturb. Other devices show the block without ringing.
+                    All phones means every Android device. A chosen Mac uses a notification with
+                    sound while Clipper stays open, including when its window is closed.
                 </Paragraph>
             )}
+            {alarm && devicesError && (
+                <Paragraph fontSize={12} color="#f85149">
+                    Devices could not be loaded: {devicesError}
+                </Paragraph>
+            )}
+
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                    type="checkbox"
+                    checked={breakReminders}
+                    onChange={(event) => setBreakReminders(event.target.checked)}
+                />
+                Break reminders
+            </label>
+            <Paragraph fontSize={12} color="#8b949e">
+                Eye and movement reminders on Mac while this block's timer runs. Clipper must stay
+                open; closing its window keeps reminders running.
+            </Paragraph>
 
             <XStack gap="$2" flexWrap="wrap">
                 <Toggle

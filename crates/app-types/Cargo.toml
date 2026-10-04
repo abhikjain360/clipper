@@ -12,3 +12,6 @@ uniffi = ["dep:uniffi"]
 serde.workspace = true
 strum.workspace = true
 uniffi = { workspace = true, optional = true }
+
+[dev-dependencies]
+postcard.workspace = true

@@ -7,12 +7,12 @@ const IPC_SECRET_BYTES: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum IpcSecretError {
-    #[error("IPC secret not found")]
+    #[error("IPC secret not found; open Clipper to start the daemon")]
     NotFound,
     #[error("IPC secret has wrong length: expected {IPC_SECRET_BYTES}, got {0}")]
     WrongLength(usize),
     #[cfg(target_os = "macos")]
-    #[error("keychain read failed: {0}")]
+    #[error("keychain read failed: {0}; allow Clipper access to its IPC secret")]
     Keychain(String),
     #[cfg(target_os = "linux")]
     #[error("IPC secret file I/O failed: {0}")]
@@ -44,8 +44,7 @@ fn load_ipc_secret_uncached(_data_dir: &Path) -> Result<Zeroizing<Vec<u8>>, IpcS
 
 #[cfg(target_os = "linux")]
 fn load_ipc_secret_uncached(data_dir: &Path) -> Result<Zeroizing<Vec<u8>>, IpcSecretError> {
-    let path = data_dir.join(IPC_SECRET_FILE);
-    let bytes = match std::fs::read(&path) {
+    let bytes = match std::fs::read(data_dir.join(IPC_SECRET_FILE)) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(IpcSecretError::NotFound),
         Err(e) => return Err(IpcSecretError::Io(e)),
@@ -61,16 +60,8 @@ fn load_ipc_secret_uncached(_data_dir: &Path) -> Result<Zeroizing<Vec<u8>>, IpcS
     Err(IpcSecretError::UnsupportedPlatform)
 }
 
-/// This process's cached copy of the IPC secret. See
-/// [`clipper_daemon_types::ipc_secret_cache`] for why it is cached:
-/// `daemon_client::connection_loop` retries the handshake on a backoff, and the
-/// app dials before the daemon it just spawned has bound its socket, so at least
-/// one retry — and so at least one extra store read — happens on every launch.
 static IPC_SECRET: IpcSecretCache = empty_cache();
 
-/// The shared IPC secret used to authenticate to the daemon. Read from the
-/// platform store once per process; never created here — the daemon owns
-/// creation.
 pub fn load_ipc_secret(data_dir: &Path) -> Result<Zeroizing<Vec<u8>>, IpcSecretError> {
     cached_secret(&IPC_SECRET, || {
         tracing::debug!("Reading IPC secret from the platform credential store");

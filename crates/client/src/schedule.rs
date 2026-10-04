@@ -202,6 +202,7 @@ pub fn actual_view(
         start,
         end,
         running,
+        break_reminders: false,
     }
 }
 
@@ -272,6 +273,7 @@ pub fn occurrence_view(
 /// id, so it stays stable across refreshes.
 pub fn ingested_as_series(event: &clipper_schedule::IngestedEvent) -> ScheduleItem {
     ScheduleItem {
+        break_reminders: false,
         id: clipper_schedule::ScheduleItemId(event.id),
         title: event.title.clone(),
         span: event.span.clone(),
@@ -371,6 +373,7 @@ mod tests {
 
     fn sample_item() -> ScheduleItem {
         ScheduleItem {
+            break_reminders: false,
             id: ScheduleItemId::new(),
             title: "Gym".to_string(),
             span: ScheduleSpan::Timed {

@@ -111,6 +111,7 @@ export type ObjectId = string;
 export type AlarmPolicy = {
   /// Minutes before the block starts. Zero rings at the start.
   minutes_before: number;
+  target_device?: string | null;
 };
 
 /// A series definition. Stored once however often it repeats.
@@ -121,6 +122,7 @@ export type ScheduleItem = {
   recurrence: Recurrence;
   reference?: ObjectId | null;
   alarm?: AlarmPolicy | null;
+  break_reminders?: boolean;
 };
 
 /// A series as rendered for a list. Built by the Rust side so every shell shows
@@ -180,6 +182,7 @@ export type ActualView = {
   // Empty while the timer is still running.
   end: string;
   running: boolean;
+  break_reminders?: boolean;
 };
 
 /// One alarm for the platform to register.

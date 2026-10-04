@@ -361,7 +361,11 @@ async function runTauriBuild(
   if (Deno.build.os === "darwin") {
     const tauriConf = JSON.parse(
       await Deno.readTextFile(joinPath(repoRoot, "web/src-tauri/tauri.conf.json")),
-    ) as { productName: string };
+    ) as {
+      productName: string;
+      identifier: string;
+      bundle: { macOS?: { signingIdentity?: string } };
+    };
     const macOSBin = joinPath(
       repoRoot,
       `target/release/bundle/macos/${tauriConf.productName}.app/Contents/MacOS`,
@@ -371,6 +375,21 @@ async function runTauriBuild(
       const dest = joinPath(macOSBin, "clipper-daemon");
       await Deno.copyFile(src, dest);
       await Deno.chmod(dest, 0o755);
+      const identity = env.APPLE_SIGNING_IDENTITY ?? tauriConf.bundle.macOS?.signingIdentity ?? "-";
+      const codesign = await command("codesign", env);
+      await runCommand(codesign, ["--force", "--sign", identity, dest], { cwd: repoRoot, env });
+      await runCommand(
+        codesign,
+        [
+          "--force",
+          "--sign",
+          identity,
+          "--identifier",
+          tauriConf.identifier,
+          joinPath(macOSBin, "../.."),
+        ],
+        { cwd: repoRoot, env },
+      );
       console.log(`Bundled daemon → ${dest}`);
     }
   }

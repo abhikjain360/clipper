@@ -34,6 +34,7 @@ fn berlin_span(start: &str) -> ScheduleSpan {
 
 fn cadence_item(start: &str, end: RecurrenceEnd) -> ScheduleItem {
     ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "until".to_string(),
         span: berlin_span(start),
@@ -49,6 +50,7 @@ fn imported_item(start: &str, rule: &str) -> (ScheduleItem, ImportedRuleResolver
     let mut rules = ImportedRuleResolver::new();
     rules.insert(import, uid, rule).expect("the rule is valid");
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "until".to_string(),
         span: berlin_span(start),
@@ -225,6 +227,7 @@ fn local_midnight_window(zone: Tz, from: (i32, u32, u32), to: (i32, u32, u32)) -
 #[test]
 fn until_slack_skips_an_unresolvable_day_past_the_cutoff() {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "apia".to_string(),
         span: ScheduleSpan::AllDay {

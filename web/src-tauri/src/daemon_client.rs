@@ -51,28 +51,19 @@ mod inner {
     };
 
     use clipper_app_types::AppState;
+    use clipper_daemon_client::{authenticate, read_line, write_line};
     use clipper_daemon_types::{
-        AuthChallenge, AuthenticateParams, AuthenticateResult, DaemonCommand, DaemonEvent,
-        DaemonLine, DaemonRequest, DaemonResponse, IPC_AUTH_NONCE_BYTES, IPC_AUTH_TAG_BYTES,
-        IPC_AUTH_VERSION, ipc_client_auth_message, ipc_daemon_auth_message, ipc_path,
+        DaemonCommand, DaemonEvent, DaemonLine, DaemonRequest, DaemonResponse, ipc_path,
     };
-    use hmac::{Hmac, Mac};
-    use rand::RngExt;
-    use sha2::Sha256;
     use tokio::{
-        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        io::BufReader,
         net::unix::{OwnedReadHalf, OwnedWriteHalf},
         sync::{Notify, RwLock, mpsc, oneshot},
         time::{Duration, sleep},
     };
     use tracing::{debug, info, warn};
-    use zeroize::Zeroizing;
 
     use super::DaemonClientError;
-    use crate::ipc_secret;
-
-    type HmacSha256 = Hmac<Sha256>;
-    const MAX_LINE: usize = 32 * 1024 * 1024;
     const INIT_DELAY: Duration = Duration::from_millis(200);
     const MAX_DELAY: Duration = Duration::from_secs(5);
 
@@ -172,89 +163,14 @@ mod inner {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
-        authenticate(&mut reader, &mut write_half, data_dir).await?;
+        authenticate(&mut reader, &mut write_half, data_dir)
+            .await
+            .map_err(|error| error.to_string())?;
         info!("Daemon IPC authenticated");
 
         run(&mut reader, write_half, rx, shared)
             .await
             .map_err(|error| error.to_string())
-    }
-
-    async fn authenticate(
-        reader: &mut BufReader<OwnedReadHalf>,
-        writer: &mut OwnedWriteHalf,
-        data_dir: &Path,
-    ) -> Result<(), String> {
-        let line = read_line(reader, &mut Vec::new())
-            .await
-            .map_err(|e| format!("auth read: {e}"))?;
-        let DaemonEvent::AuthChallenge {
-            auth_challenge:
-                AuthChallenge {
-                    protocol_version,
-                    daemon_nonce,
-                },
-        } = serde_json::from_str::<DaemonEvent>(&line).map_err(|e| format!("auth parse: {e}"))?
-        else {
-            return Err("expected AuthChallenge".into());
-        };
-
-        if protocol_version != IPC_AUTH_VERSION {
-            return Err(format!("unsupported protocol version {protocol_version}"));
-        }
-
-        let secret =
-            ipc_secret::load_ipc_secret(data_dir).map_err(|e| format!("load IPC secret: {e}"))?;
-
-        let mut client_nonce = [0u8; IPC_AUTH_NONCE_BYTES];
-        rand::rng().fill(&mut client_nonce);
-
-        let tag = hmac_tag(
-            &secret,
-            &ipc_client_auth_message(&daemon_nonce, &client_nonce),
-        )?;
-
-        let req = DaemonRequest::new(
-            "auth".into(),
-            DaemonCommand::Authenticate(AuthenticateParams {
-                protocol_version: IPC_AUTH_VERSION,
-                client_nonce: client_nonce.to_vec(),
-                tag,
-            }),
-        );
-        write_line(
-            writer,
-            &serde_json::to_string(&req).map_err(|e| e.to_string())?,
-        )
-        .await
-        .map_err(|e| format!("auth write: {e}"))?;
-
-        let line = read_line(reader, &mut Vec::new())
-            .await
-            .map_err(|e| format!("auth result read: {e}"))?;
-        match serde_json::from_str::<DaemonResponse>(&line)
-            .map_err(|e| format!("auth result parse: {e}"))?
-        {
-            DaemonResponse::Success {
-                result: Some(val), ..
-            } => {
-                let result: AuthenticateResult =
-                    serde_json::from_value(val).map_err(|e| format!("auth result decode: {e}"))?;
-                if result.tag.len() != IPC_AUTH_TAG_BYTES {
-                    return Err("daemon auth tag wrong length".into());
-                }
-                let expected = hmac_tag(
-                    &secret,
-                    &ipc_daemon_auth_message(&daemon_nonce, &client_nonce),
-                )?;
-                if result.tag != expected {
-                    return Err("daemon HMAC verification failed".into());
-                }
-                Ok(())
-            }
-            DaemonResponse::Success { result: None, .. } => Err("auth: missing result".into()),
-            DaemonResponse::Error { error, .. } => Err(format!("auth error: {}", error.message)),
-        }
     }
 
     async fn run(
@@ -323,47 +239,10 @@ mod inner {
         }
     }
 
-    async fn read_line(
-        reader: &mut BufReader<OwnedReadHalf>,
-        buf: &mut Vec<u8>,
-    ) -> Result<String, String> {
-        loop {
-            let available = reader.fill_buf().await.map_err(|e| format!("read: {e}"))?;
-            if available.is_empty() {
-                return Err("daemon disconnected".into());
-            }
-            let take = available
-                .iter()
-                .position(|&b| b == b'\n')
-                .map_or(available.len(), |p| p + 1);
-            if buf.len() + take > MAX_LINE {
-                return Err("line too long".into());
-            }
-            buf.extend_from_slice(&available[..take]);
-            reader.consume(take);
-            if buf.ends_with(b"\n") {
-                break;
-            }
-        }
-        String::from_utf8(std::mem::take(buf))
-            .map(|s| s.trim().to_owned())
-            .map_err(|e| format!("utf8: {e}"))
-    }
-
-    async fn write_line(writer: &mut OwnedWriteHalf, line: &str) -> std::io::Result<()> {
-        writer.write_all(format!("{}\n", line).as_bytes()).await
-    }
-
-    fn hmac_tag(secret: &Zeroizing<Vec<u8>>, message: &[u8]) -> Result<Vec<u8>, String> {
-        let mut mac = HmacSha256::new_from_slice(secret).map_err(|e| format!("HMAC init: {e}"))?;
-        mac.update(message);
-        Ok(mac.finalize().into_bytes().to_vec())
-    }
-
     #[cfg(test)]
     mod tests {
         use tokio::{
-            io::{AsyncWriteExt, BufReader},
+            io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
             net::UnixStream,
             time::{Duration, timeout},
         };

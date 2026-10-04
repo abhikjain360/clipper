@@ -494,6 +494,15 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 DaemonCommand::ExpandSchedule(params) => {
                     cmd_expand_schedule(id, params, &engine).await
                 }
+                DaemonCommand::DesktopAlarms(params) => {
+                    match engine
+                        .desktop_alarms(&params.from, &params.to, &params.observer_zone)
+                        .await
+                    {
+                        Ok(alarms) => json_success(id, alarms),
+                        Err(error) => client_error(id, error),
+                    }
+                }
                 DaemonCommand::AddCalendarSource(params) => {
                     cmd_add_calendar_source(id, params, &engine).await
                 }

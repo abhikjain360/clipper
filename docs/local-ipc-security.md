@@ -40,7 +40,7 @@ command. The handshake proves that both ends hold the shared 32-byte IPC secret,
 and it is directional so neither side's proof can be replayed as the other's.
 
 1. The daemon sends an `auth_challenge` event carrying the protocol version
-   (`IPC_AUTH_VERSION = 1`) and a fresh 32-byte `daemon_nonce`.
+   (`IPC_AUTH_VERSION = 5`) and a fresh 32-byte `daemon_nonce`.
 2. The client replies with an `authenticate` command carrying its own fresh
    32-byte `client_nonce` and an HMAC-SHA256 tag over the _client_ binding
    message (domain-separated with the context string

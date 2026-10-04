@@ -1069,9 +1069,35 @@ dependencies = [
 name = "clipper-app-types"
 version = "0.1.0"
 dependencies = [
+ "postcard",
  "serde",
  "strum",
  "uniffi",
+]
+
+[[package]]
+name = "clipper-cli"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "clap",
+ "clipper-daemon-client",
+ "clipper-daemon-types",
+ "clipper-schedule",
+ "dirs",
+ "hmac 0.12.1",
+ "iana-time-zone",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1159,6 +1185,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipper-daemon-client"
+version = "0.1.0"
+dependencies = [
+ "clipper-daemon-types",
+ "hmac 0.12.1",
+ "rand 0.10.3",
+ "security-framework",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "clipper-daemon-types"
 version = "0.1.0"
 dependencies = [
@@ -1177,17 +1219,21 @@ dependencies = [
 name = "clipper-desktop"
 version = "0.1.0"
 dependencies = [
+ "block2",
+ "chrono",
  "clipper-app-types",
  "clipper-client",
+ "clipper-daemon-client",
  "clipper-daemon-types",
  "clipper-schedule",
  "dirs",
- "hmac 0.12.1",
+ "iana-time-zone",
+ "objc2",
+ "objc2-foundation",
+ "objc2-user-notifications",
  "rand 0.10.3",
- "security-framework",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
@@ -4204,6 +4250,8 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.13.2",
+ "block2",
  "objc2",
  "objc2-foundation",
 ]

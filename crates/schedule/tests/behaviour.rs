@@ -24,6 +24,7 @@ fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> chrono::DateTime<Utc> {
 
 fn daily_at(start: TimedStart) -> ScheduleItem {
     ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "daily".to_string(),
         span: ScheduleSpan::Timed {
@@ -322,6 +323,7 @@ fn overrides_for_other_items_are_ignored() {
 #[test]
 fn all_day_spans_whole_local_days() {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "conference".to_string(),
         span: ScheduleSpan::AllDay {
@@ -349,6 +351,7 @@ fn all_day_spans_whole_local_days() {
 #[test]
 fn one_off_items_expand_to_themselves() {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "dentist".to_string(),
         span: ScheduleSpan::Timed {
@@ -499,6 +502,7 @@ fn an_impossible_finite_raw_rule_is_empty() {
 #[test]
 fn an_overnight_occurrence_overlaps_the_next_days_window() {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "overnight".to_string(),
         span: ScheduleSpan::Timed {
@@ -533,6 +537,7 @@ fn an_overnight_occurrence_overlaps_the_next_days_window() {
 #[test]
 fn a_multi_day_occurrence_overlaps_a_window_across_dst() {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "dst weekend".to_string(),
         span: ScheduleSpan::AllDay {
@@ -698,6 +703,7 @@ fn invalid_domain_values_cannot_be_constructed() {
 #[test]
 fn the_wire_format_is_self_describing() {
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "Gym".to_string(),
         span: ScheduleSpan::Timed {
@@ -756,6 +762,7 @@ fn an_item_without_a_reference_or_an_alarm_deserializes() {
     assert_eq!(item.id, id);
     assert_eq!(item.reference, None);
     assert_eq!(item.alarm, None);
+    assert!(!item.break_reminders);
 }
 
 /// An unsupported imported rule persists only its snapshot id and UID. The

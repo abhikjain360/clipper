@@ -37,6 +37,8 @@ calendar ingest and the alarm plan.
 `crates/web-wasm` is the wasm-bindgen adapter for the browser client.
 `crates/mobile-uniffi` is the UniFFI adapter for React Native mobile.
 `crates/daemon` is the local macOS/Linux background process.
+`crates/daemon-client` is the shared local IPC transport and secret reader.
+`crates/cli` provides the `clipper` schedule command-line client.
 `web` is the Vite/React client shared by the browser build and Tauri shell.
 `web/src-tauri` is the native Tauri desktop shell.
 `mobile` is the React Native/Expo Android client.
@@ -70,6 +72,15 @@ the Clipboard tab when the browser grants access.
 nix run .#tauri-dev
 nix run .#tauri-build
 ```
+
+The local daemon also serves the `clipper` command-line client:
+
+```sh
+nix run .#clipper -- schedule items
+cargo run -p clipper-cli -- schedule add --help
+```
+
+See [docs/cli.md](docs/cli.md) for commands, JSON output and date ranges.
 
 ## Development
 

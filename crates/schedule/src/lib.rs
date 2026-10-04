@@ -15,6 +15,7 @@
 //! stored.
 
 pub mod alarm;
+pub mod break_reminders;
 pub mod engine;
 pub mod ingest;
 pub mod item;
@@ -23,6 +24,7 @@ pub mod summary;
 pub mod time;
 
 pub use alarm::{AlarmPolicy, PlannedAlarm, plan_alarms, plan_imported_alarms};
+pub use break_reminders::{BreakReminder, BreakReminderKind, next_break_reminder};
 pub use engine::{EngineError, Expansion, ImportedRuleResolver, RecurrenceEngine};
 pub use ingest::{
     CalendarSource, IngestError, IngestOutcome, IngestedEvent, IngestedStatus, SkippedEvent,

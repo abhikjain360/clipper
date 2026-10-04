@@ -8,7 +8,8 @@
 //! times, timezone and DST handling included.
 
 use chrono::{DateTime, TimeDelta, Utc};
-use serde::{Deserialize, Serialize};
+use clipper_api_types::DeviceId;
+use serde::{Deserialize, Serialize, ser::SerializeStruct};
 
 use crate::item::{Occurrence, RecurrenceId, ScheduleItem, ScheduleItemId};
 
@@ -16,21 +17,43 @@ use crate::item::{Occurrence, RecurrenceId, ScheduleItem, ScheduleItemId};
 ///
 /// Absent means silent, and that is the default. Most blocks record intent
 /// rather than wake someone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct AlarmPolicy {
     /// Minutes before the occurrence starts. Zero rings at the start.
     pub minutes_before: u32,
+    #[serde(default)]
+    pub target_device: Option<DeviceId>,
+}
+
+impl Serialize for AlarmPolicy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let include_target = !serializer.is_human_readable() || self.target_device.is_some();
+        let mut state =
+            serializer.serialize_struct("AlarmPolicy", if include_target { 2 } else { 1 })?;
+        state.serialize_field("minutes_before", &self.minutes_before)?;
+        if include_target {
+            state.serialize_field("target_device", &self.target_device)?;
+        }
+        state.end()
+    }
 }
 
 impl AlarmPolicy {
     /// Rings exactly when the block begins.
     pub fn at_start() -> Self {
-        Self { minutes_before: 0 }
+        Self {
+            minutes_before: 0,
+            target_device: None,
+        }
     }
 
     pub fn minutes_before(minutes: u32) -> Self {
         Self {
             minutes_before: minutes,
+            target_device: None,
         }
     }
 
@@ -150,6 +173,7 @@ mod tests {
 
     fn gym(alarm: Option<AlarmPolicy>) -> ScheduleItem {
         ScheduleItem {
+            break_reminders: false,
             id: ScheduleItemId::new(),
             title: "Gym".to_string(),
             span: ScheduleSpan::Timed {

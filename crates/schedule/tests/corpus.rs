@@ -20,6 +20,7 @@ const LOOKAHEAD_DAYS: i64 = 365 * 5;
 fn item(dtstart: &str, recurrence: Recurrence) -> ScheduleItem {
     let local = NaiveDateTime::parse_from_str(dtstart, "%Y%m%dT%H%M%S").expect("valid DTSTART");
     ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "corpus".to_string(),
         span: ScheduleSpan::Timed {
@@ -290,6 +291,7 @@ fn dst_gap_shifts_forward_like_java() {
     let local =
         NaiveDateTime::parse_from_str("20260101T023000", "%Y%m%dT%H%M%S").expect("valid DTSTART");
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: "dst gap".to_string(),
         span: ScheduleSpan::Timed {

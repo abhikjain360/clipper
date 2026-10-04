@@ -58,6 +58,7 @@ fn large_recurring_invitations_stay_small_and_use_the_owners_reply() {
         let event = &outcome.events[0];
         assert!(serde_json::to_vec(event).unwrap().len() < 64 * 1024);
         let item = ScheduleItem {
+            break_reminders: false,
             id: clipper_schedule::ScheduleItemId(event.id),
             title: event.title.clone(),
             span: event.span.clone(),
@@ -191,6 +192,7 @@ fn imported_invitations_ring_at_their_lead_times_and_moved_starts() {
     let mut unknown = Vec::new();
     for event in &parsed.events {
         let item = ScheduleItem {
+            break_reminders: false,
             id: ScheduleItemId(event.id),
             title: event.title.clone(),
             span: event.span.clone(),
@@ -604,6 +606,7 @@ fn an_ingested_series_expands() {
 
     let standup = event("standup@example.com");
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId::new(),
         title: standup.title.clone(),
         span: standup.span.clone(),
@@ -859,6 +862,7 @@ END:VCALENDAR\r\n";
     );
 
     let series = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId(event.id),
         title: event.title,
         span: event.span,
@@ -937,6 +941,7 @@ DTEND:20260904T013000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         .pop()
         .expect("series parses");
     let series = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId(event.id),
         title: event.title.clone(),
         span: event.span.clone(),
@@ -995,6 +1000,7 @@ END:VEVENT\r\nEND:VCALENDAR\r\n";
         "FREQ=DAILY;COUNT=2;BYHOUR=9"
     );
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId(event.id),
         title: event.title,
         span: event.span,
@@ -1175,6 +1181,7 @@ fn boundary_interval_expands_with_that_interval() {
     .pop()
     .expect("one event");
     let item = ScheduleItem {
+        break_reminders: false,
         id: ScheduleItemId(event.id),
         title: event.title.clone(),
         span: event.span.clone(),

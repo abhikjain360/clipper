@@ -2377,11 +2377,10 @@ impl SyncEngine {
             if start >= to || end <= from {
                 continue;
             }
-            out.push(actual_view(
-                object_id,
-                actual,
-                &self.actual_title(actual).await,
-            ));
+            let (title, break_reminders) = self.actual_details(actual).await;
+            let mut view = actual_view(object_id, actual, &title);
+            view.break_reminders = break_reminders;
+            out.push(view);
         }
         out.sort_by(|a, b| a.start.cmp(&b.start));
         let mut state = self.state.write().await;
@@ -2392,9 +2391,11 @@ impl SyncEngine {
             && let Some(resolved) = out
                 .iter()
                 .find(|entry| entry.id == running.id && entry.running)
-            && running.title != resolved.title
+            && (running.title != resolved.title
+                || running.break_reminders != resolved.break_reminders)
         {
             running.title = resolved.title.clone();
+            running.break_reminders = resolved.break_reminders;
             drop(state);
             self.bump_version();
         }
@@ -2746,6 +2747,45 @@ impl SyncEngine {
         }
         let until = now + chrono::TimeDelta::hours(i64::from(within_hours.max(1)));
 
+        self.alarms_between_inner(now, until, observer_zone, true)
+            .await
+    }
+
+    pub async fn desktop_alarms(
+        &self,
+        from: &str,
+        to: &str,
+        observer_zone: &str,
+    ) -> Result<Vec<AlarmView>, ClientError> {
+        self.run_work(None, async {
+            let from = parse_instant(from, "alarm window start")?;
+            let to = parse_instant(to, "alarm window end")?;
+            TimeRange::new(from, to)
+                .map_err(|error| ClientError::InvalidArgument(error.to_string()))?;
+            if to - from > chrono::TimeDelta::days(366) {
+                return Err(ClientError::InvalidArgument(
+                    "alarm window cannot exceed one year".into(),
+                ));
+            }
+            self.alarms_between_inner(from, to, observer_zone, false)
+                .await
+        })
+        .await
+    }
+
+    async fn alarms_between_inner(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        until: chrono::DateTime<chrono::Utc>,
+        observer_zone: &str,
+        all_phones: bool,
+    ) -> Result<Vec<AlarmView>, ClientError> {
+        let device: DeviceId = self
+            .current_device_id()
+            .await?
+            .parse()
+            .map_err(|_| ClientError::NotAuthenticated)?;
+
         let records = self.local_store.schedule_records_with_heads().await?;
         let sources: HashMap<_, _> = records
             .iter()
@@ -2760,10 +2800,19 @@ impl SyncEngine {
             };
             let offsets = match record {
                 ScheduleRecord::Item(item) => match item.alarm {
-                    Some(policy) => vec![u64::from(policy.minutes_before) * 60],
-                    None => continue,
+                    Some(policy)
+                        if policy
+                            .target_device
+                            .map_or(all_phones, |target| target == device) =>
+                    {
+                        vec![u64::from(policy.minutes_before) * 60]
+                    }
+                    _ => continue,
                 },
                 ScheduleRecord::Ingested(event) => {
+                    if !all_phones {
+                        continue;
+                    }
                     let Some(source) = sources.get(&event.source) else {
                         continue;
                     };
@@ -3219,6 +3268,7 @@ impl SyncEngine {
                 && id == planned.item
             {
                 view.title = title.to_string();
+                view.break_reminders = record.as_item().is_some_and(|item| item.break_reminders);
             }
         }
         {
@@ -6268,6 +6318,90 @@ mod tests {
         });
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn alarm_plans_include_only_the_devices_chosen_for_them() {
+        use super::adversarial_history_tests::{
+            HISTORY_TEST_DEVICE_ID, HISTORY_TEST_KEY, encrypted_schedule_object,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", directory.path());
+        engine.local_store.set_profile("alarm-profile".into());
+        open_session(&engine).await;
+        *engine.encryption_key.write().await = Some(Zeroizing::new(HISTORY_TEST_KEY));
+        let own: DeviceId = engine.current_device_id().await.unwrap().parse().unwrap();
+        let other = DeviceId::from(uuid::Uuid::new_v4());
+        let now = chrono::Utc::now();
+        let start = now + chrono::Duration::hours(1);
+        let mut ids = Vec::new();
+        for (index, target) in [None, Some(own), Some(other)].into_iter().enumerate() {
+            let item: ScheduleItem = serde_json::from_value(serde_json::json!({
+                "id": uuid::Uuid::new_v4(),
+                "title": "Work",
+                "span": ScheduleSpan::Timed {
+                    start: clipper_schedule::TimedStart::Floating(start.naive_utc()),
+                    duration: clipper_schedule::BlockDuration::from_minutes(30).unwrap(),
+                },
+                "recurrence": {"kind": "once"},
+                "alarm": match target {
+                    Some(device) => serde_json::json!({"minutes_before": 5, "target_device": device}),
+                    None => serde_json::json!({"minutes_before": 5}),
+                },
+            })).unwrap();
+            ids.push(item.id.to_string());
+            let object_id = uuid::Uuid::new_v4().to_string();
+            let record = ScheduleRecord::Item(Box::new(item));
+            let encrypted = encrypted_schedule_object(&record, &object_id, 1, None);
+            engine
+                .local_store
+                .persist_local_schedule_present_encrypted(
+                    StoredObjectIdentity {
+                        object_id: &object_id,
+                        created_at: "2026-10-07T00:00:00Z",
+                        source_device_id: HISTORY_TEST_DEVICE_ID,
+                    },
+                    record,
+                    &encrypted,
+                    index as i64 + 1,
+                    index as i64 + 1,
+                    10,
+                )
+                .await
+                .unwrap();
+        }
+        let phone = engine.next_alarms(2, "UTC").await.unwrap();
+        let phone_ids: HashSet<_> = phone.iter().map(|alarm| alarm.item_id.as_str()).collect();
+        assert_eq!(phone_ids, HashSet::from([ids[0].as_str(), ids[1].as_str()]));
+
+        let due = start - chrono::Duration::minutes(5) + chrono::Duration::milliseconds(1);
+        let mac = engine
+            .desktop_alarms(&now.to_rfc3339(), &due.to_rfc3339(), "UTC")
+            .await
+            .unwrap();
+        assert_eq!(mac.len(), 1);
+        assert_eq!(mac[0].item_id, ids[1]);
+        assert!(mac[0].fire_at_millis <= due.timestamp_millis());
+
+        engine
+            .state
+            .write()
+            .await
+            .session
+            .as_mut()
+            .unwrap()
+            .device_id = other.to_string();
+        let second_phone = engine.next_alarms(2, "UTC").await.unwrap();
+        let second_ids: HashSet<_> = second_phone
+            .iter()
+            .map(|alarm| alarm.item_id.as_str())
+            .collect();
+        assert_eq!(
+            second_ids,
+            HashSet::from([ids[0].as_str(), ids[2].as_str()])
+        );
+    }
+
     #[test]
     fn stopping_a_timer_clamps_a_clock_that_runs_behind() {
         let now = chrono::Utc::now();
@@ -6373,6 +6507,7 @@ mod tests {
 
         let object_id = uuid::Uuid::now_v7().to_string();
         let record = ScheduleRecord::Item(Box::new(ScheduleItem {
+            break_reminders: false,
             id: clipper_schedule::ScheduleItemId::new(),
             title: "signed-out secret".into(),
             span: ScheduleSpan::Timed {

@@ -227,6 +227,7 @@ mod tests {
     #[test]
     fn a_zoned_series_ends_on_its_own_local_date() {
         let item = ScheduleItem {
+            break_reminders: false,
             id: crate::item::ScheduleItemId::new(),
             title: "Standup".to_string(),
             span: ScheduleSpan::Timed {

@@ -1,7 +1,7 @@
 # Schedule model
 
 This document describes how Clipper represents plans, calculates calendar
-occurrences, records time actually spent, and rings alarms on Android.
+occurrences, records time actually spent, and plans alarms for phones and Macs.
 
 The domain model lives in the `clipper-schedule` crate (`crates/schedule`). It
 performs calculations without storage, networking or encryption, so its inputs
@@ -53,6 +53,32 @@ is not grid-aligned is drawn where it actually falls.
 
 Editing or deleting a plan does not rewrite recorded time, because actuals are
 separate records.
+
+`ScheduleItem.break_reminders` enables eye and movement reminders while a timer
+started from this block is running on Mac. It defaults to false and is omitted
+from JSON when false. The block revision captured at timer start supplies the
+flag, so later edits do not change that timer's reminders. Imported meetings
+and unplanned timers have no break reminders.
+
+The rhythm repeats from the timer's start: eye reminders at 20 and 40 minutes,
+a movement break at 50 minutes, and return to work at 60 minutes. Stopping or
+replacing the timer cancels its remaining reminders. On wake or app relaunch,
+Clipper resumes at the next reminder; it does not replay missed reminders.
+
+The packaged Tauri Mac app delivers ordinary macOS notifications using
+UserNotifications. Closing the window hides it and keeps the app running;
+clicking the Dock icon reopens it. Quit ends reminder delivery, while the
+daemon's timer can keep running. The first enabled timer or upcoming alarm
+targeted at this Mac requests notification permission. Denial disables delivery
+for that app run. To enable it later, use
+System Settings > Notifications > Clipper, then quit and reopen Clipper.
+Unbundled development binaries do not deliver notifications. Android and the
+browser preserve the flag without delivering reminders.
+
+The desktop build wrapper signs the daemon and then the completed Mac app
+bundle after copying the daemon into it. It uses `APPLE_SIGNING_IDENTITY` or
+the configured `bundle.macOS.signingIdentity`, falling back to local ad-hoc
+signing. The app signature uses `com.clipper.desktop`, matching the bundle.
 
 `ScheduleItem.reference` optionally points to another Clipper object using the
 shared `ObjectId` UUID wrapper. The reference stores only the ID; the target
@@ -247,12 +273,20 @@ restarts.
 
 Calendar occurrences and alarms always use the latest definition of a series.
 
-## Alarms on Android
+## Alarms
 
 A `ScheduleItem` can carry an alarm policy with a lead time. `plan_alarms`
 turns a series' occurrences into planned alarms, each with a fire time, the
 occurrence start and the series title as its label, and drops any alarm whose
 fire time has passed.
+
+`AlarmPolicy.target_device` is an optional server-assigned `DeviceId`. An absent
+target is omitted from JSON and means all Android phones; Macs stay silent.
+A present target means only that device rings. The composer lists registered
+devices by name under Ring on. A removed or unavailable target stays selected;
+there is no fallback to another device. Existing items without the field keep
+ringing on phones. Alarm plans use the latest schedule definition and each
+device's current session ID.
 
 Imported events use invitation rules and start-relative VALARMs, with a
 five-minute fallback. Each source can silence its imported alarms. Provider
@@ -260,10 +294,34 @@ moves and cancellations apply before planning. `next_alarms` includes complete
 active imported batches alongside user-authored items. Details are in
 [calendar-imports.md](calendar-imports.md).
 
+### Mac notifications
+
+Tauri requests a plan containing only alarms targeted at the signed-in Mac.
+It delivers each due alarm through the same UserNotifications API as break
+reminders, with the block title and the default notification sound. Untargeted
+and imported alarms do not notify on Macs. The plan is refreshed after state
+changes and before delivery, using the system time zone for floating blocks.
+Closing the window hides it and keeps this task running; Quit ends delivery.
+After a delay such as waking from sleep, alarms at most one minute late can
+still notify. Relaunch does not replay missed alarms.
+Failed or timed-out plan queries keep the last successful delivery cursor and
+retry after five seconds, so a recovered query can still deliver due alarms
+within that minute.
+
+The first marked timer or upcoming alarm targeted at this Mac requests macOS
+notification permission. Denial disables both kinds of notification for that
+app run without retries. Unbundled development binaries do not notify.
+Notification sound and banners also follow the owner's macOS settings.
+
+### Android registration
+
 The Android app asks Rust (`next_alarms`) for the alarms in the next seven days
 and hands that list to Kotlin. It sends a new list when the app becomes active
 or when the schedule or session changes. A phone whose app is never opened runs
 out of alarms after seven days.
+
+Rust includes untargeted alarms and alarms targeted at this phone, alongside
+the imported alarms. The UniFFI wrapper returns that filtered plan unchanged.
 
 The Kotlin side is an Expo local module at `mobile/modules/clipper-alarm`. Its
 own `AndroidManifest.xml` merges into the app's and declares the permissions,
