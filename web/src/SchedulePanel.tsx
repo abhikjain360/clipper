@@ -37,6 +37,7 @@ import {
     Label,
     Paragraph,
     Spinner,
+    Switch,
     Text,
     ToggleGroup,
     XStack,
@@ -52,6 +53,7 @@ import type {
     ScheduleItemView,
     Weekday,
 } from "@clipper/shared";
+import { calendarSyncLabel } from "@clipper/shared";
 import { clipperBackend, formatBackendError, isTauriRuntime } from "./backend";
 import { layoutDay, overlapsDay, spanMinutes } from "./schedule-layout";
 import {
@@ -948,6 +950,11 @@ function CalendarSources({
     const [url, setUrl] = useState("");
     const [busy, setBusy] = useState<string | null>(null);
     const canSync = isTauriRuntime();
+    const [now, setNow] = useState(Date.now);
+    useEffect(() => {
+        const timer = setInterval(() => setNow(Date.now()), 60000);
+        return () => clearInterval(timer);
+    }, []);
     const [pending, setPending] = useState<{
         source: CalendarSourceView;
         action: "sync" | "remove" | "raw";
@@ -1026,6 +1033,20 @@ function CalendarSources({
         }
     }
 
+    async function setAlarms(source: CalendarSourceView, alarmsOn: boolean) {
+        onError(null);
+        setBusy(source.id);
+        try {
+            const backend = await clipperBackend();
+            await backend.setCalendarSourceAlarms(source.id, alarmsOn);
+            onState(await backend.getState());
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        } finally {
+            setBusy(null);
+        }
+    }
+
     return (
         <Card bg="#171a1d" p="$3" gap="$3" style={{ borderColor: "#252b31", borderWidth: 1 }}>
             <XStack items="center" justify="space-between" gap="$2">
@@ -1053,6 +1074,8 @@ function CalendarSources({
                             <Input
                                 value={url}
                                 onChangeText={setUrl}
+                                autoCorrect={false}
+                                autoCapitalize="none"
                                 placeholder="https://calendar.google.com/calendar/ical/…/basic.ics"
                                 width="100%"
                                 minW={0}
@@ -1132,8 +1155,23 @@ function CalendarSources({
                                 ? " · Original import unavailable"
                                 : ""}
                         </Text>
+                        <Text fontSize={12} color="#8b949e">
+                            {calendarSyncLabel(source.checked_at, now)}
+                        </Text>
                     </YStack>
-                    <XStack gap="$2" flexWrap="wrap">
+                    <XStack gap="$2" flexWrap="wrap" items="center">
+                        <Label htmlFor={`calendar-alarms-${source.id}`} size="$2">
+                            Alarms {source.alarms_on ? "on" : "off"}
+                        </Label>
+                        <Switch
+                            id={`calendar-alarms-${source.id}`}
+                            size="$2"
+                            checked={source.alarms_on}
+                            disabled={busy !== null}
+                            onCheckedChange={(checked) => void setAlarms(source, checked)}
+                        >
+                            <Switch.Thumb />
+                        </Switch>
                         {source.raw_import_file_id && source.raw_import_available && (
                             <Button
                                 size="$2"
@@ -1143,14 +1181,16 @@ function CalendarSources({
                                 Delete original feed
                             </Button>
                         )}
-                        <Button
-                            size="$2"
-                            icon={busy === source.id ? <Spinner /> : <RefreshCw size={14} />}
-                            disabled={!canSync || busy !== null}
-                            onPress={() => setPending({ source, action: "sync" })}
-                        >
-                            Sync
-                        </Button>
+                        {canSync && (
+                            <Button
+                                size="$2"
+                                icon={busy === source.id ? <Spinner /> : <RefreshCw size={14} />}
+                                disabled={busy !== null}
+                                onPress={() => setPending({ source, action: "sync" })}
+                            >
+                                Sync
+                            </Button>
+                        )}
                         <Button
                             size="$2"
                             icon={<Trash2 size={14} />}

@@ -201,6 +201,9 @@ export type CalendarSourceView = {
   // path never leaves the Rust side.
   location: string;
   enabled: boolean;
+  alarms_on: boolean;
+  fetched_at: string | null;
+  checked_at: string | null;
   event_count: number;
   raw_import_file_id: string | null;
   raw_import_available: boolean;
@@ -211,6 +214,8 @@ export type IngestReport = {
   added: number;
   updated: number;
   unchanged: number;
+  feed_unchanged: boolean;
+  superseded: boolean;
   // Event objects retired when an import is replaced; recordings are not included.
   tombstoned: number;
   // Entries this client could not read, reported rather than dropped.
@@ -320,6 +325,7 @@ export type ClipperBackend = {
   // Rejects in the browser: no calendar provider sends CORS headers, so feeds
   // are pulled by the desktop or mobile app and reach the browser as objects.
   syncCalendarSource: (objectId: string) => Promise<IngestReport>;
+  setCalendarSourceAlarms: (objectId: string, alarmsOn: boolean) => Promise<void>;
   deleteScheduleObject: (objectId: string) => Promise<void>;
   // `observerZone` is an IANA name; it resolves floating and all-day spans,
   // which carry no zone of their own.

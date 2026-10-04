@@ -58,6 +58,8 @@ export function tauriBackend(): ClipperBackend {
         addCalendarSource: (name, url) => invoke<string>("add_calendar_source", { name, url }),
         syncCalendarSource: (objectId) =>
             invoke<IngestReport>("sync_calendar_source", { objectId }),
+        setCalendarSourceAlarms: (objectId, alarmsOn) =>
+            invoke<void>("set_calendar_source_alarms", { objectId, alarmsOn }),
         createScheduleItem: (item: ScheduleItem) =>
             invoke<string>("create_schedule_item", { item }),
         updateScheduleItem: (objectId, item, expectedRevision) =>

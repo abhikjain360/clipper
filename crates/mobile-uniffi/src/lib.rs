@@ -2,8 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clipper_app_types::{
-    ActualView, AlarmView, AppState, ClipboardPayload, CollabItem, DeviceInfo, LogoutOutcome,
-    OccurrenceView,
+    ActualView, AlarmView, AppState, ClipboardPayload, CollabItem, DeviceInfo, IngestReport,
+    LogoutOutcome, OccurrenceView,
 };
 use clipper_client::{
     api_client::ClientError,
@@ -247,6 +247,37 @@ impl MobileClipperClient {
             .engine
             .expand_schedule(&from, &to, &observer_zone)
             .await?)
+    }
+
+    pub async fn add_calendar_source(
+        &self,
+        name: String,
+        url: String,
+    ) -> Result<String, MobileError> {
+        Ok(self.engine.add_calendar_source(&name, &url).await?)
+    }
+
+    pub async fn sync_calendar_source(
+        &self,
+        object_id: String,
+    ) -> Result<IngestReport, MobileError> {
+        Ok(self.engine.sync_calendar_source(&object_id).await?)
+    }
+
+    pub async fn set_calendar_source_alarms(
+        &self,
+        object_id: String,
+        alarms_on: bool,
+    ) -> Result<(), MobileError> {
+        self.engine
+            .set_calendar_source_alarms(&object_id, alarms_on)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_schedule_object(&self, object_id: String) -> Result<(), MobileError> {
+        self.engine.delete_schedule_object(&object_id).await?;
+        Ok(())
     }
 
     pub async fn start_actual(&self, plan_context: Option<String>) -> Result<String, MobileError> {

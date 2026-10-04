@@ -1138,6 +1138,7 @@ dependencies = [
 name = "clipper-daemon"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clipper-client",
  "clipper-core",
  "clipper-daemon-types",

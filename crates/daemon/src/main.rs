@@ -11,6 +11,8 @@ fn main() {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+mod calendar_refresh;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod clients;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod engine_manager;
@@ -318,14 +320,20 @@ async fn run() -> DaemonResult<()> {
                         let mut state_rx = engine.subscribe();
                         // Snapshot once so clients see the current state even if a
                         // change landed before we subscribed.
-                        broadcast_state(&client_mgr, engine.get_state().await).await;
+                        let state = engine.get_state().await;
+                        engine_manager
+                            .update_calendar_refresh(&engine, &state)
+                            .await;
+                        broadcast_state(&client_mgr, state).await;
                         loop {
                             tokio::select! {
                                 changed = state_rx.changed() => {
                                     if changed.is_err() {
                                         break;
                                     }
-                                    broadcast_state(&client_mgr, engine.get_state().await).await;
+                                    let state = engine.get_state().await;
+                                    engine_manager.update_calendar_refresh(&engine, &state).await;
+                                    broadcast_state(&client_mgr, state).await;
                                 }
                                 generation = ready.changed() => {
                                     if generation.is_err() {

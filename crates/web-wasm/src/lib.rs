@@ -540,6 +540,17 @@ pub fn sync_calendar_source(object_id: String) -> Promise {
     })
 }
 
+#[wasm_bindgen(js_name = setCalendarSourceAlarms)]
+pub fn set_calendar_source_alarms(object_id: String, alarms_on: bool) -> Promise {
+    ok_promise(async move {
+        engine_or_error()?
+            .set_calendar_source_alarms(&object_id, alarms_on)
+            .await
+            .map_err(js_error)?;
+        Ok(JsValue::UNDEFINED)
+    })
+}
+
 #[wasm_bindgen(js_name = createCollabDoc)]
 pub fn create_collab_doc() -> Promise {
     ok_promise(async {

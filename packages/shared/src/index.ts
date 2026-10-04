@@ -1,3 +1,5 @@
+export { calendarRefreshDue, calendarSyncLabel } from "./calendar";
+
 export type {
   ActualView,
   AlarmPolicy,

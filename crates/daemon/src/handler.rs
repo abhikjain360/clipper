@@ -507,6 +507,15 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 DaemonCommand::SyncCalendarSource(params) => {
                     cmd_sync_calendar_source(id, params.object_id, &engine).await
                 }
+                DaemonCommand::SetCalendarSourceAlarms(params) => {
+                    match engine
+                        .set_calendar_source_alarms(&params.object_id, params.alarms_on)
+                        .await
+                    {
+                        Ok(()) => DaemonResponse::success(id, None),
+                        Err(error) => client_error(id, error),
+                    }
+                }
                 DaemonCommand::Authenticate(_)
                 | DaemonCommand::Login(_)
                 | DaemonCommand::Register(_)
@@ -532,6 +541,8 @@ fn random_bytes<const N: usize>() -> [u8; N] {
 }
 
 async fn cmd_login(id: String, params: LoginParams, manager: &EngineManager) -> DaemonResponse {
+    let _change = manager.session_change.lock().await;
+    manager.stop_calendar_refresh().await;
     let LoginParams {
         passphrase,
         username,
@@ -552,6 +563,7 @@ async fn cmd_login(id: String, params: LoginParams, manager: &EngineManager) -> 
         .await
     {
         Ok(()) => {
+            manager.start_calendar_refresh(engine.clone()).await;
             // Store credentials in Keychain
             let url = engine.base_url();
             let state = engine.get_state().await;
@@ -584,6 +596,8 @@ async fn cmd_register(
     params: RegisterParams,
     manager: &EngineManager,
 ) -> DaemonResponse {
+    let _change = manager.session_change.lock().await;
+    manager.stop_calendar_refresh().await;
     let RegisterParams {
         access_key,
         username,
@@ -611,6 +625,7 @@ async fn cmd_register(
         .await
     {
         Ok(username) => {
+            manager.start_calendar_refresh(engine.clone()).await;
             let url = engine.base_url();
             let creds = Credentials {
                 device_name: device_name.to_string(),
@@ -638,6 +653,8 @@ async fn cmd_logout(
     cancel_running_work: bool,
     manager: &EngineManager,
 ) -> DaemonResponse {
+    let _change = manager.session_change.lock().await;
+    manager.stop_calendar_refresh().await;
     // Nothing to tear down if the user never logged in this daemon lifetime.
     let Some(engine) = manager.engine().await else {
         return json_success(id, clipper_client::engine::LogoutOutcome::SignedOut);
@@ -649,6 +666,8 @@ async fn cmd_logout(
                     warn!("Failed to clear stored server profile: {}", e);
                 }
                 manager.clear().await;
+            } else {
+                manager.start_calendar_refresh(engine.clone()).await;
             }
             json_success(id, outcome)
         }

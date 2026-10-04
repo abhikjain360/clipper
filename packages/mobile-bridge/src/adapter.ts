@@ -108,12 +108,21 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
       mapCollabItem(await client.renameCollabDoc(objectId, title)),
     nextAlarms: async (withinHours, observerZone) =>
       (await client.nextAlarms(withinHours, observerZone)).map(mapAlarmView),
-    addCalendarSource: async () => {
-      throw new Error("Adding a calendar source is not available on mobile yet");
+    addCalendarSource: async (name, url) => client.addCalendarSource(name, url),
+    syncCalendarSource: async (objectId) => {
+      const report = await client.syncCalendarSource(objectId);
+      return {
+        added: report.added,
+        updated: report.updated,
+        unchanged: report.unchanged,
+        feed_unchanged: report.feedUnchanged,
+        superseded: report.superseded,
+        tombstoned: report.tombstoned,
+        skipped: report.skipped,
+      };
     },
-    syncCalendarSource: async () => {
-      throw new Error("Syncing a calendar source is not available on mobile yet");
-    },
+    setCalendarSourceAlarms: async (objectId, alarmsOn) =>
+      client.setCalendarSourceAlarms(objectId, alarmsOn),
     startActual: async (planContext) => client.startActual(planContext),
     stopActual: async (objectId) => client.stopActual(objectId),
     actualsBetween: async (from, to) => (await client.actualsBetween(from, to)).map(mapActualView),
@@ -123,9 +132,7 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     createScheduleItem: async () => {
       throw new Error("Creating schedule items is not available on mobile yet");
     },
-    deleteScheduleObject: async () => {
-      throw new Error("Deleting schedule items is not available on mobile yet");
-    },
+    deleteScheduleObject: async (objectId) => client.deleteScheduleObject(objectId),
     expandSchedule: async (from, to, observerZone) =>
       (await client.expandSchedule(from, to, observerZone)).map(mapOccurrenceView),
     resume: async (token, dataKey, wrappingKey, username, deviceName, serverUrl) => {
@@ -265,6 +272,9 @@ function mapActualView(actual: NativeActualView): ActualView {
 function mapCalendarSourceView(source: NativeCalendarSourceView): CalendarSourceView {
   return {
     enabled: source.enabled,
+    alarms_on: source.alarmsOn,
+    fetched_at: source.fetchedAt ?? null,
+    checked_at: source.checkedAt ?? null,
     event_count: source.eventCount,
     raw_import_file_id: source.rawImportFileId ?? null,
     raw_import_available: source.rawImportAvailable,

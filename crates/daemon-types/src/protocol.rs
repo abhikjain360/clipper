@@ -92,6 +92,7 @@ pub enum DaemonCommand {
     ExpandSchedule(ExpandScheduleParams),
     AddCalendarSource(AddCalendarSourceParams),
     SyncCalendarSource(SyncCalendarSourceParams),
+    SetCalendarSourceAlarms(SetCalendarSourceAlarmsParams),
     StartActual(StartActualParams),
     StopActual(StopActualParams),
     ActualsBetween(ActualsBetweenParams),
@@ -277,6 +278,12 @@ pub struct ActualsBetweenParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncCalendarSourceParams {
     pub object_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetCalendarSourceAlarmsParams {
+    pub object_id: String,
+    pub alarms_on: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

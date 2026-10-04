@@ -14,7 +14,10 @@ use clipper_client::{
     api_client::ClientError,
     engine::{AppState, SavedProfile, SyncEngine},
 };
-use tokio::sync::{RwLock, watch};
+use tokio::{
+    sync::{Mutex, RwLock, watch},
+    task::JoinHandle,
+};
 
 use crate::keychain::Credentials;
 
@@ -26,6 +29,8 @@ pub struct EngineManager {
     // Bumped whenever the engine is installed or cleared so the state watcher can
     // (re)subscribe as it comes and goes across login/logout.
     ready: watch::Sender<u64>,
+    calendar_refresh: Mutex<Option<JoinHandle<()>>>,
+    pub session_change: Mutex<()>,
 }
 
 impl EngineManager {
@@ -41,6 +46,8 @@ impl EngineManager {
             stored_creds: RwLock::new(stored_creds),
             slot: RwLock::new(None),
             ready,
+            calendar_refresh: Mutex::new(None),
+            session_change: Mutex::new(()),
         })
     }
 
@@ -143,6 +150,7 @@ impl EngineManager {
     /// different server without restarting the daemon. Also forgets the stored
     /// profile, since the credentials have just been cleared.
     pub async fn clear(&self) {
+        self.stop_calendar_refresh().await;
         *self.slot.write().await = None;
         *self.stored_creds.write().await = None;
         self.bump_ready();
@@ -152,6 +160,35 @@ impl EngineManager {
     /// re-subscribe whenever the engine is (re)built or torn down.
     pub fn subscribe_ready(&self) -> watch::Receiver<u64> {
         self.ready.subscribe()
+    }
+
+    pub async fn start_calendar_refresh(&self, engine: Arc<SyncEngine>) {
+        if engine.get_state().await.session.is_none() {
+            return;
+        }
+        let mut task = self.calendar_refresh.lock().await;
+        if task.as_ref().is_some_and(|task| !task.is_finished()) {
+            return;
+        }
+        *task = Some(tokio::spawn(crate::calendar_refresh::run(engine)));
+    }
+
+    pub async fn stop_calendar_refresh(&self) {
+        if let Some(task) = self.calendar_refresh.lock().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    pub async fn update_calendar_refresh(&self, engine: &Arc<SyncEngine>, state: &AppState) {
+        let Ok(_change) = self.session_change.try_lock() else {
+            return;
+        };
+        if state.session.is_some() {
+            self.start_calendar_refresh(engine.clone()).await;
+        } else {
+            self.stop_calendar_refresh().await;
+        }
     }
 
     fn bump_ready(&self) {
@@ -290,5 +327,33 @@ mod tests {
         // Clearing forgets the prefill, matching the cleared keychain on logout.
         mgr.clear().await;
         assert!(mgr.current_state().await.saved_profile.is_none());
+    }
+
+    #[tokio::test]
+    async fn stopping_calendar_refresh_drops_running_work_without_waiting_for_it() {
+        struct Finish(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for Finish {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+
+        let mgr = manager("stop-calendar-refresh", None);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (finished, dropped) = tokio::sync::oneshot::channel();
+        *mgr.calendar_refresh.lock().await = Some(tokio::spawn(async move {
+            let _finish = Finish(Some(finished));
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        }));
+        ready.await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            mgr.stop_calendar_refresh(),
+        )
+        .await
+        .unwrap();
+        dropped.await.unwrap();
+        assert!(mgr.calendar_refresh.lock().await.is_none());
     }
 }

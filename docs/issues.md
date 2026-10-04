@@ -1230,7 +1230,10 @@ Each entry has:
   reattached.
 - **Recommendation:** a cancel action for a pending batch, cleanup of raw files
   no manifest references, and a reattach flow for overrides.
-- **Decision:**
+- **Decision:** finish saved pending batches before fetching a new response.
+  Cancellation, unreferenced raw-file cleanup and override reattachment remain
+  open. Irrecoverable pending data is retired before a fresh fetch. Transient
+  recovery failures still stop that refresh so the batch can resume.
 
 ### 93. Calendar connector questions
 
@@ -1240,9 +1243,8 @@ Each entry has:
   when the same meeting arrives from two sources; whether replying to an
   invite from Clipper is supported; how provider recurrence and moved instances
   map onto Clipper's overrides; and whether the work Google Workspace account
-  allows a personal OAuth app (if not, it is ICS-only). Today identical
-  refreshes still replace the whole batch and nothing deduplicates across or
-  within sources.
+  allows a personal OAuth app (if not, it is ICS-only). Unchanged normalized feeds
+  write nothing; separate sources still duplicate the same meeting.
 - **Decision:**
 
 ### 94. An override for a position the rule never produces adds an occurrence
@@ -1425,14 +1427,71 @@ Each entry has:
   cover the React Native app.
 - **Decision:**
 
-### 108. Calendar refresh is manual and only on native clients
+### 108. Android calendar refresh needs the app to be opened
 
 - **Status:** open
-- **Where:** `crates/client/src/calendar_import.rs`; the Android alarm plan.
-- **What happens:** there is no per-client opt-in or background refresh.
-  Android gets a seven-day alarm plan, so a phone whose app is never opened
-  runs out of alarms.
-- **Decision:**
+- **Where:** `crates/daemon/src/calendar_refresh.rs`; `mobile/src/App.tsx`;
+  the Android alarm plan.
+- **What happens:** desktop refreshes enabled sources hourly while logged in,
+  starting shortly after login. Android refreshes enabled sources on launch and
+  foreground. Both use the later of the device's local successful check time
+  and the shared active fetch time. A missing time, one older than an hour, or
+  one more than five minutes in the future is due. They refresh sequentially
+  and continue after failures. Manual Sync always
+  fetches immediately. Android registers a seven-day alarm plan; a phone whose
+  app is never opened can still run out of alarms.
+- **Decision:** keep desktop hourly and Android foreground refresh. Refresh and
+  alarm-window renewal while the Android app stays closed remain open.
+
+### 136. Calendar fetch ordering depends on device clocks
+
+- **Status:** open
+- **Where:** `crates/client/src/calendar_import.rs`.
+- **What happens:** batches record fetch completion using each device's UTC
+  clock. Incorrect clocks can order responses differently from their real fetch
+  times. Equal recorded times use the raw snapshot UUID as a stable tie-break.
+- **Decision:** use recorded UTC fetch times. A time more than five minutes
+  ahead of the current device cannot beat its fresh fetch and makes the source
+  due for refresh. Smaller clock differences and a shared time source remain open.
+
+### 139. An unchanged check cannot prevent a slow older feed from activating
+
+- **Status:** open
+- **Where:** `crates/client/src/calendar_import.rs`.
+- **What happens:** a device can fetch an older feed state and upload it slowly.
+  Another device's later unchanged check writes nothing to the server, so that
+  check cannot participate in shared activation ordering. The older state can
+  activate until the next refresh replaces it.
+- **Decision:** preserve zero server writes for unchanged feeds. A shared check
+  time or another way to reject these older states remains open.
+
+### 137. Imported alarm controls and sync status need platform integration
+
+- **Status:** fixed
+- **Where:** desktop daemon, Android and web UI, mobile bindings.
+- **What happens:** web, desktop and Android show the latest check time and an
+  alarm switch. Native apps offer manual Sync. Android supports adding,
+  refreshing and removing calendars through UniFFI, and recalculates registered
+  alarms after engine state changes, including imported batches and source
+  alarm settings. Desktop has no alarm registration or notification path.
+- **Decision:** desktop refreshes hourly while logged in and Android refreshes
+  on launch and foreground. Browser feeds refresh through a native app; the
+  browser shows the desktop refresh note and no Sync button.
+
+### 138. Concurrent calendar cleanup and late uploads can leave old events
+
+- **Status:** fixed
+- **Where:** `crates/client/src/calendar_import.rs`.
+- **What happens:** two devices cleaning the same retired batch can both read a
+  live object, then compete to tombstone it. A revision conflict leaves cleanup
+  unfinished. A slow uploader can also write an event after another device
+  finishes and purges that batch.
+- **Decision:** retry against the current head; accept a verified concurrent
+  tombstone or an already-purged object. Retain source entries added by other
+  refreshes, including added event IDs. A superseded uploader restores its
+  retired entry; refresh also finds hydrated imported events absent from the
+  current source, so interrupted retirement tracking can recover. Live workflows
+  cover concurrent cleanup, a paused late upload and recovery after restarting.
 
 ### 109. Remaining alarm features from abnormalarm
 

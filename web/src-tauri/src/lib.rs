@@ -15,9 +15,9 @@ use clipper_daemon_types::{
     CreateScheduleItemParams, DaemonCommand, DeleteCollabDocParams, DeleteFileParams,
     DeleteScheduleObjectParams, DeviceListResult, DownloadFileParams, ExpandScheduleParams,
     GetCollabDocMetaParams, LoginParams, LogoutParams, RegisterParams, RegisterResult,
-    RemoveDeviceParams, RenameCollabDocParams, SendClipboardPayloadParams, StartActualParams,
-    StopActualParams, SyncCalendarSourceParams, UpdateScheduleItemParams, UploadFileParams,
-    UploadFileResult,
+    RemoveDeviceParams, RenameCollabDocParams, SendClipboardPayloadParams,
+    SetCalendarSourceAlarmsParams, StartActualParams, StopActualParams, SyncCalendarSourceParams,
+    UpdateScheduleItemParams, UploadFileParams, UploadFileResult,
 };
 use clipper_schedule::ScheduleItem;
 use daemon_client::{DaemonClient, DaemonClientError};
@@ -155,6 +155,7 @@ pub fn run() {
             actuals_between,
             add_calendar_source,
             sync_calendar_source,
+            set_calendar_source_alarms,
             rename_collab_doc,
             get_collab_doc_meta,
             list_devices,
@@ -603,6 +604,24 @@ async fn sync_calendar_source(
             SyncCalendarSourceParams { object_id },
         ))
         .await?)
+}
+
+#[tauri::command]
+async fn set_calendar_source_alarms(
+    backend: State<'_, DesktopBackend>,
+    object_id: String,
+    alarms_on: bool,
+) -> CommandResult<()> {
+    backend
+        .daemon
+        .send_ok(DaemonCommand::SetCalendarSourceAlarms(
+            SetCalendarSourceAlarmsParams {
+                object_id,
+                alarms_on,
+            },
+        ))
+        .await?;
+    Ok(())
 }
 
 #[tauri::command]

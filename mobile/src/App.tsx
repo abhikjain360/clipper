@@ -37,6 +37,7 @@ import {
 } from "../modules/clipper-alarm";
 import {
   AppState as NativeAppState,
+  Alert,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -57,6 +58,7 @@ import {
   Paragraph,
   ScrollView,
   Spinner,
+  Switch,
   Text,
   XStack,
   YStack,
@@ -64,6 +66,7 @@ import {
 import type {
   ActualView,
   AppState,
+  CalendarSourceView,
   ClipboardItem,
   CollabItem,
   DeviceInfo,
@@ -71,6 +74,7 @@ import type {
   OccurrenceView,
   RunningWorkView,
 } from "@clipper/shared";
+import { calendarRefreshDue, calendarSyncLabel } from "@clipper/shared";
 import {
   backend,
   devDefaultServerUrl,
@@ -219,18 +223,6 @@ function ClipperApp() {
     };
   }, [sessionKey, resuming]);
 
-  // Keep the platform's alarm registry in step with the schedule.
-  //
-  // Keyed on the schedule alone, not the whole state: every sync publishes a new
-  // state object, and re-registering alarms dozens of times during a
-  // reconciliation is pure waste. The pushed plan is compared against the last
-  // one as well, since two different schedules can still produce identical
-  // alarms.
-  // Keyed on the stored record, not the formatted summary. Toggling an alarm
-  // changes neither the recurrence text nor the time text, so a summary-based
-  // key would leave the registry stale exactly when it matters most.
-  const scheduleKey =
-    state?.schedule_items.map((item) => `${item.id}:${item.definition_json}`).join("|") ?? "";
   const lastPushedPlan = useRef<string | null>(null);
   const [alarmRefreshGeneration, setAlarmRefreshGeneration] = useState(0);
 
@@ -281,7 +273,7 @@ function ClipperApp() {
     return () => {
       cancelled = true;
     };
-  }, [alarmRefreshGeneration, scheduleKey, sessionKey]);
+  }, [alarmRefreshGeneration, state, sessionKey]);
 
   if (startupError) {
     return <CenteredStatus title="Cannot start Clipper" message={startupError} />;
@@ -432,6 +424,53 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
   const [error, setError] = useState<string | null>(null);
   const [runningWork, setRunningWork] = useState<RunningWorkView[] | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
+  const calendarRefresh = useRef<Promise<void> | null>(null);
+  const sessionId = state.session?.device_id;
+
+  useEffect(() => {
+    let cancelled = false;
+    async function refreshCalendars() {
+      const previous = calendarRefresh.current;
+      const task = (async () => {
+        if (previous) await previous;
+        try {
+          const current = await backend.getState();
+          if (cancelled || current.session?.device_id !== sessionId) return;
+          for (const source of current.calendar_sources) {
+            if (cancelled) return;
+            const latest = await backend.getState();
+            if (cancelled || latest.session?.device_id !== sessionId) return;
+            const active = latest.calendar_sources.find((item) => item.id === source.id);
+            if (!active || !calendarRefreshDue(active)) continue;
+            try {
+              await backend.syncCalendarSource(source.id);
+            } catch (caught) {
+              if (!cancelled) setError(`${active.name}: ${formatBackendError(caught)}`);
+            }
+          }
+        } catch (caught) {
+          if (!cancelled) setError(formatBackendError(caught));
+        }
+      })();
+      calendarRefresh.current = task;
+      try {
+        await task;
+      } finally {
+        if (calendarRefresh.current === task) calendarRefresh.current = null;
+      }
+    }
+    const timer = setTimeout(() => {
+      if (NativeAppState.currentState === "active") void refreshCalendars();
+    }, 2000);
+    const subscription = NativeAppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") void refreshCalendars();
+    });
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      subscription.remove();
+    };
+  }, [sessionId]);
 
   async function refresh() {
     setBusy(true);
@@ -692,8 +731,14 @@ function SchedulePanel({
         <H2 size="$6">Schedule</H2>
         {loading && <Spinner size="small" />}
       </XStack>
-      <ScrollView flex={1}>
+      <ScrollView flex={1} keyboardShouldPersistTaps="handled">
         <YStack gap="$3" pb="$4">
+          <MobileCalendars
+            sources={state.calendar_sources}
+            now={now}
+            onState={onState}
+            onError={onError}
+          />
           {running ? (
             <ListCard>
               <YStack gap="$2">
@@ -804,6 +849,154 @@ function SchedulePanel({
         </YStack>
       </ScrollView>
     </YStack>
+  );
+}
+
+function MobileCalendars({
+  sources,
+  now,
+  onState,
+  onError,
+}: {
+  sources: CalendarSourceView[];
+  now: number;
+  onState: (state: AppState) => void;
+  onError: (error: string | null) => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const busyRef = useRef(false);
+
+  async function change(id: string, action: () => Promise<unknown>) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(id);
+    onError(null);
+    try {
+      await action();
+      onState(await backend.getState());
+    } catch (caught) {
+      onError(formatBackendError(caught));
+    } finally {
+      busyRef.current = false;
+      setBusy(null);
+    }
+  }
+
+  async function add() {
+    await change("add", async () => {
+      const id = await backend.addCalendarSource(name.trim() || "Calendar", url.trim());
+      setName("");
+      setUrl("");
+      setAdding(false);
+      onState(await backend.getState());
+      await backend.syncCalendarSource(id);
+    });
+  }
+
+  function remove(source: CalendarSourceView) {
+    Alert.alert(
+      `Remove ${source.name}?`,
+      "Permanently delete this calendar's imported events and original feeds? Other calendars, recordings, local plans and local overrides stay. References to deleted imported plans will be unavailable.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove",
+          style: "destructive",
+          onPress: () => void change(source.id, () => backend.deleteScheduleObject(source.id)),
+        },
+      ],
+    );
+  }
+
+  return (
+    <ListCard>
+      <YStack gap="$3">
+        <XStack items="center" justify="space-between" gap="$2">
+          <H2 size="$5">Calendars</H2>
+          {!adding && (
+            <Button size="$3" disabled={busy !== null} onPress={() => setAdding(true)}>
+              Add calendar
+            </Button>
+          )}
+        </XStack>
+        {adding && (
+          <YStack gap="$2">
+            <Label htmlFor="calendar-name">Name</Label>
+            <Input id="calendar-name" value={name} onChangeText={setName} placeholder="Work" />
+            <Label htmlFor="calendar-url">Feed URL</Label>
+            <Input
+              id="calendar-url"
+              value={url}
+              onChangeText={setUrl}
+              placeholder="https://…"
+              autoCorrect={false}
+              autoCapitalize="none"
+              keyboardType="url"
+            />
+            <XStack gap="$2">
+              <Button
+                theme="blue"
+                disabled={busy !== null || !url.trim()}
+                onPress={() => void add()}
+              >
+                Add calendar
+              </Button>
+              <Button
+                disabled={busy !== null}
+                onPress={() => {
+                  setAdding(false);
+                  setUrl("");
+                }}
+              >
+                Cancel
+              </Button>
+            </XStack>
+          </YStack>
+        )}
+        {sources.length === 0 && <Paragraph color="#9aa4ad">No calendars connected</Paragraph>}
+        {sources.map((source) => (
+          <YStack key={source.id} gap="$2">
+            <Text fontWeight="600">{source.name}</Text>
+            <Paragraph size="$2" color="#9aa4ad">
+              {source.location} · {source.event_count} events
+            </Paragraph>
+            <Paragraph size="$2" color="#9aa4ad">
+              {calendarSyncLabel(source.checked_at, now)}
+            </Paragraph>
+            <XStack items="center" gap="$2" flexWrap="wrap">
+              <Label htmlFor={`calendar-alarms-${source.id}`}>
+                Alarms {source.alarms_on ? "on" : "off"}
+              </Label>
+              <Switch
+                id={`calendar-alarms-${source.id}`}
+                size="$3"
+                checked={source.alarms_on}
+                disabled={busy !== null}
+                onCheckedChange={(checked) =>
+                  void change(source.id, () => backend.setCalendarSourceAlarms(source.id, checked))
+                }
+              >
+                <Switch.Thumb />
+              </Switch>
+              <Button
+                size="$3"
+                disabled={busy !== null}
+                onPress={() => void change(source.id, () => backend.syncCalendarSource(source.id))}
+              >
+                Sync
+              </Button>
+              <Button size="$3" disabled={busy !== null} onPress={() => remove(source)}>
+                Remove
+              </Button>
+              {busy === source.id && <Spinner size="small" />}
+            </XStack>
+          </YStack>
+        ))}
+      </YStack>
+    </ListCard>
   );
 }
 
