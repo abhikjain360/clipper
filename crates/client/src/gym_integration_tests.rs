@@ -82,6 +82,7 @@ async fn a_set_added_after_a_workout_is_logged_at_the_workout_end() {
     let sessions = engine.gym_sessions().await.unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].working_sets, 2);
+    assert_eq!(sessions[0].exercise_names, vec!["Bench press", "Row"]);
     let finished = engine.gym_session(&session).await.unwrap();
     let added = finished
         .exercises

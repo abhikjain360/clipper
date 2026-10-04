@@ -203,20 +203,53 @@ impl SyncEngine {
                 Some((session_id, working))
             })
             .collect();
+        let mut logged: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();
+        for row in self
+            .query_app_data(
+                "SELECT json_extract(value, '$.session_id') AS session_id, \
+                 json_extract(value, '$.exercise_id') AS exercise_id, \
+                 min(json_extract(value, '$.order')) AS first_order \
+                 FROM gym.sets GROUP BY 1, 2 ORDER BY 1, 3",
+            )
+            .await?
+        {
+            if let (Some(session_id), Some(exercise_id)) = (
+                row.get("session_id").and_then(|value| value.as_str()),
+                row.get("exercise_id")
+                    .and_then(|value| value.as_str())
+                    .and_then(|value| value.parse::<Uuid>().ok()),
+            ) {
+                logged
+                    .entry(session_id.to_string())
+                    .or_default()
+                    .push(exercise_id);
+            }
+        }
         let mut summaries: Vec<GymSessionSummary> = sessions
             .iter()
-            .map(|(id, session)| GymSessionSummary {
-                id: id.to_string(),
-                name: session_name(session, &templates),
-                started_at_millis: millis(session.started_at),
-                ended_at_millis: session.ended_at.map(millis),
-                exercise_names: session
+            .map(|(id, session)| {
+                let mut exercise_ids: Vec<Uuid> = session
                     .exercises
                     .iter()
                     .filter(|planned| !planned.skipped)
-                    .map(|planned| exercise_name(&names, planned.exercise_id))
-                    .collect(),
-                working_sets: counts.get(&id.to_string()).copied().unwrap_or(0),
+                    .map(|planned| planned.exercise_id)
+                    .collect();
+                for exercise_id in logged.get(&id.to_string()).into_iter().flatten() {
+                    if !exercise_ids.contains(exercise_id) {
+                        exercise_ids.push(*exercise_id);
+                    }
+                }
+                GymSessionSummary {
+                    id: id.to_string(),
+                    name: session_name(session, &templates),
+                    started_at_millis: millis(session.started_at),
+                    ended_at_millis: session.ended_at.map(millis),
+                    exercise_names: exercise_ids
+                        .into_iter()
+                        .map(|exercise_id| exercise_name(&names, exercise_id))
+                        .collect(),
+                    working_sets: counts.get(&id.to_string()).copied().unwrap_or(0),
+                }
             })
             .collect();
         summaries.sort_by(|a, b| b.started_at_millis.total_cmp(&a.started_at_millis));

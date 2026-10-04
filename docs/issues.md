@@ -2355,6 +2355,21 @@ Each entry has:
   after their colour rules. Selected section buttons in the schedule, the
   kitchen and the gym are affected.
 
+### 187. A set added on one device can replace a set logged on another
+
+- **Status:** open
+- **Severity:** medium; a logged set can be lost without any error.
+- **Where:** `crates/client/src/gym.rs` (`gym_add_set`, `gym_complete_set`)
+  and `crates/gym/src/session.rs` (`next_order`).
+- **What happens:** a set's row ID comes from its workout and its order, and
+  the order is the highest order this device knows plus one. Sets use last
+  write wins. When the Mac adds a missed set to a workout while the phone
+  holds sets of that workout it has not synced yet, both devices pick the
+  same order. Both writes succeed, and after sync only one of the two sets
+  remains.
+- **Safe use today:** add missed sets on the Mac after the phone has synced
+  the workout.
+
 ## Docs
 
 ### 29. Doc claims the code did not satisfy
