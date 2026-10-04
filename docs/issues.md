@@ -1301,15 +1301,69 @@ Each entry has:
   are not ported; ringing stops after a fixed ten minutes.
 - **Decision:**
 
-### 110. QA still owed before merge
+### 110. Owner QA on installed builds
 
-- **Status:** open
-- **What happens:** owner Rust review, then installed Android release-build QA;
-  several nights on the POCO with HyperOS settings, permission changes and
-  reboot; logged-in Tauri desktop flows (blocked on the keychain prompt),
-  including calendar import and refresh; the biometric resume round trip on a
-  device with an enrolled fingerprint; browser reload and re-download.
+- **Status:** open. The owner's Rust review is done (2026-10-06).
+- **What happens:** the checks below need the installed apps against a real
+  server, and have not all been run on this branch. The biometric resume round
+  trip needs a device with an enrolled fingerprint, and logged-in desktop
+  flows need the macOS keychain prompt answered once.
 - **Decision:**
+
+- [ ] **Schedule tab (web or desktop).**
+  - Create a floating morning routine, a zoned meeting and a three-day all-day
+    block.
+  - Move between weeks. Check titles, times and how overlapping blocks are
+    drawn.
+  - Rename each block. Then change its time or recurrence and check the result.
+  - Set "Every N" days, weeks and months, and switch between units. The number
+    stays as typed, and 0 or more than 65,535 is refused.
+  - Open an existing series that has a custom rule or an end. Check that the
+    composer shows Custom when the form cannot express the rule, that clicking
+    the already selected repeat option changes nothing, and that editing
+    weekdays keeps the end.
+- [ ] **Timers.**
+  - Start a timer from a block, stop it, then start a timer with no block.
+    Check the recorded-time lane.
+  - Reload. Check that stopped and running timers keep their state.
+  - Rename the plan a recorded session came from. Check that the session still
+    shows the plan's old title.
+  - In a second client, change an occurrence the first client is showing. Then
+    start it from the first client. The stale start must fail and must not stop
+    a timer that is already running.
+- [ ] **Two clients on one account.**
+  - Check that create, edit and delete reach the other client live.
+  - Open the same block for editing on both clients. Save one, then save the
+    other. The second save must be refused, not overwrite the first.
+  - Restart each native client. Check that schedule and clipboard content come
+    back, deleted objects stay deleted, and file downloads still work.
+- [ ] **Calendar import (desktop).**
+  - Add a disposable ICS URL and sync it. Check recurrence overrides, then an
+    upstream edit and an upstream removal.
+  - While a sync runs, stop a timer. It must stop at once, not after the sync.
+  - In the browser, check that the synced events appear. The browser cannot
+    refresh a feed; refreshing is a native operation.
+- [ ] **Android alarms.**
+  - Sign in. Grant notification, exact-alarm and full-screen access.
+  - From desktop or web, create a block with an alarm a few minutes ahead.
+    Check the count of upcoming alarms in the mirrored plan, the ringing, the
+    label and dismiss.
+  - Repeat with the app in the background, and again after a reboot.
+  - With the phone unlocked, check the heads-up notification, then tap its
+    body to open the ring screen.
+  - Set a short display timeout. Leave the ring screen untouched and check
+    that it stays awake.
+  - Leave one alarm unanswered for ten minutes. Sound, vibration, the
+    notification and the ring screen must all stop.
+  - Dismiss an alarm early. Check that a later alarm still rings for its own
+    full ten minutes.
+  - Test an alarm due right after a reboot, before first unlock, and one due
+    shortly after unlock. A later alarm ringing after the reboot does not show
+    that the first case works (entry 82). Capture logs
+    for any missed alarm.
+- [ ] **Overnight on the POCO.** Before relying on Clipper as the morning
+  alarm, repeat the alarm checks overnight on the POCO with the HyperOS
+  settings configured. Keep abnormalarm available until this passes.
 
 ### 111. Legacy-state cleanup code remains
 
