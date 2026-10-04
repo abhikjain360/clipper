@@ -4495,7 +4495,7 @@ fn verify_payload_hash(
 /// the clock can be behind the start: a device whose time moved backwards, or a
 /// timer started on a device running ahead, would otherwise be impossible to
 /// stop until wall-clock time caught up. Stopping clamps
-/// (`docs/schedule-model-review.md`).
+/// (`docs/schedule-model.md`).
 fn stopped_span(
     started: chrono::DateTime<chrono::Utc>,
     now: chrono::DateTime<chrono::Utc>,

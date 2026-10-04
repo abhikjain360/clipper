@@ -610,8 +610,7 @@ Each entry has:
 - **Where:** `crates/client/src/local_store.rs` anchors; envelope signature
   checks in `crates/client/src/engine.rs`.
 - **What happens:** a fresh install has no anchor; a jump of more than one
-  revision cannot check the missing links; a remote delete event carries no
-  signed tombstone. Browser anchors live in an evictable store. Envelope
+  revision cannot check the missing links. Browser anchors live in an evictable store. Envelope
   signatures use device keys the server supplies, so they prove server-checked
   provenance only; the AEAD under the data key is the real authenticity check.
 - **Recommendation:** confirm these limits; decide whether browser anchors need
@@ -688,7 +687,7 @@ Each entry has:
 
 ### 116. A live delete event is not signed, so the device keeps a weaker anchor
 
-- **Status:** fixing
+- **Status:** fixed in `d2841d9`. The WebSocket does not replay the event log (a reconnect takes a snapshot), so only the live broadcast needed the tombstone
 - **Severity:** medium. Not on main.
 - **Where:** `crates/api-types` (the event shape), `crates/server/src/ws.rs`
   and the event replay, `crates/client/src/local_store.rs`

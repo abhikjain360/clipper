@@ -100,16 +100,13 @@ An anchor is the newest revision of an object this device has accepted: its
 revision number and the hash of its signed envelope body. The client refuses
 any served revision that would move an object behind its anchor, including
 after a delete or a sweep, so a server cannot bring back an older revision.
-There are three kinds of anchor:
+There are two kinds of anchor:
 
-- Absent: the object was missing from a snapshot, or the server answered 404.
-  The same head may come back later; only an older or different revision is
-  refused.
-- Observed delete: a live delete event arrived. The event does not carry the
-  tombstone's signed body, so a revision that restores the object must be at
-  least two revisions past the last head this device held.
-- Tombstone: this device signed the tombstone itself, and the anchor is that
-  tombstone.
+- Absent: the object was missing from a snapshot, the server answered 404, or
+  a delete event's tombstone was missing or failed its checks. The same head
+  may come back later; only an older or different revision is refused.
+- Tombstone: the anchor is a signed tombstone, either one this device signed
+  or one a live delete event carried and the client verified.
 
 Native clients store objects in a SQLite database. Cached content and anchors
 live in separate tables, so dropping the cache never drops an anchor, and a gone
@@ -204,12 +201,16 @@ the tombstone arrived. Clipboard items never produce delete events.
 When the client receives a `deleted` event for a file, schedule object or collab
 doc:
 
-1. If the local record has the same or a later sequence number, ignore the
-   event.
+1. If the local record has a later sequence number, ignore the event. With the
+   same sequence number, only a tombstone for an object already stored as gone
+   is checked and kept, under the rules in step 3.
 2. Otherwise drop the cached content and payload ciphertext, and remove the
    object from the visible lists.
-3. Store the object as gone with the delete's sequence number. A file or
-   schedule object keeps its anchor as an Observed delete anchor.
+3. Store the object as gone with the delete's sequence number. For a file or
+   schedule object the event carries the signed tombstone; the client checks
+   it against the event and the held anchor and keeps it as a Tombstone
+   anchor. A missing or failing tombstone leaves an Absent anchor on the held
+   head.
 4. Later snapshot or fetch results with an earlier sequence number than the
    delete are ignored. Sweeps never remove a gone record, so this holds across
    reconnects.
