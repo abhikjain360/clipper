@@ -137,10 +137,10 @@ impl MigrationTrait for Migration {
                 head_revision, published_seq, deleted_at, collab_doc_id
             )
             SELECT
-                lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4'
-                    || substr(lower(hex(randomblob(2))), 2) || '-a'
-                    || substr(lower(hex(randomblob(2))), 2) || '-'
-                    || lower(hex(randomblob(6))),
+                unhex(
+                    hex(randomblob(6)) || '4' || substr(hex(randomblob(2)), 2) || 'A'
+                        || substr(hex(randomblob(2)), 2) || hex(randomblob(6))
+                ),
                 owner_user_id,
                 'collab',
                 created_at,
@@ -272,5 +272,96 @@ impl MigrationTrait for Migration {
             "m20260908_000005_object_revisions is irreversible: recreate the database instead"
                 .to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{
+        ActiveModelTrait, ColumnTrait, ConnectionTrait, Database, DbBackend, EntityTrait,
+        QueryFilter, Set, Statement,
+    };
+    use sea_orm_migration::MigratorTrait;
+    use uuid::Uuid;
+
+    use crate::{
+        entity::{access_keys, collab_docs, objects, users},
+        migration::Migrator,
+    };
+
+    #[tokio::test]
+    async fn a_collab_doc_from_before_the_migration_is_still_listed() {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("database");
+        Migrator::up(&db, Some(4)).await.expect("migrations 1 to 4");
+        let now = chrono::Utc::now().to_rfc3339();
+        let user_id = Uuid::now_v7();
+        let key_hash = Uuid::now_v7().to_string();
+        access_keys::ActiveModel {
+            key_hash: Set(key_hash.clone()),
+            created_at: Set(now.clone()),
+            expires_at: Set(None),
+            used_at: Set(Some(now.clone())),
+            used_by_user_id: Set(Some(user_id)),
+        }
+        .insert(&db)
+        .await
+        .expect("access key");
+        users::ActiveModel {
+            id: Set(user_id),
+            username: Set("owner".into()),
+            opaque_password_file: Set(vec![2]),
+            encryption_salt: Set(vec![3]),
+            access_key_hash: Set(key_hash),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            storage_bytes: Set(0),
+            object_count: Set(0),
+        }
+        .insert(&db)
+        .await
+        .expect("user");
+        let doc_id = Uuid::now_v7();
+        collab_docs::ActiveModel {
+            id: Set(doc_id),
+            owner_user_id: Set(user_id),
+            share_token: Set("token".into()),
+            yjs_state: Set(None),
+            created_at: Set(now.clone()),
+            updated_at: Set(now.clone()),
+            title: Set("Notes".into()),
+        }
+        .insert(&db)
+        .await
+        .expect("collab doc");
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO objects (id, user_id, kind, created_at, updated_at, status, created_seq, collab_doc_id)
+             VALUES (?, ?, 'collab', ?, ?, 'complete', 1, ?)",
+            [Uuid::now_v7().into(), user_id.into(), now.clone().into(), now.into(), doc_id.into()],
+        ))
+        .await
+        .expect("collab object");
+
+        Migrator::up(&db, None).await.expect("migration 5");
+
+        let listed = objects::Entity::find()
+            .filter(objects::Column::UserId.eq(user_id))
+            .filter(objects::Column::Kind.eq("collab"))
+            .find_also_related(collab_docs::Entity)
+            .all(&db)
+            .await
+            .expect("collab listing");
+        let [(object, Some(doc))] = listed.as_slice() else {
+            panic!("expected one listed collab doc, got {listed:?}");
+        };
+        assert_eq!(doc.id, doc_id);
+        assert_eq!(object.id.get_version_num(), 4);
+        let found = objects::Entity::find_by_id(object.id)
+            .one(&db)
+            .await
+            .expect("lookup by id");
+        assert!(found.is_some());
     }
 }
