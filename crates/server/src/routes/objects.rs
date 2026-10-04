@@ -932,6 +932,8 @@ pub async fn complete_object(
         object_kind: kind,
         object_id: object_uuid.into(),
         created_at: now.clone(),
+        envelope: None,
+        source_device_signing_public_key: None,
     });
     if kind == ObjectKind::Clipboard {
         spawn_clipboard_trim(state.clone(), auth.user_id);
@@ -1005,7 +1007,7 @@ pub async fn revise_object(
         ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
     })?;
 
-    validate_object_envelope(
+    let source_device_signing_public_key = validate_object_envelope(
         &state,
         auth.user_id,
         auth.device_id,
@@ -1025,6 +1027,7 @@ pub async fn revise_object(
     .await?;
 
     let tombstone = req.envelope.body.operation == ObjectEnvelopeOperation::Delete;
+    let broadcast_envelope = tombstone.then(|| req.envelope.clone());
     if tombstone && !kind_supports_revisions(kind) {
         debug!(
             object_id = %object_uuid,
@@ -1333,6 +1336,8 @@ pub async fn revise_object(
             object_kind: kind,
             object_id: object_uuid.into(),
             created_at: created_at.clone(),
+            envelope: broadcast_envelope,
+            source_device_signing_public_key: tombstone.then_some(source_device_signing_public_key),
         });
     }
 
@@ -2513,7 +2518,7 @@ async fn validate_object_envelope(
     device_id: Uuid,
     ctx: EnvelopeContext<'_>,
     placement: ExpectedPlacement,
-) -> Result<(), ApiError> {
+) -> Result<Vec<u8>, ApiError> {
     let body = &ctx.envelope.body;
     let object_id = ctx.object_id;
 
@@ -2665,7 +2670,8 @@ async fn validate_object_envelope(
             ApiErrorCode::InvalidObjectEnvelope,
             "Invalid object envelope signature",
         )
-    })
+    })?;
+    Ok(public_key)
 }
 
 fn validate_envelope_payload(
@@ -3232,6 +3238,8 @@ fn broadcast_created(
             .parse()
             .expect("broadcast object_id was already validated"),
         created_at: now.into(),
+        envelope: None,
+        source_device_signing_public_key: None,
     });
 }
 
@@ -4134,6 +4142,8 @@ mod tests {
 
             let broadcast = rx.try_recv().expect("revision broadcast");
             assert_eq!(broadcast.event_type, ObjectEventType::Updated);
+            assert!(broadcast.envelope.is_none());
+            assert!(broadcast.source_device_signing_public_key.is_none());
             let after = listed(&state, user_id, device_id).await;
             assert_eq!(after.len(), 1);
             assert_eq!(after[0].revision, 2);
@@ -4323,6 +4333,7 @@ mod tests {
         async fn a_tombstone_hides_the_object_but_keeps_its_history() {
             let (state, _dir) = test_state().await;
             let (user_id, device_id, object_id, key) = seeded(&state).await;
+            let mut rx = state.subscribe_ws_broadcasts(user_id);
             tombstone_object(
                 &state,
                 user_id,
@@ -4339,6 +4350,25 @@ mod tests {
                 "a tombstoned object is not part of the live set",
             );
             let object_uuid: Uuid = object_id.parse().expect("uuid");
+            let broadcast = rx.try_recv().expect("deleted broadcast");
+            let envelope = broadcast.envelope.as_ref().expect("signed tombstone");
+            let revision = object_revisions::Entity::find_by_id((object_uuid, 2))
+                .one(state.db())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(postcard::to_allocvec(envelope).unwrap(), revision.envelope);
+            assert_eq!(broadcast.object_kind, ObjectKind::Schedule);
+            assert_eq!(envelope.body.operation, ObjectEnvelopeOperation::Delete);
+            assert_eq!(
+                broadcast.source_device_signing_public_key,
+                Some(crypto::device_signing_public_key(&key).to_vec())
+            );
+            crypto::verify_object_envelope_signature(
+                broadcast.source_device_signing_public_key.as_ref().unwrap(),
+                envelope,
+            )
+            .unwrap();
             assert_eq!(
                 object_revisions::Entity::find()
                     .filter(object_revisions::Column::ObjectId.eq(object_uuid))
@@ -6275,6 +6305,24 @@ mod tests {
             .expect("object lookup")
             .expect("tombstoned object still exists");
         assert!(object.deleted_at.is_some());
+        let envelope = broadcast.envelope.as_ref().expect("signed tombstone");
+        let revision =
+            object_revisions::Entity::find_by_id((object_uuid, object.head_revision.unwrap()))
+                .one(state.db())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(postcard::to_allocvec(envelope).unwrap(), revision.envelope);
+        assert_eq!(envelope.body.operation, ObjectEnvelopeOperation::Delete);
+        assert_eq!(
+            broadcast.source_device_signing_public_key,
+            Some(crypto::device_signing_public_key(&signing_secret_key).to_vec())
+        );
+        crypto::verify_object_envelope_signature(
+            broadcast.source_device_signing_public_key.as_ref().unwrap(),
+            envelope,
+        )
+        .unwrap();
         assert_eq!(
             user_storage_usage(&state, user_id).await,
             (

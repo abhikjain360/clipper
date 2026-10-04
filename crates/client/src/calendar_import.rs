@@ -522,10 +522,10 @@ impl SyncEngine {
                 }
                 // Ordinary object sync hydrates file heads. A missing head
                 // defers cleanup rather than inventing a chain position.
-                let (seq, head) = self.write_tombstone(id, kind).await?;
+                let (seq, tombstone) = self.write_tombstone(id, kind).await?;
                 let visible = self
                     .local_store
-                    .apply_local_tombstone(kind, id, seq, head, RECENT_CLIPBOARD_LIMIT)
+                    .apply_local_tombstone(kind, id, seq, &tombstone, RECENT_CLIPBOARD_LIMIT)
                     .await?;
                 self.publish_visible_state(visible).await;
             }

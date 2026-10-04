@@ -749,6 +749,10 @@ pub enum WsServerMessage {
         object_kind: ObjectKind,
         object_id: ObjectId,
         created_at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        envelope: Option<Box<ObjectEnvelope>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_device_signing_public_key: Option<Vec<u8>>,
     },
     #[serde(rename = "invalidate")]
     Invalidate { target: String },
