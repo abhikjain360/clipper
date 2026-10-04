@@ -1391,8 +1391,8 @@ Each entry has:
     that the first case works (entry 82). Capture logs
     for any missed alarm.
 - [ ] **Overnight on the POCO.** Before relying on Clipper as the morning
-  alarm, repeat the alarm checks overnight on the POCO with the HyperOS
-  settings configured. Keep abnormalarm available until this passes.
+      alarm, repeat the alarm checks overnight on the POCO with the HyperOS
+      settings configured. Keep abnormalarm available until this passes.
 
 ### 111. Legacy-state cleanup code remains
 

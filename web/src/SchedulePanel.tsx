@@ -1438,7 +1438,9 @@ function ScheduleComposer({
         setAlarm(parsed.alarm != null);
         setAlarmLead(String(parsed.alarm?.minutes_before ?? 0));
         setRepeat(repeatChoiceOf(parsed.recurrence));
-        setIntervalText(String(parsed.recurrence.kind === "every" ? parsed.recurrence.interval : 1));
+        setIntervalText(
+            String(parsed.recurrence.kind === "every" ? parsed.recurrence.interval : 1),
+        );
         setDays(weekdaysOf(parsed.recurrence) ?? ["mon", "wed", "fri"]);
         if (parsed.span.kind === "all_day") {
             setAllDay(true);
