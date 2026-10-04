@@ -293,6 +293,7 @@ function mapAlarmView(alarm: NativeAlarmView): AlarmView {
     label: alarm.label,
     occurrence_key: alarm.occurrenceKey,
     occurrence_start_millis: Number(alarm.occurrenceStartMillis),
+    can_snooze: alarm.canSnooze,
   };
 }
 

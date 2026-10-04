@@ -21,6 +21,7 @@ data class PlannedAlarm(
     val label: String,
     val fireAtMillis: Long,
     val occurrenceStartMillis: Long,
+    val canSnooze: Boolean = true,
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put(KEY_ITEM_ID, itemId)
@@ -28,6 +29,7 @@ data class PlannedAlarm(
         put(KEY_LABEL, label)
         put(KEY_FIRE_AT, fireAtMillis)
         put(KEY_START, occurrenceStartMillis)
+        put(KEY_SNOOZE, canSnooze)
     }
 
     companion object {
@@ -36,6 +38,7 @@ data class PlannedAlarm(
         private const val KEY_LABEL = "label"
         private const val KEY_FIRE_AT = "fire_at"
         private const val KEY_START = "start"
+        private const val KEY_SNOOZE = "snooze"
 
         fun fromJson(json: JSONObject): PlannedAlarm = PlannedAlarm(
             itemId = json.optString(KEY_ITEM_ID),
@@ -43,6 +46,7 @@ data class PlannedAlarm(
             label = json.optString(KEY_LABEL),
             fireAtMillis = json.optLong(KEY_FIRE_AT),
             occurrenceStartMillis = json.optLong(KEY_START),
+            canSnooze = json.optBoolean(KEY_SNOOZE, true),
         )
     }
 }

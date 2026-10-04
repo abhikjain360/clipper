@@ -26,6 +26,7 @@ object AlarmIntents {
     const val EXTRA_OCCURRENCE_KEY = "com.clipper.alarm.extra.OCCURRENCE_KEY"
     const val EXTRA_FIRE_AT = "com.clipper.alarm.extra.FIRE_AT"
     const val EXTRA_START = "com.clipper.alarm.extra.START"
+    const val EXTRA_CAN_SNOOZE = "com.clipper.alarm.extra.CAN_SNOOZE"
     const val EXTRA_GENERATION = "com.clipper.alarm.extra.GENERATION"
 }
 
@@ -71,6 +72,7 @@ class AlarmScheduler(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun snooze(alarm: PlannedAlarm, generation: Long): Unit = synchronized(AlarmMirror) {
+        if (!alarm.canSnooze) return@synchronized
         check(generation == AlarmMirror.generation(context)) { "The alarm was cancelled" }
         check(canScheduleExactAlarms()) { "Exact alarms are not permitted" }
         val snooze = AlarmMirror.addSnooze(context,
@@ -174,6 +176,7 @@ class AlarmScheduler(private val context: Context) {
             putExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY, alarm.occurrenceKey)
             putExtra(AlarmIntents.EXTRA_FIRE_AT, alarm.fireAtMillis)
             putExtra(AlarmIntents.EXTRA_START, alarm.occurrenceStartMillis)
+            putExtra(AlarmIntents.EXTRA_CAN_SNOOZE, alarm.canSnooze)
             putExtra(AlarmIntents.EXTRA_GENERATION, AlarmMirror.generation(context))
         }
         return PendingIntent.getBroadcast(

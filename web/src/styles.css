@@ -4,6 +4,41 @@ body,
     min-height: 100%;
 }
 
+.kitchen-recipe-link,
+.kitchen-schedule-link {
+    color: #8bbcff;
+    overflow-wrap: anywhere;
+}
+
+.kitchen-recipe-link {
+    font-weight: 600;
+}
+
+.kitchen-schedule-recipes {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.kitchen-schedule-link {
+    font-size: 11px;
+    line-height: 13px;
+}
+
+.kitchen-check {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.kitchen-check input {
+    appearance: auto;
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+}
+
 body {
     margin: 0;
     background: #101214;

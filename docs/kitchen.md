@@ -160,29 +160,49 @@ it appears on every device once the Mac has synced.
 
 Android has a Kitchen tab beside Schedule and Alarms, and the Mac app a
 Kitchen destination in its navigation. Both read the local tables, so the
-kitchen opens offline. Scaling and quantity formatting (unit conversion,
-fractions, plurals) live in `packages/shared`, used by both.
+kitchen opens offline. The browser client shows a note instead, because it
+does not sync app data.
+
+Scaling, quantity formatting, cooking session changes and timer states live
+in Rust: `crates/kitchen` holds the rules and the client engine builds the
+views both apps render, so the screens only display them and send changes.
+Quantities are formatted like this:
+
+- an ingredient with `scales` false keeps its amount at every servings count;
+- grams and millilitres from 1000 are shown in kilograms and litres;
+- other amounts show a whole number and the nearest of ¼, ⅓, ½, ⅔ and ¾ when
+  they are close to one, and up to two decimals otherwise;
+- units are shown as the recipe writes them;
+- a step names each referenced ingredient with its scaled quantity, for
+  example `Slice the Onion (3 pieces)`.
 
 - **Recipe list**: newest first, searchable by title, summary, cuisine and
-  tags. A recipe with a coming plan shows the block's day and time.
+  tags; every search word must appear in one of them. A recipe with a coming
+  plan shows the block's day and time; coming plans are looked up in the next
+  60 days of the schedule.
 - **Recipe page**: summary, times, nutrition per serving, ingredients by
   group, a shopping list of `need_to_buy` ingredients, equipment, steps with
   scaled quantities in the text, notes, and past sessions with their duration
   and notes.
 - **Servings scaler**: without a session it changes only the page. Once a
   session is open it shows and changes the session's servings.
-- **Cooking session**: Start cooking, or ticking an ingredient or a step,
-  opens a session from the recipe's current revision. The page shows the
+- **Cooking session**: Start cooking, ticking an ingredient or a step, or
+  starting a timer opens a session from the recipe's current revision. The page shows the
   newest unfinished session of the recipe. Finish asks "How was it?" and saves
   the notes; Discard deletes the row.
 - **Step timers**: each can be started, paused, resumed, extended by one
-  minute and cleared. Starting one records this device as the one it rings on.
-  Every device shows the countdown.
+  minute and cleared. Starting one records this device as the one it rings on;
+  resuming keeps that device. Pausing stores the time left. A minute added to
+  a timer that has ended starts it again with one minute. Every device shows
+  the countdown.
+- **History**: the recipe page lists the recipe's revisions and opens an
+  earlier one read-only, without session controls. Both need the server.
 - **Pantry**: items by category with the nearest use-by first; add, edit and
   delete, with categories suggested from existing ones. Equipment is a second
   list on the same screen.
 - **Screen awake**: while a recipe page is open, Android keeps the screen on
-  and the Mac app holds a power assertion that stops the display sleeping.
+  and the Mac app holds a power assertion that stops the display sleeping
+  (`caffeinate -d`, tied to the app's process).
 
 ### Step timers as alarms
 
@@ -193,10 +213,13 @@ it.
 
 - The alarm plan includes one alarm for each running timer in an unfinished
   session whose device is this one, labelled with the timer label and the
-  recipe title.
+  recipe title, for example `Simmer · French onion soup`. Its item is the
+  session row id and its occurrence is `timer:<step>:<timer>`. Alarms carry
+  `can_snooze`, which is false for step timers.
 - Android sends a new alarm list whenever `kitchen.sessions` changes, locally
-  or by sync, besides the existing triggers. A step timer's ring screen offers
-  Dismiss and no snooze; more time is added on the recipe page.
+  or by sync, besides the existing triggers: every app-data change, local or
+  received, counts as a change of the app state. A step timer's ring screen
+  offers Dismiss and no snooze; more time is added on the recipe page.
 - On a Mac, a step timer is delivered like an alarm targeted at that Mac: a
   notification with sound while Clipper is running.
 - Ticking the step, finishing or discarding the session clears its timers and

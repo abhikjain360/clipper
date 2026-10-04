@@ -1,3 +1,5 @@
+import type { KitchenBackend } from "./kitchen";
+
 export type ConnectionStatus = "Disconnected" | "Connecting" | "Connected" | "DaemonNotRunning";
 
 export type RunningWorkView = { label: string };
@@ -192,6 +194,7 @@ export type AlarmView = {
   label: string;
   fire_at_millis: number;
   occurrence_start_millis: number;
+  can_snooze: boolean;
 };
 
 /// A calendar Clipper pulls events from.
@@ -365,6 +368,7 @@ export type ClipperBackend = {
   ) => Promise<string>;
   appDataStatus?: () => Promise<AppDataStatus>;
   appDocumentHistory?: (collection: string, id: string) => Promise<AppDocumentRevision[]>;
+  kitchen?: KitchenBackend;
   appDocumentRevision?: (collection: string, id: string, revision: number) => Promise<unknown>;
 };
 

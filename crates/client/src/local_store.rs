@@ -24,7 +24,10 @@ use clipper_app_types::{
 };
 use clipper_core::{
     crypto,
-    models::{ObjectEnvelope, ObjectEnvelopeBody, ObjectKind, ObjectPayloadDescriptor},
+    models::{
+        ObjectEnvelope, ObjectEnvelopeBody, ObjectEnvelopeOperation, ObjectKind,
+        ObjectPayloadDescriptor,
+    },
 };
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_family = "wasm"))]
@@ -1967,13 +1970,14 @@ impl LocalStore {
             return Ok(());
         };
 
-        let require_newer = matches!(
-            &record,
-            StoredObjectRecord::Deleted(marker) | StoredObjectRecord::PendingCreate(marker)
-                if marker.revision_anchor.is_some_and(|anchor| {
-                    matches!(anchor.kind, StoredRevisionAnchorKind::Tombstone)
-                })
-        );
+        let require_newer = incoming.operation != ObjectEnvelopeOperation::Delete
+            && matches!(
+                &record,
+                StoredObjectRecord::Deleted(marker) | StoredObjectRecord::PendingCreate(marker)
+                    if marker.revision_anchor.is_some_and(|anchor| {
+                        matches!(anchor.kind, StoredRevisionAnchorKind::Tombstone)
+                    })
+            );
         validate_revision_against_head(object_id, incoming, anchor.head, require_newer)
     }
 
@@ -3414,6 +3418,55 @@ mod tests {
                 envelope: ObjectEnvelope { body, signature },
             },
         )
+    }
+
+    #[tokio::test]
+    async fn a_repeated_tombstone_is_accepted_without_accepting_a_replaced_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalStore::new(temp.path());
+        store.set_profile("a".into());
+        let id: ObjectId = uuid::Uuid::now_v7().into();
+        let (file, original) = encrypted_file(id, EnvelopePlacement::Create, "original");
+        store
+            .persist_local_file_present_encrypted(&file, &original, 10, 10, 100)
+            .await
+            .unwrap();
+        let head = store.local_head(&id.to_string()).await.unwrap().unwrap();
+        let (_, deleted) = encrypted_file(id, EnvelopePlacement::Delete(head), "deleted");
+        store
+            .apply_local_tombstone(
+                ObjectKind::File,
+                &id.to_string(),
+                20,
+                &deleted.envelope.body,
+                100,
+            )
+            .await
+            .unwrap();
+        store
+            .validate_incoming_revision(&id.to_string(), &deleted.envelope.body)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .validate_incoming_revision(&id.to_string(), &original.envelope.body)
+                .await,
+            Err(LocalStoreError::RevisionRejected(_))
+        ));
+        let (_, different) = encrypted_file(id, EnvelopePlacement::Delete(head), "different");
+        assert!(matches!(
+            store
+                .validate_incoming_revision(&id.to_string(), &different.envelope.body)
+                .await,
+            Err(LocalStoreError::RevisionRejected(_))
+        ));
+        let (_, visible) = encrypted_file(id, EnvelopePlacement::Revise(head), "visible");
+        assert!(matches!(
+            store
+                .validate_incoming_revision(&id.to_string(), &visible.envelope.body)
+                .await,
+            Err(LocalStoreError::RevisionRejected(_))
+        ));
     }
 
     #[tokio::test]

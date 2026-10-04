@@ -127,6 +127,7 @@ class RingActivity : Activity() {
             }
             addView(details, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             addView(AlarmSlideControl(this@RingActivity).apply {
+                canSnooze = intent.getBooleanExtra(AlarmIntents.EXTRA_CAN_SNOOZE, true)
                 onSnooze = { RingService.snooze(this@RingActivity) }
                 onDismiss = { RingService.dismiss(this@RingActivity) }
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(96)))
@@ -139,11 +140,13 @@ class RingActivity : Activity() {
             label: String,
             itemId: String,
             occurrenceKey: String,
+            canSnooze: Boolean = true,
         ): Intent = Intent(context, RingActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra(AlarmIntents.EXTRA_LABEL, label)
             putExtra(AlarmIntents.EXTRA_ITEM_ID, itemId)
             putExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY, occurrenceKey)
+            putExtra(AlarmIntents.EXTRA_CAN_SNOOZE, canSnooze)
         }
     }
 }

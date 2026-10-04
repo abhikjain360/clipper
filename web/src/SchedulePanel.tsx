@@ -49,6 +49,7 @@ import type {
     AppState,
     CalendarSourceView,
     DeviceInfo,
+    KitchenPlan,
     OccurrenceView,
     ScheduleItem,
     ScheduleItemView,
@@ -56,6 +57,7 @@ import type {
 } from "@clipper/shared";
 import { calendarSyncLabel } from "@clipper/shared";
 import { clipperBackend, formatBackendError, isTauriRuntime } from "./backend";
+import { ScheduleRecipes } from "./kitchen/ScheduleRecipes";
 import { layoutDay, overlapsDay, spanMinutes } from "./schedule-layout";
 import {
     buildRecurrence,
@@ -97,6 +99,7 @@ function observerZone(): string {
 }
 
 export function SchedulePanel({
+    state,
     items,
     warnings,
     sources,
@@ -104,6 +107,7 @@ export function SchedulePanel({
     onState,
     onError,
 }: {
+    state: AppState;
     items: ScheduleItemView[];
     warnings: string[];
     sources: CalendarSourceView[];
@@ -152,6 +156,7 @@ export function SchedulePanel({
         [selectedDate, view],
     );
     const [occurrences, setOccurrences] = useState<OccurrenceView[]>([]);
+    const [plans, setPlans] = useState<KitchenPlan[]>([]);
     const [actuals, setActuals] = useState<ActualView[]>([]);
     const [loading, setLoading] = useState(false);
     const loadGeneration = useRef(0);
@@ -162,17 +167,25 @@ export function SchedulePanel({
         setLoading(true);
         try {
             const backend = await clipperBackend();
-            const [expanded, logged] = await Promise.all([
+            const [expanded, logged, kitchenPlans] = await Promise.all([
                 backend.expandSchedule(
                     weekStart.toISOString(),
                     weekEnd.toISOString(),
                     observerZone(),
                 ),
                 backend.actualsBetween(weekStart.toISOString(), weekEnd.toISOString()),
+                backend.kitchen
+                    ? backend.kitchen.plans().catch((caught: unknown) => {
+                          if (generation === loadGeneration.current)
+                              onError(formatBackendError(caught));
+                          return [];
+                      })
+                    : Promise.resolve([]),
             ]);
             if (generation === loadGeneration.current) {
                 setOccurrences(expanded);
                 setActuals(logged);
+                setPlans(kitchenPlans);
             }
         } catch (caught) {
             if (generation === loadGeneration.current) onError(formatBackendError(caught));
@@ -186,7 +199,7 @@ export function SchedulePanel({
         return () => {
             loadGeneration.current += 1;
         };
-    }, [loadWeek, items, sources, running]);
+    }, [loadWeek, items, sources, running, state]);
 
     return (
         <YStack gap="$3">
@@ -295,6 +308,7 @@ export function SchedulePanel({
                             end={weekEnd}
                             selectedMonth={selectedDate.getMonth()}
                             occurrences={occurrences}
+                            plans={plans}
                             actuals={actuals}
                             onDay={(day) => {
                                 setSelectedDate(day);
@@ -306,6 +320,7 @@ export function SchedulePanel({
                             dayCount={view === "day" ? 1 : 7}
                             weekStart={weekStart}
                             occurrences={occurrences}
+                            plans={plans}
                             actuals={actuals}
                             onStart={async (occurrence) => {
                                 if (starting) return;
@@ -421,6 +436,7 @@ function MonthGrid({
     end,
     selectedMonth,
     occurrences,
+    plans,
     actuals,
     onDay,
 }: {
@@ -428,6 +444,7 @@ function MonthGrid({
     end: Date;
     selectedMonth: number;
     occurrences: OccurrenceView[];
+    plans: KitchenPlan[];
     actuals: ActualView[];
     onDay: (day: Date) => void;
 }) {
@@ -468,14 +485,17 @@ function MonthGrid({
                                     title={event.title}
                                     detail={event.all_day ? "All day" : clockRange(event)}
                                 >
-                                    <button
-                                        className="month-event"
-                                        onClick={() => onDay(day)}
-                                        style={{ background: blockColor(event).fill }}
-                                    >
-                                        {event.all_day ? "" : `${clock(event.start)} `}
-                                        {event.title}
-                                    </button>
+                                    <div>
+                                        <button
+                                            className="month-event"
+                                            onClick={() => onDay(day)}
+                                            style={{ background: blockColor(event).fill }}
+                                        >
+                                            {event.all_day ? "" : `${clock(event.start)} `}
+                                            {event.title}
+                                        </button>
+                                        <ScheduleRecipes occurrence={event} plans={plans} />
+                                    </div>
                                 </EventHover>
                             ))}
                         {actuals.some((actual) => overlapsDay(actual, day)) && (
@@ -494,12 +514,14 @@ function WeekGrid({
     dayCount,
     weekStart,
     occurrences,
+    plans,
     actuals,
     onStart,
 }: {
     dayCount: number;
     weekStart: Date;
     occurrences: OccurrenceView[];
+    plans: KitchenPlan[];
     actuals: ActualView[];
     onStart: (occurrence: OccurrenceView) => void;
 }) {
@@ -624,10 +646,13 @@ function WeekGrid({
                                 {allDay
                                     .filter((occurrence) => overlapsDay(occurrence, day))
                                     .map((occurrence) => (
-                                        <OccurrenceChip
-                                            key={`${occurrence.item_id}-${occurrence.start}`}
-                                            occurrence={occurrence}
-                                        />
+                                        <YStack key={`${occurrence.item_id}-${occurrence.start}`}>
+                                            <OccurrenceChip occurrence={occurrence} />
+                                            <ScheduleRecipes
+                                                occurrence={occurrence}
+                                                plans={plans}
+                                            />
+                                        </YStack>
                                     ))}
                             </YStack>
                         ))}
@@ -676,6 +701,7 @@ function WeekGrid({
                                 <TimedBlock
                                     key={`${occurrence.item_id}-${occurrence.start}`}
                                     occurrence={occurrence}
+                                    plans={plans}
                                     day={day}
                                     onStart={onStart}
                                     lane={lane}
@@ -734,12 +760,14 @@ function ActualBlock({ actual, day }: { actual: ActualView; day: Date }) {
 
 function TimedBlock({
     occurrence,
+    plans,
     day,
     onStart,
     lane,
     lanes,
 }: {
     occurrence: OccurrenceView;
+    plans: KitchenPlan[];
     day: Date;
     onStart: (occurrence: OccurrenceView) => void;
     lane: number;
@@ -802,6 +830,7 @@ function TimedBlock({
                             : clockRange(occurrence)}
                     </Text>
                 )}
+                <ScheduleRecipes occurrence={occurrence} plans={plans} />
             </div>
         </EventHover>
     );

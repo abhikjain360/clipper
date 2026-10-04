@@ -2,6 +2,7 @@ import {
   AlarmClock,
   Calendar,
   Clipboard,
+  CookingPot,
   Copy,
   Dumbbell,
   Download,
@@ -92,10 +93,20 @@ import {
 } from "./backend";
 import { subscribeToCollabDoc, type CollabDocStatus } from "./collabDoc";
 import { GymPanel } from "./gym/GymPanel";
+import type { KitchenPlan } from "@clipper/mobile-bridge";
+import { KitchenPanel } from "./kitchen/KitchenPanel";
 import { armRestEndForOpenWorkout, stopRestEnd } from "./gym/restAlarm";
 import tamaguiConfig from "./tamagui.config";
 
-type TabName = "clipboard" | "files" | "devices" | "collab" | "schedule" | "alarms" | "gym";
+type TabName =
+  | "clipboard"
+  | "files"
+  | "devices"
+  | "collab"
+  | "schedule"
+  | "alarms"
+  | "gym"
+  | "kitchen";
 
 const navItems = [
   { value: "clipboard", label: "Clipboard", Icon: Clipboard },
@@ -105,6 +116,7 @@ const navItems = [
   { value: "schedule", label: "Schedule", Icon: Calendar },
   { value: "alarms", label: "Alarms", Icon: AlarmClock },
   { value: "gym", label: "Gym", Icon: Dumbbell },
+  { value: "kitchen", label: "Kitchen", Icon: CookingPot },
 ] as const satisfies readonly { value: TabName; label: string; Icon: typeof Clipboard }[];
 type ViewerContent = { title: string; content: string };
 
@@ -264,6 +276,7 @@ function ClipperApp() {
           label: alarm.label,
           fireAtMillis: alarm.fire_at_millis,
           occurrenceStartMillis: alarm.occurrence_start_millis,
+          canSnooze: alarm.can_snooze,
         }));
         const fingerprint = `${effectSessionKey}:${alarmRefreshGeneration}:${JSON.stringify(plan)}`;
         if (fingerprint === lastPushedPlan.current) return;
@@ -482,6 +495,7 @@ function LoginScreen({
 
 function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppState) => void }) {
   const [tab, setTab] = useState<TabName>("clipboard");
+  const [openRecipeId, setOpenRecipeId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -712,9 +726,27 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
             onError={setError}
           />
         )}
-        {tab === "schedule" && <SchedulePanel state={state} onState={onState} onError={setError} />}
+        {tab === "schedule" && (
+          <SchedulePanel
+            state={state}
+            onState={onState}
+            onError={setError}
+            onOpenRecipe={(id) => {
+              setOpenRecipeId(id);
+              setTab("kitchen");
+            }}
+          />
+        )}
         {tab === "alarms" && alarmsSupported && <AlarmsPanel onError={setError} />}
         {tab === "gym" && <GymPanel onError={setError} />}
+        {tab === "kitchen" && (
+          <KitchenPanel
+            state={state}
+            openRecipeId={openRecipeId}
+            onOpenRecipe={setOpenRecipeId}
+            onError={setError}
+          />
+        )}
       </YStack>
 
       {navExpanded && (
@@ -733,13 +765,16 @@ function SchedulePanel({
   state,
   onState,
   onError,
+  onOpenRecipe,
 }: {
   state: AppState;
   onState: (state: AppState) => void;
   onError: (error: string | null) => void;
+  onOpenRecipe: (id: string) => void;
 }) {
   const [now, setNow] = useState(Date.now);
   const [occurrences, setOccurrences] = useState<OccurrenceView[]>([]);
+  const [kitchenPlans, setKitchenPlans] = useState<KitchenPlan[]>([]);
   const [actuals, setActuals] = useState<ActualView[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -769,14 +804,16 @@ function SchedulePanel({
     const generation = ++loadGeneration.current;
     setLoading(true);
     try {
-      const [expanded, recorded] = await Promise.all([
+      const [expanded, recorded, plans] = await Promise.all([
         backend.expandSchedule(from, to, zone),
         backend.actualsBetween(from, to),
+        backend.nativeClient().kitchenPlans(),
       ]);
       if (generation !== loadGeneration.current) return;
       expanded.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
       recorded.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
       setOccurrences(expanded);
+      setKitchenPlans(plans);
       setActuals(recorded);
     } catch (caught) {
       if (generation === loadGeneration.current) onError(formatBackendError(caught));
@@ -906,6 +943,27 @@ function SchedulePanel({
                           {occurrence.source}
                         </Text>
                       )}
+                      {kitchenPlans
+                        .filter(
+                          (plan) =>
+                            plan.itemId === occurrence.item_id &&
+                            plan.occurrenceKey === occurrence.occurrence_key,
+                        )
+                        .map((plan, planIndex) => (
+                          <Button
+                            key={`${plan.recipeId}:${planIndex}`}
+                            size="$3"
+                            height="auto"
+                            py="$2"
+                            justify="flex-start"
+                            icon={<CookingPot size={16} />}
+                            onPress={() => onOpenRecipe(plan.recipeId)}
+                          >
+                            <Text color="#6fb4ff" shrink={1}>
+                              {plan.title}
+                            </Text>
+                          </Button>
+                        ))}
                       {occurrence.cancelled ? (
                         <Text fontSize={12} color="#ff7b7b">
                           Cancelled

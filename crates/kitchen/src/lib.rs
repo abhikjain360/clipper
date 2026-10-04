@@ -1,3 +1,6 @@
+mod cooking;
+mod quantity;
+
 use std::{collections::BTreeSet, fmt};
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -19,6 +22,9 @@ impl fmt::Display for ValidationError {
         }
     }
 }
+
+pub use cooking::TimerState;
+pub use quantity::{format_quantity, scale_factor};
 
 pub trait KitchenValue: Serialize + DeserializeOwned {
     const COLLECTION_NAME: &'static str;
@@ -111,23 +117,12 @@ impl KitchenValue for Recipe {
             }
         }
         for (index, step) in self.steps.iter().enumerate() {
-            let bytes = step.text.as_bytes();
-            for (start, byte) in bytes.iter().enumerate() {
-                if *byte != b'{' {
-                    continue;
-                }
-                let mut end = start + 1;
-                while end < bytes.len() && is_reference_byte(bytes[end]) {
-                    end += 1;
-                }
-                if end > start + 1 && bytes.get(end) == Some(&b'}') {
-                    let id = &step.text[start + 1..end];
-                    if !ids.contains(id) {
-                        return Err(invalid(
-                            &format!("steps[{index}].text"),
-                            &format!("{{{id}}} does not match any ingredient id"),
-                        ));
-                    }
+            for (_, id) in references(&step.text) {
+                if !ids.contains(id) {
+                    return Err(invalid(
+                        &format!("steps[{index}].text"),
+                        &format!("{{{id}}} does not match any ingredient id"),
+                    ));
                 }
             }
         }
@@ -457,6 +452,29 @@ fn validate_ingredient_id(id: &str, path: &str) -> Result<(), ValidationError> {
 
 fn is_reference_byte(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+}
+
+fn references(text: &str) -> Vec<(std::ops::Range<usize>, &str)> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    let mut start = 0;
+    while start < bytes.len() {
+        if bytes[start] != b'{' {
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < bytes.len() && is_reference_byte(bytes[end]) {
+            end += 1;
+        }
+        if end > start + 1 && bytes.get(end) == Some(&b'}') {
+            found.push((start..end + 1, &text[start + 1..end]));
+            start = end + 1;
+        } else {
+            start += 1;
+        }
+    }
+    found
 }
 
 fn validate_recipe_id(id: Uuid, path: &str) -> Result<(), ValidationError> {

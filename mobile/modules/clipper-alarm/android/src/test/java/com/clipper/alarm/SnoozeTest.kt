@@ -4,6 +4,7 @@ import android.app.AlarmManager
 import android.app.Application
 import android.content.Intent
 import android.os.Looper
+import org.json.JSONArray
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -43,6 +44,36 @@ class SnoozeTest {
     fun tearDown() {
         service?.destroy()
         AlarmMirror.clear(context)
+    }
+
+    @Test
+    fun storedSnoozeChoiceDismissesTimersAndStillSnoozesOlderPlans() {
+        AlarmMirror.save(context, listOf(alarm().copy(canSnooze = false)))
+        startRinging(AlarmMirror.load(context).single())
+        val ringing = requireNotNull(service).get()
+        val notification = requireNotNull(shadowOf(ringing).lastForegroundNotification)
+        assertEquals(listOf("Dismiss"), notification.actions.map { it.title.toString() })
+        assertFalse(shadowOf(notification.fullScreenIntent).savedIntent
+            .getBooleanExtra(AlarmIntents.EXTRA_CAN_SNOOZE, true))
+
+        ringing.onStartCommand(Intent(context, RingService::class.java)
+            .setAction(AlarmIntents.ACTION_SNOOZE), 0, 2)
+        assertFalse(RingService.isRinging)
+        assertTrue(shadowOf(ringing).isForegroundStopped)
+        assertTrue(AlarmMirror.loadSnoozes(context).isEmpty())
+        assertTrue(shadowOf(manager).scheduledAlarms.isEmpty())
+
+        val olderAlarm = alarm().toJson().apply { remove("snooze") }
+        context.createDeviceProtectedStorageContext()
+            .getSharedPreferences("clipper_alarm_plan", Application.MODE_PRIVATE).edit()
+            .putString("plan", JSONArray().put(olderAlarm).toString()).commit()
+        service?.destroy()
+        startRinging(AlarmMirror.load(context).single())
+        requireNotNull(service).get().onStartCommand(Intent(context, RingService::class.java)
+            .setAction(AlarmIntents.ACTION_SNOOZE), 0, 2)
+        assertFalse(RingService.isRinging)
+        assertEquals(1, AlarmMirror.loadSnoozes(context).size)
+        assertNotNull(shadowOf(manager).scheduledAlarms.single().alarmClockInfo)
     }
 
     @Test

@@ -19,6 +19,13 @@ import kotlin.math.min
 class AlarmSlideControl(context: Context) : View(context) {
     var onSnooze: () -> Unit = {}
     var onDismiss: () -> Unit = {}
+    var canSnooze: Boolean = true
+        set(value) {
+            field = value
+            contentDescription = context.getString(if (value) R.string.clipper_alarm_slide_description
+                else R.string.clipper_alarm_dismiss_slide_description)
+            reset()
+        }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
@@ -58,9 +65,11 @@ class AlarmSlideControl(context: Context) : View(context) {
 
         paint.textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 16f, resources.displayMetrics)
         val baseline = centerY - (paint.ascent() + paint.descent()) / 2f
-        paint.textAlign = Paint.Align.LEFT
-        paint.color = blend(Color.parseColor("#8b949e"), Color.WHITE, (-progress).coerceAtLeast(0f))
-        canvas.drawText(context.getString(R.string.clipper_alarm_snooze), dp(20), baseline, paint)
+        if (canSnooze) {
+            paint.textAlign = Paint.Align.LEFT
+            paint.color = blend(Color.parseColor("#8b949e"), Color.WHITE, (-progress).coerceAtLeast(0f))
+            canvas.drawText(context.getString(R.string.clipper_alarm_snooze), dp(20), baseline, paint)
+        }
         paint.textAlign = Paint.Align.RIGHT
         paint.color = blend(Color.parseColor("#8b949e"), Color.WHITE, progress.coerceAtLeast(0f))
         canvas.drawText(context.getString(R.string.clipper_alarm_dismiss), width - dp(20), baseline, paint)
@@ -73,8 +82,10 @@ class AlarmSlideControl(context: Context) : View(context) {
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = dp(2)
         paint.strokeCap = Paint.Cap.ROUND
-        canvas.drawLine(handleX - dp(4), centerY - dp(6), handleX - dp(10), centerY, paint)
-        canvas.drawLine(handleX - dp(10), centerY, handleX - dp(4), centerY + dp(6), paint)
+        if (canSnooze) {
+            canvas.drawLine(handleX - dp(4), centerY - dp(6), handleX - dp(10), centerY, paint)
+            canvas.drawLine(handleX - dp(10), centerY, handleX - dp(4), centerY + dp(6), paint)
+        }
         canvas.drawLine(handleX + dp(4), centerY - dp(6), handleX + dp(10), centerY, paint)
         canvas.drawLine(handleX + dp(10), centerY, handleX + dp(4), centerY + dp(6), paint)
     }
@@ -104,13 +115,13 @@ class AlarmSlideControl(context: Context) : View(context) {
                 }
                 val distance = event.x - downX
                 if (abs(distance) > touchSlop) dragged = true
-                offset = (startOffset + distance).coerceIn(-travel(), travel())
+                offset = (startOffset + distance).coerceIn(if (canSnooze) -travel() else 0f, travel())
                 invalidate()
                 return true
             }
             MotionEvent.ACTION_UP -> {
                 if (!tracking) return false
-                offset = (startOffset + event.x - downX).coerceIn(-travel(), travel())
+                offset = (startOffset + event.x - downX).coerceIn(if (canSnooze) -travel() else 0f, travel())
                 val action = if (dragged && abs(offset) >= travel() * THRESHOLD) {
                     if (offset < 0f) onSnooze else onDismiss
                 } else null
@@ -129,8 +140,10 @@ class AlarmSlideControl(context: Context) : View(context) {
 
     override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
         super.onInitializeAccessibilityNodeInfo(info)
-        info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.clipper_alarm_snooze_action,
-            context.getString(R.string.clipper_alarm_snooze)))
+        if (canSnooze) {
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.clipper_alarm_snooze_action,
+                context.getString(R.string.clipper_alarm_snooze)))
+        }
         info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.clipper_alarm_dismiss_action,
             context.getString(R.string.clipper_alarm_dismiss)))
     }
@@ -139,6 +152,7 @@ class AlarmSlideControl(context: Context) : View(context) {
         if (!isEnabled) return false
         when (action) {
             R.id.clipper_alarm_snooze_action -> {
+                if (!canSnooze) return false
                 reset()
                 onSnooze()
                 return true

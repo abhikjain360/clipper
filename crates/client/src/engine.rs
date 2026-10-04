@@ -51,6 +51,9 @@ mod app_data_sync;
 mod app_document_sync;
 #[path = "calendar_import.rs"]
 mod calendar_import;
+#[cfg(not(target_family = "wasm"))]
+#[path = "kitchen.rs"]
+mod kitchen;
 #[path = "schedule_context.rs"]
 mod schedule_context;
 use schedule_context::revision_ref;
@@ -163,7 +166,6 @@ pub struct SyncEngine {
     state_version: std::sync::atomic::AtomicU64,
     ws_restart_tx: watch::Sender<u64>,
     ws_restart_rx: watch::Receiver<u64>,
-    ws_wake: tokio::sync::Notify,
     suppressed_payload: RwLock<Option<([u8; 32], web_time::Instant)>>,
     /// Serialize this device's timer commands across UI/IPC callers.
     actual_write: Mutex<()>,
@@ -220,7 +222,6 @@ impl SyncEngine {
             state_version: std::sync::atomic::AtomicU64::new(0),
             ws_restart_tx,
             ws_restart_rx,
-            ws_wake: tokio::sync::Notify::new(),
             suppressed_payload: RwLock::new(None),
             actual_write: Mutex::new(()),
             calendar_write: Mutex::new(()),
@@ -3075,9 +3076,12 @@ impl SyncEngine {
                         label: planned.label.clone(),
                         fire_at_millis: planned.fire_at.timestamp_millis(),
                         occurrence_start_millis: planned.occurrence_start.timestamp_millis(),
+                        can_snooze: true,
                     }),
             );
         }
+        #[cfg(not(target_family = "wasm"))]
+        alarms.extend(self.kitchen_timer_alarms(device, now, until).await);
         alarms.sort_by_key(|alarm| alarm.fire_at_millis);
         Ok(alarms)
     }
@@ -3429,7 +3433,6 @@ impl SyncEngine {
         }
         let epoch = self.history_epoch.load(Ordering::SeqCst);
         self.ws_restart_tx.send_modify(|requested| *requested += 1);
-        self.ws_wake.notify_one();
         let confirmed = self.confirm_session(epoch).await;
         self.app_data.request_push();
         confirmed
@@ -4356,6 +4359,7 @@ impl SyncEngine {
     async fn ws_loop(self: &Arc<Self>, epoch: u64) {
         let mut backoff = Duration::from_secs(1);
         let max_backoff = Duration::from_secs(60);
+        let mut restart_rx = self.restart_signal();
 
         loop {
             if !self.session_is_current(epoch) {
@@ -4375,12 +4379,22 @@ impl SyncEngine {
             }
             self.bump_version();
 
-            match async {
-                self.confirm_session(epoch).await?;
-                self.ws_connect(epoch).await
-            }
-            .await
-            {
+            let result = tokio::select! {
+                biased;
+                changed = restart_rx.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    backoff = Duration::from_secs(1);
+                    continue;
+                }
+                result = self.confirm_session(epoch) => result,
+            };
+            let result = match result {
+                Ok(()) => self.ws_connect(epoch, restart_rx.clone()).await,
+                Err(error) => Err(error),
+            };
+            match result {
                 Ok(()) => {
                     backoff = Duration::from_secs(1);
                 }
@@ -4420,7 +4434,10 @@ impl SyncEngine {
                 () = tokio::time::sleep(backoff + jitter) => {
                     backoff = (backoff * 2).min(max_backoff);
                 }
-                () = self.ws_wake.notified() => {
+                changed = restart_rx.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
                     backoff = Duration::from_secs(1);
                 }
             }
@@ -4428,7 +4445,11 @@ impl SyncEngine {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    async fn ws_connect(self: &Arc<Self>, epoch: u64) -> Result<(), ClientError> {
+    async fn ws_connect(
+        self: &Arc<Self>,
+        epoch: u64,
+        mut restart_rx: watch::Receiver<u64>,
+    ) -> Result<(), ClientError> {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite;
 
@@ -4436,87 +4457,95 @@ impl SyncEngine {
         // process-default provider; ensure that's ring before connecting.
         crate::ensure_crypto_provider();
 
-        let (token, ws_url, host) = {
-            let api = self.api_for_session(epoch).await?;
-            let t = api
-                .token()
-                .ok_or(ClientError::NotAuthenticated)?
-                .to_string();
-            let ws_url = api.websocket_url()?;
-            let host = api.base_url().host_str().unwrap_or("localhost").to_string();
-            (t, ws_url, host)
-        };
+        let handshake = async {
+            let (token, ws_url, host) = {
+                let api = self.api_for_session(epoch).await?;
+                let t = api
+                    .token()
+                    .ok_or(ClientError::NotAuthenticated)?
+                    .to_string();
+                let ws_url = api.websocket_url()?;
+                let host = api.base_url().host_str().unwrap_or("localhost").to_string();
+                (t, ws_url, host)
+            };
 
-        let request = tungstenite::http::Request::builder()
-            .uri(ws_url.as_str())
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Host", host)
-            .header("Connection", "Upgrade")
-            .header("Upgrade", "websocket")
-            .header("Sec-WebSocket-Version", "13")
-            .header(
-                "Sec-WebSocket-Key",
-                tungstenite::handshake::client::generate_key(),
+            let request = tungstenite::http::Request::builder()
+                .uri(ws_url.as_str())
+                .header("Authorization", format!("Bearer {}", token))
+                .header("Host", host)
+                .header("Connection", "Upgrade")
+                .header("Upgrade", "websocket")
+                .header("Sec-WebSocket-Version", "13")
+                .header(
+                    "Sec-WebSocket-Key",
+                    tungstenite::handshake::client::generate_key(),
+                )
+                .body(())
+                .map_err(|e| ClientError::WebSocket(e.to_string()))?;
+
+            let (ws_stream, _) = tokio::time::timeout(
+                WS_CONNECT_TIMEOUT,
+                tokio_tungstenite::connect_async(request),
             )
-            .body(())
-            .map_err(|e| ClientError::WebSocket(e.to_string()))?;
-
-        let (ws_stream, _) = tokio::time::timeout(
-            WS_CONNECT_TIMEOUT,
-            tokio_tungstenite::connect_async(request),
-        )
-        .await
-        .map_err(|_| ClientError::WebSocket("timed out connecting".into()))?
-        .map_err(websocket_handshake_error)?;
-
-        let (mut write, mut read) = ws_stream.split();
-
-        let hello = WsClientMessage::Hello;
-        let hello_json =
-            serde_json::to_string(&hello).map_err(|e| ClientError::WebSocket(e.to_string()))?;
-        write
-            .send(tungstenite::Message::Text(hello_json.into()))
             .await
-            .map_err(|e: tungstenite::Error| ClientError::WebSocket(e.to_string()))?;
+            .map_err(|_| ClientError::WebSocket("timed out connecting".into()))?
+            .map_err(websocket_handshake_error)?;
 
-        let stream_start_seq = tokio::time::timeout(WS_HELLO_ACK_TIMEOUT, async {
-            loop {
-                let msg = read
-                    .next()
-                    .await
-                    .ok_or_else(|| ClientError::WebSocket("closed before hello_ack".into()))?
-                    .map_err(|e: tungstenite::Error| ClientError::WebSocket(e.to_string()))?;
-                match msg {
-                    tungstenite::Message::Text(text) => {
-                        match serde_json::from_str::<WsServerMessage>(&text) {
-                            Ok(WsServerMessage::HelloAck {
-                                stream_start_seq, ..
-                            }) => return Ok(stream_start_seq),
-                            Ok(WsServerMessage::Error { error }) => {
-                                return Err(ClientError::WebSocket(error.to_string()));
-                            }
-                            Ok(other) => {
-                                debug!("Ignoring WS message before hello_ack: {:?}", other);
-                            }
-                            Err(e) => {
-                                return Err(ClientError::WebSocket(format!(
-                                    "failed to parse hello_ack: {e}"
-                                )));
+            let (mut write, mut read) = ws_stream.split();
+
+            let hello = WsClientMessage::Hello;
+            let hello_json =
+                serde_json::to_string(&hello).map_err(|e| ClientError::WebSocket(e.to_string()))?;
+            write
+                .send(tungstenite::Message::Text(hello_json.into()))
+                .await
+                .map_err(|e: tungstenite::Error| ClientError::WebSocket(e.to_string()))?;
+
+            let stream_start_seq = tokio::time::timeout(WS_HELLO_ACK_TIMEOUT, async {
+                loop {
+                    let msg = read
+                        .next()
+                        .await
+                        .ok_or_else(|| ClientError::WebSocket("closed before hello_ack".into()))?
+                        .map_err(|e: tungstenite::Error| ClientError::WebSocket(e.to_string()))?;
+                    match msg {
+                        tungstenite::Message::Text(text) => {
+                            match serde_json::from_str::<WsServerMessage>(&text) {
+                                Ok(WsServerMessage::HelloAck {
+                                    stream_start_seq, ..
+                                }) => return Ok(stream_start_seq),
+                                Ok(WsServerMessage::Error { error }) => {
+                                    return Err(ClientError::WebSocket(error.to_string()));
+                                }
+                                Ok(other) => {
+                                    debug!("Ignoring WS message before hello_ack: {:?}", other);
+                                }
+                                Err(e) => {
+                                    return Err(ClientError::WebSocket(format!(
+                                        "failed to parse hello_ack: {e}"
+                                    )));
+                                }
                             }
                         }
+                        tungstenite::Message::Ping(data) => {
+                            _ = write.send(tungstenite::Message::Pong(data)).await;
+                        }
+                        tungstenite::Message::Close(_) => {
+                            return Err(ClientError::WebSocket("closed before hello_ack".into()));
+                        }
+                        _ => {}
                     }
-                    tungstenite::Message::Ping(data) => {
-                        _ = write.send(tungstenite::Message::Pong(data)).await;
-                    }
-                    tungstenite::Message::Close(_) => {
-                        return Err(ClientError::WebSocket("closed before hello_ack".into()));
-                    }
-                    _ => {}
                 }
-            }
-        })
-        .await
-        .map_err(|_| ClientError::WebSocket("timed out waiting for hello_ack".into()))??;
+            })
+            .await
+            .map_err(|_| ClientError::WebSocket("timed out waiting for hello_ack".into()))??;
+            Ok::<_, ClientError>((write, read, stream_start_seq))
+        };
+        let (mut write, mut read, stream_start_seq) = tokio::select! {
+            biased;
+            _ = restart_rx.changed() => return Ok(()),
+            result = handshake => result?,
+        };
 
         // The session may have changed while the handshake was in flight.
         // Claiming the generation only for the session this socket
@@ -4536,43 +4565,36 @@ impl SyncEngine {
             generation, "WebSocket connected and reconciliation started"
         );
 
-        let mut restart_rx = self.restart_signal();
         loop {
-            tokio::select! {
-                changed = restart_rx.changed() => {
-                    if changed.is_ok() {
-                        info!("WebSocket reconnect requested");
+            let msg_result = tokio::select! {
+                _ = restart_rx.changed() => break,
+                result = tokio::time::timeout(WS_READ_TIMEOUT, read.next()) => result,
+            };
+            let Ok(msg_result) = msg_result else {
+                return Err(ClientError::WebSocket(
+                    "no message from the server within the read timeout".into(),
+                ));
+            };
+            let Some(msg_result) = msg_result else {
+                break;
+            };
+            let msg: tungstenite::Message = msg_result
+                .map_err(|e: tungstenite::Error| ClientError::WebSocket(e.to_string()))?;
+
+            match msg {
+                tungstenite::Message::Text(text) => {
+                    if !self.handle_ws_text(&text, generation).await? {
+                        break;
                     }
+                }
+                tungstenite::Message::Ping(data) => {
+                    _ = write.send(tungstenite::Message::Pong(data)).await;
+                }
+                tungstenite::Message::Close(_) => {
+                    info!("WebSocket closed by server");
                     break;
                 }
-                msg_result = tokio::time::timeout(WS_READ_TIMEOUT, read.next()) => {
-                    let Ok(msg_result) = msg_result else {
-                        return Err(ClientError::WebSocket(
-                            "no message from the server within the read timeout".into(),
-                        ));
-                    };
-                    let Some(msg_result) = msg_result else {
-                        break;
-                    };
-                    let msg: tungstenite::Message = msg_result
-                        .map_err(|e: tungstenite::Error| ClientError::WebSocket(e.to_string()))?;
-
-                    match msg {
-                        tungstenite::Message::Text(text) => {
-                            if !self.handle_ws_text(&text, generation).await? {
-                                break;
-                            }
-                        }
-                        tungstenite::Message::Ping(data) => {
-                            _ = write.send(tungstenite::Message::Pong(data)).await;
-                        }
-                        tungstenite::Message::Close(_) => {
-                            info!("WebSocket closed by server");
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
+                _ => {}
             }
         }
 
@@ -5551,6 +5573,10 @@ mod app_data_integration_tests;
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "app_document_integration_tests.rs"]
 mod app_document_integration_tests;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "kitchen_integration_tests.rs"]
+mod kitchen_integration_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "offline_resume_tests.rs"]

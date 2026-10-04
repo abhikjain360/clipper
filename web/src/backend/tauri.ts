@@ -1,12 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
     ActualView,
+    AppDocumentRevision,
     AppState,
     ClipboardPayload,
     ClipperBackend,
     CollabItem,
     DeviceInfo,
     IngestReport,
+    KitchenPantry,
+    KitchenPlan,
+    KitchenRecipe,
+    KitchenRecipeList,
     LogoutOutcome,
     OccurrenceView,
     ScheduleItem,
@@ -74,6 +79,21 @@ export function tauriBackend(): ClipperBackend {
         getCollabDocMeta: (objectId) => invoke<CollabItem>("get_collab_doc_meta", { objectId }),
         listDevices: () => invoke<DeviceInfo[]>("list_devices"),
         removeDevice: (deviceId) => invoke<void>("remove_device", { deviceId }),
+        kitchen: {
+            recipes: (search, zone) =>
+                invoke<KitchenRecipeList>("kitchen_recipes", { search, zone }),
+            recipe: (id, servings, zone) =>
+                invoke<KitchenRecipe>("kitchen_recipe", { id, servings, zone }),
+            recipeHistory: (id) => invoke<AppDocumentRevision[]>("kitchen_recipe_history", { id }),
+            recipeRevision: (id, revision, servings) =>
+                invoke<KitchenRecipe>("kitchen_recipe_revision", { id, revision, servings }),
+            changeSession: (recipeId, change) =>
+                invoke<void>("kitchen_change_session", { recipeId, change }),
+            pantry: () => invoke<KitchenPantry>("kitchen_pantry"),
+            changePantry: (change) => invoke<void>("kitchen_change_pantry", { change }),
+            plans: () => invoke<KitchenPlan[]>("kitchen_plans"),
+            keepDisplayAwake: (on) => invoke<void>("keep_display_awake", { on }),
+        },
         // Browser-only session resume. The desktop daemon owns credentials and
         // survives webview reloads, so these are never invoked under Tauri; they
         // exist only to satisfy the shared backend contract.

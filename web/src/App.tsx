@@ -2,6 +2,7 @@ import {
     ArrowLeft,
     CalendarClock,
     Clipboard,
+    CookingPot,
     Copy,
     Download,
     Eye,
@@ -66,6 +67,7 @@ import type {
 } from "@clipper/shared";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { SchedulePanel } from "./SchedulePanel";
+import { KitchenPanel } from "./kitchen/KitchenPanel";
 
 // Lazy-loaded so the heavy CodeMirror dependency (editor core, vim mode, and the
 // per-language packs) splits into its own chunk and stays off the initial load
@@ -395,6 +397,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
         { path: "/files", label: "Files", icon: Folder },
         { path: "/collab", label: "Collab Docs", icon: FileText },
         { path: "/schedule", label: "Schedule", icon: CalendarClock },
+        { path: "/kitchen", label: "Kitchen", icon: CookingPot },
         { path: "/devices", label: "Devices", icon: Smartphone },
     ];
     const navigation = (expanded: boolean, mobile = false) => (
@@ -544,6 +547,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                         </Route>
                         <Route path="/schedule">
                             <SchedulePanel
+                                state={state}
                                 items={state.schedule_items}
                                 warnings={state.schedule_warnings}
                                 sources={state.calendar_sources}
@@ -551,6 +555,19 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                                 onState={onState}
                                 onError={setError}
                             />
+                        </Route>
+                        <Route path="/kitchen/:id">
+                            {(params) => (
+                                <KitchenPanel
+                                    key={params.id}
+                                    id={params.id}
+                                    state={state}
+                                    onError={setError}
+                                />
+                            )}
+                        </Route>
+                        <Route path="/kitchen">
+                            <KitchenPanel state={state} onError={setError} />
                         </Route>
                         <Route path="/devices">
                             <DevicesPanel onError={setError} />

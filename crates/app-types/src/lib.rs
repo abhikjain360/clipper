@@ -211,6 +211,12 @@ pub struct AlarmView {
     /// When the block itself begins. Differs from `fire_at_millis` whenever the
     /// alarm has a lead time.
     pub occurrence_start_millis: i64,
+    #[serde(default = "can_snooze_by_default")]
+    pub can_snooze: bool,
+}
+
+fn can_snooze_by_default() -> bool {
+    true
 }
 
 /// A calendar source, rendered for a list.
@@ -349,6 +355,9 @@ pub struct AppDocumentRevision {
     pub device_id: String,
     pub deleted: bool,
 }
+
+mod kitchen;
+pub use kitchen::*;
 
 #[cfg(test)]
 mod tests {

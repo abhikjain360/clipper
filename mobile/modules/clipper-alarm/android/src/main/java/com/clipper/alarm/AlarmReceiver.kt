@@ -59,7 +59,8 @@ class AlarmReceiver : BroadcastReceiver() {
 
         Log.i(TAG, "Alarm $index fired: $label")
         val alarm = planned ?: PlannedAlarm(itemId, occurrenceKey, label, deliveredAt,
-            intent.getLongExtra(AlarmIntents.EXTRA_START, deliveredAt))
+            intent.getLongExtra(AlarmIntents.EXTRA_START, deliveredAt),
+            intent.getBooleanExtra(AlarmIntents.EXTRA_CAN_SNOOZE, true))
         RingService.start(appContext, alarm, generation)
 
         // Move the alarm window forward. Re-arming reads only the device-protected

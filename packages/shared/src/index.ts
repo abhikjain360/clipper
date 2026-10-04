@@ -1,6 +1,30 @@
 export { calendarRefreshDue, calendarSyncLabel } from "./calendar";
 
 export type {
+  KitchenBackend,
+  KitchenBlock,
+  KitchenEquipment,
+  KitchenIngredient,
+  KitchenIngredientGroup,
+  KitchenNutrition,
+  KitchenPantry,
+  KitchenPantryCategory,
+  KitchenPantryChange,
+  KitchenPantryItem,
+  KitchenPastSession,
+  KitchenPlan,
+  KitchenRecipe,
+  KitchenRecipeList,
+  KitchenRecipeSummary,
+  KitchenSession,
+  KitchenSessionChange,
+  KitchenStep,
+  KitchenTimer,
+  KitchenTimerAction,
+  KitchenTimerState,
+} from "./kitchen";
+
+export type {
   ActualView,
   AlarmPolicy,
   AlarmView,

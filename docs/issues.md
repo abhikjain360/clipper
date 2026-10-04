@@ -782,13 +782,33 @@ Each entry has:
 
 ### 148. Concurrent calendar import cleanup can fail intermittently
 
-- **Status:** open; reproduction pending.
+- **Status:** fixed.
 - **Where:** `crates/client/src/schedule_integration_tests.rs`,
-  `live_calendar_unchanged_feeds_and_newer_fetches`.
-- **What happened:** one server-backed run left older import cleanup pending
-  because revision 1 of its object was refused as a rollback of the retained
-  revision anchor. The isolated rerun and the next full run passed.
-- **Next:** reproduce the cleanup race before changing the revision checks.
+  `live_calendar_unchanged_feeds_and_newer_fetches`;
+  `crates/client/src/calendar_import.rs`, import reads and cleanup;
+  `crates/client/src/local_store.rs`, tombstone validation.
+- **What happened:** concurrent imports could purge a payload between reads,
+  replace a source head before its payload was read, or deliver a tombstone
+  before cleanup checked the old head. Refresh failed or left cleanup pending.
+- **Fix:** retry replaced source reads against a verified newer head. Treat
+  missing retired payloads and verified competing tombstones as completed
+  cleanup. Accept an identical signed tombstone while retaining rollback,
+  body identity and parent-link checks.
+- **Validation:** controlled replacement and cleanup tests pass.
+  `live_calendar_unchanged_feeds_and_newer_fetches` passes 15 consecutive runs
+  with imported recurrence rules.
+
+### 151. Foreground reconnect waited for a stalled WebSocket attempt
+
+- **Status:** fixed.
+- **Where:** `crates/client/src/engine.rs`, native WebSocket loop.
+- **What happened:** `reconnect_now` woke backoff but could not interrupt
+  connection or hello waits, delaying reconnection by up to 30 or 10 seconds.
+- **Fix:** observe the restart signal throughout confirmation, connection,
+  hello and the connected socket. Drop the current attempt before starting
+  another one, and restart immediately without backoff. Pass the outer
+  receiver's seen version into the attempt so a restart during the handoff
+  from confirmation to connection cannot be missed.
 
 ### 12. Migration 5 broke collab docs on servers upgraded from main
 

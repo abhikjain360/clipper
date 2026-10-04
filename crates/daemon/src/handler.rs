@@ -571,6 +571,53 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                         Err(error) => client_error(id, error),
                     }
                 }
+                DaemonCommand::KitchenRecipes(params) => {
+                    match engine.kitchen_recipes(&params.search, &params.zone).await {
+                        Ok(list) => json_success(id, list),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::KitchenRecipe(params) => {
+                    match engine
+                        .kitchen_recipe(&params.id, params.servings, &params.zone)
+                        .await
+                    {
+                        Ok(recipe) => json_success(id, recipe),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::KitchenRecipeRevision(params) => {
+                    match engine
+                        .kitchen_recipe_revision(&params.id, params.revision, params.servings)
+                        .await
+                    {
+                        Ok(recipe) => json_success(id, recipe),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::KitchenChangeSession(params) => {
+                    match engine
+                        .kitchen_change_session(&params.recipe_id, params.change)
+                        .await
+                    {
+                        Ok(()) => DaemonResponse::success(id, None),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::KitchenPantry => match engine.kitchen_pantry().await {
+                    Ok(pantry) => json_success(id, pantry),
+                    Err(error) => client_error(id, error),
+                },
+                DaemonCommand::KitchenChangePantry(change) => {
+                    match engine.kitchen_change_pantry(change).await {
+                        Ok(()) => DaemonResponse::success(id, None),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::KitchenPlans => match engine.kitchen_plans().await {
+                    Ok(plans) => json_success(id, plans),
+                    Err(error) => client_error(id, error),
+                },
                 DaemonCommand::AppDocumentRevision(params) => {
                     match engine
                         .app_document_revision(&params.collection, &params.id, params.revision)

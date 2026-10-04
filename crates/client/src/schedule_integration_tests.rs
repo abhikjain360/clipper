@@ -170,6 +170,394 @@ async fn calendar_feed_server(
 
 #[tokio::test]
 #[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_reconnect_between_confirmation_and_handshake_cancels_the_attempt() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let url = format!("http://{address}");
+    let first = register_proxy_engine(&url, &temp.path().join("first")).await;
+    for foreground in [false, true] {
+        let engine = copy_session(
+            &first,
+            &url,
+            &temp.path().join(format!("handoff-{foreground}")),
+        )
+        .await;
+        let mut restart_rx = engine.restart_signal();
+        engine.confirm_session(0).await.unwrap();
+        let generation = engine.local_store.current_generation().await;
+        if foreground {
+            engine.reconnect_now().await.unwrap();
+        } else {
+            engine.refresh().await.unwrap();
+        }
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            engine.ws_connect(0, restart_rx.clone()),
+        )
+        .await
+        .expect("a restart during the handoff cancels the attempt immediately")
+        .unwrap();
+        assert_eq!(
+            engine.local_store.current_generation().await,
+            generation,
+            "the cancelled attempt starts no reconciliation"
+        );
+        tokio::time::timeout(Duration::from_secs(1), restart_rx.changed())
+            .await
+            .expect("the outer loop still skips backoff for this restart")
+            .unwrap();
+        engine.stop_session_work().await;
+    }
+    first.stop_session_work().await;
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_reconnect_abandons_stalled_handshakes_before_connecting_again() {
+    use futures_util::StreamExt;
+
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let first =
+        register_proxy_engine(&format!("http://{address}"), &temp.path().join("first")).await;
+    for hello in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (stalled_tx, mut stalled_rx) = tokio::sync::mpsc::channel(1);
+        let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel(1);
+        let proxy = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            let mut stalled = false;
+            loop {
+                let (mut client, _) = tokio::select! {
+                    accepted = listener.accept() => accepted.unwrap(),
+                    _ = connections.join_next(), if !connections.is_empty() => continue,
+                };
+                let mut prefix = [0; 16];
+                let read = client.peek(&mut prefix).await.unwrap();
+                if !stalled && prefix[..read].starts_with(b"GET /api/ws ") {
+                    stalled = true;
+                    let stalled_tx = stalled_tx.clone();
+                    let closed_tx = closed_tx.clone();
+                    connections.spawn(async move {
+                        if hello {
+                            let mut socket = tokio_tungstenite::accept_async(client).await.unwrap();
+                            let message = socket.next().await.unwrap().unwrap();
+                            assert!(message.is_text());
+                            stalled_tx.send(()).await.unwrap();
+                            assert!(!matches!(socket.next().await, Some(Ok(message)) if !message.is_close()));
+                        } else {
+                            stalled_tx.send(()).await.unwrap();
+                            let mut buffer = [0; 4096];
+                            while client.read(&mut buffer).await.unwrap() != 0 {}
+                        }
+                        closed_tx.send(()).await.unwrap();
+                    });
+                } else {
+                    if prefix[..read].starts_with(b"GET /api/ws ") {
+                        tokio::time::timeout(Duration::from_secs(2), closed_rx.recv())
+                            .await
+                            .expect("the previous socket closes before the next handshake")
+                            .expect("the previous socket was abandoned");
+                    }
+                    connections.spawn(async move {
+                        let mut server = tokio::net::TcpStream::connect(address).await.unwrap();
+                        let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                    });
+                }
+            }
+        });
+        let engine =
+            copy_session(&first, &url, &temp.path().join(format!("stalled-{hello}"))).await;
+        let connecting = Arc::clone(&engine);
+        let connection = tokio::spawn(async move { connecting.ws_loop(0).await });
+        tokio::time::timeout(Duration::from_secs(5), stalled_rx.recv())
+            .await
+            .expect("the connection reaches the stalled handshake")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            engine.reconnect_now().await.unwrap();
+            wait_for(&engine, |state| {
+                matches!(state.connection_status, ConnectionStatus::Connected)
+            })
+            .await;
+        })
+        .await
+        .expect("foreground reconnect completes before either handshake timeout");
+        connection.abort();
+        let _ = connection.await;
+        engine.stop_session_work().await;
+        proxy.abort();
+        let _ = proxy.await;
+    }
+    first.stop_session_work().await;
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_calendar_import_reads_and_cleanup_survive_replacement() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let first =
+        register_proxy_engine(&format!("http://{address}"), &temp.path().join("first")).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let armed = Arc::new(std::sync::Mutex::new(None));
+    let arrived = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Semaphore::new(0));
+    let proxy = tokio::spawn(paused_calendar_request_proxy(
+        listener,
+        address,
+        Arc::clone(&armed),
+        Arc::clone(&arrived),
+        Arc::clone(&resume),
+    ));
+    let slow = copy_session(&first, &url, &temp.path().join("slow")).await;
+    let source_id = first
+        .add_calendar_source("Work", "http://127.0.0.1/feed.ics")
+        .await
+        .unwrap();
+    for response in [false, true] {
+        let item = first.api.get_object(&source_id).await.unwrap();
+        let path = if response {
+            format!("GET /api/objects/{source_id} HTTP/1.1")
+        } else {
+            format!(
+                "GET /api/objects/{source_id}/payloads/{} HTTP/1.1",
+                item.payloads[0].id
+            )
+        };
+        *armed.lock().unwrap() = Some((path, response));
+        let reading = Arc::clone(&slow);
+        let id = source_id.clone();
+        let read = tokio::spawn(async move { reading.read_calendar_source(&id).await });
+        tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+            .await
+            .unwrap();
+        first
+            .set_calendar_source_alarms(&source_id, response)
+            .await
+            .unwrap();
+        if response {
+            slow.read_calendar_source(&source_id).await.unwrap();
+        }
+        resume.add_permits(1);
+        let (source, _) = read.await.unwrap().unwrap();
+        assert_eq!(
+            source.alarms_on, response,
+            "a replaced read returns the current source"
+        );
+    }
+
+    let text = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:meeting\r\nSUMMARY:Older\r\nDTSTART:20261008T090000Z\r\nRRULE:FREQ=DAILY;COUNT=3;BYHOUR=9,17\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let older = slow
+        .stage_calendar_import(&source_id, text, Utc::now())
+        .await
+        .unwrap();
+    let file = slow
+        .local_store
+        .import_file_object(&older.object_id.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    *armed.lock().unwrap() = Some((
+        format!(
+            "GET /api/objects/{}/payloads/{} HTTP/1.1",
+            older.object_id, file.payloads[0].id
+        ),
+        false,
+    ));
+    let finishing = Arc::clone(&slow);
+    let id = source_id.clone();
+    let batch = older.clone();
+    let finish =
+        tokio::spawn(async move { finishing.finish_calendar_import(&id, text, &batch).await });
+    tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+        .await
+        .unwrap();
+    first.refresh().await.unwrap();
+    wait_for(&first, |state| {
+        state
+            .files
+            .iter()
+            .any(|file| file.id == older.object_id.to_string())
+    })
+    .await;
+    first
+        .finish_calendar_import(&source_id, text, &older)
+        .await
+        .unwrap();
+    let newer_text = text.replace("SUMMARY:Older", "SUMMARY:Newer");
+    let newer = first
+        .stage_calendar_import(&source_id, &newer_text, Utc::now())
+        .await
+        .unwrap();
+    let report = first
+        .finish_calendar_import(&source_id, &newer_text, &newer)
+        .await
+        .unwrap();
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    resume.add_permits(1);
+    let report = finish.await.unwrap().unwrap();
+    assert!(report.superseded);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    let (source, _) = slow.read_calendar_source(&source_id).await.unwrap();
+    assert_eq!(source.active_import, Some(newer));
+    assert!(source.pending_imports.is_empty());
+    assert!(source.retired_imports.is_empty());
+
+    for (kind, historical) in [
+        (ObjectKind::Schedule, true),
+        (ObjectKind::Schedule, false),
+        (ObjectKind::File, false),
+    ] {
+        let batch = slow
+            .stage_calendar_import(&source_id, text, Utc::now())
+            .await
+            .unwrap();
+        slow.finish_calendar_import(&source_id, text, &batch)
+            .await
+            .unwrap();
+        let id = if kind == ObjectKind::Schedule {
+            batch.events[0]
+        } else {
+            batch.object_id
+        }
+        .to_string();
+        let item = first.api.get_object_revision(&id, 1).await.unwrap();
+        let path = if historical {
+            format!(
+                "GET /api/objects/{id}/revisions/1/payloads/{} HTTP/1.1",
+                item.payloads[0].id
+            )
+        } else {
+            format!("GET /api/objects/{id} HTTP/1.1")
+        };
+        *armed.lock().unwrap() = Some((path, !historical));
+        let cleaning = Arc::clone(&slow);
+        let target = id.clone();
+        let source = source.id;
+        let cleanup = tokio::spawn(async move {
+            cleaning
+                .purge_import_object(&target, kind, source, batch.object_id)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+            .await
+            .unwrap();
+        if historical {
+            first
+                .purge_import_object(&id, kind, source, batch.object_id)
+                .await
+                .unwrap();
+        } else {
+            let item = first.api.get_object(&id).await.unwrap();
+            let head = LocalHead {
+                revision: item.revision,
+                parent_hash: crypto::object_envelope_parent_hash(&item.envelope.body).unwrap(),
+            };
+            let (seq, tombstone) = first
+                .write_tombstone_at(&id, kind, Some(head))
+                .await
+                .unwrap();
+            slow.local_store
+                .apply_local_tombstone(kind, &id, seq, &tombstone, RECENT_CLIPBOARD_LIMIT)
+                .await
+                .unwrap();
+        }
+        resume.add_permits(1);
+        cleanup.await.unwrap().unwrap();
+        assert!(matches!(
+            first.api.get_object_revision(&id, 1).await,
+            Err(ClientError::Api { status: 404, .. })
+        ));
+    }
+    first.stop_session_work().await;
+    slow.stop_session_work().await;
+    proxy.abort();
+    let _ = proxy.await;
+}
+
+async fn paused_calendar_request_proxy(
+    listener: tokio::net::TcpListener,
+    upstream: std::net::SocketAddr,
+    armed: Arc<std::sync::Mutex<Option<(String, bool)>>>,
+    arrived: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Semaphore>,
+) {
+    let mut connections = tokio::task::JoinSet::new();
+    loop {
+        let (client, _) = tokio::select! {
+            accepted = listener.accept() => accepted.unwrap(),
+            _ = connections.join_next(), if !connections.is_empty() => continue,
+        };
+        let armed = Arc::clone(&armed);
+        let arrived = Arc::clone(&arrived);
+        let resume = Arc::clone(&resume);
+        connections.spawn(async move {
+            let server = tokio::net::TcpStream::connect(upstream).await.unwrap();
+            let (mut client_read, mut client_write) = client.into_split();
+            let (mut server_read, mut server_write) = server.into_split();
+            let pause_response = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let paused = Arc::clone(&pause_response);
+            let downloading_arrived = Arc::clone(&arrived);
+            let downloading_resume = Arc::clone(&resume);
+            let upload = async move {
+                let mut buffer = [0; 65536];
+                loop {
+                    let read = match client_read.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    let pause = {
+                        let mut armed = armed.lock().unwrap();
+                        if armed.as_ref().is_some_and(|(prefix, _)| {
+                            buffer[..read].starts_with(prefix.as_bytes())
+                        }) {
+                            armed.take().map(|(_, response)| response)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(response) = pause {
+                        if response {
+                            pause_response.store(true, Ordering::SeqCst);
+                        } else {
+                            arrived.notify_one();
+                            resume.acquire().await.unwrap().forget();
+                        }
+                    }
+                    if server_write.write_all(&buffer[..read]).await.is_err() {
+                        break;
+                    }
+                }
+            };
+            let download = async move {
+                let mut buffer = [0; 65536];
+                loop {
+                    let read = match server_read.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    if paused.swap(false, Ordering::SeqCst) {
+                        downloading_arrived.notify_one();
+                        downloading_resume.acquire().await.unwrap().forget();
+                    }
+                    if client_write.write_all(&buffer[..read]).await.is_err() {
+                        break;
+                    }
+                }
+            };
+            tokio::select! { () = upload => {}, () = download => {} }
+        });
+    }
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
 async fn live_calendar_unchanged_feeds_and_newer_fetches() {
     crate::ensure_crypto_provider();
     let temp = tempfile::tempdir().unwrap();
@@ -324,8 +712,8 @@ async fn live_calendar_unchanged_feeds_and_newer_fetches() {
     }
 
     for newest_first in [true, false] {
-        let older_text = alarms_feed.replace("SUMMARY:Meeting", "SUMMARY:Older");
-        let newer_text = alarms_feed.replace("SUMMARY:Meeting", "SUMMARY:Newer");
+        let older_text = original.replace("SUMMARY:Meeting", "SUMMARY:Older");
+        let newer_text = original.replace("SUMMARY:Meeting", "SUMMARY:Newer");
         let older_time = Utc::now();
         let newer_time = older_time + chrono::TimeDelta::microseconds(1);
         let (older, newer) = tokio::join!(

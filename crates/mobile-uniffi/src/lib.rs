@@ -12,6 +12,7 @@ use clipper_client::{
 use zeroize::Zeroizing;
 
 mod gym;
+mod kitchen;
 
 uniffi::setup_scaffolding!();
 clipper_app_types::uniffi_reexport_scaffolding!();

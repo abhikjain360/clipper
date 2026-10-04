@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.view.WindowManager
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONArray
@@ -130,6 +131,17 @@ class ClipperAlarmModule : Module() {
 
         Function("dismiss") {
             RingService.dismiss(context)
+        }
+
+        Function("keepScreenOn") { on: Boolean ->
+            appContext.currentActivity?.runOnUiThread {
+                val window = appContext.currentActivity?.window ?: return@runOnUiThread
+                if (on) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
         }
 
         Function("scheduleRestEnd") { sessionId: String, endsAtMillis: Double, title: String, text: String ->

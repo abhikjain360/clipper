@@ -201,6 +201,7 @@ impl SyncEngine {
         show(&session.tables, &envelope, revision)?;
         drop(guard);
         self.app_data.request_push();
+        self.bump_version();
         Ok(row_id.to_string())
     }
 
@@ -410,12 +411,17 @@ impl SyncEngine {
             .local_store
             .apply_app_data_page(&stored, last_sequence)
             .await?;
+        let mut changed = false;
         for ((row, envelope), applied) in stored.iter().zip(&envelopes).zip(applied) {
             if applied {
                 show(&session.tables, envelope, row.revision)?;
+                changed = true;
             }
         }
         self.app_data.set_last_applied(last_sequence);
+        if changed {
+            self.bump_version();
+        }
         Ok(rejected)
     }
 
@@ -644,6 +650,7 @@ impl SyncEngine {
             .ok_or_else(|| ClientError::UnexpectedResponse("malformed row key".into()))?;
         self.local_store.replace_app_data_row(&row).await?;
         show(&session.tables, &theirs, current.revision)?;
+        self.bump_version();
         Ok(false)
     }
 

@@ -62,6 +62,10 @@ class RingService : Service() {
                     stopSelf(startId)
                     return START_NOT_STICKY
                 }
+                if (!alarm.canSnooze) {
+                    stopRinging()
+                    return START_NOT_STICKY
+                }
                 return try {
                     AlarmScheduler(this).snooze(alarm, activeGeneration)
                     stopRinging()
@@ -89,8 +93,9 @@ class RingService : Service() {
         val itemId = intent?.getStringExtra(AlarmIntents.EXTRA_ITEM_ID).orEmpty()
         val occurrenceKey = intent?.getStringExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY).orEmpty()
         val fireAt = intent.getLongExtra(AlarmIntents.EXTRA_FIRE_AT, System.currentTimeMillis())
+        val canSnooze = intent.getBooleanExtra(AlarmIntents.EXTRA_CAN_SNOOZE, true)
         activeAlarm = PlannedAlarm(itemId, occurrenceKey, label, fireAt,
-            intent.getLongExtra(AlarmIntents.EXTRA_START, fireAt))
+            intent.getLongExtra(AlarmIntents.EXTRA_START, fireAt), canSnooze)
         activeGeneration = generation
         // Android 10+ restricts background activity launches. The full-screen
         // intent on the alarm notification is the supported path while the
@@ -99,7 +104,7 @@ class RingService : Service() {
         val appWasVisible = isAppVisible()
 
         acquireWakeLock()
-        startForegroundWithNotification(label, itemId, occurrenceKey)
+        startForegroundWithNotification(label, itemId, occurrenceKey, canSnooze)
 
         isRinging = true
         ClipperClockWidget.updateAll(this)
@@ -115,7 +120,7 @@ class RingService : Service() {
         if (appWasVisible) {
             runCatching {
                 startActivity(
-                    RingActivity.intent(this, label, itemId, occurrenceKey)
+                    RingActivity.intent(this, label, itemId, occurrenceKey, canSnooze)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 )
             }.onFailure { Log.w(TAG, "Could not show ring activity", it) }
@@ -165,6 +170,7 @@ class RingService : Service() {
         label: String,
         itemId: String,
         occurrenceKey: String,
+        canSnooze: Boolean,
     ) {
         // Notification channels and the channel-aware Notification.Builder
         // were added in API 26. The alarm module still supports API 24/25,
@@ -174,7 +180,7 @@ class RingService : Service() {
         val fullScreen = PendingIntent.getActivity(
             this,
             0,
-            RingActivity.intent(this, label, itemId, occurrenceKey),
+            RingActivity.intent(this, label, itemId, occurrenceKey, canSnooze),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
@@ -191,6 +197,16 @@ class RingService : Service() {
             .setOngoing(true)
             .setContentIntent(fullScreen)
             .setFullScreenIntent(fullScreen, true)
+            .apply {
+                if (!canSnooze) {
+                    val dismiss = PendingIntent.getService(this@RingService, 0,
+                        Intent(this@RingService, RingService::class.java)
+                            .setAction(AlarmIntents.ACTION_DISMISS),
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                    addAction(Notification.Action.Builder(null,
+                        getString(R.string.clipper_alarm_dismiss), dismiss).build())
+                }
+            }
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -233,6 +249,7 @@ class RingService : Service() {
                 putExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY, alarm.occurrenceKey)
                 putExtra(AlarmIntents.EXTRA_FIRE_AT, alarm.fireAtMillis)
                 putExtra(AlarmIntents.EXTRA_START, alarm.occurrenceStartMillis)
+                putExtra(AlarmIntents.EXTRA_CAN_SNOOZE, alarm.canSnooze)
                 putExtra(AlarmIntents.EXTRA_GENERATION, generation)
             }
             runCatching {

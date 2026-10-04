@@ -15,6 +15,7 @@ export type PlannedAlarm = {
   label: string;
   fireAtMillis: number;
   occurrenceStartMillis: number;
+  canSnooze: boolean;
 };
 
 type ClipperAlarmNative = {
@@ -34,6 +35,7 @@ type ClipperAlarmNative = {
   dismiss: () => void;
   scheduleRestEnd: (sessionId: string, endsAtMillis: number, title: string, text: string) => void;
   cancelRestEnd: (sessionId: string | null) => void;
+  keepScreenOn: (on: boolean) => void;
 };
 
 const native: ClipperAlarmNative | null =
@@ -58,6 +60,7 @@ export function setAlarms(alarms: PlannedAlarm[]): number {
     label: alarm.label,
     fire_at: alarm.fireAtMillis,
     start: alarm.occurrenceStartMillis,
+    snooze: alarm.canSnooze,
   }));
   return native?.setAlarms(JSON.stringify(plan)) ?? 0;
 }
@@ -122,4 +125,8 @@ export function scheduleRestEnd(
 
 export function cancelRestEnd(sessionId: string | null): void {
   native?.cancelRestEnd(sessionId);
+}
+
+export function keepScreenOn(on: boolean): void {
+  native?.keepScreenOn(on);
 }

@@ -5,6 +5,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.MotionEvent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -29,6 +30,26 @@ class AlarmSlideControlTest {
         }
         val density = slider.resources.displayMetrics.density
         slider.layout(0, 0, (400 * density).toInt(), (96 * density).toInt())
+    }
+
+    @Test
+    fun disabledSnoozeBlocksLeftDragsAndAccessibilityButAllowsDismissal() {
+        slider.canSnooze = false
+        touch(MotionEvent.ACTION_DOWN, 0.5f)
+        touch(MotionEvent.ACTION_MOVE, 0.05f)
+        touch(MotionEvent.ACTION_UP, 0.05f)
+        assertTrue(actions.isEmpty())
+        assertFalse(slider.createAccessibilityNodeInfo().actionList.any {
+            it.id == R.id.clipper_alarm_snooze_action
+        })
+        assertFalse(slider.performAccessibilityAction(R.id.clipper_alarm_snooze_action, null))
+        assertEquals("Slide right to dismiss", slider.contentDescription)
+
+        shadowOf(Looper.getMainLooper()).idleFor(300, TimeUnit.MILLISECONDS)
+        touch(MotionEvent.ACTION_DOWN, 0.5f)
+        touch(MotionEvent.ACTION_MOVE, 0.95f)
+        touch(MotionEvent.ACTION_UP, 0.95f)
+        assertEquals(listOf("dismiss"), actions)
     }
 
     @Test

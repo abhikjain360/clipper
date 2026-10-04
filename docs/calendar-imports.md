@@ -129,6 +129,11 @@ with user-authored alarms.
    covering all objects; the active manifest controls visibility. Concurrent
    cleanup retries competing tombstones and removes only the batch entries it
    finished, retaining newer entries and event IDs added during cleanup.
+   A missing retired payload is already purged. A signed tombstone identical
+   to the retained anchor is already deleted. These outcomes complete cleanup;
+   they do not weaken rollback, body identity or parent-link checks. Source
+   reads overtaken by a newer authenticated head retry before updating the
+   manifest.
 
 A device uploading a batch can discover that another device has finished and
 retired it. If the batch is still active, upload errors remain errors. If it

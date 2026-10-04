@@ -11,3 +11,6 @@ serde_json.workspace = true
 serde_path_to_error.workspace = true
 thiserror.workspace = true
 uuid = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+uuid = { workspace = true, features = ["v7"] }

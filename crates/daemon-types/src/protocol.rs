@@ -7,7 +7,9 @@
 //! response, and event payloads cannot drift.
 
 use clipper_api_types::{ApiErrorCode, ErrorResponse};
-use clipper_app_types::{AppDataWrite, AppState, DeviceInfo};
+use clipper_app_types::{
+    AppDataWrite, AppState, DeviceInfo, KitchenPantryChange, KitchenSessionChange,
+};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -17,7 +19,7 @@ use zeroize::Zeroizing;
 /// incompatibly — the desktop app and the daemon are separate binaries, and an
 /// old daemon can outlive an app update (it is reparented to PID 1, so it keeps
 /// running until killed).
-pub const IPC_AUTH_VERSION: u32 = 8;
+pub const IPC_AUTH_VERSION: u32 = 9;
 pub const IPC_AUTH_NONCE_BYTES: usize = 32;
 pub const IPC_AUTH_TAG_BYTES: usize = 32;
 
@@ -102,6 +104,13 @@ pub enum DaemonCommand {
     AppDataStatus,
     AppDocumentHistory(AppDocumentHistoryParams),
     AppDocumentRevision(AppDocumentRevisionParams),
+    KitchenRecipes(KitchenRecipesParams),
+    KitchenRecipe(KitchenRecipeParams),
+    KitchenRecipeRevision(KitchenRecipeRevisionParams),
+    KitchenChangeSession(KitchenChangeSessionParams),
+    KitchenPantry,
+    KitchenChangePantry(KitchenPantryChange),
+    KitchenPlans,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -327,6 +336,32 @@ pub struct AppDocumentRevisionParams {
     pub collection: String,
     pub id: String,
     pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KitchenRecipesParams {
+    pub search: String,
+    pub zone: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KitchenRecipeParams {
+    pub id: String,
+    pub servings: Option<u32>,
+    pub zone: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KitchenRecipeRevisionParams {
+    pub id: String,
+    pub revision: u64,
+    pub servings: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KitchenChangeSessionParams {
+    pub recipe_id: String,
+    pub change: KitchenSessionChange,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

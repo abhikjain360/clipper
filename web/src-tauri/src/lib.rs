@@ -4,6 +4,7 @@ mod alarms;
 mod break_reminders;
 mod daemon_client;
 mod daemon_spawn;
+mod kitchen;
 #[cfg(target_os = "macos")]
 mod notifications;
 
@@ -178,6 +179,15 @@ pub fn run() {
             get_collab_doc_meta,
             list_devices,
             remove_device,
+            kitchen::kitchen_recipes,
+            kitchen::kitchen_recipe,
+            kitchen::kitchen_recipe_history,
+            kitchen::kitchen_recipe_revision,
+            kitchen::kitchen_change_session,
+            kitchen::kitchen_pantry,
+            kitchen::kitchen_change_pantry,
+            kitchen::kitchen_plans,
+            kitchen::keep_display_awake,
         ])
         .on_window_event(|window, event| {
             #[cfg(target_os = "macos")]

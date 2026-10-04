@@ -560,7 +560,7 @@ impl SyncEngine {
         Ok(())
     }
 
-    async fn read_calendar_source(
+    pub(super) async fn read_calendar_source(
         &self,
         id: &str,
     ) -> Result<(CalendarSource, LocalHead), ClientError> {
@@ -608,11 +608,49 @@ impl SyncEngine {
         id: &str,
         source: bool,
     ) -> Result<Option<ScheduleRecord>, ClientError> {
-        let item = match self.api.get_object(id).await {
-            Ok(item) => item,
-            Err(ClientError::Api { status: 404, .. }) => return Ok(None),
-            Err(error) => return Err(error),
-        };
+        loop {
+            let item = match self.api.get_object(id).await {
+                Ok(item) => item,
+                Err(ClientError::Api { status: 404, .. }) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let result = self.load_calendar_record_once(id, source, &item).await;
+            let Err(error) = &result else {
+                return result;
+            };
+            if !matches!(
+                error,
+                ClientError::RevisionRejected(_) | ClientError::Api { status: 404, .. }
+            ) {
+                return result;
+            }
+            let head = match self.api.get_object_head(id).await {
+                Ok(head) => head,
+                Err(ClientError::Api { status: 404, .. }) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            verify_object_head_envelope(&head)?;
+            if head.id.to_string() != id || head.kind != ObjectKind::Schedule {
+                return Err(ClientError::InvalidArgument(
+                    "Calendar object identity mismatch".into(),
+                ));
+            }
+            self.check_revision_advance(&head).await?;
+            if head.envelope.body.operation == ObjectEnvelopeOperation::Delete {
+                return Ok(None);
+            }
+            if head.revision <= item.revision {
+                return result;
+            }
+        }
+    }
+
+    async fn load_calendar_record_once(
+        &self,
+        id: &str,
+        source: bool,
+        item: &ObjectListItem,
+    ) -> Result<Option<ScheduleRecord>, ClientError> {
         if item.id.to_string() != id || item.kind != ObjectKind::Schedule {
             return Err(ClientError::InvalidArgument(
                 "Import event identity mismatch".into(),
@@ -620,7 +658,7 @@ impl SyncEngine {
         }
         let key = self.current_encryption_key().await?;
         let (record, encrypted) = self
-            .decrypt_schedule_object_item(&self.api, &item, &key)
+            .decrypt_schedule_object_item(&self.api, item, &key)
             .await?;
         if (source && record.as_source().is_none()) || (!source && record.as_ingested().is_none()) {
             return Err(ClientError::InvalidArgument(
@@ -649,7 +687,7 @@ impl SyncEngine {
     /// Verifies the target before purging it, tombstoned or not. A missing
     /// historical revision means the object is already gone. It is not
     /// permission to delete an object of some other kind.
-    async fn purge_import_object(
+    pub(super) async fn purge_import_object(
         &self,
         id: &str,
         kind: ObjectKind,
@@ -677,7 +715,7 @@ impl SyncEngine {
             )?;
             let payload = single_payload(&historical)?;
             check_payload_ciphertext_size(payload, MAX_SCHEDULE_PAYLOAD_CIPHERTEXT_BYTES)?;
-            let ciphertext = self
+            let ciphertext = match self
                 .api
                 .download_object_revision_payload(
                     id,
@@ -685,7 +723,12 @@ impl SyncEngine {
                     &payload.id.to_string(),
                     payload.ciphertext_size,
                 )
-                .await?;
+                .await
+            {
+                Ok(ciphertext) => ciphertext,
+                Err(ClientError::Api { status: 404, .. }) => return Ok(()),
+                Err(error) => return Err(error),
+            };
             verify_payload_hash(payload, &ciphertext)?;
             let aad = crypto::object_payload_aad(&historical.envelope.body, payload.id)?;
             let plaintext = crypto::decrypt(&key, &payload.nonce, &ciphertext, &aad)?;
@@ -743,29 +786,26 @@ impl SyncEngine {
                     "Import cleanup identity mismatch".into(),
                 ));
             }
-            if kind == ObjectKind::Schedule {
-                match self.check_revision_advance(&item).await {
-                    Ok(()) => {}
-                    Err(error @ ClientError::RevisionRejected(_)) => {
-                        let head = match self.api.get_object_head(id).await {
-                            Ok(head) => head,
-                            Err(ClientError::Api { status: 404, .. }) => break,
-                            Err(error) => return Err(error),
-                        };
-                        verify_object_head_envelope(&head)?;
-                        if head.id.to_string() != id
-                            || head.kind != kind
-                            || head.envelope.body.operation != ObjectEnvelopeOperation::Delete
-                        {
-                            return Err(error);
-                        }
-                        self.check_revision_advance(&head).await?;
-                        break;
+            match self.check_revision_advance(&item).await {
+                Ok(()) => {}
+                Err(error @ ClientError::RevisionRejected(_)) => {
+                    let head = match self.api.get_object_head(id).await {
+                        Ok(head) => head,
+                        Err(ClientError::Api { status: 404, .. }) => break,
+                        Err(error) => return Err(error),
+                    };
+                    verify_object_head_envelope(&head)?;
+                    if head.id.to_string() != id
+                        || head.kind != kind
+                        || head.envelope.body.operation != ObjectEnvelopeOperation::Delete
+                    {
+                        return Err(error);
                     }
-                    Err(error) => return Err(error),
+                    self.check_revision_advance(&head).await?;
+                    break;
                 }
+                Err(error) => return Err(error),
             }
-            self.check_revision_advance(&item).await?;
             let head = LocalHead {
                 revision: item.envelope.body.revision,
                 parent_hash: crypto::object_envelope_parent_hash(&item.envelope.body)?,
