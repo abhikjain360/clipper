@@ -326,6 +326,10 @@ async fn serve(config: ServerConfig, secrets: ServerSecrets) -> ServerResult<()>
             get(routes::objects::download_revision_payload),
         )
         .route(
+            "/api/objects/{id}/head",
+            get(routes::objects::get_object_head),
+        )
+        .route(
             "/api/objects/{id}",
             get(routes::objects::get_object).delete(routes::objects::purge_object),
         )

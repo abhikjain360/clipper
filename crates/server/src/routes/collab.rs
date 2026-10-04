@@ -75,9 +75,6 @@ pub async fn create_collab_doc(
     let state_ref = &state;
 
     let seq = with_txn(state.db(), "create_collab_doc", async move |txn| {
-        // The collab_docs insert is the first write, so it takes the SQLite write
-        // lock. Allocate the seq only after that, matching the event_log.seq
-        // boundary rule (seq order must match commit order).
         collab_docs::ActiveModel {
             id: Set(collab_doc_id),
             owner_user_id: Set(user_id),
@@ -251,9 +248,6 @@ pub async fn rename_collab_doc(
     let state_ref = &state;
 
     let (seq, doc) = with_txn(state.db(), "rename_collab_doc", async move |txn| {
-        // The collab_docs update is the first write, so it takes the SQLite
-        // write lock; the seq is allocated only after that (see the seq
-        // ordering rule in CLAUDE.md).
         let doc = collab_docs::ActiveModel {
             id: Set(collab_doc_id),
             title: Set(title_ref.to_owned()),
@@ -421,7 +415,6 @@ pub async fn delete_collab_doc(
             ));
         }
 
-        // Allocated after the delete above has taken the write lock.
         let seq = state_ref.next_event_seq();
         event_log::ActiveModel {
             seq: Set(seq),

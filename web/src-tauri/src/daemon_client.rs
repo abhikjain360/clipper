@@ -9,6 +9,11 @@ pub enum DaemonClientError {
     Daemon(String),
     #[error("IPC protocol error: {0}")]
     Protocol(String),
+    #[error("IPC write failed: {0}")]
+    Write(#[from] std::io::Error),
+    #[cfg(unix)]
+    #[error("IPC writer task failed: {0}")]
+    WriterTask(#[from] tokio::task::JoinError),
 }
 
 // ── public interface ──────────────────────────────────────────────────────────
@@ -170,7 +175,9 @@ mod inner {
         authenticate(&mut reader, &mut write_half, data_dir).await?;
         info!("Daemon IPC authenticated");
 
-        run(&mut reader, &mut write_half, rx, shared).await
+        run(&mut reader, write_half, rx, shared)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn authenticate(
@@ -252,10 +259,18 @@ mod inner {
 
     async fn run(
         reader: &mut BufReader<OwnedReadHalf>,
-        writer: &mut OwnedWriteHalf,
+        mut writer: OwnedWriteHalf,
         rx: &mut mpsc::UnboundedReceiver<PendingRequest>,
         shared: &Arc<Shared>,
-    ) -> Result<(), String> {
+    ) -> Result<(), DaemonClientError> {
+        let (write_tx, mut write_rx) = mpsc::unbounded_channel::<String>();
+        let mut writers = tokio::task::JoinSet::new();
+        writers.spawn(async move {
+            while let Some(line) = write_rx.recv().await {
+                write_line(&mut writer, &line).await?;
+            }
+            Ok::<(), std::io::Error>(())
+        });
         let mut in_flight: HashMap<
             String,
             oneshot::Sender<Result<Option<serde_json::Value>, DaemonClientError>>,
@@ -265,17 +280,21 @@ mod inner {
 
         loop {
             tokio::select! {
+                result = writers.join_next() => {
+                    return result.expect("writer task exists")?.map_err(DaemonClientError::Write);
+                }
                 pending = rx.recv() => {
                     let Some(pending) = pending else { return Ok(()); };
                     let id = next_id.to_string();
                     next_id += 1;
                     let req = DaemonRequest::new(id.clone(), pending.command);
-                    let json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
-                    write_line(writer, &json).await.map_err(|e| format!("write: {e}"))?;
+                    let json = serde_json::to_string(&req)
+                        .map_err(|error| DaemonClientError::Protocol(error.to_string()))?;
                     in_flight.insert(id, pending.reply_tx);
+                    write_tx.send(json).map_err(|_| DaemonClientError::NotConnected)?;
                 }
                 line = read_line(reader, &mut partial_line) => {
-                    let line = line.map_err(|e| format!("read: {e}"))?;
+                    let line = line.map_err(DaemonClientError::Protocol)?;
                     if line.is_empty() { continue; }
                     match serde_json::from_str::<DaemonLine>(&line) {
                         Ok(DaemonLine::Response(resp)) => {
@@ -350,6 +369,58 @@ mod inner {
         };
 
         use super::read_line;
+
+        #[tokio::test]
+        async fn a_large_request_write_does_not_block_reading_replies() {
+            use clipper_daemon_types::SendClipboardParams;
+
+            use super::*;
+
+            let (client, daemon) = UnixStream::pair().unwrap();
+            let (read_half, write_half) = client.into_split();
+            let mut reader = BufReader::new(read_half);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let shared = Arc::new(Shared {
+                state: RwLock::new(AppState::default()),
+                version: AtomicU64::new(0),
+                notify: Notify::new(),
+            });
+            let task =
+                tokio::spawn(async move { run(&mut reader, write_half, &mut rx, &shared).await });
+            let (reply_tx, reply_rx) = oneshot::channel();
+            tx.send(PendingRequest {
+                command: DaemonCommand::GetState,
+                reply_tx,
+            })
+            .unwrap();
+            let (daemon_read, mut daemon_write) = daemon.into_split();
+            let mut daemon_reader = BufReader::new(daemon_read);
+            let mut line = String::new();
+            daemon_reader.read_line(&mut line).await.unwrap();
+            let request: DaemonRequest = serde_json::from_str(&line).unwrap();
+            let (large_reply, _) = oneshot::channel();
+            tx.send(PendingRequest {
+                command: DaemonCommand::SendClipboard(SendClipboardParams {
+                    text: "x".repeat(8 * 1024 * 1024),
+                }),
+                reply_tx: large_reply,
+            })
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let response = DaemonResponse::success(request.id, None);
+            daemon_write
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            let result = timeout(Duration::from_millis(500), reply_rx).await;
+            task.abort();
+            assert!(
+                result
+                    .expect("reply read while the large write is blocked")
+                    .unwrap()
+                    .is_ok()
+            );
+        }
 
         #[tokio::test]
         async fn a_read_cancelled_mid_line_keeps_the_bytes_it_already_read() {

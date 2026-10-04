@@ -52,6 +52,32 @@ fn recurrence_numbers_are_checked_after_every_property_name_separator() {
 }
 
 #[test]
+fn too_many_semicolon_values_and_parameters_are_refused() {
+    for line in [
+        format!("X-A:a{}", ";".repeat(500_000)),
+        format!("REQUEST-STATUS:a{}", ";".repeat(500_000)),
+        format!("GEO:1{}", ";".repeat(500_000)),
+        format!("X-A{}:v", ";B".repeat(500_000)),
+    ] {
+        let feed = format!(
+            "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:empty\nDTSTART:20260907T090000Z\n{line}\nEND:VEVENT\nEND:VCALENDAR\n"
+        );
+        assert!(matches!(
+            parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()),
+            Err(clipper_schedule::IngestError::LimitExceeded(
+                "too many calendar values"
+            ))
+        ));
+    }
+    let feed = format!(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:quoted\nDTSTART:20260907T090000Z\nX-A;B=\"{}\":v\nSUMMARY:{}\nEND:VEVENT\nEND:VCALENDAR\n",
+        ";,".repeat(500_000),
+        "\\;".repeat(500_000),
+    );
+    assert!(parse_ics(&feed, SourceId(uuid_fixture()), import_fixture()).is_ok());
+}
+
+#[test]
 fn too_many_empty_values_are_refused_before_calendar_parsing() {
     for property in ["CATEGORIES", "EXDATE"] {
         let feed = format!(
