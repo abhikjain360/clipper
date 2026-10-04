@@ -785,6 +785,8 @@ function TimedBlock({
     lanes: number;
 }) {
     const { top, height } = bandGeometry(occurrence, day);
+    const drawnHeight = Math.max(4, height - 2);
+    const color = blockColor(occurrence);
     const label = `${occurrence.title}, ${clockRange(occurrence)}${
         occurrence.source ? `, from ${occurrence.source}` : ""
     }${occurrence.cancelled ? ", cancelled" : ""}`;
@@ -802,14 +804,15 @@ function TimedBlock({
                     padding: "1px 4px",
                     cursor: "pointer",
                     top,
-                    height,
+                    height: drawnHeight,
                     left: `calc(${(lane / lanes) * 100}% + 2px)`,
                     width: `calc(${100 / lanes}% - 4px)`,
                     overflow: "hidden",
+                    boxSizing: "border-box",
                     borderRadius: 4,
-                    backgroundColor: blockColor(occurrence).fill,
-                    borderLeftColor: blockColor(occurrence).accent,
-                    borderLeftWidth: 3,
+                    backgroundColor: color.fill,
+                    border: `1px solid ${color.accent}80`,
+                    borderLeft: `3px solid ${color.accent}`,
                     opacity: occurrence.cancelled ? 0.55 : 1,
                 }}
                 aria-label={label}
@@ -823,8 +826,8 @@ function TimedBlock({
                 }}
                 onClick={() => onStart(occurrence)}
             >
-                {/* One complete 13px line plus 1px padding above and below. */}
-                {height >= 15 && (
+                {/* One complete 13px line plus 1px padding and 1px border above and below. */}
+                {drawnHeight >= 17 && (
                     <Text
                         fontSize={11}
                         lineHeight={13}
@@ -834,7 +837,7 @@ function TimedBlock({
                         {occurrence.title}
                     </Text>
                 )}
-                {height >= 34 && (
+                {drawnHeight >= 36 && (
                     <Text fontSize={10} lineHeight={12} color="#8b949e" numberOfLines={1}>
                         {occurrence.source
                             ? `${clockRange(occurrence)} · ${occurrence.source}`
