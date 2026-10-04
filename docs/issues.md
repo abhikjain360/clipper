@@ -2535,6 +2535,18 @@ Each entry has:
   while its generator runs, causing a file-not-found error.
 - **Decision:** use a separate temporary directory for each check.
 
+### 201. Refused notification permission stopped the Mac notification loops
+
+- **Status:** fixed, uncommitted
+- **Severity:** medium
+- **Where:** Tauri break reminders, alarms and notification permission handling.
+- **Fix:** request permission once and read the current authorization status on
+  state changes and each minute while notifications are scheduled. Missing
+  responses time out. Denial skips delivery without stopping either loop;
+  granting permission resumes delivery without restarting or replaying missed
+  notifications. Running break timers show a note and Notifications settings
+  button while permission is off.
+
 ## Docs
 
 ### 29. Doc claims the code did not satisfy

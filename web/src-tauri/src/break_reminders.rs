@@ -14,7 +14,12 @@ struct BreakReminders {
 }
 
 impl BreakReminders {
-    fn update(&mut self, actual: Option<&ActualView>, now: DateTime<Utc>) -> Option<BreakReminder> {
+    fn update(
+        &mut self,
+        actual: Option<&ActualView>,
+        now: DateTime<Utc>,
+        authorized: bool,
+    ) -> Option<BreakReminder> {
         let Some(actual) = actual.filter(|actual| {
             actual.running
                 && actual.end.is_empty()
@@ -45,7 +50,7 @@ impl BreakReminders {
         }
         let reminder = timer.next;
         timer.next = next_break_reminder(started, now);
-        (now - reminder.at < Duration::minutes(1)).then_some(reminder)
+        (authorized && now - reminder.at < Duration::minutes(1)).then_some(reminder)
     }
 }
 
@@ -71,7 +76,6 @@ pub async fn run(daemon: std::sync::Arc<crate::daemon_client::DaemonClient>) {
     use crate::notifications;
 
     let mut reminders = BreakReminders::default();
-    let mut authorized = false;
     let mut resolved_timer = None;
     loop {
         let version = daemon.state_version();
@@ -95,14 +99,17 @@ pub async fn run(daemon: std::sync::Arc<crate::daemon_client::DaemonClient>) {
             .await;
             continue;
         }
-        let due = reminders.update(state.running_actual.as_ref(), Utc::now());
-        if reminders.timer.is_some() && !authorized {
-            if !notifications::request_permission().await {
-                return;
-            }
-            authorized = true;
-            continue;
-        }
+        let authorized = if state.running_actual.as_ref().is_some_and(|actual| {
+            actual.running
+                && actual.end.is_empty()
+                && !actual.item_id.is_empty()
+                && actual.break_reminders
+        }) {
+            notifications::request_permission().await
+        } else {
+            false
+        };
+        let due = reminders.update(state.running_actual.as_ref(), Utc::now(), authorized);
         if let Some(reminder) = due
             && let Ok(Ok(meetings)) = tokio::time::timeout(
                 Wait::from_secs(2),
@@ -171,7 +178,7 @@ mod tests {
         let actual = actual();
         let started = actual.start.parse::<DateTime<Utc>>().unwrap();
         let mut reminders = BreakReminders::default();
-        assert_eq!(reminders.update(Some(&actual), started), None);
+        assert_eq!(reminders.update(Some(&actual), started, true), None);
         for (minute, kind) in [
             (20, BreakReminderKind::Eyes),
             (40, BreakReminderKind::Eyes),
@@ -184,14 +191,14 @@ mod tests {
         ] {
             let at = started + Duration::minutes(minute);
             assert_eq!(
-                reminders.update(Some(&actual), at - Duration::seconds(1)),
+                reminders.update(Some(&actual), at - Duration::seconds(1), true),
                 None
             );
             assert_eq!(
-                reminders.update(Some(&actual), at),
+                reminders.update(Some(&actual), at, true),
                 Some(BreakReminder { kind, at })
             );
-            assert_eq!(reminders.update(Some(&actual), at), None);
+            assert_eq!(reminders.update(Some(&actual), at, true), None);
         }
     }
 
@@ -200,19 +207,19 @@ mod tests {
         let mut actual = actual();
         let started = actual.start.parse::<DateTime<Utc>>().unwrap();
         let mut reminders = BreakReminders::default();
-        reminders.update(Some(&actual), started);
+        reminders.update(Some(&actual), started, true);
         actual.running = false;
         actual.end = (started + Duration::minutes(10)).to_rfc3339();
         assert_eq!(
-            reminders.update(Some(&actual), started + Duration::minutes(20)),
+            reminders.update(Some(&actual), started + Duration::minutes(20), true),
             None
         );
         assert_eq!(
-            reminders.update(None, started + Duration::minutes(50)),
+            reminders.update(None, started + Duration::minutes(50), true),
             None
         );
         assert_eq!(
-            reminders.update(None, started + Duration::minutes(80)),
+            reminders.update(None, started + Duration::minutes(80), true),
             None
         );
     }
@@ -231,9 +238,9 @@ mod tests {
         ] {
             let started = actual.start.parse::<DateTime<Utc>>().unwrap();
             let mut reminders = BreakReminders::default();
-            assert_eq!(reminders.update(Some(&actual), started), None);
+            assert_eq!(reminders.update(Some(&actual), started, true), None);
             assert_eq!(
-                reminders.update(Some(&actual), started + Duration::minutes(20)),
+                reminders.update(Some(&actual), started + Duration::minutes(20), true),
                 None
             );
         }
@@ -250,11 +257,11 @@ mod tests {
             ..Default::default()
         }];
         let mut reminders = BreakReminders::default();
-        reminders.update(Some(&actual), started);
+        reminders.update(Some(&actual), started, true);
         let deliver = |reminder| outside_meetings(reminder, &meetings);
         assert_eq!(
             reminders
-                .update(Some(&actual), started + Duration::minutes(20))
+                .update(Some(&actual), started + Duration::minutes(20), true)
                 .filter(|reminder| deliver(*reminder)),
             None,
         );
@@ -265,12 +272,48 @@ mod tests {
         let at = started + Duration::minutes(40);
         assert_eq!(
             reminders
-                .update(Some(&actual), at)
+                .update(Some(&actual), at, true)
                 .filter(|reminder| deliver(*reminder)),
             Some(BreakReminder {
                 at,
                 kind: BreakReminderKind::Eyes
             }),
+        );
+    }
+
+    #[test]
+    fn denied_permission_skips_reminders_and_granting_resumes_the_rhythm() {
+        let actual = actual();
+        let started = actual.start.parse::<DateTime<Utc>>().unwrap();
+        let mut reminders = BreakReminders::default();
+        assert_eq!(reminders.update(Some(&actual), started, false), None);
+        assert_eq!(
+            reminders.update(Some(&actual), started + Duration::minutes(20), false),
+            None
+        );
+        assert_eq!(
+            reminders.update(Some(&actual), started + Duration::minutes(21), true),
+            None
+        );
+        let at = started + Duration::minutes(40);
+        assert_eq!(
+            reminders.update(Some(&actual), at, true),
+            Some(BreakReminder {
+                at,
+                kind: BreakReminderKind::Eyes
+            })
+        );
+        assert_eq!(
+            reminders.update(Some(&actual), started + Duration::minutes(50), false),
+            None
+        );
+        let at = started + Duration::minutes(60);
+        assert_eq!(
+            reminders.update(Some(&actual), at, true),
+            Some(BreakReminder {
+                at,
+                kind: BreakReminderKind::Work
+            })
         );
     }
 }

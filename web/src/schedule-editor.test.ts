@@ -54,6 +54,22 @@ const backend = {
     startActual: async () => starts++,
     getState: async () => ({}),
 };
+const notifications = {
+    desktop: false,
+    allowed: false as boolean | null,
+    failed: false,
+    checks: 0,
+    settings: 0,
+    async invoke(command: string) {
+        if (command === "notification_permission") {
+            this.checks++;
+            if (this.failed) throw new Error("Missing permission response");
+            return this.allowed;
+        }
+        assert.equal(command, "open_notification_settings");
+        this.settings++;
+    },
+};
 
 const ui = `
 import { Children, createElement as h, cloneElement, createContext, useContext } from "react";
@@ -92,11 +108,13 @@ before(async () => {
         IS_REACT_ACT_ENVIRONMENT: true,
     });
     Reflect.set(globalThis, Symbol.for("schedule-editor-backend"), backend);
+    Reflect.set(globalThis, Symbol.for("schedule-notifications"), notifications);
     const mocks: Record<string, string> = {
         tamagui: ui,
         "./tamagui.config": ui,
         "./backend": `export const clipperBackend = async () => globalThis[Symbol.for("schedule-editor-backend")];
-            export const formatBackendError = String; export const isTauriRuntime = () => false;`,
+            export const formatBackendError = String; export const isTauriRuntime = () => globalThis[Symbol.for("schedule-notifications")].desktop;`,
+        "@tauri-apps/api/core": `export const invoke = (command) => globalThis[Symbol.for("schedule-notifications")].invoke(command);`,
         "./CalendarDatePicker": `export { Box as CalendarDatePicker } from "tamagui";`,
         "./kitchen/ScheduleRecipes": `export const ScheduleRecipes = () => null;`,
         "lucide-react": `export { Box as AlarmClock, Box as CalendarClock, Box as ChevronLeft,
@@ -145,6 +163,7 @@ before(async () => {
 after(() => {
     act(() => root?.unmount());
     Reflect.deleteProperty(globalThis, Symbol.for("schedule-editor-backend"));
+    Reflect.deleteProperty(globalThis, Symbol.for("schedule-notifications"));
     browser.happyDOM.abort();
 });
 
@@ -313,4 +332,65 @@ test("Next disables only the running occurrence and shows its elapsed time", asy
         cancelled.some((button) => button.textContent === "Start"),
         false,
     );
+});
+
+const reminderNote = "Break reminders are off: allow notifications for Clipper in System Settings";
+const reminderTimer: ActualView = {
+    id: "reminder-timer",
+    item_id: series,
+    occurrence_key: "first",
+    title: "Work",
+    start: new Date(Date.now() - 120_000).toISOString(),
+    end: "",
+    running: true,
+    break_reminders: true,
+};
+
+test("a denied break timer shows settings and clears the note after permission is granted", async () => {
+    notifications.desktop = true;
+    notifications.allowed = false;
+    notifications.settings = 0;
+    await render([occurrence], "Next", reminderTimer);
+    assert.ok(browser.document.body.textContent?.includes(reminderNote));
+    const settings = Array.from(browser.document.querySelectorAll("button")).find(
+        (button) => button.textContent === "Open notification settings",
+    );
+    assert.ok(settings);
+    await act(async () => settings.click());
+    assert.equal(notifications.settings, 1);
+    notifications.allowed = true;
+    await act(async () => browser.dispatchEvent(new browser.Event("focus")));
+    assert.equal(browser.document.body.textContent?.includes(reminderNote), false);
+    assert.equal(browser.document.body.textContent?.includes("Open notification settings"), false);
+    assert.deepEqual(errors, []);
+});
+
+test("missing permission recovers on the minute check without restarting the timer", async (t) => {
+    act(() => root.render(null));
+    t.mock.timers.enable({ apis: ["setInterval"] });
+    notifications.desktop = true;
+    notifications.failed = true;
+    notifications.checks = 0;
+    await render([occurrence], "Next", reminderTimer);
+    assert.ok(browser.document.body.textContent?.includes(reminderNote));
+    assert.equal(notifications.checks, 1);
+    notifications.failed = false;
+    notifications.allowed = true;
+    await act(async () => t.mock.timers.tick(60_000));
+    assert.equal(notifications.checks, 2);
+    assert.equal(browser.document.body.textContent?.includes(reminderNote), false);
+    notifications.allowed = false;
+    await act(async () => t.mock.timers.tick(60_000));
+    assert.ok(browser.document.body.textContent?.includes(reminderNote));
+    act(() => root.render(null));
+});
+
+test("ordinary timers and browser timers do not show the notification note", async () => {
+    notifications.desktop = true;
+    notifications.allowed = false;
+    await render([occurrence], "Next", { ...reminderTimer, break_reminders: false });
+    assert.equal(browser.document.body.textContent?.includes(reminderNote), false);
+    notifications.desktop = false;
+    await render([occurrence], "Next", reminderTimer);
+    assert.equal(browser.document.body.textContent?.includes(reminderNote), false);
 });

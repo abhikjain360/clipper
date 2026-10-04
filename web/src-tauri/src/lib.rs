@@ -182,6 +182,8 @@ pub fn run() {
             start_actual,
             stop_actual,
             actuals_between,
+            notification_permission,
+            open_notification_settings,
             add_calendar_source,
             sync_calendar_source,
             set_calendar_source_alarms,
@@ -254,6 +256,45 @@ fn init_tracing() {
             .unwrap_or_else(|_| EnvFilter::new("clipper_desktop=info,clipper_client=info"));
         tracing_subscriber::fmt().with_env_filter(filter).init();
     });
+}
+
+#[tauri::command]
+async fn notification_permission() -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(notifications::allowed().await)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[tauri::command]
+async fn open_notification_settings() -> CommandResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = tauri::async_runtime::spawn_blocking(|| {
+            std::process::Command::new("/usr/bin/open")
+                .arg("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+                .status()
+        })
+        .await
+        .map_err(|error| CommandError::Client(error.to_string()))?
+        .map_err(|error| CommandError::Client(error.to_string()))?;
+        if !status.success() {
+            return Err(CommandError::Client(
+                "Could not open notification settings".into(),
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(CommandError::Client(
+            "Notification settings are available on macOS".into(),
+        ))
+    }
 }
 
 #[tauri::command]

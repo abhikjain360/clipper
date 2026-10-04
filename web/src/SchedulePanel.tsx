@@ -67,6 +67,7 @@ import type {
 } from "@clipper/shared";
 import { calendarSyncLabel } from "@clipper/shared";
 import { clipperBackend, formatBackendError, isTauriRuntime } from "./backend";
+import { openNotificationSettings, useNotificationPermission } from "./notification-permission";
 import { ScheduleRecipes } from "./kitchen/ScheduleRecipes";
 import { layoutDay, overlapsDay, spanMinutes } from "./schedule-layout";
 import {
@@ -1254,6 +1255,10 @@ function RunningTimer({
 }) {
     const [now, setNow] = useState(() => Date.now());
     const [busy, setBusy] = useState(false);
+    const remindersActive = Boolean(
+        running?.running && !running.end && running.item_id && running.break_reminders,
+    );
+    const notificationsAllowed = useNotificationPermission(remindersActive);
 
     // Ticks the display only. The record is written twice and no more, on
     // start and on stop, because every write is a retained object.
@@ -1313,6 +1318,22 @@ function RunningTimer({
                     Stop
                 </Button>
             </XStack>
+            {remindersActive && notificationsAllowed === false && (
+                <YStack gap="$2" mt="$3">
+                    <Text fontSize={12} color={palette.warning} role="status">
+                        Break reminders are off: allow notifications for Clipper in System Settings
+                    </Text>
+                    <Button
+                        onPress={() =>
+                            void openNotificationSettings().catch((error) =>
+                                onError(formatBackendError(error)),
+                            )
+                        }
+                    >
+                        Open notification settings
+                    </Button>
+                </YStack>
+            )}
         </Card>
     );
 }

@@ -78,9 +78,14 @@ The packaged Tauri Mac app delivers ordinary macOS notifications using
 UserNotifications. Closing the window hides it and keeps the app running;
 clicking the Dock icon reopens it. Quit ends reminder delivery, while the
 daemon's timer can keep running. The first enabled timer or upcoming alarm
-targeted at this Mac requests notification permission. Denial disables delivery
-for that app run. To enable it later, use
-System Settings > Notifications > Clipper, then quit and reopen Clipper.
+targeted at this Mac requests notification permission once. Denied or missing
+permission skips delivery while both loops keep running. They recheck permission
+on state changes and at least once a minute without repeating the prompt.
+Allowing notifications in System Settings > Notifications > Clipper resumes
+delivery without restarting the app or replaying skipped reminders. While an
+enabled timer is running without permission, the desktop shows a note and a
+button to open Notifications settings. The note refreshes each minute and when
+the window gains focus, and disappears when permission is granted.
 Unbundled development binaries do not deliver notifications. Android and the
 browser preserve the flag without delivering reminders.
 
@@ -349,8 +354,10 @@ retry after five seconds, so a recovered query can still deliver due alarms
 within that minute.
 
 The first marked timer or upcoming alarm targeted at this Mac requests macOS
-notification permission. Denial disables both kinds of notification for that
-app run without retries. Unbundled development binaries do not notify.
+notification permission once. Both loops recheck the current permission on
+state changes and at least once a minute while notifications are scheduled.
+Denied or missing permission skips due notifications; allowing notifications
+later resumes delivery without a restart. Unbundled development binaries do not notify.
 Notification sound and banners also follow the owner's macOS settings.
 
 ### Android registration

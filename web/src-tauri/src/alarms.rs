@@ -15,12 +15,20 @@ impl Alarms {
         self.after.max(now - chrono::Duration::minutes(1))
     }
 
-    fn due<'a>(&mut self, plan: Option<&'a [AlarmView]>, now: DateTime<Utc>) -> Vec<&'a AlarmView> {
+    fn due<'a>(
+        &mut self,
+        plan: Option<&'a [AlarmView]>,
+        now: DateTime<Utc>,
+        authorized: bool,
+    ) -> Vec<&'a AlarmView> {
         let Some(plan) = plan else {
             return Vec::new();
         };
         let from = self.from(now).timestamp_millis();
         self.after = now;
+        if !authorized {
+            return Vec::new();
+        }
         plan.iter()
             .filter(|alarm| {
                 alarm.fire_at_millis > from && alarm.fire_at_millis <= now.timestamp_millis()
@@ -32,7 +40,6 @@ impl Alarms {
 pub async fn run(daemon: Arc<DaemonClient>) {
     let mut alarms = Alarms { after: Utc::now() };
     let mut device = None;
-    let mut authorized = false;
     loop {
         let version = daemon.state_version();
         let state = daemon.get_state().await;
@@ -58,20 +65,18 @@ pub async fn run(daemon: Arc<DaemonClient>) {
             )
             .await;
             let plan = result.ok().and_then(Result::ok);
-            if plan.as_ref().is_some_and(|plan| !plan.is_empty()) && !authorized {
-                if !notifications::request_permission().await {
-                    return;
-                }
-                authorized = true;
-                continue;
-            }
+            let authorized = if plan.as_ref().is_some_and(|plan| !plan.is_empty()) {
+                notifications::request_permission().await
+            } else {
+                false
+            };
             if daemon.state_version() != version {
                 continue;
             }
             let observed = Utc::now();
             let fresh = daemon.get_state().await;
             if fresh.device_id() == device.as_deref() {
-                for alarm in alarms.due(plan.as_deref(), observed) {
+                for alarm in alarms.due(plan.as_deref(), observed, authorized) {
                     notifications::show_alarm(alarm);
                 }
                 if let Some(next) = plan
@@ -111,21 +116,55 @@ mod tests {
         }];
         assert!(
             alarms
-                .due(None, started + chrono::Duration::seconds(10))
+                .due(None, started + chrono::Duration::seconds(10), true)
                 .is_empty()
         );
         assert!(
             alarms
-                .due(None, started + chrono::Duration::seconds(15))
+                .due(None, started + chrono::Duration::seconds(15), true)
                 .is_empty()
         );
-        let due = alarms.due(Some(&plan), started + chrono::Duration::seconds(20));
+        let due = alarms.due(Some(&plan), started + chrono::Duration::seconds(20), true);
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].fire_at_millis, fire_at.timestamp_millis());
         assert!(
             alarms
-                .due(Some(&plan), started + chrono::Duration::seconds(25))
+                .due(Some(&plan), started + chrono::Duration::seconds(25), true)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn denied_permission_skips_alarms_and_granting_resumes_delivery() {
+        let started: DateTime<Utc> = "2026-10-07T09:00:00Z".parse().unwrap();
+        let mut alarms = Alarms { after: started };
+        let plan: Vec<_> = [5, 20, 30, 40]
+            .into_iter()
+            .map(|second| AlarmView {
+                fire_at_millis: (started + chrono::Duration::seconds(second)).timestamp_millis(),
+                ..Default::default()
+            })
+            .collect();
+        assert!(
+            alarms
+                .due(Some(&plan), started + chrono::Duration::seconds(10), false)
+                .is_empty()
+        );
+        assert!(
+            alarms
+                .due(Some(&plan), started + chrono::Duration::seconds(15), true)
+                .is_empty()
+        );
+        let due = alarms.due(Some(&plan), started + chrono::Duration::seconds(20), true);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].fire_at_millis, plan[1].fire_at_millis);
+        assert!(
+            alarms
+                .due(Some(&plan), started + chrono::Duration::seconds(30), false)
+                .is_empty()
+        );
+        let due = alarms.due(Some(&plan), started + chrono::Duration::seconds(40), true);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].fire_at_millis, plan[3].fire_at_millis);
     }
 }
