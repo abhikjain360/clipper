@@ -3876,15 +3876,21 @@ fn imported_source_readiness_requires_a_complete_active_batch() {
         import: pending_id,
         uid: pending_event.uid.clone(),
     };
-    for (listed, windowed, valid) in [
-        (true, true, true),
-        (false, true, false),
-        (true, false, false),
+    for (listed, windowed, newer, valid) in [
+        (true, true, true, true),
+        (false, true, true, false),
+        (true, false, true, false),
+        (true, true, false, false),
     ] {
         let mut active = batch.clone();
         active.window = Some(clipper_schedule::ingest::ImportWindow::around(Utc::now()));
         let mut pending = active.clone();
         pending.object_id = pending_id;
+        pending.fetched_at = if newer {
+            active.fetched_at + chrono::TimeDelta::minutes(1)
+        } else {
+            active.fetched_at - chrono::TimeDelta::minutes(1)
+        };
         if !listed {
             pending.events.clear();
         }

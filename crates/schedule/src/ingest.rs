@@ -184,6 +184,10 @@ impl CalendarSource {
                     && batch.events.iter().any(|id| id.to_string() == object_id)
             }) || self.pending_imports.iter().any(|batch| {
                 batch.window.is_some()
+                    && self.active_import.as_ref().is_none_or(|active| {
+                        (batch.fetched_at, uuid::Uuid::from(batch.object_id))
+                            > (active.fetched_at, uuid::Uuid::from(active.object_id))
+                    })
                     && event.snapshot() == Some(batch.object_id)
                     && batch.events.iter().any(|id| id.to_string() == object_id)
             }))

@@ -195,7 +195,9 @@ There is no server transaction covering all objects. The source manifest
 controls visibility: devices hide an incomplete imported view and show a warning
 until its required records arrive. During a pending delta, membership also
 accepts a written event whose snapshot matches that pending batch and whose
-object ID is listed in it. The changed revision appears immediately; the other
+object ID is listed in it, when the pending batch is newer than the active
+import by fetch time, then snapshot ID. An older pending batch has already
+lost to the active import, so its writes are not shown. The changed revision appears immediately; the other
 events and their alarms remain visible after interruption, before any retry.
 Initial imports and whole-batch replacements still wait for activation.
 Cleanup authenticates source ownership, object
