@@ -23,7 +23,7 @@ pub mod summary;
 pub mod time;
 
 pub use alarm::{AlarmPolicy, PlannedAlarm, plan_alarms};
-pub use engine::{EngineError, Expansion, ImportedRuleResolver, RecurrenceEngine, RruleEngine};
+pub use engine::{EngineError, Expansion, ImportedRuleResolver, RecurrenceEngine};
 pub use ingest::{
     CalendarSource, IngestError, IngestOutcome, IngestedEvent, IngestedStatus, SkippedEvent,
     SourceId, SourceKind, parse_ics, parse_imported_recurrence_rules,

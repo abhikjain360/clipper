@@ -13,7 +13,7 @@ pub(super) struct CachedImportRules {
     epoch: u64,
     import: ObjectId,
     head: LocalHead,
-    engine: RruleEngine,
+    engine: RecurrenceEngine,
 }
 
 const MAX_IMPORT_BYTES: i64 = 8 * 1024 * 1024;
@@ -27,9 +27,9 @@ impl SyncEngine {
     pub(super) async fn recurrence_engine(
         &self,
         recurrence: &clipper_schedule::Recurrence,
-    ) -> Result<RruleEngine, ClientError> {
+    ) -> Result<RecurrenceEngine, ClientError> {
         let clipper_schedule::Recurrence::Imported { import, .. } = recurrence else {
-            return Ok(RruleEngine::new());
+            return Ok(RecurrenceEngine::new());
         };
         let epoch = self.history_epoch.load(Ordering::SeqCst);
         let id = import.to_string();
@@ -97,7 +97,7 @@ impl SyncEngine {
             .map_err(|_| ClientError::InvalidArgument("Original import is not UTF-8".into()))?;
         let rules = clipper_schedule::parse_imported_recurrence_rules(text, *import)
             .map_err(|error| ClientError::InvalidArgument(format!("Original import: {error}")))?;
-        let engine = RruleEngine::with_imported_rules(rules);
+        let engine = RecurrenceEngine::with_imported_rules(rules);
         #[cfg(not(target_family = "wasm"))]
         self.local_store
             .cache_import_file_ciphertext(&id, head, &ciphertext)

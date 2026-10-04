@@ -99,7 +99,7 @@ mod tests {
     use super::*;
     use crate::{
         TimeRange,
-        engine::{Expansion, RecurrenceEngine, RruleEngine},
+        engine::{Expansion, RecurrenceEngine},
         recurrence::{Cadence, Frequency, Recurrence, WeekdaySet},
         time::{BlockDuration, ScheduleSpan, TimedStart},
     };
@@ -130,7 +130,7 @@ mod tests {
     }
 
     fn week_of(item: &ScheduleItem) -> Vec<Occurrence> {
-        RruleEngine::new()
+        RecurrenceEngine::new()
             .occurrences(
                 item,
                 &[],
