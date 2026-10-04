@@ -1136,7 +1136,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "postcard",
- "rand 0.10.2",
+ "rand 0.10.3",
  "reqwest",
  "rusqlite",
  "rustls",
@@ -1170,8 +1170,8 @@ dependencies = [
  "hkdf 0.12.4",
  "opaque-ke",
  "postcard",
- "rand 0.10.2",
- "rand 0.8.7",
+ "rand 0.10.3",
+ "rand 0.8.8",
  "serde",
  "sha2 0.10.9",
  "thiserror 2.0.20",
@@ -1188,7 +1188,7 @@ dependencies = [
  "dirs 7.0.0",
  "hmac 0.12.1",
  "libc",
- "rand 0.10.2",
+ "rand 0.10.3",
  "security-framework",
  "serde",
  "serde_json",
@@ -1226,7 +1226,7 @@ dependencies = [
  "clipper-schedule",
  "dirs 7.0.0",
  "hmac 0.12.1",
- "rand 0.10.2",
+ "rand 0.10.3",
  "security-framework",
  "serde",
  "serde_json",
@@ -1301,7 +1301,7 @@ dependencies = [
  "ipnet",
  "libc",
  "postcard",
- "rand 0.10.2",
+ "rand 0.10.3",
  "rpassword",
  "sea-orm",
  "sea-orm-migration",
@@ -4303,7 +4303,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hkdf 0.12.4",
  "hmac 0.12.1",
- "rand 0.8.7",
+ "rand 0.8.8",
  "serde",
  "subtle",
  "voprf",
@@ -4852,9 +4852,9 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rand"
-version = "0.8.7"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -4873,9 +4873,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
+checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
@@ -5197,7 +5197,7 @@ dependencies = [
  "borsh",
  "bytes",
  "num-traits",
- "rand 0.8.7",
+ "rand 0.8.8",
  "rkyv",
  "serde",
  "serde_json",
@@ -6253,7 +6253,7 @@ dependencies = [
  "log",
  "md-5",
  "memchr",
- "rand 0.10.2",
+ "rand 0.10.3",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -7396,7 +7396,7 @@ dependencies = [
  "http",
  "httparse",
  "log",
- "rand 0.10.2",
+ "rand 0.10.3",
  "rustls",
  "rustls-pki-types",
  "sha1 0.11.0",
@@ -8770,9 +8770,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.9.0"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 dependencies = [
  "serde",
  "zeroize_derive",
