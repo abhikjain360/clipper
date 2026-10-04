@@ -3,11 +3,14 @@ export { occurrenceId, occurrenceHidden, loadDoneMarks, writeDoneMark } from "./
 export type { DoneMark } from "./schedule-done";
 export {
   palette,
+  calendarBorder,
   statusSurfaces,
   scheduleColors,
   fatigueColors,
   cursorColors,
   buttonThemes,
+  buttonStyles,
+  inputStyles,
   darkDefaults,
   createDarkThemes,
 } from "./palette";

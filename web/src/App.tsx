@@ -1,4 +1,4 @@
-import { Button } from "./tamagui.config";
+import { Button, Input } from "./tamagui.config";
 import { palette } from "@clipper/shared";
 import {
     ArrowLeft,
@@ -35,7 +35,7 @@ import {
     type ReactNode,
 } from "react";
 import { Route, Switch, useLocation } from "wouter";
-import { Card, H1, H2, Input, Label, Paragraph, Spinner, Text, XStack, YStack } from "tamagui";
+import { Card, H1, H2, Label, Paragraph, Spinner, Text, XStack, YStack } from "tamagui";
 import {
     clearSessionResume,
     clipperBackend,
@@ -263,13 +263,7 @@ function LoginScreen({
 
     return (
         <YStack minH="100vh" items="center" justify="center" p="$4">
-            <Card
-                width="100%"
-                maxW={460}
-                p="$5"
-                bg={palette.surface}
-                style={{ borderColor: palette.border, borderWidth: 1 }}
-            >
+            <Card width="100%" maxW={460} p="$5" bg={palette.cardFill}>
                 <form onSubmit={submit}>
                     <YStack gap="$4">
                         <YStack gap="$2">
@@ -283,7 +277,7 @@ function LoginScreen({
                             <Button
                                 type="button"
                                 flex={1}
-                                theme={mode === "login" ? "blue" : undefined}
+                                selected={mode === "login"}
                                 onPress={() => setMode("login")}
                             >
                                 Login
@@ -291,7 +285,7 @@ function LoginScreen({
                             <Button
                                 type="button"
                                 flex={1}
-                                theme={mode === "register" ? "blue" : undefined}
+                                selected={mode === "register"}
                                 onPress={() => setMode("register")}
                             >
                                 Register
@@ -343,7 +337,7 @@ function LoginScreen({
 
                         <Button
                             type="submit"
-                            theme="blue"
+                            tone="accent"
                             disabled={busy}
                             icon={busy ? <Spinner /> : undefined}
                         >
@@ -440,11 +434,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                                 ? "page"
                                 : undefined
                         }
-                        theme={
-                            (path === "/" ? location === path : location.startsWith(path))
-                                ? "blue"
-                                : undefined
-                        }
+                        selected={path === "/" ? location === path : location.startsWith(path)}
                         icon={<Icon size={20} />}
                         justify={expanded ? "flex-start" : "center"}
                         onPress={() => {
@@ -476,13 +466,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                     {expanded ? "Logout" : null}
                 </Button>
                 {runningWork && (
-                    <Card
-                        p="$3"
-                        gap="$2"
-                        borderWidth={1}
-                        borderColor={palette.border}
-                        aria-label="Running work"
-                    >
+                    <Card p="$3" gap="$2" borderWidth={0} aria-label="Running work">
                         <Paragraph>Work is still running</Paragraph>
                         {runningWork.map((work, index) => (
                             <Text key={index}>{work.label}</Text>
@@ -491,7 +475,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                             Wait
                         </Button>
                         <Button
-                            theme="red"
+                            tone="danger"
                             height="auto"
                             py="$2"
                             disabled={loggingOut}
@@ -921,7 +905,7 @@ function FileViewerOverlay({
                 zIndex: 1000,
                 display: "flex",
                 flexDirection: "column",
-                background: palette.page,
+                background: palette.pageFill,
             }}
         >
             <div
@@ -931,8 +915,8 @@ function FileViewerOverlay({
                     justifyContent: "space-between",
                     gap: 12,
                     padding: "10px 16px",
-                    background: palette.surface,
-                    borderBottom: `1px solid ${palette.border}`,
+                    background: palette.cardFill,
+                    border: "none",
                 }}
             >
                 <span
@@ -1216,12 +1200,7 @@ function CollabDocView({
                             </Button>
                         </XStack>
                     </ListCard>
-                    <Card
-                        flex={1}
-                        bg={palette.surface}
-                        overflow="hidden"
-                        style={{ borderColor: palette.border, borderWidth: 1 }}
-                    >
+                    <Card flex={1} bg={palette.cardFill} overflow="hidden">
                         {serverUrl ? (
                             <ErrorBoundary fallback={renderEditorError}>
                                 <Suspense fallback={codeEditorFallback}>
@@ -1297,8 +1276,8 @@ function TitleField({
                 value={draft}
                 placeholder={placeholder}
                 aria-label="Document title"
-                bg="transparent"
-                borderColor={editing ? palette.accent : palette.border}
+                bg={palette.inputFill}
+                borderWidth={0}
                 fontSize={20}
                 fontWeight="600"
                 onFocus={() => setEditing(true)}
@@ -1373,7 +1352,7 @@ function SharePage({ token }: { token: string }) {
     }
 
     return (
-        <YStack minH="100vh" bg={palette.page}>
+        <YStack minH="100vh" bg={palette.pageFill}>
             <YStack flex={1} style={{ minHeight: 0 }}>
                 <ErrorBoundary fallback={renderEditorError}>
                     <Suspense fallback={codeEditorFallback}>
@@ -1388,11 +1367,7 @@ function SharePage({ token }: { token: string }) {
                     </Suspense>
                 </ErrorBoundary>
             </YStack>
-            <XStack
-                justify="center"
-                py="$2"
-                style={{ borderTopColor: palette.border, borderTopWidth: 1 }}
-            >
+            <XStack justify="center" py="$2">
                 <Text fontSize={12} color={palette.secondary}>
                     Made with Clipper
                 </Text>
@@ -1504,12 +1479,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function ListCard({ children }: { children: ReactNode }) {
     return (
-        <Card
-            className="library-card"
-            p="$3"
-            bg={palette.surface}
-            style={{ borderColor: palette.border, borderWidth: 1 }}
-        >
+        <Card className="library-card" p="$3" bg={palette.cardFill}>
             {children}
         </Card>
     );
@@ -1554,7 +1524,7 @@ function ConnectionBadge({ status }: { status: AppState["connection_status"] }) 
               ? palette.warning
               : palette.secondary;
     return (
-        <XStack items="center" gap="$2" px="$2" py="$1" rounded="$2" bg={palette.raised}>
+        <XStack items="center" gap="$2" px="$2" py="$1" rounded="$2" bg={palette.cardFill}>
             <YStack width={8} height={8} rounded={999} bg={color} />
             <Text fontSize={12} color={palette.secondary}>
                 {status}

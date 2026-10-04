@@ -38,12 +38,11 @@ export function EventHover({
                 width={300}
                 maxW="calc(100vw - 24px)"
                 p="$3"
-                bg={palette.raised}
-                borderWidth={1}
-                borderColor={palette.border}
+                bg={palette.cardFill}
+                borderWidth={0}
                 rounded="$3"
             >
-                <Tooltip.Arrow bg={palette.raised} borderWidth={1} borderColor={palette.border} />
+                <Tooltip.Arrow bg={palette.cardFill} borderWidth={0} />
                 <YStack gap="$1" width="100%" minW={0}>
                     <Text
                         fontSize={14}

@@ -84,11 +84,7 @@ export function Fatigue({ onError }: { onError: (error: string | null) => void }
       <YStack gap="$3" pb="$8">
         <XStack items="center" justify="space-between">
           <H2 size="$6">Fatigue</H2>
-          <Button
-            size="$3"
-            theme={editing ? "blue" : undefined}
-            onPress={() => setEditing(!editing)}
-          >
+          <Button size="$3" selected={editing} onPress={() => setEditing(!editing)}>
             {editing ? "Done" : "Recovery days"}
           </Button>
         </XStack>
@@ -107,7 +103,7 @@ export function Fatigue({ onError }: { onError: (error: string | null) => void }
                         {`${bandLabels[muscle.band]} · ${muscle.score}%`}
                       </Text>
                     </XStack>
-                    <YStack height={8} rounded={4} bg={palette.page} overflow="hidden">
+                    <YStack height={8} rounded={4} bg={palette.pageFill} overflow="hidden">
                       <YStack
                         height={8}
                         width={`${Math.max(muscle.score, 1)}%`}

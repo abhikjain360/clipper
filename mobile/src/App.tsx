@@ -60,11 +60,9 @@ import {
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { TamaguiProvider } from "tamagui";
 import {
-  Button,
   Card,
   H1,
   H2,
-  Input,
   Label,
   Paragraph,
   ScrollView,
@@ -104,7 +102,7 @@ import { GymPanel } from "./gym/GymPanel";
 import type { KitchenPlan } from "@clipper/mobile-bridge";
 import { KitchenPanel } from "./kitchen/KitchenPanel";
 import { armRestEndForOpenWorkout, stopRestEnd } from "./gym/restAlarm";
-import tamaguiConfig from "./tamagui.config";
+import tamaguiConfig, { Button, Input } from "./tamagui.config";
 
 type TabName =
   | "clipboard"
@@ -169,7 +167,7 @@ export default function App() {
     <TamaguiProvider config={tamaguiConfig} defaultTheme="dark">
       <SafeAreaProvider>
         <StatusBar barStyle="light-content" />
-        <SafeAreaView style={{ flex: 1, backgroundColor: palette.page }}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: palette.pageFill }}>
           <ClipperApp />
         </SafeAreaView>
       </SafeAreaProvider>
@@ -420,19 +418,12 @@ function LoginScreen({
     <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
       <ScrollView
         flex={1}
-        bg={palette.page}
+        bg={palette.pageFill}
         contentContainerStyle={{ grow: 1 }}
         keyboardShouldPersistTaps="handled"
       >
         <YStack flex={1} items="center" justify="center" p="$4">
-          <Card
-            width="100%"
-            maxW={460}
-            p="$5"
-            bg={palette.surface}
-            borderColor={palette.border}
-            borderWidth={1}
-          >
+          <Card width="100%" maxW={460} p="$5" bg={palette.cardFill} borderWidth={0}>
             <YStack gap="$4">
               <YStack gap="$2">
                 <H1 size="$9">Clipper</H1>
@@ -440,18 +431,10 @@ function LoginScreen({
               </YStack>
 
               <XStack gap="$2">
-                <Button
-                  flex={1}
-                  theme={mode === "login" ? "blue" : undefined}
-                  onPress={() => setMode("login")}
-                >
+                <Button flex={1} selected={mode === "login"} onPress={() => setMode("login")}>
                   Login
                 </Button>
-                <Button
-                  flex={1}
-                  theme={mode === "register" ? "blue" : undefined}
-                  onPress={() => setMode("register")}
-                >
+                <Button flex={1} selected={mode === "register"} onPress={() => setMode("register")}>
                   Register
                 </Button>
               </XStack>
@@ -493,7 +476,7 @@ function LoginScreen({
               {error && <Paragraph color={palette.danger}>{error}</Paragraph>}
 
               <Button
-                theme="blue"
+                tone="accent"
                 disabled={busy}
                 icon={busy ? <Spinner /> : undefined}
                 onPress={() => void authenticate()}
@@ -636,7 +619,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
           <Button
             key={value}
             aria-label={label}
-            theme={tab === value ? "blue" : undefined}
+            selected={tab === value}
             icon={<Icon size={20} />}
             justify={expanded ? "flex-start" : "center"}
             onPress={() => {
@@ -668,7 +651,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
           {expanded ? "Logout" : null}
         </Button>
         {expanded && runningWork && (
-          <Card p="$3" gap="$2" borderWidth={1} borderColor={palette.border}>
+          <Card p="$3" gap="$2" borderWidth={0}>
             <Paragraph>Work is still running</Paragraph>
             {runningWork.map((work, index) => (
               <Text key={index}>{work.label}</Text>
@@ -677,7 +660,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
               Wait
             </Button>
             <Button
-              theme="red"
+              tone="danger"
               height="auto"
               py="$2"
               disabled={loggingOut}
@@ -704,14 +687,9 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
   );
 
   return (
-    <XStack flex={1} bg={palette.page}>
+    <XStack flex={1} bg={palette.pageFill}>
       {!compactNavigation && (
-        <YStack
-          width={64}
-          bg={palette.surface}
-          borderRightColor={palette.border}
-          borderRightWidth={1}
-        >
+        <YStack width={64} bg={palette.cardFill} borderWidth={0}>
           {navigation(false)}
         </YStack>
       )}
@@ -771,12 +749,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
 
       {navExpanded && (
         <XStack position="absolute" t={0} b={0} l={0} r={0} z={10}>
-          <YStack
-            width={220}
-            bg={palette.surface}
-            borderRightColor={palette.border}
-            borderRightWidth={1}
-          >
+          <YStack width={220} bg={palette.cardFill} borderWidth={0}>
             {navigation(true)}
           </YStack>
           <YStack flex={1} bg="rgba(0,0,0,0.5)" onPress={() => setNavExpanded(false)} />
@@ -1040,7 +1013,7 @@ function SchedulePanel({
                           </Text>
                         ) : (
                           <Button
-                            theme="blue"
+                            tone="accent"
                             size="$3"
                             disabled={busy}
                             onPress={() =>
@@ -1068,7 +1041,7 @@ function SchedulePanel({
                   <Button
                     size="$3"
                     aria-pressed={showDone.has(key)}
-                    theme={showDone.has(key) ? "blue" : undefined}
+                    selected={showDone.has(key)}
                     onPress={() =>
                       setShowDone((current) => {
                         const next = new Set(current);
@@ -1218,7 +1191,7 @@ function MobileCalendars({
             />
             <XStack gap="$2">
               <Button
-                theme="blue"
+                tone="accent"
                 disabled={busy !== null || !url.trim()}
                 onPress={() => void add()}
               >
@@ -1266,7 +1239,7 @@ function MobileCalendars({
               <YStack gap="$2">
                 <Button
                   size="$3"
-                  theme={!source.target_device ? "blue" : undefined}
+                  selected={!source.target_device}
                   disabled={busy !== null}
                   onPress={() => void setTargetDevice(source, null)}
                 >
@@ -1279,7 +1252,7 @@ function MobileCalendars({
                     <Button
                       key={device.id}
                       size="$3"
-                      theme={source.target_device === device.id ? "blue" : undefined}
+                      selected={source.target_device === device.id}
                       disabled={busy !== null}
                       onPress={() => void setTargetDevice(source, device.id)}
                     >
@@ -1296,7 +1269,7 @@ function MobileCalendars({
                     <Button
                       key={minutes}
                       size="$3"
-                      theme={(source.alarm_lead_minutes ?? 5) === minutes ? "blue" : undefined}
+                      selected={(source.alarm_lead_minutes ?? 5) === minutes}
                       disabled={busy !== null}
                       onPress={() =>
                         void change(source.id, () =>
@@ -1318,8 +1291,7 @@ function MobileCalendars({
                 Alarms {source.alarms_on ? "on" : "off"}
               </Label>
               <Switch
-                borderWidth={1}
-                borderColor={palette.border}
+                borderWidth={0}
                 id={`calendar-alarms-${source.id}`}
                 size="$3"
                 checked={source.alarms_on}
@@ -1328,7 +1300,7 @@ function MobileCalendars({
                   void change(source.id, () => backend.setCalendarSourceAlarms(source.id, checked))
                 }
               >
-                <Switch.Thumb activeStyle={{ bg: palette.page }} />
+                <Switch.Thumb activeStyle={{ bg: palette.pageFill }} />
               </Switch>
               <Button
                 size="$3"
@@ -1681,7 +1653,7 @@ function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
   return (
     <ScrollView flex={1}>
       <YStack gap="$3" p="$3">
-        <Card bg={palette.surface} p="$3" gap="$2">
+        <Card bg={palette.cardFill} p="$3" gap="$2">
           <H2 size="$5">Exact alarms</H2>
           <Paragraph color={exact ? palette.success : palette.danger}>
             {exact
@@ -1691,7 +1663,7 @@ function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
           {!exact && <Button onPress={() => openExactAlarmSettings()}>Open system setting</Button>}
         </Card>
 
-        <Card bg={palette.surface} p="$3" gap="$2">
+        <Card bg={palette.cardFill} p="$3" gap="$2">
           <H2 size="$5">Notifications</H2>
           <Paragraph color={notifications ? palette.success : palette.danger}>
             {notifications
@@ -1703,7 +1675,7 @@ function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
           )}
         </Card>
 
-        <Card bg={palette.surface} p="$3" gap="$2">
+        <Card bg={palette.cardFill} p="$3" gap="$2">
           <H2 size="$5">Full-screen alarms</H2>
           <Paragraph color={fullScreen ? palette.success : palette.danger}>
             {fullScreen
@@ -1715,7 +1687,7 @@ function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
           )}
         </Card>
 
-        <Card bg={palette.surface} p="$3" gap="$2">
+        <Card bg={palette.cardFill} p="$3" gap="$2">
           <H2 size="$5">Scheduled</H2>
           <Paragraph color={palette.secondary}>
             {planned === 1
@@ -1729,21 +1701,21 @@ function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
           <Button onPress={refresh}>Refresh</Button>
         </Card>
 
-        <Card bg={palette.surface} p="$3" gap="$2">
+        <Card bg={palette.cardFill} p="$3" gap="$2">
           <H2 size="$5">Test</H2>
           <Paragraph fontSize={12} color={palette.secondary}>
             Rings immediately, exercising the same path a real alarm takes — foreground service,
             full-screen intent, and the ring screen over the lock screen.
           </Paragraph>
           <XStack gap="$2">
-            <Button theme="blue" onPress={() => ringNow("Test alarm")}>
+            <Button tone="accent" onPress={() => ringNow("Test alarm")}>
               Ring now
             </Button>
             <Button onPress={() => dismissAlarm()}>Stop</Button>
           </XStack>
         </Card>
 
-        <Card bg={palette.surface} p="$3" gap="$2">
+        <Card bg={palette.cardFill} p="$3" gap="$2">
           <H2 size="$5">Vendor settings</H2>
           <Paragraph fontSize={12} color={palette.secondary}>
             On Xiaomi, HyperOS, and similar, alarms only survive if Clipper has Autostart enabled
@@ -1954,7 +1926,7 @@ function CollabPanel({
                     gap="$3"
                     flex={1}
                     onPress={() => setReading(item)}
-                    pressStyle={{ bg: palette.raised }}
+                    pressStyle={{ bg: palette.cardFill }}
                   >
                     <FileCode size={22} color={palette.accent} />
                     <YStack flex={1} gap="$1">
@@ -2015,7 +1987,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function ListCard({ children }: { children: ReactNode }) {
   return (
-    <Card p="$3" bg={palette.surface} borderColor={palette.border} borderWidth={1}>
+    <Card p="$3" bg={palette.cardFill} borderWidth={0}>
       {children}
     </Card>
   );
@@ -2029,7 +2001,7 @@ function ConnectionBadge({ status }: { status: AppState["connection_status"] }) 
         ? palette.warning
         : palette.secondary;
   return (
-    <XStack items="center" gap="$2" px="$2" py="$1" rounded="$2" bg={palette.raised}>
+    <XStack items="center" gap="$2" px="$2" py="$1" rounded="$2" bg={palette.cardFill}>
       <YStack width={8} height={8} rounded={999} bg={color} />
       <Text fontSize={12} color={palette.secondary}>
         {status}
@@ -2072,7 +2044,7 @@ function CenteredStatus({
   loading?: boolean;
 }) {
   return (
-    <YStack flex={1} items="center" justify="center" gap="$3" p="$4" bg={palette.page}>
+    <YStack flex={1} items="center" justify="center" gap="$3" p="$4" bg={palette.pageFill}>
       {loading && <Spinner size="large" />}
       <H2>{title}</H2>
       {message && <Paragraph color={palette.secondary}>{message}</Paragraph>}
@@ -2158,16 +2130,8 @@ function CollabDocReader({
 
   return (
     <Modal visible={doc !== null} animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: palette.page }}>
-        <XStack
-          items="center"
-          justify="space-between"
-          gap="$2"
-          px="$3"
-          py="$2"
-          borderBottomColor={palette.border}
-          borderBottomWidth={1}
-        >
+      <SafeAreaView style={{ flex: 1, backgroundColor: palette.pageFill }}>
+        <XStack items="center" justify="space-between" gap="$2" px="$3" py="$2" borderWidth={0}>
           <YStack flex={1} gap="$1">
             <Text numberOfLines={1} fontWeight="600" color={palette.text}>
               {doc ? collabTitle(doc) : ""}
@@ -2196,7 +2160,7 @@ function CollabDocReader({
             style={{
               flex: 1,
               color: palette.text,
-              backgroundColor: palette.page,
+              backgroundColor: palette.pageFill,
               fontFamily: MONOSPACE_FONT,
               fontSize: 13,
               lineHeight: 18,
@@ -2248,7 +2212,7 @@ function RenameDocDialog({
   return (
     <Modal visible={doc !== null} animationType="fade" transparent onRequestClose={onCancel}>
       <YStack flex={1} justify="center" p="$4" bg="rgba(0,0,0,0.6)">
-        <Card p="$4" gap="$3" bg={palette.surface} borderColor={palette.border} borderWidth={1}>
+        <Card p="$4" gap="$3" bg={palette.cardFill} borderWidth={0}>
           <H2 size="$5">Rename doc</H2>
           <Input
             value={draft}
@@ -2261,7 +2225,7 @@ function RenameDocDialog({
             <Button size="$3" onPress={onCancel}>
               Cancel
             </Button>
-            <Button size="$3" theme="blue" onPress={() => onSave(draft)}>
+            <Button size="$3" tone="accent" onPress={() => onSave(draft)}>
               Save
             </Button>
           </XStack>
@@ -2295,16 +2259,8 @@ function ContentViewer({
 
   return (
     <Modal visible={viewing !== null} animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: palette.page }}>
-        <XStack
-          items="center"
-          justify="space-between"
-          gap="$2"
-          px="$3"
-          py="$2"
-          borderBottomColor={palette.border}
-          borderBottomWidth={1}
-        >
+      <SafeAreaView style={{ flex: 1, backgroundColor: palette.pageFill }}>
+        <XStack items="center" justify="space-between" gap="$2" px="$3" py="$2" borderWidth={0}>
           <Text flex={1} numberOfLines={1} fontWeight="600" color={palette.text}>
             {viewing?.title ?? ""}
           </Text>
@@ -2319,7 +2275,7 @@ function ContentViewer({
           style={{
             flex: 1,
             color: palette.text,
-            backgroundColor: palette.page,
+            backgroundColor: palette.pageFill,
             fontFamily: MONOSPACE_FONT,
             fontSize: 13,
             lineHeight: 18,

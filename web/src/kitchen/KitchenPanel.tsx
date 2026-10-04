@@ -59,16 +59,10 @@ export function KitchenPanel({
         <YStack gap="$3" maxW={1000} width="100%" self="center">
             <H2>Kitchen</H2>
             <XStack gap="$2" role="group" aria-label="Kitchen sections">
-                <Button
-                    theme={section === "recipes" ? "blue" : undefined}
-                    onPress={() => setSection("recipes")}
-                >
+                <Button selected={section === "recipes"} onPress={() => setSection("recipes")}>
                     Recipes
                 </Button>
-                <Button
-                    theme={section === "pantry" ? "blue" : undefined}
-                    onPress={() => setSection("pantry")}
-                >
+                <Button selected={section === "pantry"} onPress={() => setSection("pantry")}>
                     Pantry
                 </Button>
             </XStack>

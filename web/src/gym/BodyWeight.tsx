@@ -76,7 +76,7 @@ export function BodyWeight({
                     />
                     <XStack>
                         <Button
-                            theme="green"
+                            tone="success"
                             disabled={busy || kg === undefined}
                             onPress={logWeight}
                         >
@@ -97,7 +97,7 @@ export function BodyWeight({
                                 px="$3"
                                 py="$2"
                                 rounded="$3"
-                                bg={palette.page}
+                                bg={palette.pageFill}
                             >
                                 <Text minW={80} fontWeight="600">{`${formatKg(entry.kg)} kg`}</Text>
                                 <Text flex={1} color={palette.secondary}>
@@ -177,7 +177,7 @@ export function BodyWeight({
                                         px="$3"
                                         py="$1.5"
                                         rounded="$3"
-                                        bg={palette.page}
+                                        bg={palette.pageFill}
                                     >
                                         <Text flex={2} flexBasis={0}>
                                             {`Week of ${formatShortDate(localDate(week.week_start))}`}

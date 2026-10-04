@@ -1,8 +1,8 @@
-import { Button } from "../tamagui.config";
+import { Button, Input, TextArea } from "../tamagui.config";
 import { palette } from "@clipper/shared";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useLocation } from "wouter";
-import { H2, Input, Paragraph, Text, TextArea, XStack, YStack } from "tamagui";
+import { H2, Paragraph, Text, XStack, YStack } from "tamagui";
 import type { KitchenBackend, KitchenIngredient, KitchenSessionChange } from "@clipper/shared";
 import { formatBackendError } from "../backend";
 import { RecipeHistory } from "./RecipeHistory";
@@ -333,14 +333,14 @@ export function RecipePage({
                             {recipe.session ? (
                                 <>
                                     <Button
-                                        theme="blue"
+                                        tone="accent"
                                         disabled={disabled}
                                         onPress={() => setAction("finish")}
                                     >
                                         Finish
                                     </Button>
                                     <Button
-                                        theme="red"
+                                        tone="danger"
                                         disabled={disabled}
                                         onPress={() => setAction("discard")}
                                     >
@@ -349,7 +349,7 @@ export function RecipePage({
                                 </>
                             ) : (
                                 <Button
-                                    theme="blue"
+                                    tone="accent"
                                     disabled={disabled}
                                     onPress={() => void change({ change: "start" })}
                                 >
@@ -410,7 +410,7 @@ export function RecipePage({
                 )}
                 <Button
                     disabled={disabled}
-                    theme={action === "discard" ? "red" : "blue"}
+                    tone={action === "discard" ? "danger" : "accent"}
                     onPress={() => {
                         if (action === "finish")
                             void change({ change: "finish", notes: notes.trim() || null });

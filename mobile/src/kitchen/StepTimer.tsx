@@ -32,7 +32,7 @@ export function StepTimer({
   }, [timer.state, timer.endsAtMillis]);
 
   return (
-    <YStack gap="$2" p="$2" bg={palette.raised} rounded="$2">
+    <YStack gap="$2" p="$2" bg={palette.cardFill} rounded="$2">
       <Text fontWeight="600">{`${timer.label} · ${timer.minutes} min`}</Text>
       {timer.state === KitchenTimerState.Running && timer.endsAtMillis !== undefined && (
         <Text fontSize={28} fontWeight="700" color={colors.accent} aria-label="Time remaining">
@@ -50,7 +50,7 @@ export function StepTimer({
         {timer.state === KitchenTimerState.Idle && (
           <Button
             size="$4"
-            theme="blue"
+            tone="accent"
             disabled={disabled}
             onPress={() => onAction(KitchenTimerAction.Start)}
           >

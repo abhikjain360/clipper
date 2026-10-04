@@ -1,8 +1,8 @@
-import { Button } from "../tamagui.config";
+import { Button, Input } from "../tamagui.config";
 import { palette, statusSurfaces } from "@clipper/shared";
 import { useCallback, useState } from "react";
 import { Link } from "wouter";
-import { H2, Input, Paragraph, Text, XStack, YStack } from "tamagui";
+import { H2, Paragraph, Text, XStack, YStack } from "tamagui";
 import type { KitchenBackend, KitchenRecipeSummary } from "@clipper/shared";
 import {
     blockTime,

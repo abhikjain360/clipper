@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronUp, Plus, Trash2 } from "lucide-react";
 import { useCallback, useState, type ReactNode } from "react";
-import { Input, Label, ScrollView, Spinner, Switch, Text, XStack, YStack } from "tamagui";
-import { Button } from "../tamagui.config";
+import { Label, ScrollView, Spinner, Switch, Text, XStack, YStack } from "tamagui";
+import { Button, Input } from "../tamagui.config";
 import {
     formatRestSeconds,
     palette,
@@ -86,6 +86,7 @@ export function Library({
                             <ListRow
                                 key={template.id}
                                 label={`Edit ${template.name}`}
+                                selected={template.id === templateDraft?.id}
                                 onPress={() =>
                                     setTemplateDraft({
                                         id: template.id,
@@ -143,6 +144,7 @@ export function Library({
                                 <ListRow
                                     key={exercise.id}
                                     label={`Edit ${exercise.name}`}
+                                    selected={exercise.id === exerciseDraft?.id}
                                     onPress={() =>
                                         setExerciseDraft({
                                             id: exercise.id,
@@ -233,10 +235,12 @@ export function Library({
 
 function ListRow({
     label,
+    selected,
     onPress,
     children,
 }: {
     label: string;
+    selected: boolean;
     onPress: () => void;
     children: ReactNode;
 }) {
@@ -246,10 +250,14 @@ function ListRow({
             px="$3"
             py="$2"
             rounded="$3"
+            bg={selected ? palette.selectedFill : palette.cardFill}
+            borderWidth={selected ? 1 : 0}
+            borderColor={palette.selectedBorder}
             cursor="pointer"
-            hoverStyle={{ bg: palette.raised }}
-            pressStyle={{ bg: palette.raised }}
+            hoverStyle={{ bg: selected ? palette.selectedFill : palette.cardFill }}
+            pressStyle={{ bg: selected ? palette.selectedFill : palette.cardFill }}
             role="button"
+            aria-pressed={selected}
             aria-label={label}
             onPress={onPress}
         >
@@ -357,7 +365,7 @@ function ExerciseEditor({
                             Cancel
                         </Button>
                         <Button
-                            theme="blue"
+                            tone="accent"
                             disabled={busy || !draft.name.trim()}
                             onPress={() => onSave(draft)}
                         >
@@ -565,7 +573,7 @@ function TemplateEditor({
                     </XStack>
                     <XStack gap="$2" justify="space-between" flexWrap="wrap">
                         {draft.id ? (
-                            <Button theme="red" disabled={busy} onPress={() => onDelete(draft)}>
+                            <Button tone="danger" disabled={busy} onPress={() => onDelete(draft)}>
                                 Delete workout
                             </Button>
                         ) : (
@@ -576,7 +584,7 @@ function TemplateEditor({
                                 Cancel
                             </Button>
                             <Button
-                                theme="blue"
+                                tone="accent"
                                 disabled={
                                     busy || !draft.name.trim() || draft.exercises.length === 0
                                 }

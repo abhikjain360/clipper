@@ -45,30 +45,30 @@ interface CollabRuntime {
 }
 
 const fillHeightTheme = EditorView.theme({
-    "&": { height: "100%", backgroundColor: palette.page, color: palette.text },
+    "&": { height: "100%", backgroundColor: palette.pageFill, color: palette.text },
     ".cm-scroller": { overflow: "auto" },
     ".cm-content": { caretColor: palette.accent },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: palette.accent },
     ".cm-gutters": {
-        backgroundColor: palette.surface,
+        backgroundColor: palette.cardFill,
         color: palette.secondary,
-        borderRight: `1px solid ${palette.border}`,
+        border: "none",
     },
-    ".cm-activeLine, .cm-activeLineGutter": { backgroundColor: palette.surface },
+    ".cm-activeLine, .cm-activeLineGutter": { backgroundColor: palette.cardFill },
     ".cm-activeLineGutter": { color: palette.secondary },
     "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": {
-        backgroundColor: palette.raised,
+        backgroundColor: palette.selectedFill,
     },
     ".cm-selectionMatch": {
-        backgroundColor: palette.surface,
+        backgroundColor: palette.selectedFill,
         outline: `1px solid ${palette.accent}`,
     },
     ".cm-foldPlaceholder, .cm-tooltip": {
-        backgroundColor: palette.raised,
+        backgroundColor: palette.cardFill,
         color: palette.text,
-        border: `1px solid ${palette.border}`,
+        border: "none",
     },
-    ".cm-ySelectionInfo": { color: palette.page },
+    ".cm-ySelectionInfo": { color: palette.pageFill },
 });
 
 const highlightColors = new Map<string, string>([
@@ -298,8 +298,8 @@ export function CodeEditor({ content = "", lang, collab }: CodeEditorProps) {
                     alignItems: "center",
                     gap: 8,
                     padding: "6px 10px",
-                    background: palette.page,
-                    borderBottom: `1px solid ${palette.border}`,
+                    background: palette.pageFill,
+                    border: "none",
                 }}
             >
                 <button

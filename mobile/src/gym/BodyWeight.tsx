@@ -80,7 +80,7 @@ export function BodyWeight({ onError }: { onError: (error: string | null) => voi
               decimal
             />
             <Button
-              theme="green"
+              tone="success"
               size="$5"
               disabled={busy || kg === undefined}
               onPress={() => kg !== undefined && void run(() => gym().gymAddBodyWeight(kg))}

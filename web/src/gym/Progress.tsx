@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
-import { Input, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
+import { Input } from "../tamagui.config";
+import { ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
 import {
     formatDay,
     formatKg,
@@ -108,12 +109,12 @@ function ExerciseRow({
             px="$3"
             py="$2"
             rounded="$3"
-            borderWidth={1}
-            borderColor={selected ? palette.accent : "transparent"}
-            bg={selected ? palette.raised : undefined}
+            borderWidth={selected ? 1 : 0}
+            borderColor={palette.selectedBorder}
+            bg={selected ? palette.selectedFill : palette.cardFill}
             cursor="pointer"
-            hoverStyle={{ bg: palette.raised }}
-            pressStyle={{ bg: palette.raised }}
+            hoverStyle={{ bg: selected ? palette.selectedFill : palette.cardFill }}
+            pressStyle={{ bg: selected ? palette.selectedFill : palette.cardFill }}
             role="button"
             aria-pressed={selected}
             onPress={onSelect}
@@ -174,7 +175,7 @@ function ExerciseProgress({
                                 px="$3"
                                 py="$1.5"
                                 rounded="$3"
-                                bg={palette.page}
+                                bg={palette.pageFill}
                             >
                                 <Text color={palette.secondary}>
                                     {formatDay(point.started_at_millis)}

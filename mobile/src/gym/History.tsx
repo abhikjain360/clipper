@@ -67,7 +67,7 @@ export function History({ onError }: { onError: (error: string | null) => void }
               <XStack
                 key={session.id}
                 onPress={() => setOpenId(session.id)}
-                pressStyle={{ bg: palette.raised }}
+                pressStyle={{ bg: palette.cardFill }}
               >
                 <YStack flex={1}>
                   <GymCard>
@@ -212,9 +212,9 @@ function SessionDetail({
                         px="$2"
                         py="$2"
                         rounded="$2"
-                        bg={palette.raised}
+                        bg={palette.cardFill}
                         onPress={() => setEditing({ set, number })}
-                        pressStyle={{ bg: palette.raised }}
+                        pressStyle={{ bg: palette.cardFill }}
                         aria-label={`Edit ${setLabel(set.kind, number).toLowerCase()} of ${exercise.name}`}
                       >
                         <Text color={set.kind === SetKind.WarmUp ? colors.warmUp : undefined}>

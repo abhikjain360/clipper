@@ -1,9 +1,9 @@
-import { Button } from "../tamagui.config";
+import { Button, Input } from "../tamagui.config";
 import { palette } from "@clipper/shared";
 import { ChevronDown, ChevronUp, Plus, Trash2 } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert } from "react-native";
-import { H2, Input, ScrollView, Switch, Text, XStack, YStack } from "tamagui";
+import { H2, ScrollView, Switch, Text, XStack, YStack } from "tamagui";
 import {
   MuscleGroup,
   type GymExercise,
@@ -81,18 +81,10 @@ export function Library({ onError }: { onError: (error: string | null) => void }
     <ScrollView flex={1} keyboardShouldPersistTaps="always">
       <YStack gap="$3" pb="$8">
         <XStack gap="$2">
-          <Button
-            flex={1}
-            theme={tab === "workouts" ? "blue" : undefined}
-            onPress={() => setTab("workouts")}
-          >
+          <Button flex={1} selected={tab === "workouts"} onPress={() => setTab("workouts")}>
             Workouts
           </Button>
-          <Button
-            flex={1}
-            theme={tab === "exercises" ? "blue" : undefined}
-            onPress={() => setTab("exercises")}
-          >
+          <Button flex={1} selected={tab === "exercises"} onPress={() => setTab("exercises")}>
             Exercises
           </Button>
         </XStack>
@@ -120,7 +112,7 @@ export function Library({ onError }: { onError: (error: string | null) => void }
                     exercises: template.exercises.map((planned) => ({ ...planned })),
                   })
                 }
-                pressStyle={{ bg: palette.raised }}
+                pressStyle={{ bg: palette.cardFill }}
               >
                 <YStack flex={1}>
                   <GymCard>
@@ -168,7 +160,7 @@ export function Library({ onError }: { onError: (error: string | null) => void }
                     archived: exercise.archived,
                   })
                 }
-                pressStyle={{ bg: palette.raised }}
+                pressStyle={{ bg: palette.cardFill }}
               >
                 <Text color={exercise.archived ? colors.faint : undefined}>{exercise.name}</Text>
                 {exercise.archived && <Muted>archived</Muted>}
@@ -284,15 +276,14 @@ function ExerciseEditor({
       <XStack items="center" justify="space-between">
         <Text>Archived</Text>
         <Switch
-          borderWidth={1}
-          borderColor={palette.border}
+          borderWidth={0}
           checked={draft.archived}
           onCheckedChange={(archived) => onChange({ ...draft, archived })}
         >
-          <Switch.Thumb activeStyle={{ bg: palette.page }} />
+          <Switch.Thumb activeStyle={{ bg: palette.pageFill }} />
         </Switch>
       </XStack>
-      <Button theme="blue" size="$5" disabled={!draft.name.trim()} onPress={() => onSave(draft)}>
+      <Button tone="accent" size="$5" disabled={!draft.name.trim()} onPress={() => onSave(draft)}>
         Save exercise
       </Button>
     </SheetModal>
@@ -444,15 +435,14 @@ function TemplateEditor({
                   Superset with the exercise above
                 </Text>
                 <Switch
-                  borderWidth={1}
-                  borderColor={palette.border}
+                  borderWidth={0}
                   size="$3"
                   checked={planned.supersetWithPrevious}
                   onCheckedChange={(supersetWithPrevious) =>
                     update(index, { supersetWithPrevious })
                   }
                 >
-                  <Switch.Thumb activeStyle={{ bg: palette.page }} />
+                  <Switch.Thumb activeStyle={{ bg: palette.pageFill }} />
                 </Switch>
               </XStack>
             )}
@@ -463,7 +453,7 @@ function TemplateEditor({
         Add exercise
       </Button>
       <Button
-        theme="blue"
+        tone="accent"
         size="$5"
         disabled={!draft.name.trim() || draft.exercises.length === 0}
         onPress={() => onSave(draft)}
@@ -471,7 +461,7 @@ function TemplateEditor({
         Save workout
       </Button>
       {draft.id && (
-        <Button theme="red" onPress={() => onDelete(draft)}>
+        <Button tone="danger" onPress={() => onDelete(draft)}>
           Delete workout
         </Button>
       )}

@@ -1,4 +1,4 @@
-import { Button } from "./tamagui.config";
+import { Button, Input } from "./tamagui.config";
 import {
     palette,
     scheduleColors,
@@ -43,7 +43,6 @@ import {
     Dialog,
     Select,
     H2,
-    Input,
     Label,
     Paragraph,
     Spinner,
@@ -325,12 +324,7 @@ export function SchedulePanel({
                 className={`schedule-workspace${resizing ? " is-resizing" : ""}`}
                 style={{ "--sidebar-width": `${displayedWidth}px` } as CSSProperties}
             >
-                <Card
-                    bg={palette.surface}
-                    p="$3"
-                    gap="$3"
-                    style={{ borderColor: palette.border, borderWidth: 1 }}
-                >
+                <Card bg={palette.cardFill} p="$3" gap="$3">
                     <XStack items="center" justify="space-between" gap="$2" flexWrap="wrap">
                         <XStack items="center" gap="$2">
                             <ToggleGroup
@@ -350,10 +344,7 @@ export function SchedulePanel({
                                             key={option}
                                             value={option}
                                         >
-                                            <Button
-                                                size="$2"
-                                                theme={mode === option ? "blue" : undefined}
-                                            >
+                                            <Button size="$2" selected={mode === option}>
                                                 {option === "calendar" ? "Calendar" : "Next"}
                                             </Button>
                                         </ToggleGroup.Item>
@@ -381,7 +372,6 @@ export function SchedulePanel({
                                     <XStack>
                                         {(["day", "week", "month"] as const).map((option) => (
                                             <ToggleGroup.Item
-                                                // The child Button theme supplies the selected styling.
                                                 activeStyle={{}}
                                                 asChild
                                                 key={option}
@@ -391,10 +381,7 @@ export function SchedulePanel({
                                                     option.slice(1)
                                                 }
                                             >
-                                                <Button
-                                                    size="$2"
-                                                    theme={view === option ? "blue" : undefined}
-                                                >
+                                                <Button size="$2" selected={view === option}>
                                                     {option.slice(0, 1).toUpperCase() +
                                                         option.slice(1)}
                                                 </Button>
@@ -641,10 +628,10 @@ function NextList({
                 return (
                     <Card
                         key={day.toISOString()}
-                        bg={palette.surface}
+                        bg={palette.cardFill}
                         p="$3"
                         gap="$3"
-                        style={{ borderColor: palette.border, borderWidth: 1, flexShrink: 0 }}
+                        style={{ flexShrink: 0 }}
                     >
                         <Text fontWeight="600">
                             {index === 0 ? "Today · " : ""}
@@ -690,7 +677,7 @@ function NextList({
                                         </Text>
                                     ) : (
                                         <Button
-                                            theme="blue"
+                                            tone="accent"
                                             size="$3"
                                             self="flex-start"
                                             disabled={starting}
@@ -718,7 +705,7 @@ function NextList({
                             size="$3"
                             self="flex-start"
                             aria-pressed={showDone.has(key)}
-                            theme={showDone.has(key) ? "blue" : undefined}
+                            selected={showDone.has(key)}
                             onPress={() =>
                                 setShowDone((current) => {
                                     const next = new Set(current);
@@ -950,11 +937,10 @@ function WeekGrid({
                             items="center"
                             py="$1"
                             style={{
-                                borderLeftColor: palette.border,
-                                borderLeftWidth: 1,
+                                borderWidth: 0,
                                 backgroundColor:
                                     startOfDay(day).getTime() === today
-                                        ? palette.surface
+                                        ? palette.cardFill
                                         : undefined,
                             }}
                         >
@@ -967,10 +953,7 @@ function WeekGrid({
                 </XStack>
 
                 {allDay.length > 0 && (
-                    <XStack
-                        pr={gutter}
-                        style={{ borderTopColor: palette.border, borderTopWidth: 1 }}
-                    >
+                    <XStack pr={gutter}>
                         <YStack
                             width={56}
                             style={{ flexShrink: 0 }}
@@ -990,7 +973,6 @@ function WeekGrid({
                                 minW={0}
                                 gap={2}
                                 p={2}
-                                style={{ borderLeftColor: palette.border, borderLeftWidth: 1 }}
                             >
                                 {allDay
                                     .filter((occurrence) => overlapsDay(occurrence, day))
@@ -1018,8 +1000,7 @@ function WeekGrid({
                 <XStack
                     ref={scroller}
                     style={{
-                        borderTopColor: palette.border,
-                        borderTopWidth: 1,
+                        borderWidth: 0,
                         maxHeight: "max(320px, calc(100dvh - 240px))",
                         overflowY: "auto",
                     }}
@@ -1042,16 +1023,11 @@ function WeekGrid({
                             height={DAY_HEIGHT}
                             style={{
                                 position: "relative",
-                                borderLeftColor: palette.border,
-                                borderLeftWidth: 1,
+                                borderWidth: 0,
                             }}
                         >
                             {Array.from({ length: 24 }, (_, hour) => (
-                                <YStack
-                                    key={hour}
-                                    height={HOUR_HEIGHT}
-                                    style={{ borderTopColor: palette.border, borderTopWidth: 1 }}
-                                />
+                                <YStack key={hour} height={HOUR_HEIGHT} />
                             ))}
                             {layoutDay(timed, day).map(({ span: occurrence, lane, lanes }) => (
                                 <TimedBlock
@@ -1276,11 +1252,7 @@ function RunningTimer({
 
     const elapsed = Math.max(0, now - new Date(running.start).getTime());
     return (
-        <Card
-            bg={statusSurfaces.warning}
-            p="$3"
-            style={{ borderColor: palette.warning, borderWidth: 1 }}
-        >
+        <Card bg={statusSurfaces.warning} p="$3">
             <XStack items="center" justify="space-between" gap="$3" flexWrap="wrap">
                 <YStack>
                     <Text>{running.title}</Text>
@@ -1289,7 +1261,7 @@ function RunningTimer({
                     </Text>
                 </YStack>
                 <Button
-                    theme="yellow"
+                    tone="warning"
                     icon={busy ? <Spinner /> : <Square size={14} />}
                     disabled={busy}
                     onPress={() => void act((backend) => backend.stopActual(running.id))}
@@ -1493,12 +1465,7 @@ function CalendarSources({
     }
 
     return (
-        <Card
-            bg={palette.surface}
-            p="$3"
-            gap="$3"
-            style={{ borderColor: palette.border, borderWidth: 1 }}
-        >
+        <Card bg={palette.cardFill} p="$3" gap="$3">
             <XStack items="center" justify="space-between" gap="$2">
                 <H2 size="$5">Calendars</H2>
                 {!adding && (
@@ -1539,7 +1506,7 @@ function CalendarSources({
                     </Paragraph>
                     <XStack gap="$2">
                         <Button
-                            theme="blue"
+                            tone="accent"
                             disabled={busy === "add" || url.trim().length === 0}
                             icon={busy === "add" ? <Spinner /> : undefined}
                             onPress={() => void add()}
@@ -1561,7 +1528,7 @@ function CalendarSources({
             )}
 
             {pending && (
-                <YStack gap="$2" p="$3" bg={palette.raised} rounded="$3" role="alert">
+                <YStack gap="$2" p="$3" bg={palette.cardFill} rounded="$3" role="alert">
                     <Text fontWeight="600">{pending.source.name}</Text>
                     <Paragraph>
                         {pending.action === "raw"
@@ -1614,15 +1581,14 @@ function CalendarSources({
                             Alarms {source.alarms_on ? "on" : "off"}
                         </Label>
                         <Switch
-                            borderWidth={1}
-                            borderColor={palette.border}
+                            borderWidth={0}
                             id={`calendar-alarms-${source.id}`}
                             size="$2"
                             checked={source.alarms_on}
                             disabled={busy !== null}
                             onCheckedChange={(checked) => void setAlarms(source, checked)}
                         >
-                            <Switch.Thumb activeStyle={{ bg: palette.page }} />
+                            <Switch.Thumb activeStyle={{ bg: palette.pageFill }} />
                         </Switch>
                         <Label htmlFor={`calendar-target-${source.id}`} size="$2">
                             Ring on
@@ -1798,13 +1764,7 @@ function SeriesList({
 
     if (items.length === 0) {
         return (
-            <Card
-                bg={palette.surface}
-                p="$4"
-                items="center"
-                gap="$2"
-                style={{ borderColor: palette.border, borderWidth: 1 }}
-            >
+            <Card bg={palette.cardFill} p="$4" items="center" gap="$2">
                 <CalendarClock size={28} color={palette.secondary} />
                 <Paragraph color={palette.secondary}>Nothing scheduled yet</Paragraph>
             </Card>
@@ -1863,9 +1823,8 @@ function SeriesList({
                     key={item.id}
                     className="event-card"
                     onClick={() => onEdit(item)}
-                    bg={palette.surface}
+                    bg={palette.cardFill}
                     p="$3"
-                    style={{ borderColor: palette.border, borderWidth: 1 }}
                 >
                     <XStack items="flex-start" justify="space-between" gap="$3">
                         <YStack flex={1} minW={0} style={{ overflowWrap: "anywhere" }}>
@@ -2166,12 +2125,7 @@ function ScheduleComposer({
     }
 
     return (
-        <Card
-            bg={palette.surface}
-            p="$3"
-            gap="$3"
-            style={{ borderColor: palette.border, borderWidth: 1 }}
-        >
+        <Card bg={palette.cardFill} p="$3" gap="$3">
             <XStack gap="$2" flexWrap="wrap" items="flex-end">
                 <Field label="Title">
                     <Input
@@ -2412,7 +2366,7 @@ function ScheduleComposer({
 
             <XStack gap="$2">
                 <Button
-                    theme="blue"
+                    tone="accent"
                     disabled={busy}
                     icon={busy ? <Spinner /> : undefined}
                     onPress={() => void submit()}
@@ -2437,7 +2391,7 @@ function Toggle({
     children: ReactNode;
 }) {
     return (
-        <Button size="$2" theme={on ? "blue" : undefined} onPress={onPress}>
+        <Button size="$2" selected={on} onPress={onPress}>
             {children}
         </Button>
     );

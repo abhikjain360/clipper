@@ -2343,7 +2343,7 @@ Each entry has:
 
 ### 186. Selected blue buttons show the page colour instead of the accent
 
-- **Status:** open
+- **Status:** fixed
 - **Severity:** low; selected buttons are hard to tell apart.
 - **Where:** `packages/shared/src/palette.ts` (`createDarkThemes`), as used by
   the web Tamagui config.
@@ -2354,6 +2354,14 @@ Each entry has:
   red and yellow buttons keep their fill because their button rules come
   after their colour rules. Selected section buttons in the schedule, the
   kitchen and the gym are affected.
+- **Fix:** both apps use shared palette roles through explicit Button
+  variants. Primary actions use a solid accent fill and dark text. Selected
+  controls use an accent-tinted fill and accent border. They do not use colour
+  themes that Tamagui can merge.
+- **Checked:** a production build with an isolated mock backend rendered in
+  headless Chrome. Start had the accent fill; selected Next and Week had the
+  selected fill and accent border. Default buttons, cards and inputs had their
+  separate fills and no borders.
 
 ### 187. A set added on one device can replace a set logged on another
 

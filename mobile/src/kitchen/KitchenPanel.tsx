@@ -25,7 +25,7 @@ export function KitchenPanel({
       <XStack gap="$2">
         <Button
           size="$3"
-          theme={openRecipeId !== null || section === "recipes" ? "blue" : undefined}
+          selected={openRecipeId !== null || section === "recipes"}
           onPress={() => {
             onOpenRecipe(null);
             setSection("recipes");
@@ -35,7 +35,7 @@ export function KitchenPanel({
         </Button>
         <Button
           size="$3"
-          theme={openRecipeId === null && section === "pantry" ? "blue" : undefined}
+          selected={openRecipeId === null && section === "pantry"}
           onPress={() => {
             onOpenRecipe(null);
             setSection("pantry");

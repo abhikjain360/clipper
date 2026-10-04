@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
     palette,
     buttonThemes,
+    buttonStyles,
     createDarkThemes,
     darkDefaults,
     scheduleColors,
@@ -20,72 +21,71 @@ function luminance(hex: string): number {
     return channels[0]! * 0.2126 + channels[1]! * 0.7152 + channels[2]! * 0.0722;
 }
 
-function ratio(first: string, second: string): number {
-    const a = luminance(first);
-    const b = luminance(second);
-    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-}
-
 function contrast(name: string, foreground: string, background: string, minimum: number) {
     assert.match(foreground, /^#[a-f0-9]{6}$/i);
     assert.match(background, /^#[a-f0-9]{6}$/i);
-    const measured = ratio(foreground, background);
+    const a = luminance(foreground);
+    const b = luminance(background);
+    const measured = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
     assert.ok(measured >= minimum, `${name}: ${measured.toFixed(2)}:1, requires ${minimum}:1`);
 }
 
-const surfaces = [palette.page, palette.surface, palette.raised];
+const surfaces = [palette.pageFill, palette.cardFill];
 
-test("body, secondary and status text meet 4.5:1 on every surface", () => {
-    for (const background of [...surfaces, ...Object.values(statusSurfaces)]) {
-        for (const name of [
-            "text",
-            "secondary",
-            "accent",
-            "danger",
-            "warning",
-            "success",
-        ] as const) {
-            contrast(name, palette[name], background, 4.5);
+test("body and secondary text meet 4.5:1 on every neutral and selected fill", () => {
+    for (const background of [
+        ...surfaces,
+        palette.inputFill,
+        palette.buttonFill,
+        palette.buttonHover,
+        palette.buttonPressed,
+        palette.selectedFill,
+        ...Object.values(statusSurfaces),
+    ]) {
+        contrast("body", palette.text, background, 4.5);
+        contrast("secondary", palette.secondary, background, 4.5);
+    }
+    for (const background of surfaces) {
+        for (const color of [palette.accent, palette.danger, palette.warning, palette.success]) {
+            contrast("status text", color, background, 4.5);
         }
-        contrast("card and input edges", palette.border, background, 3);
     }
 });
 
-test("button text, boundaries and selected states meet contrast targets", () => {
-    assert.equal(darkDefaults.Button.borderWidth, 1);
-    assert.equal(darkDefaults.Button.borderColor, "$borderColor");
+test("fill hierarchy separates buttons, cards and fields without normal borders", () => {
+    assert.ok(luminance(palette.pageFill) < luminance(palette.cardFill));
+    assert.ok(luminance(palette.inputFill) < luminance(palette.cardFill));
+    assert.ok(luminance(palette.buttonHover) > luminance(palette.buttonFill));
+    assert.ok(luminance(palette.buttonPressed) < luminance(palette.buttonFill));
+    assert.equal(darkDefaults.Button.borderWidth, 0);
+    assert.equal(darkDefaults.Card.borderWidth, 0);
+    assert.equal(darkDefaults.Input.borderWidth, 0);
+    assert.equal(buttonStyles.borderWidth, 0);
+    for (const fill of [palette.buttonFill, palette.buttonHover, palette.buttonPressed]) {
+        contrast("button against card", fill, palette.cardFill, 1.6);
+    }
+    for (const adjacent of [...surfaces, palette.selectedFill, palette.buttonHover]) {
+        contrast("selected border", palette.selectedBorder, adjacent, 3);
+    }
     for (const [name, theme] of Object.entries(buttonThemes)) {
         for (const state of ["", "Hover", "Press", "Focus"] as const) {
-            const background = theme[`background${state}`];
-            contrast(`${name} ${state} text`, theme[`color${state}`], background, 4.5);
-            for (const adjacent of surfaces) {
-                contrast(`${name} ${state} boundary`, theme[`borderColor${state}`], adjacent, 3);
-                assert.notEqual(background, adjacent);
-                if (name !== "default") contrast(`${name} selected fill`, background, adjacent, 3);
-            }
-            if (name === "default") {
-                contrast("button inner edge", theme[`borderColor${state}`], background, 3);
-                contrast("button secondary text", palette.secondary, background, 4.5);
-                for (const color of [
-                    palette.accent,
-                    palette.danger,
-                    palette.warning,
-                    palette.success,
-                ]) {
-                    contrast("button status icon", color, background, 4.5);
-                }
-            }
+            contrast(
+                `${name} ${state} text`,
+                theme[`color${state}`],
+                theme[`background${state}`],
+                4.5,
+            );
+            assert.equal(theme[`borderColor${state}`], "transparent");
         }
     }
 });
 
-test("both apps' stock component subthemes receive the accessible dark colours", () => {
+test("both apps' stock component subthemes use readable text and borderless fields", () => {
     const require = createRequire(import.meta.url);
     const { defaultConfig } = require("@tamagui/config/v4") as {
         defaultConfig: { themes: Record<string, Record<string, string>> };
     };
-    const themes = createDarkThemes(defaultConfig.themes);
-    for (const [name, theme] of Object.entries(themes)) {
+    for (const [name, theme] of Object.entries(createDarkThemes(defaultConfig.themes))) {
         if (name !== "dark" && !name.startsWith("dark_")) continue;
         for (const state of ["", "Hover", "Press", "Focus"] as const) {
             contrast(
@@ -94,17 +94,11 @@ test("both apps' stock component subthemes receive the accessible dark colours",
                 theme[`background${state}`]!,
                 4.5,
             );
-            for (const adjacent of surfaces) {
-                contrast(`${name} ${state} edge`, theme[`borderColor${state}`]!, adjacent, 3);
-            }
+            assert.equal(theme[`borderColor${state}`], "transparent");
         }
         if (name.endsWith("_Input") || name.endsWith("_TextArea")) {
+            assert.equal(theme.background, palette.inputFill);
             contrast(`${name} placeholder`, theme.placeholderColor!, theme.background!, 4.5);
-        }
-        if (name.endsWith("_Switch")) {
-            for (const adjacent of surfaces)
-                contrast(`${name} selected track`, theme.backgroundActive!, adjacent, 3);
-            contrast(`${name} selected thumb`, palette.page, theme.backgroundActive!, 3);
         }
     }
 });
@@ -120,6 +114,6 @@ test("calendar kinds, fatigue bands and editor cursor labels remain readable", (
     for (const color of Object.values(fatigueColors)) {
         for (const background of surfaces) contrast("fatigue text", color, background, 4.5);
     }
-    for (const color of cursorColors) contrast("remote cursor label", palette.page, color, 4.5);
+    for (const color of cursorColors) contrast("remote cursor label", palette.onAccent, color, 4.5);
     for (const background of surfaces) contrast("editor keyword", cursorColors[4], background, 4.5);
 });

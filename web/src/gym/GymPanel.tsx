@@ -89,7 +89,7 @@ export function GymPanel({ state, onError }: { state: unknown; onError: ErrorHan
                     <Button
                         key={value}
                         aria-pressed={section === value}
-                        theme={section === value ? "blue" : undefined}
+                        selected={section === value}
                         onPress={() => setSection(value)}
                     >
                         {label}

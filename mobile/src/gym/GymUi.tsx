@@ -1,18 +1,18 @@
-import { Button } from "../tamagui.config";
+import { Button, Input } from "../tamagui.config";
 import { Minus, Plus, Search, X } from "lucide-react-native";
 import { useEffect, useState, type ReactNode } from "react";
 import { Modal, TextInput } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Svg, { Circle, Line, Polyline, Text as SvgText } from "react-native-svg";
-import { Card, H2, Input, Paragraph, ScrollView, Text, XStack, YStack } from "tamagui";
+import { Card, H2, Paragraph, ScrollView, Text, XStack, YStack } from "tamagui";
 import type { GymExercise, GymSet, GymSetValues } from "@clipper/mobile-bridge";
 import { fatigueColors, formatKg, palette, parseCount, parseWeight } from "@clipper/shared";
 import { setLabel } from "./gymClient";
 
 export const colors = {
-  background: palette.page,
-  card: palette.surface,
-  border: palette.border,
+  background: palette.pageFill,
+  card: palette.cardFill,
+  grid: palette.buttonFill,
   muted: palette.secondary,
   faint: palette.secondary,
   accent: palette.accent,
@@ -26,9 +26,9 @@ export function GymCard({ children, highlighted }: { children: ReactNode; highli
   return (
     <Card
       p="$3"
-      bg={colors.card}
-      borderColor={highlighted ? colors.accent : colors.border}
-      borderWidth={1}
+      bg={highlighted ? palette.selectedFill : palette.cardFill}
+      borderColor={palette.selectedBorder}
+      borderWidth={highlighted ? 1 : 0}
     >
       {children}
     </Card>
@@ -89,9 +89,8 @@ export function NumberEntry({
             flex: 1,
             height: 56,
             borderRadius: 8,
-            borderWidth: 1,
-            borderColor: colors.border,
-            backgroundColor: colors.background,
+            borderWidth: 0,
+            backgroundColor: palette.inputFill,
             color: palette.text,
             fontSize: 26,
             textAlign: "center",
@@ -129,7 +128,7 @@ export function ReserveChips({
             size="$5"
             px={0}
             aria-label={`${reserve} reps in reserve`}
-            theme={value === reserve ? "blue" : undefined}
+            selected={value === reserve}
             onPress={() => onChange(value === reserve ? undefined : reserve)}
           >
             {String(reserve)}
@@ -202,15 +201,7 @@ export function SheetModal({
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
-        <XStack
-          items="center"
-          justify="space-between"
-          gap="$2"
-          px="$3"
-          py="$2"
-          borderBottomColor={colors.border}
-          borderBottomWidth={1}
-        >
+        <XStack items="center" justify="space-between" gap="$2" px="$3" py="$2" borderWidth={0}>
           <H2 size="$5" flex={1} numberOfLines={1}>
             {title}
           </H2>
@@ -298,7 +289,7 @@ export function SetEditor({
       <NumberEntry label="Reps" value={reps} onChange={setReps} step={1} />
       <ReserveChips value={reserve} onChange={setReserve} />
       <Button
-        theme="blue"
+        tone="accent"
         size="$5"
         onPress={() =>
           onSave({ weightKg: parseWeight(weight), reps: parseCount(reps), repsInReserve: reserve })
@@ -306,7 +297,7 @@ export function SetEditor({
       >
         Save set
       </Button>
-      <Button theme="red" size="$4" onPress={onDelete}>
+      <Button tone="danger" size="$4" onPress={onDelete}>
         Delete set
       </Button>
     </SheetModal>
@@ -356,7 +347,7 @@ export function LineChart({
               x2={width - right}
               y1={toY(value)}
               y2={toY(value)}
-              stroke={colors.border}
+              stroke={colors.grid}
               strokeWidth={1}
             />
           ))}

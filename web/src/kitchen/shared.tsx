@@ -46,12 +46,7 @@ export function useKitchenData<T>(
 
 export function KitchenCard({ children }: { children: ReactNode }) {
     return (
-        <Card
-            bg={palette.surface}
-            p="$3"
-            gap="$3"
-            style={{ borderColor: palette.border, borderWidth: 1 }}
-        >
+        <Card bg={palette.cardFill} p="$3" gap="$3">
             {children}
         </Card>
     );

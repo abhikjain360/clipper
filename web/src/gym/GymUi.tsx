@@ -1,17 +1,6 @@
 import { Minus, Plus, Search } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
-import {
-    Card,
-    Dialog,
-    H2,
-    Input,
-    Label,
-    Paragraph,
-    ScrollView,
-    Text,
-    XStack,
-    YStack,
-} from "tamagui";
+import { Card, Dialog, H2, Label, Paragraph, ScrollView, Text, XStack, YStack } from "tamagui";
 import {
     fatigueColors,
     formatKg,
@@ -26,7 +15,7 @@ import {
     type GymSetKind,
     type GymSetValues,
 } from "@clipper/shared";
-import { Button } from "../tamagui.config";
+import { Button, Input } from "../tamagui.config";
 import { formatBackendError } from "../backend";
 
 export type ErrorHandler = (error: string | null) => void;
@@ -122,9 +111,9 @@ export function GymCard({
         <Card
             p="$4"
             gap="$3"
-            bg={palette.surface}
-            borderWidth={1}
-            borderColor={highlighted ? palette.accent : palette.border}
+            bg={highlighted ? palette.selectedFill : palette.cardFill}
+            borderWidth={highlighted ? 1 : 0}
+            borderColor={palette.selectedBorder}
         >
             {children}
         </Card>
@@ -199,9 +188,8 @@ export function GymDialog({
                     maxH="90vh"
                     p="$4"
                     gap="$3"
-                    bg={palette.surface}
-                    borderWidth={1}
-                    borderColor={palette.border}
+                    bg={palette.cardFill}
+                    borderWidth={0}
                     style={{ overflowY: "auto" }}
                 >
                     <Dialog.Title size="$7">{title}</Dialog.Title>
@@ -238,7 +226,11 @@ export function ConfirmDialog({
                 <Button disabled={busy} onPress={onCancel}>
                     Cancel
                 </Button>
-                <Button theme={destructive ? "red" : "blue"} disabled={busy} onPress={onConfirm}>
+                <Button
+                    tone={destructive ? "danger" : "accent"}
+                    disabled={busy}
+                    onPress={onConfirm}
+                >
                     {confirmLabel}
                 </Button>
             </XStack>
@@ -325,7 +317,7 @@ export function ReserveChips({
                         px={0}
                         aria-label={`${reserve} reps in reserve`}
                         aria-pressed={value === reserve}
-                        theme={value === reserve ? "blue" : undefined}
+                        selected={value === reserve}
                         onPress={() => onChange(value === reserve ? null : reserve)}
                     >
                         {String(reserve)}
@@ -476,14 +468,14 @@ export function SetEditor({
                 onSubmit={() => onSave(setValues(draft))}
             />
             <XStack gap="$2" justify="space-between" flexWrap="wrap">
-                <Button theme="red" disabled={busy} onPress={onDelete}>
+                <Button tone="danger" disabled={busy} onPress={onDelete}>
                     Delete set
                 </Button>
                 <XStack gap="$2">
                     <Button disabled={busy} onPress={onClose}>
                         Cancel
                     </Button>
-                    <Button theme="blue" disabled={busy} onPress={() => onSave(setValues(draft))}>
+                    <Button tone="accent" disabled={busy} onPress={() => onSave(setValues(draft))}>
                         Save set
                     </Button>
                 </XStack>
@@ -600,9 +592,9 @@ export function LineChart({
         left + (maxX === minX ? plotWidth / 2 : ((x - minX) / (maxX - minX)) * plotWidth);
     const toY = (y: number) => top + (1 - (y - minY) / (maxY - minY)) * plotHeight;
     const accent = palette.accent;
-    const grid = palette.raised;
+    const grid = palette.buttonFill;
     const muted = palette.secondary;
-    const surface = palette.surface;
+    const surface = palette.cardFill;
     const last = points[points.length - 1];
     const active = hovered === null ? undefined : points[hovered];
     return (
@@ -718,9 +710,8 @@ export function LineChart({
                     px="$2"
                     py="$1"
                     rounded="$3"
-                    bg={palette.raised}
-                    borderWidth={1}
-                    borderColor={palette.border}
+                    bg={palette.cardFill}
+                    borderWidth={0}
                     pointerEvents="none"
                 >
                     <Text fontWeight="600">{formatValue(active.y)}</Text>
@@ -752,10 +743,10 @@ export function SetRow({
             px="$3"
             py="$2"
             rounded="$3"
-            bg={palette.page}
+            bg={palette.pageFill}
             cursor="pointer"
-            hoverStyle={{ bg: palette.raised }}
-            pressStyle={{ bg: palette.raised }}
+            hoverStyle={{ bg: palette.cardFill }}
+            pressStyle={{ bg: palette.cardFill }}
             role="button"
             aria-label={`Edit ${setLabel(set.kind, number).toLowerCase()} of ${exerciseName}`}
             onPress={onEdit}

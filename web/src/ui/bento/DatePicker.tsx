@@ -124,12 +124,10 @@ function DayPicker() {
                                             month: "long",
                                             day: "numeric",
                                         })}
-                                        chromeless
                                         circular
                                         p={0}
                                         {...swapOnClick(dayButton(d))}
-                                        bg={d.selected ? "$background" : "transparent"}
-                                        theme={d.selected ? "blue" : undefined}
+                                        selected={d.selected}
                                         disabled={!d.inCurrentMonth}
                                     >
                                         <Button.Text

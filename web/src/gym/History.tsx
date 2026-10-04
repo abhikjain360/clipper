@@ -123,12 +123,12 @@ function SessionRow({
             px="$3"
             py="$2"
             rounded="$3"
-            borderWidth={1}
-            borderColor={selected ? palette.accent : "transparent"}
-            bg={selected ? palette.raised : undefined}
+            borderWidth={selected ? 1 : 0}
+            borderColor={palette.selectedBorder}
+            bg={selected ? palette.selectedFill : palette.cardFill}
             cursor="pointer"
-            hoverStyle={{ bg: palette.raised }}
-            pressStyle={{ bg: palette.raised }}
+            hoverStyle={{ bg: selected ? palette.selectedFill : palette.cardFill }}
+            pressStyle={{ bg: selected ? palette.selectedFill : palette.cardFill }}
             role="button"
             aria-pressed={selected}
             onPress={onSelect}
@@ -225,7 +225,7 @@ function SessionDetail({
                             Add exercise
                         </Button>
                         <Button
-                            theme="red"
+                            tone="danger"
                             icon={<Trash2 size={16} />}
                             disabled={busy}
                             onPress={() => setDeletingSession(true)}
@@ -374,14 +374,14 @@ function AddSetDialog({
             <XStack gap="$2" role="group" aria-label="Kind of set">
                 <Button
                     aria-pressed={kind === "working"}
-                    theme={kind === "working" ? "blue" : undefined}
+                    selected={kind === "working"}
                     onPress={() => setKind("working")}
                 >
                     Working set
                 </Button>
                 <Button
                     aria-pressed={kind === "warm_up"}
-                    theme={kind === "warm_up" ? "blue" : undefined}
+                    selected={kind === "warm_up"}
                     onPress={() => setKind("warm_up")}
                 >
                     Warm-up
@@ -396,7 +396,7 @@ function AddSetDialog({
                 <Button disabled={busy} onPress={onClose}>
                     Cancel
                 </Button>
-                <Button theme="blue" disabled={busy} onPress={() => onAdd(kind, setValues(draft))}>
+                <Button tone="accent" disabled={busy} onPress={() => onAdd(kind, setValues(draft))}>
                     Add set
                 </Button>
             </XStack>

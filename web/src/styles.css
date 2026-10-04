@@ -46,7 +46,7 @@ html {
 
 body {
     margin: 0;
-    background: var(--clipper-page);
+    background: var(--clipper-pageFill);
     color: var(--clipper-text);
     font-family:
         Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -54,9 +54,6 @@ body {
 
 .event-card {
     cursor: pointer;
-}
-.event-card:hover {
-    border-color: var(--clipper-border) !important;
 }
 .event-card-title {
     background: none;
@@ -104,10 +101,10 @@ body {
     min-width: 0;
     min-height: 120px;
     padding: 6px;
-    border: 1px solid var(--clipper-border);
+    border: 0;
 }
 .month-cell[data-outside="true"] {
-    background: var(--clipper-page);
+    background: var(--clipper-pageFill);
 }
 .month-date,
 .month-event,
@@ -124,7 +121,7 @@ body {
 }
 .month-date[aria-current="date"] {
     background: var(--clipper-accent);
-    color: var(--clipper-page);
+    color: var(--clipper-pageFill);
 }
 .month-event {
     display: block;
@@ -136,7 +133,7 @@ body {
     margin-top: 3px;
     padding: 4px;
     font-size: 12px;
-    box-shadow: inset 0 0 0 1px var(--clipper-border);
+    box-shadow: inset 0 0 0 1px var(--clipper-calendarBorder);
 }
 .month-actual {
     background: transparent;
@@ -153,34 +150,33 @@ select {
 }
 
 select {
-    background: var(--clipper-button);
+    background: var(--clipper-inputFill);
     color: var(--clipper-text);
-    border: 1px solid var(--clipper-border);
+    border: 0;
 }
 
 select:hover {
-    background: var(--clipper-buttonHover);
+    background: var(--clipper-inputFill);
 }
 
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
 select:focus-visible {
     outline: 2px solid var(--clipper-accent);
 }
 
 input:not([type="checkbox"]):not([type="radio"]),
 textarea {
-    background: var(--clipper-page);
+    background: var(--clipper-inputFill);
     color: var(--clipper-text);
-    border-color: var(--clipper-border);
+    border: 0;
 }
 
 input::placeholder,
 textarea::placeholder {
     color: var(--clipper-secondary);
     opacity: 1;
-}
-
-input:not(.is_Input):not([type="checkbox"]):not([type="radio"]) {
-    box-shadow: inset 0 0 0 1px var(--clipper-border);
 }
 
 * {
@@ -208,7 +204,7 @@ input:not(.is_Input):not([type="checkbox"]):not([type="radio"]) {
     bottom: 0;
     left: 7px;
     width: 2px;
-    background: var(--clipper-border);
+    background: var(--clipper-buttonFill);
     border-radius: 2px;
 }
 .schedule-divider:hover::after,
@@ -258,8 +254,8 @@ input:not(.is_Input):not([type="checkbox"]):not([type="radio"]) {
     inset: 0 auto 0 0;
     width: 68px;
     padding: 10px 8px;
-    background: var(--clipper-surface);
-    border-right: 1px solid var(--clipper-border);
+    background: var(--clipper-cardFill);
+    border-right: 0;
     display: flex;
     flex-direction: column;
     gap: 18px;
@@ -301,7 +297,7 @@ input:not(.is_Input):not([type="checkbox"]):not([type="radio"]) {
     max-height: 100dvh;
     width: min(280px, 85vw);
     max-width: 85vw;
-    background: var(--clipper-surface);
+    background: var(--clipper-cardFill);
     color: var(--clipper-text);
 }
 .mobile-nav-dialog::backdrop {
@@ -334,9 +330,9 @@ input:not(.is_Input):not([type="checkbox"]):not([type="radio"]) {
         justify-content: center;
         width: 40px;
         height: 36px;
-        border: 1px solid var(--clipper-border);
+        border: 0;
         border-radius: 6px;
-        background: var(--clipper-button);
+        background: var(--clipper-buttonFill);
         color: var(--clipper-text);
     }
 }
@@ -382,9 +378,6 @@ input:not(.is_Input):not([type="checkbox"]):not([type="radio"]) {
 .library-grid .library-card svg {
     flex-shrink: 0;
 }
-.library-grid .library-card:hover {
-    border-color: var(--clipper-border) !important;
-}
 
 .nav-collapse-toggle {
     display: flex;
@@ -395,9 +388,9 @@ input:not(.is_Input):not([type="checkbox"]):not([type="radio"]) {
     height: 40px;
     flex-shrink: 0;
     padding: 0;
-    border: 1px solid var(--clipper-border);
+    border: 0;
     border-radius: 6px;
-    background: var(--clipper-button);
+    background: var(--clipper-buttonFill);
     color: var(--clipper-secondary);
     cursor: pointer;
 }
@@ -411,28 +404,32 @@ input:not(.is_Input):not([type="checkbox"]):not([type="radio"]) {
 
 .editor-toggle,
 .editor-select {
-    background: var(--clipper-button);
+    background: var(--clipper-buttonFill);
     color: var(--clipper-text);
-    border: 1px solid var(--clipper-border);
+    border: 0;
+}
+.editor-select,
+.editor-select:hover {
+    background: var(--clipper-inputFill);
 }
 .editor-toggle:hover,
-.editor-select:hover {
+.mobile-nav-toggle:hover {
     background: var(--clipper-buttonHover);
 }
 .editor-toggle:active,
 .nav-collapse-toggle:active {
-    background: var(--clipper-buttonPress);
+    background: var(--clipper-buttonPressed);
 }
 .editor-toggle[aria-pressed="true"] {
-    background: var(--clipper-accent);
-    color: var(--clipper-page);
-    border-color: var(--clipper-accent);
+    background: var(--clipper-selectedFill);
+    color: var(--clipper-text);
+    border: 1px solid var(--clipper-selectedBorder);
 }
 .editor-toggle[aria-pressed="true"]:hover {
-    background: var(--clipper-accentHover);
+    background: var(--clipper-selectedFill);
 }
 .editor-toggle[aria-pressed="true"]:active {
-    background: var(--clipper-accentPress);
+    background: var(--clipper-selectedFill);
 }
 .editor-toggle:focus-visible,
 .editor-select:focus-visible {

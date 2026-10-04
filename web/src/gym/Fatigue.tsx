@@ -78,7 +78,7 @@ export function Fatigue({
                 </YStack>
                 <Button
                     aria-pressed={editing}
-                    theme={editing ? "blue" : undefined}
+                    selected={editing}
                     onPress={() => setEditing(!editing)}
                 >
                     {editing ? "Done" : "Recovery days"}
@@ -110,7 +110,7 @@ export function Fatigue({
                                         <YStack
                                             height={8}
                                             rounded={4}
-                                            bg={palette.raised}
+                                            bg={palette.cardFill}
                                             overflow="hidden"
                                             role="meter"
                                             aria-label={`${muscle.display_name} fatigue`}

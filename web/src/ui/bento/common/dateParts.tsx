@@ -117,7 +117,7 @@ const DatePickerContent = styled(Popover.Content, {
         unstyled: {
             false: {
                 padding: 12,
-                borderWidth: 1,
+                borderWidth: 0,
                 borderColor: "$borderColor",
                 boxShadow: "0px 8px 24px rgba(0, 0, 0, 0.25)",
             },
@@ -133,7 +133,7 @@ export const DatePicker = withStaticProperties(DatePickerImpl, {
     Trigger: Popover.Trigger,
     Content: withStaticProperties(DatePickerContent, {
         Arrow: styled(Popover.Arrow, {
-            borderWidth: 1,
+            borderWidth: 0,
             borderColor: "$borderColor",
         }),
     }),
@@ -172,13 +172,11 @@ export function MonthPicker({
             >
                 {months.map((month) => (
                     <Button
-                        theme={month.active ? "blue" : undefined}
+                        selected={month.active}
                         rounded="$4"
                         shrink={0}
                         flexBasis={90}
-                        bg={month.active ? "$background" : "transparent"}
                         key={month.$date.toString()}
-                        chromeless
                         p={0}
                         {...swapOnClick(
                             monthButton(month, {
@@ -226,13 +224,11 @@ export function YearPicker({
             >
                 {years.map((year) => (
                     <Button
-                        theme={year.year === Number(selectedYear) ? "blue" : undefined}
+                        selected={year.year === Number(selectedYear)}
                         rounded="$4"
                         flexBasis="30%"
                         grow={1}
-                        bg={year.year === Number(selectedYear) ? "$background" : "transparent"}
                         key={year.$date.toString()}
-                        chromeless
                         p={0}
                         {...swapOnClick(
                             yearButton(year, {

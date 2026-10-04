@@ -187,7 +187,7 @@ export function RecipePage({
                   <Muted>{`Cooking · Started ${localTime(view.session.startedAtMillis)}`}</Muted>
                   <XStack gap="$2">
                     <Button
-                      theme="green"
+                      tone="success"
                       disabled={disabled}
                       onPress={() => {
                         setNotes("");
@@ -203,7 +203,7 @@ export function RecipePage({
                 </YStack>
               ) : (
                 <Button
-                  theme="blue"
+                  tone="accent"
                   size="$5"
                   disabled={disabled}
                   onPress={() => change(new KitchenSessionChange.Start())}
@@ -347,7 +347,7 @@ export function RecipePage({
       >
         <NotesInput value={notes} onChange={setNotes} disabled={busy} />
         {error && <Text color={colors.bad}>{error}</Text>}
-        <Button theme="green" disabled={disabled} onPress={() => void finish()}>
+        <Button tone="success" disabled={disabled} onPress={() => void finish()}>
           Finish
         </Button>
         <Button disabled={busy} onPress={() => setFinishing(false)}>

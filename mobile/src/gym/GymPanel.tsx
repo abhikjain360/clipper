@@ -54,7 +54,7 @@ export function GymPanel({ onError }: { onError: (error: string | null) => void 
           <Button
             key={value}
             size="$3"
-            theme={section === value ? "blue" : undefined}
+            selected={section === value}
             onPress={() => setSection(value)}
           >
             {label}

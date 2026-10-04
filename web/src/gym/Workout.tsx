@@ -219,7 +219,7 @@ export function Workout({
                             />
                             <XStack gap="$2" flexWrap="wrap">
                                 <Button
-                                    theme="green"
+                                    tone="success"
                                     disabled={busy}
                                     icon={busy ? <Spinner /> : undefined}
                                     onPress={completeSet}
@@ -437,7 +437,7 @@ function StartWorkout({
                                 ))}
                             </YStack>
                             <Button
-                                theme="blue"
+                                tone="accent"
                                 icon={<Play size={16} />}
                                 disabled={busy}
                                 onPress={() => onStart(template.id)}
@@ -547,10 +547,9 @@ function SetRows({
                     px="$3"
                     py="$2"
                     rounded="$3"
-                    borderWidth={1}
-                    borderColor={
-                        offset === 0 && kind === nextKind ? palette.accent : palette.border
-                    }
+                    bg={offset === 0 && kind === nextKind ? palette.selectedFill : palette.cardFill}
+                    borderWidth={offset === 0 && kind === nextKind ? 1 : 0}
+                    borderColor={palette.selectedBorder}
                 >
                     <Text color={palette.secondary}>{setLabel(kind, number)}</Text>
                     <Text color={palette.secondary}>
@@ -595,12 +594,7 @@ function PlanRow({
             ? " · done"
             : "";
     return (
-        <YStack
-            gap="$2"
-            pt={first ? 0 : "$3"}
-            borderTopWidth={first ? 0 : 1}
-            borderColor={palette.border}
-        >
+        <YStack gap="$2" pt={first ? 0 : "$3"} borderTopWidth={0}>
             <XStack items="center" gap="$2">
                 <YStack flex={1}>
                     <Text
@@ -652,7 +646,7 @@ function PlanRow({
                             key={set.id}
                             size="$2"
                             chromeless
-                            bg={palette.page}
+                            bg={palette.pageFill}
                             aria-label={`Edit ${setLabel(set.kind, number).toLowerCase()} of ${exercise.name}`}
                             onPress={() => onEdit(set, number)}
                         >

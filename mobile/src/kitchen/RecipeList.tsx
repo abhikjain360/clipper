@@ -1,8 +1,9 @@
 import type { KitchenRecipeSummary } from "@clipper/mobile-bridge";
 import type { AppState } from "@clipper/shared";
 import { Search } from "lucide-react-native";
+import { Input } from "../tamagui.config";
 import { useCallback, useState } from "react";
-import { H2, Input, ScrollView, Text, XStack, YStack } from "tamagui";
+import { H2, ScrollView, Text, XStack, YStack } from "tamagui";
 import { colors, GymCard, Muted } from "../gym/GymUi";
 import { blockTime, deviceZone, kitchen, localTime, useKitchenView } from "./kitchenClient";
 import { LoadStatus } from "./KitchenUi";
@@ -48,7 +49,7 @@ export function RecipeList({
                     gap="$1"
                     py="$2"
                     onPress={() => onOpen(session.recipeId)}
-                    pressStyle={{ bg: palette.raised }}
+                    pressStyle={{ bg: palette.cardFill }}
                     accessibilityRole="button"
                     aria-label={`Open ${session.title}`}
                   >
@@ -101,7 +102,7 @@ function RecipeRow({
       gap="$1"
       py="$2"
       onPress={() => onOpen(recipe.id)}
-      pressStyle={{ bg: palette.raised }}
+      pressStyle={{ bg: palette.cardFill }}
       accessibilityRole="button"
       aria-label={`Open ${recipe.title}`}
     >

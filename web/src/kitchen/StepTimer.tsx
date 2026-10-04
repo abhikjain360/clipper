@@ -33,7 +33,7 @@ export function StepTimer({
     const seconds = Math.ceil(remaining / 1000);
     const countdown = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
     return (
-        <YStack gap="$2" p="$2" bg={palette.page} rounded="$2">
+        <YStack gap="$2" p="$2" bg={palette.pageFill} rounded="$2">
             <XStack gap="$2" items="center" flexWrap="wrap">
                 <Text>
                     {timer.label} · {timer.minutes} min

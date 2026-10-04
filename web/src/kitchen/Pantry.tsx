@@ -1,7 +1,7 @@
-import { Button } from "../tamagui.config";
+import { Button, Input, TextArea } from "../tamagui.config";
 import { palette } from "@clipper/shared";
 import { useCallback, useRef, useState, type FormEvent } from "react";
-import { H2, Input, Paragraph, Text, TextArea, XStack, YStack } from "tamagui";
+import { H2, Paragraph, Text, XStack, YStack } from "tamagui";
 import type {
     KitchenBackend,
     KitchenEquipment,
@@ -75,7 +75,7 @@ export function Pantry({
                     Refresh
                 </Button>
                 <Button
-                    theme="blue"
+                    tone="accent"
                     disabled={busy || loading || failed}
                     onPress={() => setEditor({ kind: "item", item: null })}
                 >
@@ -207,7 +207,7 @@ export function Pantry({
                     </Paragraph>
                 )}
                 <Button
-                    theme="red"
+                    tone="danger"
                     disabled={busy}
                     onPress={() => {
                         if (deleting)
@@ -304,7 +304,7 @@ function PantryForm({
                 <Field label="Notes">
                     <TextArea value={notes} onChangeText={setNotes} disabled={busy} minH={100} />
                 </Field>
-                <Button theme="blue" type="submit" disabled={busy}>
+                <Button tone="accent" type="submit" disabled={busy}>
                     Save
                 </Button>
             </YStack>

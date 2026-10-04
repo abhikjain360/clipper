@@ -1,11 +1,11 @@
-import { Button } from "../tamagui.config";
+import { Button, Input } from "../tamagui.config";
 import {
   KitchenPantryChange,
   type KitchenEquipment,
   type KitchenPantryItem,
 } from "@clipper/mobile-bridge";
 import { useState } from "react";
-import { Input, Text, XStack } from "tamagui";
+import { Text, XStack } from "tamagui";
 import { colors, SheetModal } from "../gym/GymUi";
 import { Field, NotesInput } from "./KitchenUi";
 
@@ -81,7 +81,7 @@ export function PantryForm({
                 <Button
                   key={value}
                   size="$3"
-                  theme={value === category ? "blue" : undefined}
+                  selected={value === category}
                   disabled={busy}
                   onPress={() => setCategory(value)}
                 >
@@ -116,7 +116,7 @@ export function PantryForm({
         <NotesInput value={notes} onChange={setNotes} disabled={busy} />
       </Field>
       {error && <Text color={colors.bad}>{error}</Text>}
-      <Button theme="blue" disabled={busy} onPress={save}>
+      <Button tone="accent" disabled={busy} onPress={save}>
         Save
       </Button>
       <Button disabled={busy} onPress={onClose}>

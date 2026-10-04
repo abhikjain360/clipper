@@ -256,7 +256,7 @@ export function LiveSession({ onError }: { onError: (error: string | null) => vo
               <NumberEntry label="Reps" value={reps} onChange={setReps} step={1} placeholder="–" />
               <ReserveChips value={reserve} onChange={setReserve} />
               <Button
-                theme="green"
+                tone="success"
                 size="$6"
                 disabled={busy}
                 icon={busy ? <Spinner /> : undefined}
@@ -424,7 +424,7 @@ function StartWorkout({
                   .join(", ")}
               </Muted>
               <Button
-                theme="blue"
+                tone="accent"
                 size="$5"
                 icon={<Play size={18} />}
                 disabled={busy}
@@ -532,9 +532,9 @@ function SetRows({
           px="$2"
           py="$2"
           rounded="$2"
-          bg={palette.raised}
+          bg={palette.cardFill}
           onPress={() => onEdit(set, number)}
-          pressStyle={{ bg: palette.raised }}
+          pressStyle={{ bg: palette.cardFill }}
           aria-label={`${setLabel(set.kind, number)} done`}
         >
           <Text color={set.kind === SetKind.WarmUp ? colors.warmUp : undefined}>
@@ -551,8 +551,9 @@ function SetRows({
           px="$2"
           py="$2"
           rounded="$2"
-          borderWidth={1}
-          borderColor={offset === 0 && kind === nextKind ? colors.accent : colors.border}
+          bg={offset === 0 && kind === nextKind ? palette.selectedFill : palette.cardFill}
+          borderWidth={offset === 0 && kind === nextKind ? 1 : 0}
+          borderColor={palette.selectedBorder}
         >
           <Text color={colors.muted}>{setLabel(kind, number)}</Text>
           <Text color={colors.faint}>
@@ -605,7 +606,7 @@ function PlanRow({
           items="center"
           gap="$2"
           onPress={() => setOpen(!open)}
-          pressStyle={{ bg: palette.raised }}
+          pressStyle={{ bg: palette.cardFill }}
         >
           <YStack flex={1}>
             <Text
