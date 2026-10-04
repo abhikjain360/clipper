@@ -3,6 +3,10 @@ plugins {
   id 'expo-module-gradle-plugin'
 }
 
+dependencies {
+  compileOnly 'com.facebook.react:react-android'
+}
+
 group = 'com.clipper.editor'
 version = '0.1.0'
 

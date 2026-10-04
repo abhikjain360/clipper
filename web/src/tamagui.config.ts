@@ -28,6 +28,13 @@ const tamaguiConfig = createTamagui({
         ...defaultConfig.fonts,
         body: libronFont(defaultConfig.fonts.body),
         heading: libronFont(defaultConfig.fonts.heading),
+        mono: createFont({
+            ...defaultConfig.fonts.body,
+            family: "var(--clipper-monospace)",
+            weight: Object.fromEntries(
+                Object.entries(defaultConfig.fonts.body.weight).map(([size]) => [size, "400"]),
+            ),
+        }),
     },
     themes: createDarkThemes(defaultConfig.themes),
     defaultProps: darkDefaults,

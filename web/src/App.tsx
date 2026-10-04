@@ -103,10 +103,10 @@ const renderEditorError = (error: Error): ReactNode => (
                 Editor failed to load
             </div>
             <div
+                className="monospace"
                 style={{
                     color: palette.secondary,
                     fontSize: 12,
-                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
                     maxWidth: 520,
                 }}
             >
@@ -763,11 +763,9 @@ function ClipboardPanel({
                             <XStack items="center" justify="space-between" gap="$3">
                                 <YStack flex={1} gap="$1">
                                     <Text
-                                        style={{
-                                            fontFamily: isTextMimeType(item.mime_type)
-                                                ? "ui-monospace, SFMono-Regular, Menlo, monospace"
-                                                : undefined,
-                                        }}
+                                        fontFamily={
+                                            isTextMimeType(item.mime_type) ? "$mono" : "$body"
+                                        }
                                         numberOfLines={6}
                                     >
                                         {item.text}
@@ -1340,11 +1338,7 @@ function CollabDocView({
                                 <Text
                                     numberOfLines={1}
                                     color={shareLink(meta) ? undefined : palette.secondary}
-                                    style={{
-                                        fontFamily: shareLink(meta)
-                                            ? "ui-monospace, SFMono-Regular, Menlo, monospace"
-                                            : undefined,
-                                    }}
+                                    fontFamily={shareLink(meta) ? "$mono" : "$body"}
                                 >
                                     {shareLink(meta) ?? SHARE_LINK_UNAVAILABLE}
                                 </Text>

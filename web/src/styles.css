@@ -480,3 +480,46 @@ dialog:not([open]) {
 .editor-select:focus-visible {
     outline: 2px solid var(--clipper-accent);
 }
+@font-face {
+    font-family: "Fira Code";
+    src: url("/fonts/fira-code/FiraCode-Regular.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "Fira Code";
+    src: url("/fonts/fira-code/FiraCode-Medium.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 500;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "Fira Code";
+    src: url("/fonts/fira-code/FiraCode-SemiBold.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 600;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "Fira Code";
+    src: url("/fonts/fira-code/FiraCode-Bold.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+}
+
+:root {
+    --clipper-monospace: "Fira Code", monospace;
+}
+
+pre,
+code,
+kbd,
+samp,
+.monospace {
+    font-family: var(--clipper-monospace);
+}

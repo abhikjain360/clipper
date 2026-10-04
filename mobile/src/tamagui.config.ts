@@ -9,6 +9,8 @@ import {
 } from "tamagui";
 import { createDarkThemes, darkDefaults, buttonStyles, inputStyles } from "@clipper/shared";
 
+export const monospaceFont = "Fira Code";
+
 function libronFont(font: typeof defaultConfig.fonts.body) {
   return createFont({
     ...font,
@@ -34,6 +36,19 @@ const tamaguiConfig = createTamagui({
     ...defaultConfig.fonts,
     body: libronFont(defaultConfig.fonts.body),
     heading: libronFont(defaultConfig.fonts.heading),
+    mono: createFont({
+      ...defaultConfig.fonts.body,
+      family: monospaceFont,
+      weight: Object.fromEntries(
+        Object.entries(defaultConfig.fonts.body.weight).map(([size]) => [size, "400"]),
+      ),
+      face: {
+        400: { normal: "FiraCode-Regular" },
+        500: { normal: "FiraCode-Medium" },
+        600: { normal: "FiraCode-SemiBold" },
+        700: { normal: "FiraCode-Bold" },
+      },
+    }),
   },
   themes: createDarkThemes(defaultConfig.themes),
   defaultProps: darkDefaults,

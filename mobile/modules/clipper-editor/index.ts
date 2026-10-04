@@ -5,6 +5,7 @@ import type { EditorEvent, EditorState } from "../../src/collabText";
 type CollabInputProps = ViewProps & {
   state: EditorState;
   editable: boolean;
+  fontFamily: string;
   colors: { text: string; background: string; selection: string; cursor: string };
   onEdit: (event: NativeSyntheticEvent<EditorEvent>) => void;
 };

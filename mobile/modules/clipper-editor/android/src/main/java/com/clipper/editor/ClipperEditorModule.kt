@@ -10,6 +10,7 @@ import android.text.TextWatcher
 import android.view.Gravity
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
+import com.facebook.react.common.assets.ReactFontManager
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -42,6 +43,11 @@ class ClipperEditorModule : Module() {
             Prop("editable") { view: ClipperEditorView, editable: Boolean ->
                 view.input.isEnabled = editable
             }
+            Prop("fontFamily") { view: ClipperEditorView, fontFamily: String ->
+                view.input.typeface = ReactFontManager.getInstance().getTypeface(
+                    fontFamily, Typeface.NORMAL, view.context.assets
+                )
+            }
             Prop("colors") { view: ClipperEditorView, colors: InputColors ->
                 view.input.setTextColor(Color.parseColor(colors.text))
                 view.input.setBackgroundColor(Color.parseColor(colors.background))
@@ -73,7 +79,6 @@ class ClipperEditorView(context: Context, appContext: AppContext) : ExpoView(con
             InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         input.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI
         input.gravity = Gravity.TOP or Gravity.START
-        input.typeface = Typeface.MONOSPACE
         input.textSize = 13f
         input.setLineSpacing(5 * resources.displayMetrics.scaledDensity, 1f)
         val padding = (12 * resources.displayMetrics.density).toInt()

@@ -108,7 +108,7 @@ import { GymPanel } from "./gym/GymPanel";
 import type { KitchenPlan } from "@clipper/mobile-bridge";
 import { KitchenPanel } from "./kitchen/KitchenPanel";
 import { armRestEndForOpenWorkout, stopRestEnd } from "./gym/restAlarm";
-import tamaguiConfig, { Button, Input } from "./tamagui.config";
+import tamaguiConfig, { Button, Input, monospaceFont } from "./tamagui.config";
 
 type TabName =
   | "clipboard"
@@ -138,14 +138,6 @@ type ViewerContent = {
   file?: FileItem;
   details?: boolean;
 };
-
-// Android renders code with the platform "monospace" family; iOS has no such
-// alias, so fall back to Menlo there.
-const MONOSPACE_FONT = Platform.select({
-  ios: "Menlo",
-  android: "monospace",
-  default: "monospace",
-});
 
 /**
  * How far ahead alarms are handed to the platform.
@@ -2250,7 +2242,7 @@ function CollabDocEditor({
               style={{
                 flex: 1,
                 color: palette.text,
-                fontFamily: MONOSPACE_FONT,
+                fontFamily: monospaceFont,
                 padding: 12,
                 textAlignVertical: "top",
               }}
@@ -2260,6 +2252,7 @@ function CollabDocEditor({
               key={docId}
               state={editor}
               editable={loaded}
+              fontFamily={monospaceFont}
               colors={{
                 text: palette.text,
                 background: palette.pageFill,
@@ -2400,7 +2393,7 @@ function ContentViewer({
               flex: 1,
               color: palette.text,
               backgroundColor: palette.pageFill,
-              fontFamily: MONOSPACE_FONT,
+              fontFamily: monospaceFont,
               fontSize: 13,
               lineHeight: 18,
               padding: 12,

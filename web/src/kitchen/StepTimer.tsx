@@ -39,11 +39,7 @@ export function StepTimer({
                     {timer.label} · {timer.minutes} min
                 </Text>
                 {timer.state !== "idle" && (
-                    <Text
-                        style={{ fontFamily: "monospace" }}
-                        role="timer"
-                        aria-label={`${timer.label} remaining`}
-                    >
+                    <Text role="timer" aria-label={`${timer.label} remaining`}>
                         {done ? "Done" : countdown}
                         {timer.state === "paused" ? " · Paused" : ""}
                     </Text>

@@ -26,7 +26,11 @@
             "./assets/fonts/libron/Libron-Regular.ttf",
             "./assets/fonts/libron/Libron-Italic.ttf",
             "./assets/fonts/libron/Libron-Bold.ttf",
-            "./assets/fonts/libron/Libron-BoldItalic.ttf"
+            "./assets/fonts/libron/Libron-BoldItalic.ttf",
+            "./assets/fonts/fira-code/FiraCode-Regular.ttf",
+            "./assets/fonts/fira-code/FiraCode-Medium.ttf",
+            "./assets/fonts/fira-code/FiraCode-SemiBold.ttf",
+            "./assets/fonts/fira-code/FiraCode-Bold.ttf"
           ],
           "android": {
             "fonts": [
@@ -57,6 +61,15 @@
                     "weight": 700,
                     "style": "italic"
                   }
+                ]
+              },
+              {
+                "fontFamily": "Fira Code",
+                "fontDefinitions": [
+                  { "path": "./assets/fonts/fira-code/FiraCode-Regular.ttf", "weight": 400 },
+                  { "path": "./assets/fonts/fira-code/FiraCode-Medium.ttf", "weight": 500 },
+                  { "path": "./assets/fonts/fira-code/FiraCode-SemiBold.ttf", "weight": 600 },
+                  { "path": "./assets/fonts/fira-code/FiraCode-Bold.ttf", "weight": 700 }
                 ]
               }
             ]

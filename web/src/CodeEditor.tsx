@@ -46,7 +46,7 @@ interface CollabRuntime {
 
 const fillHeightTheme = EditorView.theme({
     "&": { height: "100%", backgroundColor: palette.pageFill, color: palette.text },
-    ".cm-scroller": { overflow: "auto" },
+    ".cm-scroller": { overflow: "auto", fontFamily: "var(--clipper-monospace)" },
     ".cm-content": { caretColor: palette.accent },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: palette.accent },
     ".cm-gutters": {
