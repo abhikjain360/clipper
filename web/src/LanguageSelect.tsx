@@ -14,14 +14,12 @@ export function LanguageSelect({
 }) {
     return (
         <select
+            className="editor-select"
             value={value}
             disabled={disabled}
             aria-label="Editor language"
             onChange={(event) => onChange(event.currentTarget.value)}
             style={{
-                background: "#171a1d",
-                color: "#e6e9ec",
-                border: "1px solid #252b31",
                 borderRadius: 6,
                 padding: "4px 8px",
                 fontSize: 12,

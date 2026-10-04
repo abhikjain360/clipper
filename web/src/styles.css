@@ -4,9 +4,13 @@ body,
     min-height: 100%;
 }
 
+html {
+    color-scheme: dark;
+}
+
 .kitchen-recipe-link,
 .kitchen-schedule-link {
-    color: #8bbcff;
+    color: var(--clipper-accent);
     overflow-wrap: anywhere;
 }
 
@@ -37,12 +41,13 @@ body,
     width: 18px;
     height: 18px;
     margin-top: 2px;
+    accent-color: var(--clipper-accent);
 }
 
 body {
     margin: 0;
-    background: #101214;
-    color: #f2f5f7;
+    background: var(--clipper-page);
+    color: var(--clipper-text);
     font-family:
         Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -51,7 +56,7 @@ body {
     cursor: pointer;
 }
 .event-card:hover {
-    border-color: #526171 !important;
+    border-color: var(--clipper-border) !important;
 }
 .event-card-title {
     background: none;
@@ -63,7 +68,7 @@ body {
     cursor: pointer;
 }
 .event-card-title:focus-visible {
-    outline: 2px solid #8bbcff;
+    outline: 2px solid var(--clipper-accent);
     outline-offset: 4px;
 }
 .calendar-now {
@@ -71,7 +76,7 @@ body {
     left: 0;
     right: 0;
     height: 2px;
-    background: #ff625e;
+    background: var(--clipper-danger);
     z-index: 5;
     pointer-events: none;
 }
@@ -83,7 +88,7 @@ body {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: #ff625e;
+    background: var(--clipper-danger);
 }
 .month-grid {
     display: grid;
@@ -93,16 +98,16 @@ body {
 .month-heading {
     padding: 8px;
     text-align: center;
-    color: #8b949e;
+    color: var(--clipper-secondary);
 }
 .month-cell {
     min-width: 0;
     min-height: 120px;
     padding: 6px;
-    border: 1px solid #252b31;
+    border: 1px solid var(--clipper-border);
 }
 .month-cell[data-outside="true"] {
-    background: #101214;
+    background: var(--clipper-page);
 }
 .month-date,
 .month-event,
@@ -118,7 +123,8 @@ body {
     border-radius: 4px;
 }
 .month-date[aria-current="date"] {
-    background: #245c92;
+    background: var(--clipper-accent);
+    color: var(--clipper-page);
 }
 .month-event {
     display: block;
@@ -130,10 +136,11 @@ body {
     margin-top: 3px;
     padding: 4px;
     font-size: 12px;
+    box-shadow: inset 0 0 0 1px var(--clipper-border);
 }
 .month-actual {
     background: transparent;
-    color: #7bd88f;
+    color: var(--clipper-success);
     font-size: 12px;
     margin-top: 6px;
 }
@@ -143,6 +150,37 @@ input,
 textarea,
 select {
     font: inherit;
+}
+
+select {
+    background: var(--clipper-button);
+    color: var(--clipper-text);
+    border: 1px solid var(--clipper-border);
+}
+
+select:hover {
+    background: var(--clipper-buttonHover);
+}
+
+select:focus-visible {
+    outline: 2px solid var(--clipper-accent);
+}
+
+input:not([type="checkbox"]):not([type="radio"]),
+textarea {
+    background: var(--clipper-page);
+    color: var(--clipper-text);
+    border-color: var(--clipper-border);
+}
+
+input::placeholder,
+textarea::placeholder {
+    color: var(--clipper-secondary);
+    opacity: 1;
+}
+
+input:not(.is_Input):not([type="checkbox"]):not([type="radio"]) {
+    box-shadow: inset 0 0 0 1px var(--clipper-border);
 }
 
 * {
@@ -170,16 +208,16 @@ select {
     bottom: 0;
     left: 7px;
     width: 2px;
-    background: #303940;
+    background: var(--clipper-border);
     border-radius: 2px;
 }
 .schedule-divider:hover::after,
 .schedule-divider:focus-visible::after,
 .is-resizing .schedule-divider::after {
-    background: #8bbcff;
+    background: var(--clipper-accent);
 }
 .schedule-divider:focus-visible {
-    outline: 1px solid #8bbcff;
+    outline: 1px solid var(--clipper-accent);
     outline-offset: -2px;
 }
 .is-resizing {
@@ -220,8 +258,8 @@ select {
     inset: 0 auto 0 0;
     width: 68px;
     padding: 10px 8px;
-    background: #171a1d;
-    border-right: 1px solid #303940;
+    background: var(--clipper-surface);
+    border-right: 1px solid var(--clipper-border);
     display: flex;
     flex-direction: column;
     gap: 18px;
@@ -263,8 +301,8 @@ select {
     max-height: 100dvh;
     width: min(280px, 85vw);
     max-width: 85vw;
-    background: #171a1d;
-    color: #f2f5f7;
+    background: var(--clipper-surface);
+    color: var(--clipper-text);
 }
 .mobile-nav-dialog::backdrop {
     background: rgba(0, 0, 0, 0.6);
@@ -296,10 +334,10 @@ select {
         justify-content: center;
         width: 40px;
         height: 36px;
-        border: 1px solid #303940;
+        border: 1px solid var(--clipper-border);
         border-radius: 6px;
-        background: #171a1d;
-        color: #f2f5f7;
+        background: var(--clipper-button);
+        color: var(--clipper-text);
     }
 }
 .mobile-nav-dialog:not([open]) {
@@ -345,7 +383,7 @@ select {
     flex-shrink: 0;
 }
 .library-grid .library-card:hover {
-    border-color: #44515c !important;
+    border-color: var(--clipper-border) !important;
 }
 
 .nav-collapse-toggle {
@@ -357,16 +395,46 @@ select {
     height: 40px;
     flex-shrink: 0;
     padding: 0;
-    border: 0;
+    border: 1px solid var(--clipper-border);
     border-radius: 6px;
-    background: transparent;
-    color: #9aa4ad;
+    background: var(--clipper-button);
+    color: var(--clipper-secondary);
     cursor: pointer;
 }
 .nav-collapse-toggle:hover {
-    color: #f2f5f7;
-    background: #252b31;
+    color: var(--clipper-text);
+    background: var(--clipper-buttonHover);
 }
 .nav-collapse-toggle:focus-visible {
-    outline: 2px solid #8bbcff;
+    outline: 2px solid var(--clipper-accent);
+}
+
+.editor-toggle,
+.editor-select {
+    background: var(--clipper-button);
+    color: var(--clipper-text);
+    border: 1px solid var(--clipper-border);
+}
+.editor-toggle:hover,
+.editor-select:hover {
+    background: var(--clipper-buttonHover);
+}
+.editor-toggle:active,
+.nav-collapse-toggle:active {
+    background: var(--clipper-buttonPress);
+}
+.editor-toggle[aria-pressed="true"] {
+    background: var(--clipper-accent);
+    color: var(--clipper-page);
+    border-color: var(--clipper-accent);
+}
+.editor-toggle[aria-pressed="true"]:hover {
+    background: var(--clipper-accentHover);
+}
+.editor-toggle[aria-pressed="true"]:active {
+    background: var(--clipper-accentPress);
+}
+.editor-toggle:focus-visible,
+.editor-select:focus-visible {
+    outline: 2px solid var(--clipper-accent);
 }

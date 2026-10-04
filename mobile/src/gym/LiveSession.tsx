@@ -1,7 +1,9 @@
+import { Button } from "../tamagui.config";
+import { palette } from "@clipper/shared";
 import { ChevronDown, ChevronUp, Play, Plus, RotateCcw, SkipForward } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Keyboard, AppState as NativeAppState } from "react-native";
-import { Button, H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
+import { H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
 import {
   SetKind,
   type GymExercise,
@@ -532,9 +534,9 @@ function SetRows({
           px="$2"
           py="$2"
           rounded="$2"
-          bg="#1f2428"
+          bg={palette.raised}
           onPress={() => onEdit(set, number)}
-          pressStyle={{ opacity: 0.6 }}
+          pressStyle={{ bg: palette.raised }}
           aria-label={`${setLabel(set.kind, number)} done`}
         >
           <Text color={set.kind === SetKind.WarmUp ? colors.warmUp : undefined}>
@@ -605,7 +607,7 @@ function PlanRow({
           items="center"
           gap="$2"
           onPress={() => setOpen(!open)}
-          pressStyle={{ opacity: 0.6 }}
+          pressStyle={{ bg: palette.raised }}
         >
           <YStack flex={1}>
             <Text

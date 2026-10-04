@@ -1,7 +1,8 @@
+import { Button } from "../tamagui.config";
 import { Trash2 } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Keyboard } from "react-native";
-import { Button, H2, ScrollView, Text, XStack, YStack } from "tamagui";
+import { H2, ScrollView, Text, XStack, YStack } from "tamagui";
 import type { GymBodyWeight, GymWeeklyBodyWeight } from "@clipper/mobile-bridge";
 import { formatBackendError } from "../backend";
 import {

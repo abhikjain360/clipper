@@ -1,8 +1,14 @@
+import { palette, cursorColors } from "@clipper/shared";
 import { useEffect, useRef, useState } from "react";
 import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers } from "@codemirror/view";
 import { defaultKeymap } from "@codemirror/commands";
-import { oneDark } from "@codemirror/theme-one-dark";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import {
+    oneDarkTheme,
+    oneDarkHighlightStyle,
+    color as oneDarkColors,
+} from "@codemirror/theme-one-dark";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
@@ -39,22 +45,55 @@ interface CollabRuntime {
 }
 
 const fillHeightTheme = EditorView.theme({
-    "&": { height: "100%" },
+    "&": { height: "100%", backgroundColor: palette.page, color: palette.text },
     ".cm-scroller": { overflow: "auto" },
+    ".cm-content": { caretColor: palette.accent },
+    ".cm-cursor, .cm-dropCursor": { borderLeftColor: palette.accent },
+    ".cm-gutters": {
+        backgroundColor: palette.surface,
+        color: palette.secondary,
+        borderRight: `1px solid ${palette.border}`,
+    },
+    ".cm-activeLine, .cm-activeLineGutter": { backgroundColor: palette.surface },
+    ".cm-activeLineGutter": { color: palette.secondary },
+    "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": {
+        backgroundColor: palette.raised,
+    },
+    ".cm-selectionMatch": {
+        backgroundColor: palette.surface,
+        outline: `1px solid ${palette.accent}`,
+    },
+    ".cm-foldPlaceholder, .cm-tooltip": {
+        backgroundColor: palette.raised,
+        color: palette.text,
+        border: `1px solid ${palette.border}`,
+    },
+    ".cm-ySelectionInfo": { color: palette.page },
 });
+
+const highlightColors = new Map<string, string>([
+    [oneDarkColors.chalky, palette.warning],
+    [oneDarkColors.coral, palette.danger],
+    [oneDarkColors.cyan, palette.accent],
+    [oneDarkColors.invalid, palette.danger],
+    [oneDarkColors.ivory, palette.text],
+    [oneDarkColors.stone, palette.secondary],
+    [oneDarkColors.malibu, palette.accent],
+    [oneDarkColors.sage, palette.success],
+    [oneDarkColors.whiskey, palette.warning],
+    [oneDarkColors.violet, cursorColors[4]],
+]);
+const editorHighlight = HighlightStyle.define(
+    oneDarkHighlightStyle.specs.map((style) => {
+        const result = Object.assign({}, style);
+        if (style.color) result.color = highlightColors.get(style.color) ?? palette.text;
+        return result;
+    }),
+);
 
 // Distinct-ish remote cursor colours, indexed by the Yjs client id so each
 // connected editor gets a stable colour without coordinating.
-const CURSOR_COLORS = [
-    "#30bced",
-    "#6eeb83",
-    "#ffbc42",
-    "#ee6352",
-    "#9b5de5",
-    "#f15bb5",
-    "#00bbf9",
-    "#fee440",
-];
+const CURSOR_COLORS = cursorColors;
 
 // The Y-sync WebSocket base the provider connects under. y-websocket appends
 // `/<room>` and `?params`, yielding `…/api/collab-docs/<objectId>/ws?token=…`.
@@ -175,7 +214,8 @@ export function CodeEditor({ content = "", lang, collab }: CodeEditorProps) {
         const extensions = [
             vimCompartment.current.of([]),
             lineNumbers(),
-            oneDark,
+            oneDarkTheme,
+            syntaxHighlighting(editorHighlight),
             fillHeightTheme,
             EditorView.lineWrapping,
             languageCompartment.current.of([]),
@@ -258,19 +298,17 @@ export function CodeEditor({ content = "", lang, collab }: CodeEditorProps) {
                     alignItems: "center",
                     gap: 8,
                     padding: "6px 10px",
-                    background: "#13161a",
-                    borderBottom: "1px solid #252b31",
+                    background: palette.page,
+                    borderBottom: `1px solid ${palette.border}`,
                 }}
             >
                 <button
+                    className="editor-toggle"
                     type="button"
                     onClick={toggleVim}
                     aria-pressed={vimMode}
                     title="Toggle Vim key bindings"
                     style={{
-                        background: vimMode ? "#1d3a5f" : "#171a1d",
-                        color: vimMode ? "#9cd2ff" : "#e6e9ec",
-                        border: `1px solid ${vimMode ? "#2f6db0" : "#252b31"}`,
                         borderRadius: 6,
                         padding: "4px 10px",
                         fontSize: 12,

@@ -1,5 +1,7 @@
+import { Button } from "../tamagui.config";
+import { palette } from "@clipper/shared";
 import { useCallback, useRef, useState, type FormEvent } from "react";
-import { Button, H2, Input, Paragraph, Text, TextArea, XStack, YStack } from "tamagui";
+import { H2, Input, Paragraph, Text, TextArea, XStack, YStack } from "tamagui";
 import type {
     KitchenBackend,
     KitchenEquipment,
@@ -88,10 +90,14 @@ export function Pantry({
                         <YStack key={item.id} gap="$1">
                             <XStack gap="$2" items="center" flexWrap="wrap">
                                 <Text fontWeight="600">{item.name}</Text>
-                                {item.listed_twice && <Text color="#f3c969">Listed twice</Text>}
+                                {item.listed_twice && (
+                                    <Text color={palette.warning}>Listed twice</Text>
+                                )}
                             </XStack>
                             {item.amount && <Text>{item.amount}</Text>}
-                            {item.use_by && <Text color="#9aa4ad">Use by: {item.use_by}</Text>}
+                            {item.use_by && (
+                                <Text color={palette.secondary}>Use by: {item.use_by}</Text>
+                            )}
                             {item.notes && <Paragraph>{item.notes}</Paragraph>}
                             <XStack gap="$2">
                                 <Button
@@ -118,7 +124,7 @@ export function Pantry({
                 </KitchenCard>
             ))}
             {!loading && !failed && value?.categories.length === 0 && (
-                <Paragraph color="#9aa4ad">No pantry items yet.</Paragraph>
+                <Paragraph color={palette.secondary}>No pantry items yet.</Paragraph>
             )}
             <XStack items="center" justify="space-between" gap="$2" flexWrap="wrap">
                 <H2 size="$5">Equipment</H2>
@@ -133,7 +139,7 @@ export function Pantry({
                 <KitchenCard key={item.id}>
                     <XStack gap="$2" items="center" flexWrap="wrap">
                         <Text fontWeight="600">{item.name}</Text>
-                        {item.listed_twice && <Text color="#f3c969">Listed twice</Text>}
+                        {item.listed_twice && <Text color={palette.warning}>Listed twice</Text>}
                     </XStack>
                     {item.notes && <Paragraph>{item.notes}</Paragraph>}
                     <XStack gap="$2">
@@ -159,7 +165,7 @@ export function Pantry({
                 </KitchenCard>
             ))}
             {!loading && !failed && value?.equipment.length === 0 && (
-                <Paragraph color="#9aa4ad">No equipment yet.</Paragraph>
+                <Paragraph color={palette.secondary}>No equipment yet.</Paragraph>
             )}
             <KitchenDialog
                 open={editor !== null}
@@ -172,7 +178,7 @@ export function Pantry({
                 }}
             >
                 {changeError && (
-                    <Paragraph role="alert" color="#ff7b7b">
+                    <Paragraph role="alert" color={palette.danger}>
                         {changeError}
                     </Paragraph>
                 )}
@@ -196,7 +202,7 @@ export function Pantry({
                 }}
             >
                 {changeError && (
-                    <Paragraph role="alert" color="#ff7b7b">
+                    <Paragraph role="alert" color={palette.danger}>
                         {changeError}
                     </Paragraph>
                 )}

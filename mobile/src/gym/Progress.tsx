@@ -1,5 +1,6 @@
+import { Button } from "../tamagui.config";
 import { useEffect, useRef, useState } from "react";
-import { Button, H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
+import { H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
 import type { GymExercise, GymOneRepMax } from "@clipper/mobile-bridge";
 import { formatBackendError } from "../backend";
 import { formatDay, formatKg, gym } from "./gymClient";

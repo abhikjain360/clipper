@@ -1,5 +1,7 @@
+import { Button } from "../tamagui.config";
+import { palette } from "@clipper/shared";
 import { useEffect, useState } from "react";
-import { Button, Paragraph, Text, XStack, YStack } from "tamagui";
+import { Paragraph, Text, XStack, YStack } from "tamagui";
 import type { KitchenTimer, KitchenTimerAction } from "@clipper/shared";
 
 export function StepTimer({
@@ -31,7 +33,7 @@ export function StepTimer({
     const seconds = Math.ceil(remaining / 1000);
     const countdown = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
     return (
-        <YStack gap="$2" p="$2" bg="#101214" rounded="$2">
+        <YStack gap="$2" p="$2" bg={palette.page} rounded="$2">
             <XStack gap="$2" items="center" flexWrap="wrap">
                 <Text>
                     {timer.label} · {timer.minutes} min
@@ -47,7 +49,7 @@ export function StepTimer({
                     </Text>
                 )}
             </XStack>
-            <Paragraph color="#9aa4ad" fontSize={12}>
+            <Paragraph color={palette.secondary} fontSize={12}>
                 {timer.state === "idle"
                     ? "Starting here rings on this Mac."
                     : timer.rings_here

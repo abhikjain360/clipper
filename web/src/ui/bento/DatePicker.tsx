@@ -1,3 +1,4 @@
+import { Button } from "../../tamagui.config";
 // Adapted from the free Tamagui Bento DatePicker, retrieved 2026-09-10.
 // https://tamagui.dev/bento/elements/datepickers
 import {
@@ -8,7 +9,7 @@ import {
 
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useMemo, useState } from "react";
-import { AnimatePresence, Button, H3, View } from "tamagui";
+import { AnimatePresence, H3, View } from "tamagui";
 
 import {
     CalendarHeader,

@@ -1,10 +1,11 @@
+import { Button } from "../tamagui.config";
 import {
   KitchenPantryChange,
   type KitchenEquipment,
   type KitchenPantryItem,
 } from "@clipper/mobile-bridge";
 import { useState } from "react";
-import { Button, Input, Text, XStack } from "tamagui";
+import { Input, Text, XStack } from "tamagui";
 import { colors, SheetModal } from "../gym/GymUi";
 import { Field, NotesInput } from "./KitchenUi";
 

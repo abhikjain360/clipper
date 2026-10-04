@@ -1,7 +1,9 @@
+import { Button } from "../tamagui.config";
+import { palette } from "@clipper/shared";
 import { ArrowLeft, Trash2 } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert } from "react-native";
-import { Button, H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
+import { H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
 import {
   SetKind,
   type GymSession,
@@ -72,7 +74,7 @@ export function History({ onError }: { onError: (error: string | null) => void }
               <XStack
                 key={session.id}
                 onPress={() => setOpenId(session.id)}
-                pressStyle={{ opacity: 0.6 }}
+                pressStyle={{ bg: palette.raised }}
               >
                 <YStack flex={1}>
                   <GymCard>
@@ -217,9 +219,9 @@ function SessionDetail({
                         px="$2"
                         py="$2"
                         rounded="$2"
-                        bg="#1f2428"
+                        bg={palette.raised}
                         onPress={() => setEditing({ set, number })}
-                        pressStyle={{ opacity: 0.6 }}
+                        pressStyle={{ bg: palette.raised }}
                         aria-label={`Edit ${setLabel(set.kind, number).toLowerCase()} of ${exercise.name}`}
                       >
                         <Text color={set.kind === SetKind.WarmUp ? colors.warmUp : undefined}>

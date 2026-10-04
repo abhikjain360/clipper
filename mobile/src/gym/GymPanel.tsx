@@ -1,5 +1,6 @@
+import { Button } from "../tamagui.config";
 import { useEffect, useState } from "react";
-import { Button, XStack, YStack } from "tamagui";
+import { XStack, YStack } from "tamagui";
 import { GymStarterLibrary } from "@clipper/mobile-bridge";
 import { formatBackendError } from "../backend";
 import { BodyWeight } from "./BodyWeight";

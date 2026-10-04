@@ -48,7 +48,7 @@ export function RecipeList({
                     gap="$1"
                     py="$2"
                     onPress={() => onOpen(session.recipeId)}
-                    pressStyle={{ opacity: 0.6 }}
+                    pressStyle={{ bg: palette.raised }}
                     accessibilityRole="button"
                     aria-label={`Open ${session.title}`}
                   >
@@ -101,7 +101,7 @@ function RecipeRow({
       gap="$1"
       py="$2"
       onPress={() => onOpen(recipe.id)}
-      pressStyle={{ opacity: 0.6 }}
+      pressStyle={{ bg: palette.raised }}
       accessibilityRole="button"
       aria-label={`Open ${recipe.title}`}
     >
@@ -110,7 +110,14 @@ function RecipeRow({
           {recipe.title}
         </Text>
         {recipe.cooking && (
-          <Text color={colors.good} bg="#223328" px="$2" py="$1" rounded="$2" fontSize={12}>
+          <Text
+            color={colors.good}
+            bg={statusSurfaces.success}
+            px="$2"
+            py="$1"
+            rounded="$2"
+            fontSize={12}
+          >
             Cooking
           </Text>
         )}
@@ -126,3 +133,4 @@ function RecipeRow({
     </YStack>
   );
 }
+import { palette, statusSurfaces } from "@clipper/shared";

@@ -1,7 +1,9 @@
+import { Button } from "../tamagui.config";
+import { palette } from "@clipper/shared";
 import { Check, Square } from "lucide-react-native";
 import { useEffect, type ReactNode } from "react";
 import { BackHandler, TextInput } from "react-native";
-import { Button, Spinner, Text, XStack, YStack } from "tamagui";
+import { Spinner, Text, XStack, YStack } from "tamagui";
 import { colors, Muted } from "../gym/GymUi";
 
 export function Tick({
@@ -61,7 +63,7 @@ export function NotesInput({
         borderWidth: 1,
         borderColor: colors.border,
         backgroundColor: colors.background,
-        color: "#e6e9ec",
+        color: palette.text,
         padding: 12,
         fontSize: 16,
       }}

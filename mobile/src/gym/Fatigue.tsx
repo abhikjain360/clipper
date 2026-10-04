@@ -1,10 +1,12 @@
+import { Button } from "../tamagui.config";
+import { palette, fatigueColors } from "@clipper/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState as NativeAppState } from "react-native";
-import { Button, H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
+import { H2, ScrollView, Spinner, Text, XStack, YStack } from "tamagui";
 import { FatigueBand, MuscleGroup, type GymMuscleFatigue } from "@clipper/mobile-bridge";
 import { formatBackendError } from "../backend";
 import { gym } from "./gymClient";
-import { colors, GymCard, Muted, Stepper } from "./GymUi";
+import { GymCard, Muted, Stepper } from "./GymUi";
 
 const bandLabels: Record<FatigueBand, string> = {
   [FatigueBand.Recovered]: "Recovered",
@@ -15,11 +17,11 @@ const bandLabels: Record<FatigueBand, string> = {
 };
 
 const bandColors = {
-  [FatigueBand.Recovered]: "#4ade80",
-  [FatigueBand.Low]: "#a3e635",
-  [FatigueBand.Moderate]: "#facc15",
-  [FatigueBand.High]: "#fb923c",
-  [FatigueBand.VeryHigh]: "#f87171",
+  [FatigueBand.Recovered]: fatigueColors.recovered,
+  [FatigueBand.Low]: fatigueColors.low,
+  [FatigueBand.Moderate]: fatigueColors.moderate,
+  [FatigueBand.High]: fatigueColors.high,
+  [FatigueBand.VeryHigh]: fatigueColors.veryHigh,
 } as const satisfies Record<FatigueBand, string>;
 
 const groups: { group: MuscleGroup; label: string }[] = [
@@ -105,7 +107,7 @@ export function Fatigue({ onError }: { onError: (error: string | null) => void }
                         {`${bandLabels[muscle.band]} · ${muscle.score}%`}
                       </Text>
                     </XStack>
-                    <YStack height={8} rounded={4} bg={colors.border} overflow="hidden">
+                    <YStack height={8} rounded={4} bg={palette.page} overflow="hidden">
                       <YStack
                         height={8}
                         width={`${Math.max(muscle.score, 1)}%`}

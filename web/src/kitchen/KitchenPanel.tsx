@@ -1,5 +1,7 @@
+import { Button } from "../tamagui.config";
+import { palette } from "@clipper/shared";
 import { useEffect, useState } from "react";
-import { Button, H2, Paragraph, Spinner, XStack, YStack } from "tamagui";
+import { H2, Paragraph, Spinner, XStack, YStack } from "tamagui";
 import type { KitchenBackend } from "@clipper/shared";
 import { clipperBackend, formatBackendError } from "../backend";
 import { Pantry } from "./Pantry";
@@ -42,7 +44,7 @@ export function KitchenPanel({
     if (error)
         return (
             <YStack gap="$2">
-                <Paragraph role="alert" color="#ff7b7b">
+                <Paragraph role="alert" color={palette.danger}>
                     {error}
                 </Paragraph>
                 <Button onPress={() => setVersion((current) => current + 1)}>Retry</Button>

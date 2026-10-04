@@ -1,5 +1,7 @@
+import { Button } from "../tamagui.config";
+import { palette } from "@clipper/shared";
 import { cloneElement, isValidElement, useEffect, useId, useState, type ReactNode } from "react";
-import { Button, Card, Dialog, Label, Paragraph, Spinner, YStack } from "tamagui";
+import { Card, Dialog, Label, Paragraph, Spinner, YStack } from "tamagui";
 import { formatBackendError } from "../backend";
 
 export type ErrorHandler = (error: string | null) => void;
@@ -44,7 +46,12 @@ export function useKitchenData<T>(
 
 export function KitchenCard({ children }: { children: ReactNode }) {
     return (
-        <Card bg="#171a1d" p="$3" gap="$3" style={{ borderColor: "#252b31", borderWidth: 1 }}>
+        <Card
+            bg={palette.surface}
+            p="$3"
+            gap="$3"
+            style={{ borderColor: palette.border, borderWidth: 1 }}
+        >
             {children}
         </Card>
     );
@@ -54,7 +61,7 @@ export function Field({ label, children }: { label: string; children: ReactNode 
     const id = useId();
     return (
         <YStack gap="$1">
-            <Label htmlFor={id} fontSize={12} color="#9aa4ad">
+            <Label htmlFor={id} fontSize={12} color={palette.secondary}>
                 {label}
             </Label>
             {isValidElement<{ id?: string }>(children) ? cloneElement(children, { id }) : children}
@@ -75,7 +82,7 @@ export function Loading({
         <>
             {loading && <Spinner size="small" />}
             {failed && (
-                <Paragraph role="status" color="#ff7b7b">
+                <Paragraph role="status" color={palette.danger}>
                     {error ?? "Could not load Kitchen data. Try Refresh."}
                 </Paragraph>
             )}

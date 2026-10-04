@@ -766,6 +766,19 @@ Each entry has:
 
 ## Bugs
 
+### 183. Both apps had dim text and hard-to-see controls
+
+- **Status:** fixed in the working tree; uncommitted
+- **Severity:** medium.
+- **Where:** both Tamagui configs, `web/src`, `mobile/src`.
+- **What happens:** stock dark component themes and hard-coded colours made
+  secondary text dim and control edges blend into cards. The stock Button's
+  normal border colour is transparent, even with a global border default.
+- **Decision:** use one shared dark palette and component themes, styled Buttons
+  with visible 1px borders, and accent schedule Start actions. Preserve calendar
+  kind fills and test text, boundaries, control states and semantic colours
+  against the WCAG contrast targets.
+
 ### 182. Google Calendar ICS feeds omit meeting reminders
 
 - **Status:** open; provider limitation.

@@ -1,4 +1,14 @@
 export { calendarRefreshDue, calendarSyncLabel } from "./calendar";
+export {
+  palette,
+  statusSurfaces,
+  scheduleColors,
+  fatigueColors,
+  cursorColors,
+  buttonThemes,
+  darkDefaults,
+  createDarkThemes,
+} from "./palette";
 
 export type {
   KitchenBackend,

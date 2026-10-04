@@ -1,7 +1,9 @@
+import { Button } from "../tamagui.config";
+import { palette } from "@clipper/shared";
 import { ChevronDown, ChevronUp, Plus, Trash2 } from "lucide-react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert } from "react-native";
-import { Button, H2, Input, ScrollView, Switch, Text, XStack, YStack } from "tamagui";
+import { H2, Input, ScrollView, Switch, Text, XStack, YStack } from "tamagui";
 import {
   MuscleGroup,
   type GymExercise,
@@ -117,7 +119,7 @@ export function Library({ onError }: { onError: (error: string | null) => void }
                     exercises: template.exercises.map((planned) => ({ ...planned })),
                   })
                 }
-                pressStyle={{ opacity: 0.6 }}
+                pressStyle={{ bg: palette.raised }}
               >
                 <YStack flex={1}>
                   <GymCard>
@@ -165,7 +167,7 @@ export function Library({ onError }: { onError: (error: string | null) => void }
                     archived: exercise.archived,
                   })
                 }
-                pressStyle={{ opacity: 0.6 }}
+                pressStyle={{ bg: palette.raised }}
               >
                 <Text color={exercise.archived ? colors.faint : undefined}>{exercise.name}</Text>
                 {exercise.archived && <Muted>archived</Muted>}
@@ -281,10 +283,12 @@ function ExerciseEditor({
       <XStack items="center" justify="space-between">
         <Text>Archived</Text>
         <Switch
+          borderWidth={1}
+          borderColor={palette.border}
           checked={draft.archived}
           onCheckedChange={(archived) => onChange({ ...draft, archived })}
         >
-          <Switch.Thumb />
+          <Switch.Thumb activeStyle={{ bg: palette.page }} />
         </Switch>
       </XStack>
       <Button theme="blue" size="$5" disabled={!draft.name.trim()} onPress={() => onSave(draft)}>
@@ -439,13 +443,15 @@ function TemplateEditor({
                   Superset with the exercise above
                 </Text>
                 <Switch
+                  borderWidth={1}
+                  borderColor={palette.border}
                   size="$3"
                   checked={planned.supersetWithPrevious}
                   onCheckedChange={(supersetWithPrevious) =>
                     update(index, { supersetWithPrevious })
                   }
                 >
-                  <Switch.Thumb />
+                  <Switch.Thumb activeStyle={{ bg: palette.page }} />
                 </Switch>
               </XStack>
             )}

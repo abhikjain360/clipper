@@ -1,6 +1,8 @@
+import { Button } from "../tamagui.config";
+import { palette, statusSurfaces } from "@clipper/shared";
 import { useCallback, useState } from "react";
 import { Link } from "wouter";
-import { Button, H2, Input, Paragraph, Text, XStack, YStack } from "tamagui";
+import { H2, Input, Paragraph, Text, XStack, YStack } from "tamagui";
 import type { KitchenBackend, KitchenRecipeSummary } from "@clipper/shared";
 import {
     blockTime,
@@ -54,7 +56,7 @@ export function RecipeList({
                             >
                                 {session.title}
                             </Link>
-                            <Text color="#9aa4ad">
+                            <Text color={palette.secondary}>
                                 Started {localTime(session.started_at_millis)} · Revision{" "}
                                 {session.recipe_revision}
                                 {session.deleted ? " · Recipe deleted" : ""}
@@ -81,7 +83,7 @@ export function RecipeList({
                 </KitchenCard>
             ))}
             {!loading && !failed && value?.recipes.length === 0 && (
-                <Paragraph color="#9aa4ad">
+                <Paragraph color={palette.secondary}>
                     {search.trim() ? "No recipes match this search." : "No recipes yet."}
                 </Paragraph>
             )}
@@ -97,23 +99,30 @@ function RecipeSummary({ recipe }: { recipe: KitchenRecipeSummary }) {
                     {recipe.title}
                 </Link>
                 {recipe.cooking && (
-                    <Text bg="#245a37" color="#b4f3c8" px="$2" py="$1" rounded="$2" fontSize={12}>
+                    <Text
+                        bg={statusSurfaces.success}
+                        color={palette.success}
+                        px="$2"
+                        py="$1"
+                        rounded="$2"
+                        fontSize={12}
+                    >
                         Cooking
                     </Text>
                 )}
             </XStack>
             <Paragraph>{recipe.summary}</Paragraph>
             <XStack gap="$2" flexWrap="wrap">
-                {recipe.cuisine && <Text color="#9aa4ad">{recipe.cuisine}</Text>}
+                {recipe.cuisine && <Text color={palette.secondary}>{recipe.cuisine}</Text>}
                 {recipe.tags.map((tag) => (
-                    <Text key={tag} color="#9aa4ad">
+                    <Text key={tag} color={palette.secondary}>
                         {tag}
                     </Text>
                 ))}
-                <Text color="#9aa4ad">{recipe.total_minutes} min total</Text>
+                <Text color={palette.secondary}>{recipe.total_minutes} min total</Text>
             </XStack>
             {recipe.next_block && (
-                <Paragraph color="#9aa4ad">
+                <Paragraph color={palette.secondary}>
                     Planned: {recipe.next_block.title}, {blockTime(recipe.next_block.start_millis)}
                 </Paragraph>
             )}

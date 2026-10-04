@@ -1,6 +1,7 @@
+import { Button } from "../tamagui.config";
 import type { AppState } from "@clipper/shared";
 import { useState } from "react";
-import { Button, XStack, YStack } from "tamagui";
+import { XStack, YStack } from "tamagui";
 import { Pantry } from "./Pantry";
 import { RecipeHistory } from "./RecipeHistory";
 import { RecipeList } from "./RecipeList";

@@ -1,5 +1,5 @@
+import { Button } from "./tamagui.config";
 import { useState, type ReactNode } from "react";
-import { Button } from "tamagui";
 import type { DatePickerProviderProps } from "@rehookify/datepicker";
 import { DatePickerBody } from "./ui/bento/DatePicker";
 import { DatePicker } from "./ui/bento/common/dateParts";

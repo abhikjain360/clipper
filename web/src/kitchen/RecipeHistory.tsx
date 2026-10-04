@@ -1,5 +1,7 @@
+import { Button } from "../tamagui.config";
+import { palette } from "@clipper/shared";
 import { useCallback, useState } from "react";
-import { Button, Paragraph, Text, XStack, YStack } from "tamagui";
+import { Paragraph, Text, XStack, YStack } from "tamagui";
 import type { KitchenBackend } from "@clipper/shared";
 import { KitchenCard, Loading, localTime, useKitchenData, type ErrorHandler } from "./shared";
 
@@ -41,7 +43,9 @@ export function RecipeHistory({
                         )}
                         <Text>{localTime(entry.written_at)}</Text>
                         <span title={entry.device_id}>
-                            <Text color="#9aa4ad">Device {entry.device_id.slice(0, 8)}</Text>
+                            <Text color={palette.secondary}>
+                                Device {entry.device_id.slice(0, 8)}
+                            </Text>
                         </span>
                     </XStack>
                 </KitchenCard>

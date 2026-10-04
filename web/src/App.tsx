@@ -1,3 +1,5 @@
+import { Button } from "./tamagui.config";
+import { palette } from "@clipper/shared";
 import {
     ArrowLeft,
     CalendarClock,
@@ -32,19 +34,7 @@ import {
     type ReactNode,
 } from "react";
 import { Route, Switch, useLocation } from "wouter";
-import {
-    Button,
-    Card,
-    H1,
-    H2,
-    Input,
-    Label,
-    Paragraph,
-    Spinner,
-    Text,
-    XStack,
-    YStack,
-} from "tamagui";
+import { Card, H1, H2, Input, Label, Paragraph, Spinner, Text, XStack, YStack } from "tamagui";
 import {
     clearSessionResume,
     clipperBackend,
@@ -83,7 +73,7 @@ const codeEditorFallback = (
             minHeight: 0,
             display: "grid",
             placeItems: "center",
-            color: "#5b6571",
+            color: palette.secondary,
         }}
     >
         Loading editor…
@@ -104,12 +94,12 @@ const renderEditorError = (error: Error): ReactNode => (
         }}
     >
         <div>
-            <div style={{ color: "#ff8f8f", fontWeight: 600, marginBottom: 6 }}>
+            <div style={{ color: palette.danger, fontWeight: 600, marginBottom: 6 }}>
                 Editor failed to load
             </div>
             <div
                 style={{
-                    color: "#9aa4ad",
+                    color: palette.secondary,
                     fontSize: 12,
                     fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
                     maxWidth: 520,
@@ -275,14 +265,16 @@ function LoginScreen({
                 width="100%"
                 maxW={460}
                 p="$5"
-                bg="#171a1d"
-                style={{ borderColor: "#252b31", borderWidth: 1 }}
+                bg={palette.surface}
+                style={{ borderColor: palette.border, borderWidth: 1 }}
             >
                 <form onSubmit={submit}>
                     <YStack gap="$4">
                         <YStack gap="$2">
                             <H1 size="$9">Clipper</H1>
-                            <Paragraph color="#9aa4ad">Encrypted clipboard and file sync</Paragraph>
+                            <Paragraph color={palette.secondary}>
+                                Encrypted clipboard and file sync
+                            </Paragraph>
                         </YStack>
 
                         <XStack gap="$2">
@@ -345,7 +337,7 @@ function LoginScreen({
                             />
                         </Field>
 
-                        {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
+                        {error && <Paragraph color={palette.danger}>{error}</Paragraph>}
 
                         <Button
                             type="submit"
@@ -485,7 +477,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                         p="$3"
                         gap="$2"
                         borderWidth={1}
-                        borderColor="#303940"
+                        borderColor={palette.border}
                         aria-label="Running work"
                     >
                         <Paragraph>Work is still running</Paragraph>
@@ -537,7 +529,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
             </dialog>
             <main className="app-main">
                 <YStack width="100%" self="center" p="$3" gap="$3" flex={1}>
-                    {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
+                    {error && <Paragraph color={palette.danger}>{error}</Paragraph>}
 
                     <Switch>
                         <Route path="/files">
@@ -695,7 +687,7 @@ function ClipboardPanel({
                                     >
                                         {item.text}
                                     </Text>
-                                    <Paragraph size="$2" color="#9aa4ad">
+                                    <Paragraph size="$2" color={palette.secondary}>
                                         {item.mime_type} - {formatRelativeTime(item.created_at)}
                                     </Paragraph>
                                 </YStack>
@@ -854,10 +846,10 @@ function FilesPanel({
                             <ListCard key={file.id}>
                                 <XStack items="center" justify="space-between" gap="$3">
                                     <XStack items="center" gap="$3" flex={1}>
-                                        <Files size={22} color="#6fb4ff" />
+                                        <Files size={22} color={palette.accent} />
                                         <YStack flex={1} gap="$1">
                                             <Text numberOfLines={1}>{file.filename}</Text>
-                                            <Paragraph size="$2" color="#9aa4ad">
+                                            <Paragraph size="$2" color={palette.secondary}>
                                                 {formatByteSize(file.blob_size)} -{" "}
                                                 {formatRelativeTime(file.created_at)}
                                             </Paragraph>
@@ -881,7 +873,7 @@ function FilesPanel({
                                         <Button
                                             size="$3"
                                             aria-label={`Delete ${file.filename}`}
-                                            icon={<Trash2 size={16} color="#ff6b6b" />}
+                                            icon={<Trash2 size={16} color={palette.danger} />}
                                             onPress={() => void deleteFile(file)}
                                         />
                                     </XStack>
@@ -923,7 +915,7 @@ function FileViewerOverlay({
                 zIndex: 1000,
                 display: "flex",
                 flexDirection: "column",
-                background: "#101214",
+                background: palette.page,
             }}
         >
             <div
@@ -933,13 +925,13 @@ function FileViewerOverlay({
                     justifyContent: "space-between",
                     gap: 12,
                     padding: "10px 16px",
-                    background: "#171a1d",
-                    borderBottom: "1px solid #252b31",
+                    background: palette.surface,
+                    borderBottom: `1px solid ${palette.border}`,
                 }}
             >
                 <span
                     style={{
-                        color: "#e6e9ec",
+                        color: palette.text,
                         fontWeight: 600,
                         overflow: "hidden",
                         textOverflow: "ellipsis",
@@ -1040,10 +1032,10 @@ function CollabPanel({
                                     cursor="pointer"
                                     onPress={() => setLocation(`/collab/${item.id}`)}
                                 >
-                                    <FileCode size={22} color="#6fb4ff" />
+                                    <FileCode size={22} color={palette.accent} />
                                     <YStack flex={1} gap="$1">
                                         <Text numberOfLines={1}>{collabTitle(item)}</Text>
-                                        <Paragraph size="$2" color="#9aa4ad">
+                                        <Paragraph size="$2" color={palette.secondary}>
                                             {formatRelativeTime(item.created_at)}
                                         </Paragraph>
                                     </YStack>
@@ -1058,7 +1050,7 @@ function CollabPanel({
                                     <Button
                                         size="$3"
                                         aria-label={`Delete ${collabTitle(item)}`}
-                                        icon={<Trash2 size={16} color="#ff6b6b" />}
+                                        icon={<Trash2 size={16} color={palette.danger} />}
                                         onPress={() => void deleteDoc(item)}
                                     />
                                 </XStack>
@@ -1193,12 +1185,12 @@ function CollabDocView({
                     <ListCard>
                         <XStack items="center" justify="space-between" gap="$3" flexWrap="wrap">
                             <YStack flex={1} gap="$1">
-                                <Paragraph size="$2" color="#9aa4ad">
+                                <Paragraph size="$2" color={palette.secondary}>
                                     Share link
                                 </Paragraph>
                                 <Text
                                     numberOfLines={1}
-                                    color={shareLink(meta) ? undefined : "#9aa4ad"}
+                                    color={shareLink(meta) ? undefined : palette.secondary}
                                     style={{
                                         fontFamily: shareLink(meta)
                                             ? "ui-monospace, SFMono-Regular, Menlo, monospace"
@@ -1220,9 +1212,9 @@ function CollabDocView({
                     </ListCard>
                     <Card
                         flex={1}
-                        bg="#171a1d"
+                        bg={palette.surface}
                         overflow="hidden"
-                        style={{ borderColor: "#252b31", borderWidth: 1 }}
+                        style={{ borderColor: palette.border, borderWidth: 1 }}
                     >
                         {serverUrl ? (
                             <ErrorBoundary fallback={renderEditorError}>
@@ -1300,7 +1292,7 @@ function TitleField({
                 placeholder={placeholder}
                 aria-label="Document title"
                 bg="transparent"
-                borderColor={editing ? "#2f6db0" : "transparent"}
+                borderColor={editing ? palette.accent : palette.border}
                 fontSize={20}
                 fontWeight="600"
                 onFocus={() => setEditing(true)}
@@ -1375,7 +1367,7 @@ function SharePage({ token }: { token: string }) {
     }
 
     return (
-        <YStack minH="100vh" bg="#101214">
+        <YStack minH="100vh" bg={palette.page}>
             <YStack flex={1} style={{ minHeight: 0 }}>
                 <ErrorBoundary fallback={renderEditorError}>
                     <Suspense fallback={codeEditorFallback}>
@@ -1393,9 +1385,9 @@ function SharePage({ token }: { token: string }) {
             <XStack
                 justify="center"
                 py="$2"
-                style={{ borderTopColor: "#252b31", borderTopWidth: 1 }}
+                style={{ borderTopColor: palette.border, borderTopWidth: 1 }}
             >
-                <Text fontSize={12} color="#5b6571">
+                <Text fontSize={12} color={palette.secondary}>
                     Made with Clipper
                 </Text>
             </XStack>
@@ -1448,7 +1440,7 @@ function DevicesPanel({ onError }: { onError: (error: string | null) => void }) 
                 </Button>
             </XStack>
 
-            <Paragraph size="$2" color="#9aa4ad">
+            <Paragraph size="$2" color={palette.secondary}>
                 Removing a device signs it out everywhere and revokes its access. The objects it
                 shared are kept.
             </Paragraph>
@@ -1463,17 +1455,17 @@ function DevicesPanel({ onError }: { onError: (error: string | null) => void }) 
                         <ListCard key={device.id}>
                             <XStack items="center" justify="space-between" gap="$3">
                                 <XStack items="center" gap="$3" flex={1}>
-                                    <Smartphone size={22} color="#6fb4ff" />
+                                    <Smartphone size={22} color={palette.accent} />
                                     <YStack flex={1} gap="$1">
                                         <XStack items="center" gap="$2" flexWrap="wrap">
                                             <Text numberOfLines={1}>{device.name}</Text>
                                             {device.is_current && (
-                                                <Paragraph size="$1" color="#6fb4ff">
+                                                <Paragraph size="$1" color={palette.accent}>
                                                     This device
                                                 </Paragraph>
                                             )}
                                         </XStack>
-                                        <Paragraph size="$2" color="#9aa4ad">
+                                        <Paragraph size="$2" color={palette.secondary}>
                                             {device.platform} - last seen{" "}
                                             {formatRelativeTime(device.last_seen_at)}
                                         </Paragraph>
@@ -1482,7 +1474,7 @@ function DevicesPanel({ onError }: { onError: (error: string | null) => void }) 
                                 {!device.is_current && (
                                     <Button
                                         size="$3"
-                                        icon={<Trash2 size={16} color="#ff6b6b" />}
+                                        icon={<Trash2 size={16} color={palette.danger} />}
                                         onPress={() => void removeDevice(device)}
                                     />
                                 )}
@@ -1509,8 +1501,8 @@ function ListCard({ children }: { children: ReactNode }) {
         <Card
             className="library-card"
             p="$3"
-            bg="#171a1d"
-            style={{ borderColor: "#252b31", borderWidth: 1 }}
+            bg={palette.surface}
+            style={{ borderColor: palette.border, borderWidth: 1 }}
         >
             {children}
         </Card>
@@ -1521,7 +1513,7 @@ function EmptyState({ icon, title }: { icon: ReactNode; title: string }) {
     return (
         <YStack flex={1} items="center" justify="center" gap="$3" p="$6">
             {icon}
-            <Paragraph color="#9aa4ad">{title}</Paragraph>
+            <Paragraph color={palette.secondary}>{title}</Paragraph>
         </YStack>
     );
 }
@@ -1540,7 +1532,7 @@ function CenteredStatus({
             {loading && <Spinner size="large" />}
             <H2>{title}</H2>
             {message && (
-                <Paragraph maxW={620} text="center" color="#9aa4ad">
+                <Paragraph maxW={620} text="center" color={palette.secondary}>
                     {message}
                 </Paragraph>
             )}
@@ -1550,11 +1542,15 @@ function CenteredStatus({
 
 function ConnectionBadge({ status }: { status: AppState["connection_status"] }) {
     const color =
-        status === "Connected" ? "#3ddc84" : status === "Connecting" ? "#f2c94c" : "#9099a1";
+        status === "Connected"
+            ? palette.success
+            : status === "Connecting"
+              ? palette.warning
+              : palette.secondary;
     return (
-        <XStack items="center" gap="$2" px="$2" py="$1" rounded="$2" bg="#22282e">
+        <XStack items="center" gap="$2" px="$2" py="$1" rounded="$2" bg={palette.raised}>
             <YStack width={8} height={8} rounded={999} bg={color} />
-            <Text fontSize={12} color="#9aa4ad">
+            <Text fontSize={12} color={palette.secondary}>
                 {status}
             </Text>
         </XStack>

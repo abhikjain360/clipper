@@ -1,9 +1,10 @@
+import { Button } from "../tamagui.config";
 import { KitchenSessionChange, type KitchenIngredient } from "@clipper/mobile-bridge";
 import type { AppState } from "@clipper/shared";
 import { ArrowLeft, Minus, Plus } from "lucide-react-native";
 import { useCallback, useEffect, useState } from "react";
 import { Alert } from "react-native";
-import { Button, H2, Text, ScrollView, XStack, YStack } from "tamagui";
+import { H2, Text, ScrollView, XStack, YStack } from "tamagui";
 import { keepScreenOn } from "../../modules/clipper-alarm";
 import { formatBackendError } from "../backend";
 import { colors, GymCard, Muted, SheetModal } from "../gym/GymUi";

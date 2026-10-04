@@ -1,23 +1,25 @@
+import { Button } from "../tamagui.config";
 import { Minus, Plus, Search, X } from "lucide-react-native";
 import { useEffect, useState, type ReactNode } from "react";
 import { Modal, TextInput } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Svg, { Circle, Line, Polyline, Text as SvgText } from "react-native-svg";
-import { Button, Card, H2, Input, Paragraph, ScrollView, Text, XStack, YStack } from "tamagui";
+import { Card, H2, Input, Paragraph, ScrollView, Text, XStack, YStack } from "tamagui";
 import type { GymExercise, GymSet, GymSetValues } from "@clipper/mobile-bridge";
 import { formatKg, parseCount, parseWeight, setLabel } from "./gymClient";
+import { palette, fatigueColors } from "@clipper/shared";
 
 export const colors = {
-  background: "#101214",
-  card: "#171a1d",
-  border: "#252b31",
-  muted: "#9aa4ad",
-  faint: "#5b6571",
-  accent: "#6fb4ff",
-  good: "#7bd88f",
-  warm: "#d0a33a",
-  bad: "#ff7b7b",
-  warmUp: "#f0a35e",
+  background: palette.page,
+  card: palette.surface,
+  border: palette.border,
+  muted: palette.secondary,
+  faint: palette.secondary,
+  accent: palette.accent,
+  good: palette.success,
+  warm: palette.warning,
+  bad: palette.danger,
+  warmUp: fatigueColors.warmUp,
 } as const;
 
 export function GymCard({ children, highlighted }: { children: ReactNode; highlighted?: boolean }) {
@@ -90,7 +92,7 @@ export function NumberEntry({
             borderWidth: 1,
             borderColor: colors.border,
             backgroundColor: colors.background,
-            color: "#e6e9ec",
+            color: palette.text,
             fontSize: 26,
             textAlign: "center",
           }}

@@ -1,6 +1,8 @@
+import { Button } from "../tamagui.config";
+import { palette } from "@clipper/shared";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useLocation } from "wouter";
-import { Button, H2, Input, Paragraph, Text, TextArea, XStack, YStack } from "tamagui";
+import { H2, Input, Paragraph, Text, TextArea, XStack, YStack } from "tamagui";
 import type { KitchenBackend, KitchenIngredient, KitchenSessionChange } from "@clipper/shared";
 import { formatBackendError } from "../backend";
 import { RecipeHistory } from "./RecipeHistory";
@@ -125,19 +127,19 @@ export function RecipePage({
                 <>
                     {recipe.read_only && <H2 size="$5">Revision {recipe.revision} (read-only)</H2>}
                     {recipe.deleted && (
-                        <Paragraph role="status" color="#f3c969">
+                        <Paragraph role="status" color={palette.warning}>
                             This recipe was deleted. Finish or discard this cooking session.
                         </Paragraph>
                     )}
                     {recipe.other_sessions.map((other) => (
-                        <Paragraph key={other.id} role="status" color="#f3c969">
+                        <Paragraph key={other.id} role="status" color={palette.warning}>
                             Another cooking session from revision {other.recipe_revision}, started{" "}
                             {localTime(other.started_at_millis)}, is open. It shows here once this
                             one is finished or discarded.
                         </Paragraph>
                     ))}
                     {recipe.newer_revision !== null && (
-                        <Paragraph role="status" color="#f3c969">
+                        <Paragraph role="status" color={palette.warning}>
                             This session cooks from revision {recipe.revision}. Revision{" "}
                             {recipe.newer_revision} is newer and applies from the next cook.
                         </Paragraph>
@@ -203,7 +205,7 @@ export function RecipePage({
                                             </label>
                                         )}
                                         {ingredient.note && (
-                                            <Paragraph color="#9aa4ad" fontSize={13}>
+                                            <Paragraph color={palette.secondary} fontSize={13}>
                                                 {ingredient.note}
                                             </Paragraph>
                                         )}
@@ -215,13 +217,15 @@ export function RecipePage({
                     <KitchenCard>
                         <H2 size="$5">Shopping list</H2>
                         {recipe.shopping.length === 0 ? (
-                            <Paragraph color="#9aa4ad">Nothing to buy.</Paragraph>
+                            <Paragraph color={palette.secondary}>Nothing to buy.</Paragraph>
                         ) : (
                             recipe.shopping.map((ingredient) => (
                                 <YStack key={ingredient.id} gap="$1">
                                     <Ingredient ingredient={ingredient} />
                                     {ingredient.note && (
-                                        <Paragraph color="#9aa4ad">{ingredient.note}</Paragraph>
+                                        <Paragraph color={palette.secondary}>
+                                            {ingredient.note}
+                                        </Paragraph>
                                     )}
                                 </YStack>
                             ))
@@ -230,7 +234,7 @@ export function RecipePage({
                     <KitchenCard>
                         <H2 size="$5">Equipment</H2>
                         {recipe.equipment.length === 0 ? (
-                            <Paragraph color="#9aa4ad">No equipment listed.</Paragraph>
+                            <Paragraph color={palette.secondary}>No equipment listed.</Paragraph>
                         ) : (
                             recipe.equipment.map((name, index) => <Text key={index}>{name}</Text>)
                         )}
@@ -284,7 +288,7 @@ export function RecipePage({
                     <KitchenCard>
                         <H2 size="$5">Notes</H2>
                         {recipe.notes.length === 0 ? (
-                            <Paragraph color="#9aa4ad">No notes.</Paragraph>
+                            <Paragraph color={palette.secondary}>No notes.</Paragraph>
                         ) : (
                             recipe.notes.map((note, index) => (
                                 <Paragraph key={index}>{note}</Paragraph>
@@ -294,7 +298,7 @@ export function RecipePage({
                     <KitchenCard>
                         <H2 size="$5">Coming blocks</H2>
                         {recipe.coming_blocks.length === 0 ? (
-                            <Paragraph color="#9aa4ad">No coming blocks.</Paragraph>
+                            <Paragraph color={palette.secondary}>No coming blocks.</Paragraph>
                         ) : (
                             recipe.coming_blocks.map((block) => (
                                 <Paragraph key={`${block.item_id}:${block.occurrence_key}`}>
@@ -306,17 +310,17 @@ export function RecipePage({
                     <KitchenCard>
                         <H2 size="$5">Past sessions</H2>
                         {recipe.past_sessions.length === 0 && (
-                            <Paragraph color="#9aa4ad">No past sessions.</Paragraph>
+                            <Paragraph color={palette.secondary}>No past sessions.</Paragraph>
                         )}
                         {recipe.past_sessions.map((session) => (
                             <YStack key={session.id} gap="$1">
                                 <Text>
                                     {session.servings} servings · Revision {session.recipe_revision}
                                 </Text>
-                                <Text color="#9aa4ad">
+                                <Text color={palette.secondary}>
                                     Started: {localTime(session.started_at_millis)}
                                 </Text>
-                                <Text color="#9aa4ad">
+                                <Text color={palette.secondary}>
                                     Finished: {localTime(session.finished_at_millis)} · took{" "}
                                     {session.duration_minutes} min
                                 </Text>
@@ -390,7 +394,7 @@ export function RecipePage({
                 }}
             >
                 {changeError && (
-                    <Paragraph role="alert" color="#ff7b7b">
+                    <Paragraph role="alert" color={palette.danger}>
                         {changeError}
                     </Paragraph>
                 )}

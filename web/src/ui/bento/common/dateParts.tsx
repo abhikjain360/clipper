@@ -1,3 +1,4 @@
+import { Button } from "../../../tamagui.config";
 // Adapted from the free Tamagui Bento DatePicker, retrieved 2026-09-10.
 // https://tamagui.dev/bento/elements/datepickers
 import type { DatePickerProviderProps } from "@rehookify/datepicker";
@@ -8,7 +9,6 @@ import type { PopoverProps } from "tamagui";
 import {
     Adapt,
     AnimatePresence,
-    Button,
     Popover,
     Sheet,
     SizableText,

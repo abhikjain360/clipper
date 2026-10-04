@@ -1,9 +1,10 @@
+import { Button } from "../tamagui.config";
 import { KitchenPantryChange } from "@clipper/mobile-bridge";
 import type { AppState } from "@clipper/shared";
 import { Pencil, Plus, Trash2 } from "lucide-react-native";
 import { useCallback, useState } from "react";
 import { Alert } from "react-native";
-import { Button, H2, ScrollView, Text, XStack, YStack } from "tamagui";
+import { H2, ScrollView, Text, XStack, YStack } from "tamagui";
 import { colors, GymCard, Muted } from "../gym/GymUi";
 import { kitchen, useKitchenChange, useKitchenView } from "./kitchenClient";
 import { LoadStatus } from "./KitchenUi";

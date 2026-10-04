@@ -1,3 +1,5 @@
+import { Button } from "./tamagui.config";
+import { palette, scheduleColors, statusSurfaces } from "@clipper/shared";
 import { CalendarDatePicker } from "./CalendarDatePicker";
 import { calendarWindow, movePeriod, periodStart, type CalendarView } from "./calendar-view";
 import { EventHover } from "./EventHover";
@@ -29,7 +31,6 @@ import {
     type CSSProperties,
 } from "react";
 import {
-    Button,
     Card,
     Dialog,
     Select,
@@ -263,7 +264,7 @@ export function SchedulePanel({
             {warnings.length > 0 && (
                 <YStack role="status" gap="$1">
                     {warnings.map((warning, index) => (
-                        <Paragraph key={`${index}:${warning}`} color="#f3c969" size="$3">
+                        <Paragraph key={`${index}:${warning}`} color={palette.warning} size="$3">
                             {warning}
                         </Paragraph>
                     ))}
@@ -276,10 +277,10 @@ export function SchedulePanel({
                 style={{ "--sidebar-width": `${displayedWidth}px` } as CSSProperties}
             >
                 <Card
-                    bg="#171a1d"
+                    bg={palette.surface}
                     p="$3"
                     gap="$3"
-                    style={{ borderColor: "#252b31", borderWidth: 1 }}
+                    style={{ borderColor: palette.border, borderWidth: 1 }}
                 >
                     <XStack items="center" justify="space-between" gap="$2" flexWrap="wrap">
                         <XStack items="center" gap="$2">
@@ -569,10 +570,10 @@ function NextList({
                 return (
                     <Card
                         key={day.toISOString()}
-                        bg="#1d2329"
+                        bg={palette.surface}
                         p="$3"
                         gap="$3"
-                        style={{ borderColor: "#252b31", borderWidth: 1, flexShrink: 0 }}
+                        style={{ borderColor: palette.border, borderWidth: 1, flexShrink: 0 }}
                     >
                         <Text fontWeight="600">
                             {index === 0 ? "Today · " : ""}
@@ -583,7 +584,7 @@ function NextList({
                             })}
                         </Text>
                         {dayPlanned.length === 0 && !loading && (
-                            <Paragraph size="$2" color="#9aa4ad">
+                            <Paragraph size="$2" color={palette.secondary}>
                                 Nothing scheduled
                             </Paragraph>
                         )}
@@ -592,30 +593,31 @@ function NextList({
                                 key={`${occurrence.item_id}:${occurrence.occurrence_key}`}
                                 gap="$1"
                             >
-                                <Text color={occurrence.cancelled ? "#9aa4ad" : undefined}>
+                                <Text color={occurrence.cancelled ? palette.secondary : undefined}>
                                     {occurrence.title}
                                 </Text>
-                                <Paragraph size="$2" color="#9aa4ad">
+                                <Paragraph size="$2" color={palette.secondary}>
                                     {scheduleTime(occurrence.start, day)} –{" "}
                                     {scheduleTime(occurrence.end, day)}
                                 </Paragraph>
                                 {occurrence.all_day && (
-                                    <Text fontSize={12} color="#9aa4ad">
+                                    <Text fontSize={12} color={palette.secondary}>
                                         All day
                                     </Text>
                                 )}
                                 {occurrence.source && (
-                                    <Text fontSize={12} color="#9aa4ad">
+                                    <Text fontSize={12} color={palette.secondary}>
                                         {occurrence.source}
                                     </Text>
                                 )}
                                 <ScheduleRecipes occurrence={occurrence} plans={plans} />
                                 {occurrence.cancelled ? (
-                                    <Text fontSize={12} color="#ff7b7b">
+                                    <Text fontSize={12} color={palette.danger}>
                                         Cancelled
                                     </Text>
                                 ) : (
                                     <Button
+                                        theme="blue"
                                         size="$3"
                                         self="flex-start"
                                         disabled={starting}
@@ -626,18 +628,18 @@ function NextList({
                                 )}
                             </YStack>
                         ))}
-                        <Text fontWeight="600" color="#9aa4ad">
+                        <Text fontWeight="600" color={palette.secondary}>
                             Recorded time
                         </Text>
                         {dayRecorded.length === 0 && !loading && (
-                            <Paragraph size="$2" color="#9aa4ad">
+                            <Paragraph size="$2" color={palette.secondary}>
                                 No recorded time
                             </Paragraph>
                         )}
                         {dayRecorded.map((actual) => (
                             <YStack key={actual.id} gap="$1">
                                 <Text>{actual.title || "Unplanned"}</Text>
-                                <Paragraph size="$2" color="#9aa4ad">
+                                <Paragraph size="$2" color={palette.secondary}>
                                     {scheduleTime(actual.start, day)} –{" "}
                                     {actual.running ? "Running" : scheduleTime(actual.end, day)}
                                 </Paragraph>
@@ -832,13 +834,15 @@ function WeekGrid({
                             items="center"
                             py="$1"
                             style={{
-                                borderLeftColor: "#252b31",
+                                borderLeftColor: palette.border,
                                 borderLeftWidth: 1,
                                 backgroundColor:
-                                    startOfDay(day).getTime() === today ? "#1d2329" : undefined,
+                                    startOfDay(day).getTime() === today
+                                        ? palette.surface
+                                        : undefined,
                             }}
                         >
-                            <Text fontSize={12} color="#8b949e">
+                            <Text fontSize={12} color={palette.secondary}>
                                 {weekdayLabel(day)}
                             </Text>
                             <Text fontSize={14}>{day.getDate()}</Text>
@@ -847,7 +851,10 @@ function WeekGrid({
                 </XStack>
 
                 {allDay.length > 0 && (
-                    <XStack pr={gutter} style={{ borderTopColor: "#252b31", borderTopWidth: 1 }}>
+                    <XStack
+                        pr={gutter}
+                        style={{ borderTopColor: palette.border, borderTopWidth: 1 }}
+                    >
                         <YStack
                             width={56}
                             style={{ flexShrink: 0 }}
@@ -855,7 +862,7 @@ function WeekGrid({
                             pr="$2"
                             py="$1"
                         >
-                            <Text fontSize={11} color="#8b949e">
+                            <Text fontSize={11} color={palette.secondary}>
                                 all day
                             </Text>
                         </YStack>
@@ -867,7 +874,7 @@ function WeekGrid({
                                 minW={0}
                                 gap={2}
                                 p={2}
-                                style={{ borderLeftColor: "#252b31", borderLeftWidth: 1 }}
+                                style={{ borderLeftColor: palette.border, borderLeftWidth: 1 }}
                             >
                                 {allDay
                                     .filter((occurrence) => overlapsDay(occurrence, day))
@@ -888,7 +895,7 @@ function WeekGrid({
                 <XStack
                     ref={scroller}
                     style={{
-                        borderTopColor: "#252b31",
+                        borderTopColor: palette.border,
                         borderTopWidth: 1,
                         maxHeight: "max(320px, calc(100dvh - 240px))",
                         overflowY: "auto",
@@ -897,7 +904,7 @@ function WeekGrid({
                     <YStack width={56} style={{ flexShrink: 0 }}>
                         {Array.from({ length: 24 }, (_, hour) => (
                             <YStack key={hour} height={HOUR_HEIGHT} items="flex-end" pr="$2">
-                                <Text fontSize={11} color="#8b949e">
+                                <Text fontSize={11} color={palette.secondary}>
                                     {String(hour).padStart(2, "0")}:00
                                 </Text>
                             </YStack>
@@ -912,7 +919,7 @@ function WeekGrid({
                             height={DAY_HEIGHT}
                             style={{
                                 position: "relative",
-                                borderLeftColor: "#252b31",
+                                borderLeftColor: palette.border,
                                 borderLeftWidth: 1,
                             }}
                         >
@@ -920,7 +927,7 @@ function WeekGrid({
                                 <YStack
                                     key={hour}
                                     height={HOUR_HEIGHT}
-                                    style={{ borderTopColor: "#1c2126", borderTopWidth: 1 }}
+                                    style={{ borderTopColor: palette.border, borderTopWidth: 1 }}
                                 />
                             ))}
                             {layoutDay(timed, day).map(({ span: occurrence, lane, lanes }) => (
@@ -976,7 +983,7 @@ function ActualBlock({ actual, day }: { actual: ActualView; day: Date }) {
                 right: 2,
                 width: 6,
                 borderRadius: 3,
-                backgroundColor: actual.running ? "#d0a33a" : "#7bd88f",
+                backgroundColor: actual.running ? palette.warning : palette.success,
                 opacity: 0.85,
             }}
             aria-label={`${actual.title}, actual${actual.running ? ", running" : ""}`}
@@ -1026,9 +1033,8 @@ function TimedBlock({
                     boxSizing: "border-box",
                     borderRadius: 4,
                     backgroundColor: color.fill,
-                    border: `1px solid ${color.accent}80`,
+                    border: `1px solid ${color.accent}`,
                     borderLeft: `3px solid ${color.accent}`,
-                    opacity: occurrence.cancelled ? 0.55 : 1,
                 }}
                 aria-label={label}
                 role="button"
@@ -1053,7 +1059,7 @@ function TimedBlock({
                     </Text>
                 )}
                 {drawnHeight >= 36 && (
-                    <Text fontSize={10} lineHeight={12} color="#8b949e" numberOfLines={1}>
+                    <Text fontSize={10} lineHeight={12} color={palette.secondary} numberOfLines={1}>
                         {occurrence.source
                             ? `${clockRange(occurrence)} · ${occurrence.source}`
                             : clockRange(occurrence)}
@@ -1069,10 +1075,10 @@ function TimedBlock({
 /// differently. Only the first is editable, so they have to be told apart at a
 /// glance.
 function blockColor(occurrence: OccurrenceView): { fill: string; accent: string } {
-    if (occurrence.cancelled) return { fill: "#2a2226", accent: "#8b6b6b" };
-    if (occurrence.overridden) return { fill: "#3d3320", accent: "#d0a33a" };
-    if (occurrence.source) return { fill: "#1d3330", accent: "#4dbfa5" };
-    return { fill: "#1f3350", accent: "#4d8fd6" };
+    if (occurrence.cancelled) return scheduleColors.cancelled;
+    if (occurrence.overridden) return scheduleColors.overridden;
+    if (occurrence.source) return scheduleColors.imported;
+    return scheduleColors.planned;
 }
 
 /// Where a span sits in a day column.
@@ -1143,11 +1149,15 @@ function RunningTimer({
 
     const elapsed = Math.max(0, now - new Date(running.start).getTime());
     return (
-        <Card bg="#2a2416" p="$3" style={{ borderColor: "#d0a33a", borderWidth: 1 }}>
+        <Card
+            bg={statusSurfaces.warning}
+            p="$3"
+            style={{ borderColor: palette.warning, borderWidth: 1 }}
+        >
             <XStack items="center" justify="space-between" gap="$3" flexWrap="wrap">
                 <YStack>
                     <Text>{running.title}</Text>
-                    <Text fontSize={12} color="#d0a33a">
+                    <Text fontSize={12} color={palette.warning}>
                         Running · {formatElapsed(elapsed)}
                     </Text>
                 </YStack>
@@ -1184,7 +1194,10 @@ function OccurrenceChip({ occurrence }: { occurrence: OccurrenceView }) {
                 py={1}
                 style={{
                     borderRadius: 4,
-                    backgroundColor: occurrence.overridden ? "#3d3320" : "#243a2c",
+                    backgroundColor: occurrence.overridden
+                        ? scheduleColors.overridden.fill
+                        : scheduleColors.allDay.fill,
+                    boxShadow: `inset 0 0 0 1px ${occurrence.overridden ? scheduleColors.overridden.accent : scheduleColors.allDay.accent}`,
                 }}
             >
                 <Text fontSize={11} numberOfLines={1}>
@@ -1353,7 +1366,12 @@ function CalendarSources({
     }
 
     return (
-        <Card bg="#171a1d" p="$3" gap="$3" style={{ borderColor: "#252b31", borderWidth: 1 }}>
+        <Card
+            bg={palette.surface}
+            p="$3"
+            gap="$3"
+            style={{ borderColor: palette.border, borderWidth: 1 }}
+        >
             <XStack items="center" justify="space-between" gap="$2">
                 <H2 size="$5">Calendars</H2>
                 {!adding && (
@@ -1387,7 +1405,7 @@ function CalendarSources({
                             />
                         </Field>
                     </YStack>
-                    <Paragraph fontSize={12} color="#8b949e">
+                    <Paragraph fontSize={12} color={palette.secondary}>
                         The URL is stored encrypted — the server never sees it. Anyone holding it
                         can read the calendar, so treat it like a password. Feed refresh runs in the
                         desktop app.
@@ -1407,16 +1425,16 @@ function CalendarSources({
             )}
 
             {sources.length === 0 && !adding && (
-                <Paragraph color="#8b949e">No calendars connected</Paragraph>
+                <Paragraph color={palette.secondary}>No calendars connected</Paragraph>
             )}
             {sources.length > 0 && !canSync && (
-                <Paragraph fontSize={12} color="#8b949e">
+                <Paragraph fontSize={12} color={palette.secondary}>
                     Open the desktop app to refresh calendar feeds.
                 </Paragraph>
             )}
 
             {pending && (
-                <YStack gap="$2" p="$3" bg="#242a31" rounded="$3" role="alert">
+                <YStack gap="$2" p="$3" bg={palette.raised} rounded="$3" role="alert">
                     <Text fontWeight="600">{pending.source.name}</Text>
                     <Paragraph>
                         {pending.action === "raw"
@@ -1454,13 +1472,13 @@ function CalendarSources({
                 >
                     <YStack flex={1} minW={200}>
                         <Text>{source.name}</Text>
-                        <Text fontSize={12} color="#8b949e">
+                        <Text fontSize={12} color={palette.secondary}>
                             {source.protocol} · {source.location} · {source.event_count} events
                             {source.raw_import_file_id && !source.raw_import_available
                                 ? " · Original import unavailable"
                                 : ""}
                         </Text>
-                        <Text fontSize={12} color="#8b949e">
+                        <Text fontSize={12} color={palette.secondary}>
                             {calendarSyncLabel(source.checked_at, now)}
                         </Text>
                     </YStack>
@@ -1469,13 +1487,15 @@ function CalendarSources({
                             Alarms {source.alarms_on ? "on" : "off"}
                         </Label>
                         <Switch
+                            borderWidth={1}
+                            borderColor={palette.border}
                             id={`calendar-alarms-${source.id}`}
                             size="$2"
                             checked={source.alarms_on}
                             disabled={busy !== null}
                             onCheckedChange={(checked) => void setAlarms(source, checked)}
                         >
-                            <Switch.Thumb />
+                            <Switch.Thumb activeStyle={{ bg: palette.page }} />
                         </Switch>
                         <Label htmlFor={`calendar-target-${source.id}`} size="$2">
                             Ring on
@@ -1553,7 +1573,7 @@ function CalendarSources({
                 </XStack>
             ))}
             {devicesError && (
-                <Paragraph fontSize={12} color="#f87171">
+                <Paragraph fontSize={12} color={palette.danger}>
                     Devices could not be loaded: {devicesError}
                 </Paragraph>
             )}
@@ -1652,14 +1672,14 @@ function SeriesList({
     if (items.length === 0) {
         return (
             <Card
-                bg="#171a1d"
+                bg={palette.surface}
                 p="$4"
                 items="center"
                 gap="$2"
-                style={{ borderColor: "#252b31", borderWidth: 1 }}
+                style={{ borderColor: palette.border, borderWidth: 1 }}
             >
-                <CalendarClock size={28} color="#8b949e" />
-                <Paragraph color="#8b949e">Nothing scheduled yet</Paragraph>
+                <CalendarClock size={28} color={palette.secondary} />
+                <Paragraph color={palette.secondary}>Nothing scheduled yet</Paragraph>
             </Card>
         );
     }
@@ -1667,7 +1687,7 @@ function SeriesList({
     return (
         <YStack gap="$2">
             <YStack gap="$1">
-                <Label htmlFor="event-order" fontSize={12} color="#8b949e">
+                <Label htmlFor="event-order" fontSize={12} color={palette.secondary}>
                     Order events by
                 </Label>
                 <Select value={order} onValueChange={setOrder}>
@@ -1701,13 +1721,13 @@ function SeriesList({
                 </Select>
             </YStack>
             {order === "next" && (
-                <Paragraph fontSize={12} color="#8b949e">
+                <Paragraph fontSize={12} color={palette.secondary}>
                     Upcoming starts within the next year. Refreshes every 30 seconds.
                     {sorting ? " Updating…" : ""}
                 </Paragraph>
             )}
             {sortError && (
-                <Paragraph color="#ff7b7b">
+                <Paragraph color={palette.danger}>
                     Could not order by next occurrence: {sortError}. Showing newest created.
                 </Paragraph>
             )}
@@ -1716,9 +1736,9 @@ function SeriesList({
                     key={item.id}
                     className="event-card"
                     onClick={() => onEdit(item)}
-                    bg="#171a1d"
+                    bg={palette.surface}
                     p="$3"
-                    style={{ borderColor: "#252b31", borderWidth: 1 }}
+                    style={{ borderColor: palette.border, borderWidth: 1 }}
                 >
                     <XStack items="flex-start" justify="space-between" gap="$3">
                         <YStack flex={1} minW={0} style={{ overflowWrap: "anywhere" }}>
@@ -1733,17 +1753,17 @@ function SeriesList({
                                 {item.title || "Untitled"}
                             </button>
                             {order === "next" && !sortError && !sorting && (
-                                <Text fontSize={12} color="#a9c8e6">
+                                <Text fontSize={12} color={palette.accent}>
                                     {starts.has(item.id)
                                         ? `Next: ${new Date(starts.get(item.id)!).toLocaleString()}`
                                         : "No upcoming start found within the next year"}
                                 </Text>
                             )}
                             <XStack items="center" gap="$2">
-                                <Text fontSize={12} color="#8b949e">
+                                <Text fontSize={12} color={palette.secondary}>
                                     {item.recurrence} · {item.time_summary}
                                 </Text>
-                                {item.has_alarm && <AlarmClock size={12} color="#d0a33a" />}
+                                {item.has_alarm && <AlarmClock size={12} color={palette.warning} />}
                             </XStack>
                         </YStack>
                         <XStack gap="$2" style={{ flexShrink: 0 }}>
@@ -2019,7 +2039,12 @@ function ScheduleComposer({
     }
 
     return (
-        <Card bg="#171a1d" p="$3" gap="$3" style={{ borderColor: "#252b31", borderWidth: 1 }}>
+        <Card
+            bg={palette.surface}
+            p="$3"
+            gap="$3"
+            style={{ borderColor: palette.border, borderWidth: 1 }}
+        >
             <XStack gap="$2" flexWrap="wrap" items="flex-end">
                 <Field label="Title">
                     <Input
@@ -2117,13 +2142,13 @@ function ScheduleComposer({
                 )}
             </XStack>
             {alarm && (
-                <Paragraph fontSize={12} color="#8b949e">
+                <Paragraph fontSize={12} color={palette.secondary}>
                     All phones means every Android device. A chosen Mac uses a notification with
                     sound while Clipper stays open, including when its window is closed.
                 </Paragraph>
             )}
             {alarm && devicesError && (
-                <Paragraph fontSize={12} color="#f85149">
+                <Paragraph fontSize={12} color={palette.danger}>
                     Devices could not be loaded: {devicesError}
                 </Paragraph>
             )}
@@ -2136,7 +2161,7 @@ function ScheduleComposer({
                 />
                 Break reminders
             </label>
-            <Paragraph fontSize={12} color="#8b949e">
+            <Paragraph fontSize={12} color={palette.secondary}>
                 Eye and movement reminders on Mac while this block's timer runs. Clipper must stay
                 open; closing its window keeps reminders running.
             </Paragraph>
@@ -2164,18 +2189,18 @@ function ScheduleComposer({
                 )}
             </XStack>
             {floating && !allDay && (
-                <Paragraph fontSize={12} color="#8b949e">
+                <Paragraph fontSize={12} color={palette.secondary}>
                     A floating block keeps its wall-clock time when you travel — 07:00 stays 07:00.
                     A zoned one stays pinned to {zone}.
                 </Paragraph>
             )}
             {!floating && !allDay && (
-                <Paragraph fontSize={12} color="#8b949e">
+                <Paragraph fontSize={12} color={palette.secondary}>
                     Times use {zone}.
                 </Paragraph>
             )}
             {editing && !recurrenceChanged && (
-                <Paragraph fontSize={12} color="#8b949e">
+                <Paragraph fontSize={12} color={palette.secondary}>
                     Saved recurrence: {editing.recurrence}. Kept unless you change repeat settings
                     below.
                 </Paragraph>
@@ -2295,7 +2320,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
     const id = useId();
     return (
         <YStack gap="$1">
-            <Label htmlFor={id} fontSize={12} color="#8b949e">
+            <Label htmlFor={id} fontSize={12} color={palette.secondary}>
                 {label}
             </Label>
             {isValidElement<{ id?: string }>(children) ? cloneElement(children, { id }) : children}

@@ -1,3 +1,4 @@
+import { palette } from "@clipper/shared";
 import type { ReactNode } from "react";
 import { Tooltip, Text, YStack } from "tamagui";
 import { useEventHover } from "./calendar-hover";
@@ -37,18 +38,18 @@ export function EventHover({
                 width={300}
                 maxW="calc(100vw - 24px)"
                 p="$3"
-                bg="#222a33"
+                bg={palette.raised}
                 borderWidth={1}
-                borderColor="#526171"
+                borderColor={palette.border}
                 rounded="$3"
             >
-                <Tooltip.Arrow bg="#222a33" borderWidth={1} borderColor="#526171" />
+                <Tooltip.Arrow bg={palette.raised} borderWidth={1} borderColor={palette.border} />
                 <YStack gap="$1" width="100%" minW={0}>
                     <Text
                         fontSize={14}
                         lineHeight={20}
                         fontWeight="600"
-                        color="#f2f5f7"
+                        color={palette.text}
                         style={{ overflowWrap: "anywhere" }}
                     >
                         {title || "Untitled"}
@@ -56,7 +57,7 @@ export function EventHover({
                     <Text
                         fontSize={13}
                         lineHeight={18}
-                        color="#bac7d5"
+                        color={palette.secondary}
                         style={{ overflowWrap: "anywhere" }}
                     >
                         {detail}

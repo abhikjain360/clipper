@@ -1,7 +1,8 @@
+import { Button } from "../tamagui.config";
 import type { AppState } from "@clipper/shared";
 import { ArrowLeft } from "lucide-react-native";
 import { useCallback } from "react";
-import { Button, H2, ScrollView, Text, XStack, YStack } from "tamagui";
+import { H2, ScrollView, Text, XStack, YStack } from "tamagui";
 import { colors, GymCard, Muted } from "../gym/GymUi";
 import { kitchen, useKitchenView } from "./kitchenClient";
 import { LoadStatus, useBack } from "./KitchenUi";

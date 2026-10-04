@@ -1,3 +1,4 @@
+import { palette, statusSurfaces } from "@clipper/shared";
 import {
   AlarmClock,
   Calendar,
@@ -161,7 +162,7 @@ export default function App() {
     <TamaguiProvider config={tamaguiConfig} defaultTheme="dark">
       <SafeAreaProvider>
         <StatusBar barStyle="light-content" />
-        <SafeAreaView style={{ flex: 1, backgroundColor: "#101214" }}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: palette.page }}>
           <ClipperApp />
         </SafeAreaView>
       </SafeAreaProvider>
@@ -355,8 +356,8 @@ function ConnectionBanner({ state }: { state: AppState }) {
   const offline = state.offline;
   if (!offline && pending === 0) return null;
   return (
-    <XStack px="$3" py="$2" bg="#352b16">
-      <Text color="#ffbc42">
+    <XStack px="$3" py="$2" bg={statusSurfaces.warning}>
+      <Text color={palette.warning}>
         {offline ? "Offline · " : ""}
         {pending} pending changes
       </Text>
@@ -412,16 +413,23 @@ function LoginScreen({
     <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
       <ScrollView
         flex={1}
-        bg="#101214"
+        bg={palette.page}
         contentContainerStyle={{ grow: 1 }}
         keyboardShouldPersistTaps="handled"
       >
         <YStack flex={1} items="center" justify="center" p="$4">
-          <Card width="100%" maxW={460} p="$5" bg="#171a1d" borderColor="#252b31" borderWidth={1}>
+          <Card
+            width="100%"
+            maxW={460}
+            p="$5"
+            bg={palette.surface}
+            borderColor={palette.border}
+            borderWidth={1}
+          >
             <YStack gap="$4">
               <YStack gap="$2">
                 <H1 size="$9">Clipper</H1>
-                <Paragraph color="#9aa4ad">Encrypted clipboard and file sync</Paragraph>
+                <Paragraph color={palette.secondary}>Encrypted clipboard and file sync</Paragraph>
               </YStack>
 
               <XStack gap="$2">
@@ -475,7 +483,7 @@ function LoginScreen({
                 <Input value={passphrase} secureTextEntry onChangeText={setPassphrase} />
               </Field>
 
-              {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
+              {error && <Paragraph color={palette.danger}>{error}</Paragraph>}
 
               <Button
                 theme="blue"
@@ -653,7 +661,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
           {expanded ? "Logout" : null}
         </Button>
         {expanded && runningWork && (
-          <Card p="$3" gap="$2" borderWidth={1} borderColor="#303940">
+          <Card p="$3" gap="$2" borderWidth={1} borderColor={palette.border}>
             <Paragraph>Work is still running</Paragraph>
             {runningWork.map((work, index) => (
               <Text key={index}>{work.label}</Text>
@@ -680,7 +688,7 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
           py="$2"
           aria-label={`Clipper: ${state.connection_status}`}
         >
-          <Clipboard size={22} color="#9aa4ad" />
+          <Clipboard size={22} color={palette.secondary} />
           {expanded && <Text fontWeight="600">Clipper</Text>}
         </XStack>
         {expanded && <ConnectionBadge status={state.connection_status} />}
@@ -689,9 +697,14 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
   );
 
   return (
-    <XStack flex={1} bg="#101214">
+    <XStack flex={1} bg={palette.page}>
       {!compactNavigation && (
-        <YStack width={64} bg="#171a1d" borderRightColor="#252b31" borderRightWidth={1}>
+        <YStack
+          width={64}
+          bg={palette.surface}
+          borderRightColor={palette.border}
+          borderRightWidth={1}
+        >
           {navigation(false)}
         </YStack>
       )}
@@ -706,12 +719,12 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
               icon={<Menu size={22} />}
               onPress={() => setNavExpanded(true)}
             />
-            <Text color="#9aa4ad">
+            <Text color={palette.secondary}>
               {destinations.find((item) => item.value === tab)?.label ?? "Clipper"}
             </Text>
           </XStack>
         )}
-        {error && <Paragraph color="#ff7b7b">{error}</Paragraph>}
+        {error && <Paragraph color={palette.danger}>{error}</Paragraph>}
 
         {tab === "clipboard" && (
           <ClipboardPanel items={state.clipboard_items} onState={onState} onError={setError} />
@@ -751,7 +764,12 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
 
       {navExpanded && (
         <XStack position="absolute" t={0} b={0} l={0} r={0} z={10}>
-          <YStack width={220} bg="#171a1d" borderRightColor="#252b31" borderRightWidth={1}>
+          <YStack
+            width={220}
+            bg={palette.surface}
+            borderRightColor={palette.border}
+            borderRightWidth={1}
+          >
             {navigation(true)}
           </YStack>
           <YStack flex={1} bg="rgba(0,0,0,0.5)" onPress={() => setNavExpanded(false)} />
@@ -884,10 +902,10 @@ function SchedulePanel({
             <ListCard>
               <YStack gap="$2">
                 <Text>{running.title || "Unplanned"}</Text>
-                <Paragraph size="$2" color="#9aa4ad">
+                <Paragraph size="$2" color={palette.secondary}>
                   Started {new Date(running.start).toLocaleString(undefined, { timeZone: zone })}
                 </Paragraph>
-                <Text color="#d0a33a">
+                <Text color={palette.warning}>
                   Running · {formatElapsed(now - Date.parse(running.start))}
                 </Text>
                 <Button
@@ -904,7 +922,7 @@ function SchedulePanel({
             </Button>
           )}
           {state.schedule_warnings.map((warning, index) => (
-            <Paragraph key={`${index}:${warning}`} size="$2" color="#d0a33a">
+            <Paragraph key={`${index}:${warning}`} size="$2" color={palette.warning}>
               {warning}
             </Paragraph>
           ))}
@@ -926,26 +944,26 @@ function SchedulePanel({
                     })}
                   </Text>
                   {planned.length === 0 && !loading && (
-                    <Paragraph size="$2" color="#9aa4ad">
+                    <Paragraph size="$2" color={palette.secondary}>
                       Nothing scheduled
                     </Paragraph>
                   )}
                   {planned.map((occurrence) => (
                     <YStack key={`${occurrence.item_id}:${occurrence.occurrence_key}`} gap="$1">
-                      <Text color={occurrence.cancelled ? "#9aa4ad" : undefined}>
+                      <Text color={occurrence.cancelled ? palette.secondary : undefined}>
                         {occurrence.title}
                       </Text>
-                      <Paragraph size="$2" color="#9aa4ad">
+                      <Paragraph size="$2" color={palette.secondary}>
                         {scheduleTime(occurrence.start, day.start, zone)} –{" "}
                         {scheduleTime(occurrence.end, day.start, zone)}
                       </Paragraph>
                       {occurrence.all_day && (
-                        <Text fontSize={12} color="#9aa4ad">
+                        <Text fontSize={12} color={palette.secondary}>
                           All day
                         </Text>
                       )}
                       {occurrence.source && (
-                        <Text fontSize={12} color="#9aa4ad">
+                        <Text fontSize={12} color={palette.secondary}>
                           {occurrence.source}
                         </Text>
                       )}
@@ -965,17 +983,18 @@ function SchedulePanel({
                             icon={<CookingPot size={16} />}
                             onPress={() => onOpenRecipe(plan.recipeId)}
                           >
-                            <Text color="#6fb4ff" shrink={1}>
+                            <Text color={palette.accent} shrink={1}>
                               {plan.title}
                             </Text>
                           </Button>
                         ))}
                       {occurrence.cancelled ? (
-                        <Text fontSize={12} color="#ff7b7b">
+                        <Text fontSize={12} color={palette.danger}>
                           Cancelled
                         </Text>
                       ) : (
                         <Button
+                          theme="blue"
                           size="$3"
                           disabled={busy}
                           onPress={() =>
@@ -987,18 +1006,18 @@ function SchedulePanel({
                       )}
                     </YStack>
                   ))}
-                  <Text fontWeight="600" color="#9aa4ad">
+                  <Text fontWeight="600" color={palette.secondary}>
                     Recorded time
                   </Text>
                   {recorded.length === 0 && !loading && (
-                    <Paragraph size="$2" color="#9aa4ad">
+                    <Paragraph size="$2" color={palette.secondary}>
                       No recorded time
                     </Paragraph>
                   )}
                   {recorded.map((actual) => (
                     <YStack key={actual.id} gap="$1">
                       <Text>{actual.title || "Unplanned"}</Text>
-                      <Paragraph size="$2" color="#9aa4ad">
+                      <Paragraph size="$2" color={palette.secondary}>
                         {scheduleTime(actual.start, day.start, zone)} –{" "}
                         {actual.running ? "Running" : scheduleTime(actual.end, day.start, zone)}
                       </Paragraph>
@@ -1143,14 +1162,16 @@ function MobileCalendars({
             </XStack>
           </YStack>
         )}
-        {sources.length === 0 && <Paragraph color="#9aa4ad">No calendars connected</Paragraph>}
+        {sources.length === 0 && (
+          <Paragraph color={palette.secondary}>No calendars connected</Paragraph>
+        )}
         {sources.map((source) => (
           <YStack key={source.id} gap="$2">
             <Text fontWeight="600">{source.name}</Text>
-            <Paragraph size="$2" color="#9aa4ad">
+            <Paragraph size="$2" color={palette.secondary}>
               {source.location} · {source.event_count} events
             </Paragraph>
-            <Paragraph size="$2" color="#9aa4ad">
+            <Paragraph size="$2" color={palette.secondary}>
               {calendarSyncLabel(source.checked_at, now)}
             </Paragraph>
             <Button
@@ -1192,7 +1213,7 @@ function MobileCalendars({
                     </Button>
                   ))
                 )}
-                {devicesError && <Paragraph color="#f87171">{devicesError}</Paragraph>}
+                {devicesError && <Paragraph color={palette.danger}>{devicesError}</Paragraph>}
                 <Paragraph size="$2">
                   When feed has no reminder: {source.alarm_lead_minutes ?? 5} minutes before
                 </Paragraph>
@@ -1223,6 +1244,8 @@ function MobileCalendars({
                 Alarms {source.alarms_on ? "on" : "off"}
               </Label>
               <Switch
+                borderWidth={1}
+                borderColor={palette.border}
                 id={`calendar-alarms-${source.id}`}
                 size="$3"
                 checked={source.alarms_on}
@@ -1231,7 +1254,7 @@ function MobileCalendars({
                   void change(source.id, () => backend.setCalendarSourceAlarms(source.id, checked))
                 }
               >
-                <Switch.Thumb />
+                <Switch.Thumb activeStyle={{ bg: palette.page }} />
               </Switch>
               <Button
                 size="$3"
@@ -1354,7 +1377,10 @@ function ClipboardPanel({
       </XStack>
 
       {items.length === 0 ? (
-        <EmptyState icon={<Clipboard size={28} color="#5b6571" />} title="No clipboard items yet" />
+        <EmptyState
+          icon={<Clipboard size={28} color={palette.secondary} />}
+          title="No clipboard items yet"
+        />
       ) : (
         <ScrollView>
           <YStack gap="$2" pb="$4">
@@ -1363,7 +1389,7 @@ function ClipboardPanel({
                 <XStack items="center" justify="space-between" gap="$3">
                   <YStack flex={1} gap="$1">
                     <Text numberOfLines={3}>{item.text}</Text>
-                    <Paragraph size="$2" color="#9aa4ad">
+                    <Paragraph size="$2" color={palette.secondary}>
                       {item.mime_type} - {formatRelativeTime(item.created_at)}
                     </Paragraph>
                   </YStack>
@@ -1463,7 +1489,7 @@ function FilesPanel({
       </XStack>
 
       {files.length === 0 ? (
-        <EmptyState icon={<Folder size={28} color="#5b6571" />} title="No files yet" />
+        <EmptyState icon={<Folder size={28} color={palette.secondary} />} title="No files yet" />
       ) : (
         <ScrollView>
           <YStack gap="$2" pb="$4">
@@ -1471,10 +1497,10 @@ function FilesPanel({
               <ListCard key={file.id}>
                 <XStack items="center" justify="space-between" gap="$3">
                   <XStack items="center" gap="$3" flex={1}>
-                    <Files size={22} color="#6fb4ff" />
+                    <Files size={22} color={palette.accent} />
                     <YStack flex={1} gap="$1">
                       <Text numberOfLines={1}>{file.filename}</Text>
-                      <Paragraph size="$2" color="#9aa4ad">
+                      <Paragraph size="$2" color={palette.secondary}>
                         {formatByteSize(file.blob_size)} - {formatRelativeTime(file.created_at)}
                       </Paragraph>
                     </YStack>
@@ -1494,7 +1520,7 @@ function FilesPanel({
                     />
                     <Button
                       size="$3"
-                      icon={<Trash2 size={16} color="#ff6b6b" />}
+                      icon={<Trash2 size={16} color={palette.danger} />}
                       onPress={() => void deleteFile(file)}
                     />
                   </XStack>
@@ -1581,9 +1607,9 @@ function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
   return (
     <ScrollView flex={1}>
       <YStack gap="$3" p="$3">
-        <Card bg="#171a1d" p="$3" gap="$2">
+        <Card bg={palette.surface} p="$3" gap="$2">
           <H2 size="$5">Exact alarms</H2>
-          <Paragraph color={exact ? "#7bd88f" : "#ff7b7b"}>
+          <Paragraph color={exact ? palette.success : palette.danger}>
             {exact
               ? "Exact scheduling is permitted."
               : "Exact scheduling is not permitted. Alarms will not be scheduled until you allow it."}
@@ -1591,9 +1617,9 @@ function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
           {!exact && <Button onPress={() => openExactAlarmSettings()}>Open system setting</Button>}
         </Card>
 
-        <Card bg="#171a1d" p="$3" gap="$2">
+        <Card bg={palette.surface} p="$3" gap="$2">
           <H2 size="$5">Notifications</H2>
-          <Paragraph color={notifications ? "#7bd88f" : "#ff7b7b"}>
+          <Paragraph color={notifications ? palette.success : palette.danger}>
             {notifications
               ? "Alarm notifications are enabled."
               : "Notifications are disabled. Alarms cannot show their notification."}
@@ -1603,9 +1629,9 @@ function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
           )}
         </Card>
 
-        <Card bg="#171a1d" p="$3" gap="$2">
+        <Card bg={palette.surface} p="$3" gap="$2">
           <H2 size="$5">Full-screen alarms</H2>
-          <Paragraph color={fullScreen ? "#7bd88f" : "#ff7b7b"}>
+          <Paragraph color={fullScreen ? palette.success : palette.danger}>
             {fullScreen
               ? "Full-screen alarm display is available."
               : "Full-screen alarm display is disabled. Android may show only a notification."}
@@ -1615,23 +1641,23 @@ function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
           )}
         </Card>
 
-        <Card bg="#171a1d" p="$3" gap="$2">
+        <Card bg={palette.surface} p="$3" gap="$2">
           <H2 size="$5">Scheduled</H2>
-          <Paragraph color="#8b949e">
+          <Paragraph color={palette.secondary}>
             {planned === 1
               ? "1 upcoming alarm in the mirrored plan"
               : `${planned} upcoming alarms in the mirrored plan`}
           </Paragraph>
-          <Paragraph fontSize={12} color="#8b949e">
+          <Paragraph fontSize={12} color={palette.secondary}>
             Planned alarms are mirrored to storage the system unlocks at boot, so they survive a
             restart and ring before you unlock the device. The schedule itself stays encrypted.
           </Paragraph>
           <Button onPress={refresh}>Refresh</Button>
         </Card>
 
-        <Card bg="#171a1d" p="$3" gap="$2">
+        <Card bg={palette.surface} p="$3" gap="$2">
           <H2 size="$5">Test</H2>
-          <Paragraph fontSize={12} color="#8b949e">
+          <Paragraph fontSize={12} color={palette.secondary}>
             Rings immediately, exercising the same path a real alarm takes — foreground service,
             full-screen intent, and the ring screen over the lock screen.
           </Paragraph>
@@ -1643,9 +1669,9 @@ function AlarmsPanel({ onError }: { onError: (error: string | null) => void }) {
           </XStack>
         </Card>
 
-        <Card bg="#171a1d" p="$3" gap="$2">
+        <Card bg={palette.surface} p="$3" gap="$2">
           <H2 size="$5">Vendor settings</H2>
-          <Paragraph fontSize={12} color="#8b949e">
+          <Paragraph fontSize={12} color={palette.secondary}>
             On Xiaomi, HyperOS, and similar, alarms only survive if Clipper has Autostart enabled
             and is exempt from battery optimisation. Nothing in the app can set these or detect that
             they are missing — an alarm simply never arrives.
@@ -1699,7 +1725,7 @@ function DevicesPanel({ onError }: { onError: (error: string | null) => void }) 
         </Button>
       </XStack>
 
-      <Paragraph size="$2" color="#9aa4ad">
+      <Paragraph size="$2" color={palette.secondary}>
         Removing a device signs it out everywhere and revokes its access. The objects it shared are
         kept.
       </Paragraph>
@@ -1707,7 +1733,7 @@ function DevicesPanel({ onError }: { onError: (error: string | null) => void }) 
       {devices === null ? (
         <EmptyState icon={<Spinner />} title="Loading devices..." />
       ) : devices.length === 0 ? (
-        <EmptyState icon={<Smartphone size={28} color="#5b6571" />} title="No devices" />
+        <EmptyState icon={<Smartphone size={28} color={palette.secondary} />} title="No devices" />
       ) : (
         <ScrollView>
           <YStack gap="$2" pb="$4">
@@ -1715,17 +1741,17 @@ function DevicesPanel({ onError }: { onError: (error: string | null) => void }) 
               <ListCard key={device.id}>
                 <XStack items="center" justify="space-between" gap="$3">
                   <XStack items="center" gap="$3" flex={1}>
-                    <Smartphone size={22} color="#6fb4ff" />
+                    <Smartphone size={22} color={palette.accent} />
                     <YStack flex={1} gap="$1">
                       <XStack items="center" gap="$2">
                         <Text numberOfLines={1}>{device.name}</Text>
                         {device.is_current && (
-                          <Paragraph size="$1" color="#6fb4ff">
+                          <Paragraph size="$1" color={palette.accent}>
                             This device
                           </Paragraph>
                         )}
                       </XStack>
-                      <Paragraph size="$2" color="#9aa4ad">
+                      <Paragraph size="$2" color={palette.secondary}>
                         {device.platform} - last seen {formatRelativeTime(device.last_seen_at)}
                       </Paragraph>
                     </YStack>
@@ -1733,7 +1759,7 @@ function DevicesPanel({ onError }: { onError: (error: string | null) => void }) 
                   {!device.is_current && (
                     <Button
                       size="$3"
-                      icon={<Trash2 size={16} color="#ff6b6b" />}
+                      icon={<Trash2 size={16} color={palette.danger} />}
                       onPress={() => void removeDevice(device)}
                     />
                   )}
@@ -1839,7 +1865,10 @@ function CollabPanel({
       />
 
       {collabDocs.length === 0 ? (
-        <EmptyState icon={<FileText size={28} color="#5b6571" />} title="No collab docs yet" />
+        <EmptyState
+          icon={<FileText size={28} color={palette.secondary} />}
+          title="No collab docs yet"
+        />
       ) : (
         <ScrollView>
           <YStack gap="$2" pb="$4">
@@ -1851,12 +1880,12 @@ function CollabPanel({
                     gap="$3"
                     flex={1}
                     onPress={() => setReading(item)}
-                    pressStyle={{ opacity: 0.6 }}
+                    pressStyle={{ bg: palette.raised }}
                   >
-                    <FileCode size={22} color="#6fb4ff" />
+                    <FileCode size={22} color={palette.accent} />
                     <YStack flex={1} gap="$1">
                       <Text numberOfLines={1}>{collabTitle(item)}</Text>
-                      <Paragraph size="$2" color="#9aa4ad">
+                      <Paragraph size="$2" color={palette.secondary}>
                         {formatRelativeTime(item.created_at)}
                       </Paragraph>
                     </YStack>
@@ -1874,7 +1903,7 @@ function CollabPanel({
                     />
                     <Button
                       size="$3"
-                      icon={<Trash2 size={16} color="#ff6b6b" />}
+                      icon={<Trash2 size={16} color={palette.danger} />}
                       onPress={() => void deleteDoc(item)}
                     />
                   </XStack>
@@ -1904,7 +1933,7 @@ const SHARE_LINK_UNAVAILABLE =
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <YStack gap="$2">
-      <Label color="#cdd5dc">{label}</Label>
+      <Label color={palette.text}>{label}</Label>
       {children}
     </YStack>
   );
@@ -1912,7 +1941,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function ListCard({ children }: { children: ReactNode }) {
   return (
-    <Card p="$3" bg="#171a1d" borderColor="#252b31" borderWidth={1}>
+    <Card p="$3" bg={palette.surface} borderColor={palette.border} borderWidth={1}>
       {children}
     </Card>
   );
@@ -1920,11 +1949,15 @@ function ListCard({ children }: { children: ReactNode }) {
 
 function ConnectionBadge({ status }: { status: AppState["connection_status"] }) {
   const color =
-    status === "Connected" ? "#3ddc84" : status === "Connecting" ? "#f2c94c" : "#9099a1";
+    status === "Connected"
+      ? palette.success
+      : status === "Connecting"
+        ? palette.warning
+        : palette.secondary;
   return (
-    <XStack items="center" gap="$2" px="$2" py="$1" rounded="$2" bg="#22282e">
+    <XStack items="center" gap="$2" px="$2" py="$1" rounded="$2" bg={palette.raised}>
       <YStack width={8} height={8} rounded={999} bg={color} />
-      <Text fontSize={12} color="#9aa4ad">
+      <Text fontSize={12} color={palette.secondary}>
         {status}
       </Text>
     </XStack>
@@ -1944,9 +1977,9 @@ function EmptyState({
     <YStack flex={1} items="center" justify="center" gap="$3" p="$4">
       {icon}
       <YStack items="center" gap="$1">
-        <Paragraph color="#9aa4ad">{title}</Paragraph>
+        <Paragraph color={palette.secondary}>{title}</Paragraph>
         {subtitle === undefined ? null : (
-          <Paragraph size="$2" color="#5b6571" style={{ textAlign: "center" }}>
+          <Paragraph size="$2" color={palette.secondary} style={{ textAlign: "center" }}>
             {subtitle}
           </Paragraph>
         )}
@@ -1965,10 +1998,10 @@ function CenteredStatus({
   loading?: boolean;
 }) {
   return (
-    <YStack flex={1} items="center" justify="center" gap="$3" p="$4" bg="#101214">
+    <YStack flex={1} items="center" justify="center" gap="$3" p="$4" bg={palette.page}>
       {loading && <Spinner size="large" />}
       <H2>{title}</H2>
-      {message && <Paragraph color="#9aa4ad">{message}</Paragraph>}
+      {message && <Paragraph color={palette.secondary}>{message}</Paragraph>}
     </YStack>
   );
 }
@@ -2051,18 +2084,18 @@ function CollabDocReader({
 
   return (
     <Modal visible={doc !== null} animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: "#101214" }}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: palette.page }}>
         <XStack
           items="center"
           justify="space-between"
           gap="$2"
           px="$3"
           py="$2"
-          borderBottomColor="#252b31"
+          borderBottomColor={palette.border}
           borderBottomWidth={1}
         >
           <YStack flex={1} gap="$1">
-            <Text numberOfLines={1} fontWeight="600" color="#e6e9ec">
+            <Text numberOfLines={1} fontWeight="600" color={palette.text}>
               {doc ? collabTitle(doc) : ""}
             </Text>
             <Paragraph size="$2" color={COLLAB_STATUS_COLORS[status]}>
@@ -2074,7 +2107,7 @@ function CollabDocReader({
         </XStack>
         {content.length === 0 && status === "unavailable" ? (
           <EmptyState
-            icon={<FileText size={28} color="#5b6571" />}
+            icon={<FileText size={28} color={palette.secondary} />}
             title="Can't open this doc"
             subtitle="It may have been deleted, or this device is offline."
           />
@@ -2088,8 +2121,8 @@ function CollabDocReader({
             scrollEnabled
             style={{
               flex: 1,
-              color: "#e6e9ec",
-              backgroundColor: "#101214",
+              color: palette.text,
+              backgroundColor: palette.page,
               fontFamily: MONOSPACE_FONT,
               fontSize: 13,
               lineHeight: 18,
@@ -2113,10 +2146,10 @@ const COLLAB_STATUS_LABELS: Record<CollabDocStatus, string> = {
 // `as const` keeps these literal: Tamagui's `color` prop takes a token or a
 // literal colour, not an arbitrary `string`.
 const COLLAB_STATUS_COLORS = {
-  connecting: "#9aa4ad",
-  live: "#6eeb83",
-  offline: "#ffbc42",
-  unavailable: "#ff6b6b",
+  connecting: palette.secondary,
+  live: palette.success,
+  offline: palette.warning,
+  unavailable: palette.danger,
 } as const satisfies Record<CollabDocStatus, string>;
 
 // Rename prompt. React Native has no `window.prompt`, and Alert.prompt is
@@ -2141,7 +2174,7 @@ function RenameDocDialog({
   return (
     <Modal visible={doc !== null} animationType="fade" transparent onRequestClose={onCancel}>
       <YStack flex={1} justify="center" p="$4" bg="rgba(0,0,0,0.6)">
-        <Card p="$4" gap="$3" bg="#171a1d" borderColor="#252b31" borderWidth={1}>
+        <Card p="$4" gap="$3" bg={palette.surface} borderColor={palette.border} borderWidth={1}>
           <H2 size="$5">Rename doc</H2>
           <Input
             value={draft}
@@ -2188,17 +2221,17 @@ function ContentViewer({
 
   return (
     <Modal visible={viewing !== null} animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: "#101214" }}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: palette.page }}>
         <XStack
           items="center"
           justify="space-between"
           gap="$2"
           px="$3"
           py="$2"
-          borderBottomColor="#252b31"
+          borderBottomColor={palette.border}
           borderBottomWidth={1}
         >
-          <Text flex={1} numberOfLines={1} fontWeight="600" color="#e6e9ec">
+          <Text flex={1} numberOfLines={1} fontWeight="600" color={palette.text}>
             {viewing?.title ?? ""}
           </Text>
           <Button size="$3" icon={<Copy size={16} />} onPress={() => void copyAll()} />
@@ -2211,8 +2244,8 @@ function ContentViewer({
           scrollEnabled
           style={{
             flex: 1,
-            color: "#e6e9ec",
-            backgroundColor: "#101214",
+            color: palette.text,
+            backgroundColor: palette.page,
             fontFamily: MONOSPACE_FONT,
             fontSize: 13,
             lineHeight: 18,
