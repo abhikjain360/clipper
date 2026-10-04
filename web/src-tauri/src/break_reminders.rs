@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
-use clipper_app_types::ActualView;
+use clipper_app_types::{ActualView, OccurrenceView};
 use clipper_schedule::{BreakReminder, next_break_reminder};
 
 struct Timer {
@@ -49,11 +49,24 @@ impl BreakReminders {
     }
 }
 
+fn outside_meetings(reminder: BreakReminder, meetings: &[OccurrenceView]) -> bool {
+    !meetings.iter().any(|meeting| {
+        meeting
+            .start
+            .parse::<DateTime<Utc>>()
+            .is_ok_and(|start| start <= reminder.at)
+            && meeting
+                .end
+                .parse::<DateTime<Utc>>()
+                .is_ok_and(|end| reminder.at < end)
+    })
+}
+
 #[cfg(target_os = "macos")]
 pub async fn run(daemon: std::sync::Arc<crate::daemon_client::DaemonClient>) {
     use std::time::Duration as Wait;
 
-    use clipper_daemon_types::{ActualsBetweenParams, DaemonCommand};
+    use clipper_daemon_types::{ActualsBetweenParams, DaemonCommand, ExpandScheduleParams};
 
     use crate::notifications;
 
@@ -91,6 +104,19 @@ pub async fn run(daemon: std::sync::Arc<crate::daemon_client::DaemonClient>) {
             continue;
         }
         if let Some(reminder) = due
+            && let Ok(Ok(meetings)) = tokio::time::timeout(
+                Wait::from_secs(2),
+                daemon.send_result::<Vec<OccurrenceView>>(DaemonCommand::MeetingsBetween(
+                    ExpandScheduleParams {
+                        from: reminder.at.to_rfc3339(),
+                        to: (reminder.at + Duration::seconds(1)).to_rfc3339(),
+                        observer_zone: iana_time_zone::get_timezone()
+                            .unwrap_or_else(|_| "UTC".into()),
+                    },
+                )),
+            )
+            .await
+            && outside_meetings(reminder, &meetings)
             && let Ok(Ok(fresh)) = tokio::time::timeout(
                 Wait::from_secs(2),
                 daemon.send_result::<clipper_app_types::AppState>(DaemonCommand::GetState),
@@ -211,5 +237,40 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn a_meeting_skips_one_reminder_without_changing_the_rhythm() {
+        let actual = actual();
+        let started = actual.start.parse::<DateTime<Utc>>().unwrap();
+        let meetings = vec![OccurrenceView {
+            start: (started + Duration::minutes(20)).to_rfc3339(),
+            end: (started + Duration::minutes(40)).to_rfc3339(),
+            source: Some("Meetings".into()),
+            ..Default::default()
+        }];
+        let mut reminders = BreakReminders::default();
+        reminders.update(Some(&actual), started);
+        let deliver = |reminder| outside_meetings(reminder, &meetings);
+        assert_eq!(
+            reminders
+                .update(Some(&actual), started + Duration::minutes(20))
+                .filter(|reminder| deliver(*reminder)),
+            None,
+        );
+        assert_eq!(
+            reminders.timer.as_ref().unwrap().next.at,
+            started + Duration::minutes(40)
+        );
+        let at = started + Duration::minutes(40);
+        assert_eq!(
+            reminders
+                .update(Some(&actual), at)
+                .filter(|reminder| deliver(*reminder)),
+            Some(BreakReminder {
+                at,
+                kind: BreakReminderKind::Eyes
+            }),
+        );
     }
 }

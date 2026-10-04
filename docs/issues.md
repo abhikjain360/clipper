@@ -2507,6 +2507,34 @@ Each entry has:
   Closing with disconnected edits requires an explicit discard. Other mobile
   platforms retain the read-only view.
 
+### 198. Running occurrences kept an active Start button
+
+- **Status:** fixed, uncommitted
+- **Severity:** low
+- **Where:** desktop Next view and phone schedule list.
+- **Decision:** show disabled Running with elapsed time. Match the timer's
+  series ID and occurrence key. Other occurrences keep Start.
+
+### 199. Break reminders interrupted attended meetings
+
+- **Status:** fixed, uncommitted
+- **Severity:** medium
+- **Where:** Tauri Mac break reminder scheduler.
+- **Decision:** skip each reminder inside an attended imported meeting and
+  keep the original rhythm. Use the imported alarm invitation rules,
+  independently of alarm toggles and device targets. Owned blocks do not
+  suppress reminders.
+
+### 200. Concurrent mobile checks share a codegen directory
+
+- **Status:** open
+- **Severity:** low; can fail a mobile check.
+- **Where:** `scripts/tasks.ts`, `generateMobileBindings`.
+- **What happens:** checks sharing a Cargo target directory both remove
+  `target/mobile-uniffi-turbo`. One can delete the other's working directory
+  while its generator runs, causing a file-not-found error.
+- **Decision:** use a separate temporary directory for each check.
+
 ## Docs
 
 ### 29. Doc claims the code did not satisfy

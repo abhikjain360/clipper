@@ -4,7 +4,7 @@ import { act, createElement, type ComponentType } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
 import { build } from "vite";
-import type { AppState, OccurrenceView, ScheduleItemView } from "@clipper/shared";
+import type { ActualView, AppState, OccurrenceView, ScheduleItemView } from "@clipper/shared";
 
 const browser = new Window();
 const day = new Date();
@@ -148,7 +148,7 @@ after(() => {
     browser.happyDOM.abort();
 });
 
-async function render(events: OccurrenceView[], view: string) {
+async function render(events: OccurrenceView[], view: string, running: ActualView | null = null) {
     act(() => root.render(null));
     starts = 0;
     errors.length = 0;
@@ -161,7 +161,7 @@ async function render(events: OccurrenceView[], view: string) {
                 items: [item],
                 warnings: [],
                 sources: [],
-                running: null,
+                running,
                 onState: () => {},
                 onError: (error: unknown) => {
                     if (error) errors.push(error);
@@ -261,4 +261,56 @@ test("Enter opens a focused calendar block's editor without starting a timer", a
     );
     assert.ok(browser.document.querySelector('[role="dialog"]'));
     assert.equal(starts, 0);
+});
+
+test("Next disables only the running occurrence and shows its elapsed time", async () => {
+    const now = Date.now();
+    const event = {
+        ...occurrence,
+        start: new Date(now - 60_000).toISOString(),
+        end: new Date(now + 3_600_000).toISOString(),
+    };
+    const running: ActualView = {
+        id: "timer-id",
+        item_id: event.item_id,
+        occurrence_key: event.occurrence_key,
+        title: "Timer title",
+        start: new Date(now - 120_000).toISOString(),
+        end: "",
+        running: true,
+    };
+    await render(
+        [
+            event,
+            {
+                ...event,
+                occurrence_key: "second",
+                title: "Next repeat",
+                start: new Date(now + 600_000).toISOString(),
+            },
+            { ...event, item_id: "other", title: "Other series" },
+        ],
+        "Next",
+        running,
+    );
+    const buttons = Array.from(browser.document.querySelectorAll("button"));
+    const active = buttons.find((button) => button.textContent?.startsWith("Running ·"));
+    assert.ok(active?.disabled);
+    assert.match(active.textContent!, /^Running · 2:0\d$/);
+    assert.equal(active.parentElement?.querySelectorAll("button")[0], active);
+    const other = buttons.filter((button) => button.textContent === "Start");
+    assert.equal(other.length, 2);
+    assert.ok(other.every((button) => !button.disabled));
+    await act(async () => active.click());
+    assert.equal(starts, 0);
+    await act(async () => other[0]!.click());
+    assert.equal(starts, 1);
+    assert.deepEqual(errors, []);
+    await render([{ ...event, cancelled: true }], "Next", running);
+    const cancelled = Array.from(browser.document.querySelectorAll("button"));
+    assert.ok(cancelled.find((button) => button.textContent?.startsWith("Running ·"))?.disabled);
+    assert.equal(
+        cancelled.some((button) => button.textContent === "Start"),
+        false,
+    );
 });

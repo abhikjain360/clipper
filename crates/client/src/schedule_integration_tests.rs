@@ -4448,6 +4448,78 @@ fn imported_source_readiness_requires_a_complete_active_batch() {
     assert!(!calendar_import::ready_sources(&staged).contains(&source_id));
 }
 
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_meetings_exclude_declined_cancelled_all_day_and_owned_blocks() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let engine =
+        register_proxy_engine(&format!("http://{address}"), &temp.path().join("client")).await;
+    let events = [
+        ("accepted", "ATTENDEE;PARTSTAT=ACCEPTED:mailto:owner@example.test\r\n"),
+        ("declined", "ATTENDEE;PARTSTAT=DECLINED:mailto:owner@example.test\r\n"),
+        ("cancelled", "STATUS:CANCELLED\r\n"),
+        ("no-attendees", ""),
+    ].map(|(uid, fields)| format!(
+        "BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:{uid}\r\nDTSTART:20261009T090000Z\r\nDTEND:20261009T100000Z\r\n{fields}END:VEVENT\r\n"
+    )).join("");
+    let text = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{events}BEGIN:VEVENT\r\nUID:all-day\r\nDTSTART;VALUE=DATE:20261009\r\nDTEND;VALUE=DATE:20261010\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    );
+    let id = engine
+        .add_calendar_source(
+            "Meetings",
+            "https://calendar.google.com/calendar/ical/owner%40example.test/private/test.ics",
+        )
+        .await
+        .unwrap();
+    engine.set_calendar_source_alarms(&id, false).await.unwrap();
+    let pending = engine
+        .stage_calendar_import(&id, &text, Utc::now())
+        .await
+        .unwrap();
+    engine
+        .finish_calendar_import(&id, &text, &pending)
+        .await
+        .unwrap();
+    engine
+        .create_schedule_item(clipper_schedule::ScheduleItem {
+            id: ScheduleItemId::new(),
+            title: "Owned".into(),
+            span: ScheduleSpan::Timed {
+                start: TimedStart::Floating("2026-10-09T09:00:00".parse().unwrap()),
+                duration: BlockDuration::from_minutes(60).unwrap(),
+            },
+            recurrence: Recurrence::Once,
+            reference: None,
+            alarm: None,
+            break_reminders: false,
+        })
+        .await
+        .unwrap();
+    for at in ["2026-10-09T09:00:00Z", "2026-10-09T09:20:00Z"] {
+        let until = (at.parse::<chrono::DateTime<Utc>>().unwrap() + chrono::TimeDelta::seconds(1))
+            .to_rfc3339();
+        let mut meetings = engine.meetings_between(at, &until, "UTC").await.unwrap();
+        meetings.sort_by(|a, b| a.title.cmp(&b.title));
+        assert_eq!(
+            meetings
+                .iter()
+                .map(|meeting| meeting.title.as_str())
+                .collect::<Vec<_>>(),
+            ["accepted", "no-attendees"]
+        );
+    }
+    assert!(
+        engine
+            .meetings_between("2026-10-09T10:00:00Z", "2026-10-09T10:00:01Z", "UTC")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// One connected workflow covering how edits, stale selections, overridden
 /// plans and deletion relate, rather than one assertion per field.
 async fn exercise_revision_aware_plans(engine: &SyncEngine) {

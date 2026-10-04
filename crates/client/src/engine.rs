@@ -3061,8 +3061,24 @@ impl SyncEngine {
         to: &str,
         observer_zone: &str,
     ) -> Result<Vec<OccurrenceView>, ClientError> {
-        self.run_work(None, self.expand_schedule_inner(from, to, observer_zone))
-            .await
+        self.run_work(
+            None,
+            self.expand_schedule_inner(from, to, observer_zone, false),
+        )
+        .await
+    }
+
+    pub async fn meetings_between(
+        &self,
+        from: &str,
+        to: &str,
+        observer_zone: &str,
+    ) -> Result<Vec<OccurrenceView>, ClientError> {
+        self.run_work(
+            None,
+            self.expand_schedule_inner(from, to, observer_zone, true),
+        )
+        .await
     }
 
     async fn expand_schedule_inner(
@@ -3070,6 +3086,7 @@ impl SyncEngine {
         from: &str,
         to: &str,
         observer_zone: &str,
+        meetings_only: bool,
     ) -> Result<Vec<OccurrenceView>, ClientError> {
         let epoch = self.history_epoch.load(Ordering::SeqCst);
         let from = parse_instant(from, "expansion window start")?;
@@ -3102,6 +3119,9 @@ impl SyncEngine {
             }
         }
         for (object_id, record, head) in &records {
+            if meetings_only && !matches!(record, ScheduleRecord::Ingested(_)) {
+                continue;
+            }
             // An owned block and an ingested event expand identically; only
             // their labelling differs.
             let Some(series) = schedule_context::series(record) else {
@@ -3160,28 +3180,46 @@ impl SyncEngine {
             let effective_overrides: Vec<_> =
                 effective.iter().map(|(entry, _)| entry.clone()).collect();
             match engine.overlapping_occurrences(&series, &effective_overrides, &expansion) {
-                Ok(occurrences) => out.extend(occurrences.iter().map(|occurrence| {
-                    occurrence_view(
-                        occurrence,
-                        OccurrenceLabel {
-                            title: &series.title,
-                            all_day,
-                            source: label_source,
-                            cancelled,
-                        },
-                        &clipper_schedule::PlannedRef {
-                            item: series.id,
-                            recurrence_id: occurrence.recurrence_id,
-                            schedule: pin,
-                            override_revision: effective
-                                .iter()
-                                .find(|(entry, _)| entry.recurrence_id == occurrence.recurrence_id)
-                                .and_then(|(_, pin)| *pin),
-                            observer: expansion.observer,
-                            span: occurrence.span,
-                        },
-                    )
-                })),
+                Ok(occurrences) => out.extend(
+                    occurrences
+                        .iter()
+                        .filter(|occurrence| {
+                            !meetings_only
+                                || match record {
+                                    ScheduleRecord::Ingested(event) => event.rings_at(
+                                        occurrence.recurrence_id,
+                                        source_names
+                                            .get(&event.source)
+                                            .and_then(|source| source.owner_email.as_deref()),
+                                    ),
+                                    _ => false,
+                                }
+                        })
+                        .map(|occurrence| {
+                            occurrence_view(
+                                occurrence,
+                                OccurrenceLabel {
+                                    title: &series.title,
+                                    all_day,
+                                    source: label_source,
+                                    cancelled,
+                                },
+                                &clipper_schedule::PlannedRef {
+                                    item: series.id,
+                                    recurrence_id: occurrence.recurrence_id,
+                                    schedule: pin,
+                                    override_revision: effective
+                                        .iter()
+                                        .find(|(entry, _)| {
+                                            entry.recurrence_id == occurrence.recurrence_id
+                                        })
+                                        .and_then(|(_, pin)| *pin),
+                                    observer: expansion.observer,
+                                    span: occurrence.span,
+                                },
+                            )
+                        }),
+                ),
                 // One malformed series must not blank the whole calendar.
                 Err(error) => {
                     warnings.push(format!("{}: {}", series.title, error));
@@ -3191,11 +3229,17 @@ impl SyncEngine {
         }
         out.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| a.title.cmp(&b.title)));
         warnings.sort();
+        if meetings_only && !warnings.is_empty() {
+            return Err(ClientError::UnexpectedResponse(format!(
+                "Meeting lookup is incomplete: {}",
+                warnings.join("; ")
+            )));
+        }
         let mut state = self.state.write().await;
         if self.history_epoch.load(Ordering::SeqCst) != epoch {
             return Err(ClientError::NotAuthenticated);
         }
-        if state.schedule_warnings != warnings {
+        if !meetings_only && state.schedule_warnings != warnings {
             state.schedule_warnings = warnings;
             drop(state);
             self.bump_version();

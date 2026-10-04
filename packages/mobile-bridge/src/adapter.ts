@@ -324,6 +324,7 @@ function mapActualView(actual: NativeActualView): ActualView {
     end: actual.end,
     id: actual.id,
     item_id: actual.itemId,
+    occurrence_key: actual.occurrenceKey,
     running: actual.running,
     break_reminders: actual.breakReminders,
     start: actual.start,

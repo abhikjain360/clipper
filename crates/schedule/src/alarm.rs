@@ -250,6 +250,27 @@ mod tests {
         assert_eq!(planned, sorted);
     }
 
+    #[test]
+    fn meeting_attendance_uses_the_alarm_rules_and_occurrence_overrides() {
+        let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:meeting\r\nDTSTART:20261009T090000Z\r\nDTEND:20261009T100000Z\r\nRRULE:FREQ=DAILY;COUNT=2\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:owner@example.test\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:meeting\r\nRECURRENCE-ID:20261010T090000Z\r\nDTSTART:20261010T090000Z\r\nDTEND:20261010T100000Z\r\nATTENDEE;PARTSTAT=DECLINED:mailto:owner@example.test\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let mut event = crate::parse_ics_for_owner(
+            feed,
+            crate::SourceId::new(),
+            uuid::Uuid::nil().into(),
+            Some("owner@example.test"),
+        )
+        .unwrap()
+        .events
+        .remove(0);
+        let first = RecurrenceId::Instant(utc(2026, 10, 9, 9, 0));
+        let second = RecurrenceId::Instant(utc(2026, 10, 10, 9, 0));
+        event.alarm_seconds_before.clear();
+        assert!(event.rings_at(first, Some("owner@example.test")));
+        assert!(!event.rings_at(second, Some("owner@example.test")));
+        event.status = crate::IngestedStatus::Cancelled;
+        assert!(!event.rings_at(first, Some("owner@example.test")));
+    }
+
     /// The ring screen may run before unlock, when nothing can be decrypted.
     #[test]
     fn the_label_is_carried_not_looked_up() {

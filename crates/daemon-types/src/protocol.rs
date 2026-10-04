@@ -98,6 +98,7 @@ pub enum DaemonCommand {
     RestoreOccurrence(OccurrenceParams),
     DeleteScheduleObject(DeleteScheduleObjectParams),
     ExpandSchedule(ExpandScheduleParams),
+    MeetingsBetween(ExpandScheduleParams),
     DesktopAlarms(ExpandScheduleParams),
     AddCalendarSource(AddCalendarSourceParams),
     SyncCalendarSource(SyncCalendarSourceParams),

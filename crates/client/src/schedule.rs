@@ -198,6 +198,10 @@ pub fn actual_view(
             .planned
             .map(|planned| planned.item.to_string())
             .unwrap_or_default(),
+        occurrence_key: actual
+            .planned
+            .map(|planned| occurrence_key(&planned.recurrence_id))
+            .unwrap_or_default(),
         title: title.to_string(),
         start,
         end,

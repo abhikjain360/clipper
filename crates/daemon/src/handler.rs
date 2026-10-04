@@ -558,6 +558,15 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                         Err(error) => client_error(id, error),
                     }
                 }
+                DaemonCommand::MeetingsBetween(params) => {
+                    match engine
+                        .meetings_between(&params.from, &params.to, &params.observer_zone)
+                        .await
+                    {
+                        Ok(meetings) => json_success(id, meetings),
+                        Err(e) => client_error(id, e),
+                    }
+                }
                 DaemonCommand::AddCalendarSource(params) => {
                     cmd_add_calendar_source(id, params, &engine).await
                 }

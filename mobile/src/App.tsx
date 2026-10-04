@@ -5,6 +5,7 @@ import {
   occurrenceHidden,
   loadDoneMarks,
   writeDoneMark,
+  occurrenceRunning,
 } from "@clipper/shared";
 import {
   AlarmClock,
@@ -1020,7 +1021,7 @@ function SchedulePanel({
                           </Button>
                         ))}
                       <XStack gap="$2" items="center">
-                        {occurrence.cancelled ? (
+                        {occurrence.cancelled && !occurrenceRunning(occurrence, running) ? (
                           <Text fontSize={12} color={palette.danger}>
                             Cancelled
                           </Text>
@@ -1028,12 +1029,14 @@ function SchedulePanel({
                           <Button
                             tone="accent"
                             size="$3"
-                            disabled={busy}
+                            disabled={busy || occurrenceRunning(occurrence, running)}
                             onPress={() =>
                               void changeTimer(() => backend.startActual(occurrence.plan_context))
                             }
                           >
-                            Start
+                            {running && occurrenceRunning(occurrence, running)
+                              ? `Running · ${formatElapsed(now - Date.parse(running.start))}`
+                              : "Start"}
                           </Button>
                         )}
                         <Button

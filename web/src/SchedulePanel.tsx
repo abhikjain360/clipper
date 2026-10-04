@@ -7,6 +7,7 @@ import {
     occurrenceHidden,
     loadDoneMarks,
     writeDoneMark,
+    occurrenceRunning,
 } from "@clipper/shared";
 import { CalendarDatePicker } from "./CalendarDatePicker";
 import { calendarWindow, movePeriod, periodStart, type CalendarView } from "./calendar-view";
@@ -464,6 +465,7 @@ export function SchedulePanel({
                                 now={now}
                                 loading={loading}
                                 starting={starting}
+                                running={running}
                                 onStart={startOccurrence}
                                 doneMarks={doneMarks}
                                 marking={marking || !canMarkDone}
@@ -599,6 +601,7 @@ function NextList({
     now,
     loading,
     starting,
+    running,
     onStart,
     doneMarks,
     marking,
@@ -611,6 +614,7 @@ function NextList({
     now: number;
     loading: boolean;
     starting: boolean;
+    running: ActualView | null;
     onStart: (occurrence: OccurrenceView) => void;
     doneMarks: ReadonlySet<string>;
     marking: boolean;
@@ -691,7 +695,8 @@ function NextList({
                                 )}
                                 <ScheduleRecipes occurrence={occurrence} plans={plans} />
                                 <XStack gap="$2" items="center">
-                                    {occurrence.cancelled ? (
+                                    {occurrence.cancelled &&
+                                    !occurrenceRunning(occurrence, running) ? (
                                         <Text fontSize={12} color={palette.danger}>
                                             Cancelled
                                         </Text>
@@ -700,10 +705,14 @@ function NextList({
                                             tone="accent"
                                             size="$3"
                                             self="flex-start"
-                                            disabled={starting}
+                                            disabled={
+                                                starting || occurrenceRunning(occurrence, running)
+                                            }
                                             onPress={() => onStart(occurrence)}
                                         >
-                                            Start
+                                            {running && occurrenceRunning(occurrence, running)
+                                                ? `Running · ${formatElapsed(now - Date.parse(running.start))}`
+                                                : "Start"}
                                         </Button>
                                     )}
                                     <Button

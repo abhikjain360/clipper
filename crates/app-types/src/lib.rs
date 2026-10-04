@@ -182,6 +182,7 @@ pub struct ActualView {
     /// What this was time against, if anything. Unplanned work is worth
     /// recording too, so this can be empty.
     pub item_id: String,
+    pub occurrence_key: String,
     pub title: String,
     /// RFC 3339 UTC.
     pub start: String,

@@ -378,28 +378,32 @@ impl IngestedEvent {
         )
     }
 
-    pub fn alarm_offsets_at(&self, recurrence_id: RecurrenceId, owner: Option<&str>) -> &[u64] {
+    pub fn rings_at(&self, recurrence_id: RecurrenceId, owner: Option<&str>) -> bool {
         if let Some(entry) = self
             .alarm_overrides
             .iter()
             .find(|entry| entry.recurrence_id == recurrence_id)
         {
-            if invitation_rings(
+            invitation_rings(
                 entry.status,
                 entry.all_day,
                 entry.organizer.as_deref(),
                 entry.attendance.as_ref().unwrap_or(&self.attendance),
                 owner,
-            ) {
-                &entry.seconds_before
-            } else {
-                &[]
-            }
-        } else if self.rings(owner) {
-            &self.alarm_seconds_before
+            )
         } else {
-            &[]
+            self.rings(owner)
         }
+    }
+
+    pub fn alarm_offsets_at(&self, recurrence_id: RecurrenceId, owner: Option<&str>) -> &[u64] {
+        if !self.rings_at(recurrence_id, owner) {
+            return &[];
+        }
+        self.alarm_overrides
+            .iter()
+            .find(|entry| entry.recurrence_id == recurrence_id)
+            .map_or(&self.alarm_seconds_before, |entry| &entry.seconds_before)
     }
 
     pub fn alarm_offsets(&self) -> Vec<u64> {

@@ -65,6 +65,15 @@ a movement break at 50 minutes, and return to work at 60 minutes. Stopping or
 replacing the timer cancels its remaining reminders. On wake or app relaunch,
 Clipper resumes at the next reminder; it does not replay missed reminders.
 
+The Mac app skips a reminder if its scheduled time falls inside an attended
+imported meeting. Meetings use the invitation and all-day rules in
+[Imported alarms](calendar-imports.md#imported-alarms), including attendance
+changes on individual occurrences. Calendar alarm toggles and device targets
+do not affect this check. The interval includes the meeting start and excludes
+its end. Owned blocks do not suppress reminders. Skipping one reminder keeps
+the rhythm from the timer's start; it does not defer the reminder or restart
+the cycle. If the meeting lookup fails, that reminder is skipped.
+
 The packaged Tauri Mac app delivers ordinary macOS notifications using
 UserNotifications. Closing the window hides it and keeps the app running;
 clicking the Dock icon reopens it. Quit ends reminder delivery, while the
@@ -255,6 +264,7 @@ Start timer
   -> serializes local timer commands with a lock
   -> validates the context against the current local snapshot and resolves the occurrence
   -> rejects a stale or invalid context before stopping any timer
+  -> returns the existing timer unchanged if its series and recurrence ID match
   -> stops every running timer this device has synced
   -> creates an ActualRecord with Running { started: current UTC time }
      and pins the schedule and override revisions, observer zone and planned bounds
@@ -269,6 +279,11 @@ Stop timer
 The timer writes on start and stop, not every second. Elapsed display time is
 calculated from the start timestamp. Stopping clamps the end to at least one
 second after the start, in case the device clock moved backwards.
+
+The desktop Next view and phone schedule list show a disabled Running button
+with elapsed time for that occurrence. They match the series ID and occurrence
+key carried by the running timer. Other occurrences keep Start and switch the
+timer when started.
 
 The local lock does not cover other devices. Starting a new timer is a
 separate stop and create, not one atomic transaction across both objects.

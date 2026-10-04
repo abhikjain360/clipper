@@ -180,6 +180,7 @@ export type ActualView = {
   id: string;
   // Empty for unplanned work.
   item_id: string;
+  occurrence_key: string;
   title: string;
   start: string;
   // Empty while the timer is still running.
