@@ -100,7 +100,9 @@ import {
   shareDownloadedFile,
   writeClipboardText,
 } from "./backend";
-import { subscribeToCollabDoc, type CollabDocStatus } from "./collabDoc";
+import { subscribeToCollabDoc, type CollabDocHandle, type CollabDocStatus } from "./collabDoc";
+import type { EditorState } from "./collabText";
+import { CollabInput } from "../modules/clipper-editor";
 import { GymPanel } from "./gym/GymPanel";
 import type { KitchenPlan } from "@clipper/mobile-bridge";
 import { KitchenPanel } from "./kitchen/KitchenPanel";
@@ -1942,7 +1944,8 @@ function CollabPanel({
         </Button>
       </XStack>
 
-      <CollabDocReader
+      <CollabDocEditor
+        key={readingDoc?.id ?? "closed"}
         doc={readingDoc}
         serverUrl={serverUrl}
         onClose={() => setReading(null)}
@@ -2129,10 +2132,7 @@ function formatRelativeTime(value: string): string {
   return `${days}d ago`;
 }
 
-// Live read-only view of a collab doc. Editing is a desktop/web affordance (it
-// needs a real code editor); on mobile the doc is worth *reading* anywhere, so
-// this subscribes to the same Y-sync socket and renders whatever arrives.
-function CollabDocReader({
+function CollabDocEditor({
   doc,
   serverUrl,
   onClose,
@@ -2143,8 +2143,11 @@ function CollabDocReader({
   onClose: () => void;
   onError: (error: string | null) => void;
 }) {
-  const [content, setContent] = useState("");
+  const [editor, setEditor] = useState<EditorState | null>(null);
   const [status, setStatus] = useState<CollabDocStatus>("connecting");
+  const [loaded, setLoaded] = useState(false);
+  const subscriptionRef = useRef<CollabDocHandle | null>(null);
+  const edited = useRef(false);
 
   const docId = doc?.id;
   const shareToken = doc?.share_token;
@@ -2156,70 +2159,115 @@ function CollabDocReader({
       return undefined;
     }
 
-    // Reset between documents: the previous doc's text must not flash up under
-    // the new one's title while the first sync is in flight.
-    setContent("");
+    setEditor(null);
     setStatus("connecting");
+    setLoaded(false);
+    edited.current = false;
 
     const subscription = subscribeToCollabDoc({
       objectId: docId,
-      onStatus: setStatus,
-      onText: setContent,
+      onStatus: (next) => {
+        setStatus(next);
+        if (next === "live") {
+          setLoaded(true);
+          edited.current = false;
+        }
+      },
+      onState: setEditor,
+      onEdit: () => {
+        edited.current = true;
+      },
       serverUrl,
       shareToken,
     });
-    return () => subscription.close();
+    subscriptionRef.current = subscription;
+    return () => {
+      subscriptionRef.current = null;
+      subscription.close();
+    };
   }, [docId, shareToken, serverUrl, onError]);
 
   async function copyAll() {
     try {
-      await writeClipboardText(content);
+      await writeClipboardText(editor?.text ?? "");
     } catch (caught) {
       onError(formatBackendError(caught));
     }
   }
 
+  function close() {
+    if (status !== "live" && edited.current) {
+      Alert.alert(
+        "Edits have not synced",
+        "Keep this doc open to send your edits when it reconnects.",
+        [
+          { text: "Keep editing", style: "cancel" },
+          { text: "Discard edits", style: "destructive", onPress: onClose },
+        ],
+      );
+      return;
+    }
+    onClose();
+  }
+
   return (
-    <Modal visible={doc !== null} animationType="slide" onRequestClose={onClose}>
+    <Modal visible={doc !== null} animationType="slide" onRequestClose={close}>
       <SafeAreaView style={{ flex: 1, backgroundColor: palette.pageFill }}>
-        <XStack items="center" justify="space-between" gap="$2" px="$3" py="$2" borderWidth={0}>
-          <YStack flex={1} gap="$1">
-            <Text numberOfLines={1} fontWeight="600" color={palette.text}>
-              {doc ? collabTitle(doc) : ""}
-            </Text>
-            <Paragraph size="$2" color={COLLAB_STATUS_COLORS[status]}>
-              {COLLAB_STATUS_LABELS[status]}
-            </Paragraph>
-          </YStack>
-          <Button size="$3" icon={<Copy size={16} />} onPress={() => void copyAll()} />
-          <Button size="$3" icon={<X size={16} />} onPress={onClose} />
-        </XStack>
-        {content.length === 0 && status === "unavailable" ? (
-          <EmptyState
-            icon={<FileText size={28} color={palette.secondary} />}
-            title="Can't open this doc"
-            subtitle="It may have been deleted, or this device is offline."
-          />
-        ) : content.length === 0 && status !== "live" ? (
-          <EmptyState icon={<Spinner />} title={COLLAB_STATUS_LABELS[status]} />
-        ) : (
-          <TextInput
-            value={content}
-            editable={false}
-            multiline
-            scrollEnabled
-            style={{
-              flex: 1,
-              color: palette.text,
-              backgroundColor: palette.pageFill,
-              fontFamily: MONOSPACE_FONT,
-              fontSize: 13,
-              lineHeight: 18,
-              padding: 12,
-              textAlignVertical: "top",
-            }}
-          />
-        )}
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
+          <XStack items="center" justify="space-between" gap="$2" px="$3" py="$2" borderWidth={0}>
+            <YStack flex={1} gap="$1">
+              <Text numberOfLines={1} fontWeight="600" color={palette.text}>
+                {doc ? collabTitle(doc) : ""}
+              </Text>
+              <Paragraph size="$2" color={COLLAB_STATUS_COLORS[status]}>
+                {!CollabInput && loaded
+                  ? "Read-only on this platform"
+                  : loaded && status !== "live"
+                    ? "Offline edits stay here until reconnect"
+                    : COLLAB_STATUS_LABELS[status]}
+              </Paragraph>
+            </YStack>
+            <Button size="$3" icon={<Copy size={16} />} onPress={() => void copyAll()} />
+            <Button size="$3" icon={<X size={16} />} onPress={close} />
+          </XStack>
+          {!loaded && status === "unavailable" ? (
+            <EmptyState
+              icon={<FileText size={28} color={palette.secondary} />}
+              title="Can't open this doc"
+              subtitle="It may have been deleted, or this device is offline."
+            />
+          ) : !loaded || !editor ? (
+            <EmptyState icon={<Spinner />} title={COLLAB_STATUS_LABELS[status]} />
+          ) : !CollabInput ? (
+            <TextInput
+              value={editor.text}
+              editable={false}
+              multiline
+              scrollEnabled
+              style={{
+                flex: 1,
+                color: palette.text,
+                fontFamily: MONOSPACE_FONT,
+                padding: 12,
+                textAlignVertical: "top",
+              }}
+            />
+          ) : (
+            <CollabInput
+              key={docId}
+              state={editor}
+              editable={loaded}
+              colors={{
+                text: palette.text,
+                background: palette.pageFill,
+                selection: palette.selectedFill,
+                cursor: palette.accent,
+              }}
+              onEdit={(event) => subscriptionRef.current?.receive(event.nativeEvent)}
+              style={{ flex: 1 }}
+            />
+          )}
+        </KeyboardAvoidingView>
       </SafeAreaView>
     </Modal>
   );

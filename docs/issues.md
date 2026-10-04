@@ -2493,6 +2493,20 @@ Each entry has:
   captures without a new pasteboard change. Sending an already captured entry
   returns its owned item ID. Deleted entries retain their capture checkpoint.
 
+### 197. Phone collab docs were read-only
+
+- **Status:** fixed, uncommitted
+- **Where:** `mobile/src/collabDoc.ts`, `collabText.ts`, `App.tsx` and
+  `mobile/modules/clipper-editor`.
+- **Fix:** Android edits the desktop's `content` Y.Text over the existing
+  Y-sync socket. Native input events identify the displayed replica, so queued
+  typing merges with remote edits. Relative positions preserve the selection.
+  The input scrolls inside keyboard avoidance and uses the shared palette.
+- **Offline:** keep the open doc's edits in memory and exchange state vectors
+  on reconnect. After an initial sync, connection failures retry indefinitely.
+  Closing with disconnected edits requires an explicit discard. Other mobile
+  platforms retain the read-only view.
+
 ## Docs
 
 ### 29. Doc claims the code did not satisfy
