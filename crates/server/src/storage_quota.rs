@@ -1,5 +1,5 @@
 use sea_orm::{
-    ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, JoinType, QueryFilter,
+    ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, ExprTrait, JoinType, QueryFilter,
     QuerySelect, RelationTrait,
     sea_query::{Expr, Func, SimpleExpr},
 };
