@@ -1,6 +1,7 @@
 import { CalendarDatePicker } from "./CalendarDatePicker";
 import { calendarWindow, movePeriod, periodStart, type CalendarView } from "./calendar-view";
 import { EventHover } from "./EventHover";
+import { CalendarHoverContext, useCalendarHover } from "./calendar-hover";
 import { nextStarts, orderByNextStart } from "./schedule-order";
 import {
     AlarmClock,
@@ -161,9 +162,16 @@ export function SchedulePanel({
     const [loading, setLoading] = useState(false);
     const loadGeneration = useRef(0);
     const [starting, setStarting] = useState(false);
+    const refresh = useMemo(
+        () => ({}),
+        [state, items, sources, running, view, selectedDate, occurrences, actuals, plans],
+    );
+    const hover = useCalendarHover(refresh);
+    const closeHover = hover.close;
 
     const loadWeek = useCallback(async () => {
         const generation = ++loadGeneration.current;
+        closeHover();
         setLoading(true);
         try {
             const backend = await clipperBackend();
@@ -183,6 +191,7 @@ export function SchedulePanel({
                     : Promise.resolve([]),
             ]);
             if (generation === loadGeneration.current) {
+                closeHover();
                 setOccurrences(expanded);
                 setActuals(logged);
                 setPlans(kitchenPlans);
@@ -192,7 +201,7 @@ export function SchedulePanel({
         } finally {
             if (generation === loadGeneration.current) setLoading(false);
         }
-    }, [weekStart, weekEnd, onError]);
+    }, [weekStart, weekEnd, onError, closeHover]);
 
     useEffect(() => {
         void loadWeek();
@@ -302,42 +311,44 @@ export function SchedulePanel({
                         </Button>
                     )}
 
-                    {view === "month" ? (
-                        <MonthGrid
-                            start={weekStart}
-                            end={weekEnd}
-                            selectedMonth={selectedDate.getMonth()}
-                            occurrences={occurrences}
-                            plans={plans}
-                            actuals={actuals}
-                            onDay={(day) => {
-                                setSelectedDate(day);
-                                setView("day");
-                            }}
-                        />
-                    ) : (
-                        <WeekGrid
-                            dayCount={view === "day" ? 1 : 7}
-                            weekStart={weekStart}
-                            occurrences={occurrences}
-                            plans={plans}
-                            actuals={actuals}
-                            onStart={async (occurrence) => {
-                                if (starting) return;
-                                setStarting(true);
-                                onError(null);
-                                try {
-                                    const backend = await clipperBackend();
-                                    await backend.startActual(occurrence.plan_context);
-                                    onState(await backend.getState());
-                                } catch (caught) {
-                                    onError(formatBackendError(caught));
-                                } finally {
-                                    setStarting(false);
-                                }
-                            }}
-                        />
-                    )}
+                    <CalendarHoverContext.Provider value={hover}>
+                        {view === "month" ? (
+                            <MonthGrid
+                                start={weekStart}
+                                end={weekEnd}
+                                selectedMonth={selectedDate.getMonth()}
+                                occurrences={occurrences}
+                                plans={plans}
+                                actuals={actuals}
+                                onDay={(day) => {
+                                    setSelectedDate(day);
+                                    setView("day");
+                                }}
+                            />
+                        ) : (
+                            <WeekGrid
+                                dayCount={view === "day" ? 1 : 7}
+                                weekStart={weekStart}
+                                occurrences={occurrences}
+                                plans={plans}
+                                actuals={actuals}
+                                onStart={async (occurrence) => {
+                                    if (starting) return;
+                                    setStarting(true);
+                                    onError(null);
+                                    try {
+                                        const backend = await clipperBackend();
+                                        await backend.startActual(occurrence.plan_context);
+                                        onState(await backend.getState());
+                                    } catch (caught) {
+                                        onError(formatBackendError(caught));
+                                    } finally {
+                                        setStarting(false);
+                                    }
+                                }}
+                            />
+                        )}
+                    </CalendarHoverContext.Provider>
                 </Card>
 
                 <div

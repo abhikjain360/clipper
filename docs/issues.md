@@ -766,6 +766,19 @@ Each entry has:
 
 ## Bugs
 
+### 180. Calendar hover cards stayed open and piled over the grid
+
+- **Status:** fixed in the working tree; uncommitted
+- **Severity:** medium. Seen in the owner's Mac app week view.
+- **Where:** `web/src/EventHover.tsx`, `web/src/SchedulePanel.tsx`.
+- **What happens:** each event owns uncontrolled tooltip state. Tamagui's hover
+  handling allows movement toward the card, and its document-root scroll
+  listener misses calendar scrollers. Refreshes do not reset open tooltips.
+  Stable block keys preserve that state across refreshes.
+- **Decision:** use one shared hovered block ID, controlled tooltips and direct
+  pointer leave handling. Clear hover on refresh, navigation, captured scroll,
+  window blur and document hiding. Keep card styling and block clicks.
+
 ### 179. Calendar manifests grow with the number of changed refreshes
 
 - **Status:** open; not fixed.
