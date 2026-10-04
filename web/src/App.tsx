@@ -703,6 +703,7 @@ function ClipboardPanel({
         <YStack gap="$3" flex={1}>
             <dialog
                 ref={deleteDialog}
+                className="confirm-dialog"
                 aria-label="Delete clipboard item"
                 onCancel={(event) => {
                     if (deleteBusy) event.preventDefault();
