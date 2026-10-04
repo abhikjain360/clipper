@@ -93,6 +93,9 @@ The authenticated routes:
 - `POST /api/objects/init`
 - `GET` / `PUT /api/objects/{id}/payloads/{payload_id}`
 - `POST /api/objects/{id}/complete`
+- `POST /api/objects/{id}/revisions`
+- `GET /api/objects/{id}/revisions/{revision}`
+- `GET /api/objects/{id}/revisions/{revision}/payloads/{payload_id}`
 - `GET` / `DELETE /api/objects/{id}`
 - `GET /api/objects`
 - `GET /api/ws`
@@ -123,16 +126,15 @@ shared map (see the per-user pending-ticket cap below).
 
 ### Routes with no rate-limit middleware
 
-Two routes are merged at the top level of the router with **no** rate-limit
+One route is merged at the top level of the router with **no** rate-limit
 layer:
 
 - `GET /api/health`
-- `GET /api/ws-ticket/connect` (the ticket-redeeming WebSocket upgrade handled
-  by `ws_ticket_handler`)
 
-`ws_ticket_handler` is unauthenticated (it authenticates by consuming a ticket)
-and does a SHA-256 plus an in-memory map lookup per request. Neither route is
-covered by a per-client or global bucket. See "Gaps" below.
+`GET /api/ws-ticket/connect` is also merged at the top level, but has
+`api_rate_limit_middleware` applied per client IP. It is unauthenticated (it
+authenticates by consuming a ticket) and does a SHA-256 plus an in-memory map
+lookup per request. See "Gaps" below.
 
 ### Response on rejection
 
@@ -221,11 +223,13 @@ whole object's usage; see below.
 
 ### Where and how it is enforced
 
-Reservation happens inside the `init_object` or `revise_object` transaction, via
-`reserve_user_storage_quota` → `storage_quota::try_reserve_user_storage`, after
-the object and payload rows are inserted but before the transaction commits. The
-reservation is a single conditional `UPDATE users` that both increments the
-counters and asserts the post-increment values stay within bounds:
+Ordinary writes reserve storage inside the `init_object` or `revise_object`
+transaction, via `reserve_user_storage_quota` →
+`storage_quota::try_reserve_user_storage`, after the object and payload rows are
+inserted but before the transaction commits. Tombstone revisions instead use
+`charge_user_storage` without a limit check, as described below. The reservation
+is a single conditional `UPDATE users` that both increments the counters and
+asserts the post-increment values stay within bounds:
 
 ```rust
 .col_expr(StorageBytes, StorageBytes + storage_bytes)
@@ -236,8 +240,12 @@ counters and asserts the post-increment values stay within bounds:
 ```
 
 The update affects exactly one row only if both filters hold, so the check and
-the increment are atomic under SQLite's write lock — concurrent inits for the
-same user cannot race past the limit. `try_reserve_user_storage` also
+the increment are atomic under SQLite's write lock — concurrent ordinary
+writes for the same user cannot race past the limit. Tombstone revisions are
+the exception: they use `charge_user_storage` without a limit check because a
+tombstone is the only way back under the limit. Their metadata is capped at
+256 bytes, so an account can exceed its limit by at most one capped tombstone
+per object. `try_reserve_user_storage` also
 short-circuits to `Ok(false)` if a single object's `storage_bytes` already
 exceeds `max_storage_bytes`, and returns an error for invalid arguments
 (negative bytes, `max_objects < 1`).

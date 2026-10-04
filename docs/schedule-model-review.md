@@ -108,14 +108,13 @@ when the observer changes timezone.
 
 ## Recurrence rules
 
-`Recurrence` is `Once`, `Every(Cadence)`, or `Raw`.
+`Recurrence` is `Once`, `Every(Cadence)`, or `Imported { import, uid }`.
 
 A cadence combines a frequency (daily, weekly, monthly, yearly), a positive
 interval, and an ending condition (never, occurrence count, or an end instant).
 Structured rules describe intent without exposing arbitrary rule strings to
-ordinary callers. Imported rules that the structured model cannot express use
-`RawRule`; these are validated and preserved rather than simplified into a
-potentially different schedule.
+ordinary callers. An imported rule that `Cadence` cannot express is re-read
+from the raw ICS snapshot at expansion time using its import and event UID.
 
 ## Calculating the calendar
 
@@ -140,9 +139,9 @@ continue into it, such as overnight events. Plain `occurrences()` selects by
 start time instead.
 
 Expansion has candidate and historical-scan limits. Exceeding a limit produces
-an error rather than silently returning a truncated calendar. The client
-currently logs expansion errors and skips the affected series; it does not
-fail the entire calendar or show a dedicated per-series error in the UI.
+an error rather than silently returning a truncated calendar. The client adds
+a warning for each series that fails to expand and skips it; the calendar still
+renders the other series.
 
 ## Client integration and code flow
 
@@ -185,8 +184,8 @@ Stop timer
 ```
 
 The timer writes on start and stop, not every second. Elapsed display time is
-calculated from the start timestamp. Stopping clamps the end to at least the
-start in case the device clock moved backwards.
+calculated from the start timestamp. Stopping clamps the end to at least one
+second after the start in case the device clock moved backwards.
 
 The local lock is not a global lock across disconnected devices. Starting a
 new timer also involves separate stop/create operations, not one atomic
