@@ -807,13 +807,17 @@ async fn cmd_logout(
     manager.stop_calendar_refresh().await;
     // Nothing to tear down if the user never logged in this daemon lifetime.
     let Some(engine) = manager.engine().await else {
-        manager.clear().await;
+        if let Err(error) = manager.clear().await {
+            return message_error(id, error);
+        }
         return json_success(id, clipper_client::engine::LogoutOutcome::SignedOut);
     };
     match engine.logout(cancel_running_work).await {
         Ok(outcome) => {
             if outcome == clipper_client::engine::LogoutOutcome::SignedOut {
-                manager.clear().await;
+                if let Err(error) = manager.clear().await {
+                    return message_error(id, error);
+                }
             } else {
                 manager.start_calendar_refresh(engine.clone()).await;
             }

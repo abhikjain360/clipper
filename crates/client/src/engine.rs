@@ -178,12 +178,15 @@ pub struct SyncEngine {
     schedule_history: Mutex<HashMap<(u64, clipper_schedule::ObjectRevisionRef), ScheduleRecord>>,
     #[cfg(not(target_family = "wasm"))]
     recipe_revisions: Mutex<HashMap<(u64, uuid::Uuid, u64), clipper_kitchen::Recipe>>,
+    #[cfg(not(target_family = "wasm"))]
+    kitchen_timers: Mutex<Option<(u64, Vec<AlarmView>)>>,
     history_epoch: std::sync::atomic::AtomicU64,
     /// The stamp of the newest view published to `state`, so an older view
     /// arriving late is dropped rather than shown.
     published_stamp: std::sync::atomic::AtomicU64,
     last_confirmed_at: std::sync::atomic::AtomicI64,
     offline: std::sync::atomic::AtomicBool,
+    clipboard_watching: std::sync::atomic::AtomicBool,
     #[cfg(not(target_family = "wasm"))]
     app_data: crate::app_data::AppDataHandle,
 }
@@ -234,10 +237,13 @@ impl SyncEngine {
             schedule_history: Mutex::new(HashMap::new()),
             #[cfg(not(target_family = "wasm"))]
             recipe_revisions: Mutex::new(HashMap::new()),
+            #[cfg(not(target_family = "wasm"))]
+            kitchen_timers: Mutex::new(None),
             history_epoch: std::sync::atomic::AtomicU64::new(0),
             published_stamp: std::sync::atomic::AtomicU64::new(0),
             last_confirmed_at: std::sync::atomic::AtomicI64::new(0),
             offline: std::sync::atomic::AtomicBool::new(false),
+            clipboard_watching: std::sync::atomic::AtomicBool::new(true),
             import_rules: Mutex::new(std::collections::VecDeque::new()),
             #[cfg(not(target_family = "wasm"))]
             app_data: Default::default(),
@@ -250,6 +256,14 @@ impl SyncEngine {
 
     pub fn base_url(&self) -> String {
         self.api.base_url_display()
+    }
+
+    pub fn set_clipboard_watching(&self, enabled: bool) {
+        self.clipboard_watching.store(enabled, Ordering::SeqCst);
+    }
+
+    pub fn clipboard_watching_enabled(&self) -> bool {
+        self.clipboard_watching.load(Ordering::SeqCst)
     }
 
     pub async fn set_saved_profile(&self, username: Option<String>, device_name: Option<String>) {
@@ -638,6 +652,8 @@ impl SyncEngine {
             self.schedule_history.lock().await.clear();
             #[cfg(not(target_family = "wasm"))]
             self.recipe_revisions.lock().await.clear();
+            #[cfg(not(target_family = "wasm"))]
+            self.kitchen_timers.lock().await.take();
             self.import_rules.lock().await.clear();
             // Fence anything still in flight from the previous session: the
             // database below is a different profile's, and a straggling write
@@ -672,20 +688,22 @@ impl SyncEngine {
         }
         *self.session_work.lock().unwrap() = (epoch, crate::session_work::SessionWork::new());
         drop(active_key);
-        self.bump_version();
-
-        match self
+        let visible = self
             .local_store
             .hydrate_ciphertext_cache(&cache_key, RECENT_CLIPBOARD_LIMIT)
-            .await
-        {
+            .await;
+        #[cfg(not(target_family = "wasm"))]
+        let app_data = self.open_app_data(epoch, &cache_key).await;
+        self.bump_version();
+
+        match visible {
             Ok(visible) => self.publish_visible_state(visible).await,
             Err(error) => warn!("Failed to hydrate local ciphertext cache: {}", error),
         }
 
         #[cfg(not(target_family = "wasm"))]
         {
-            match self.open_app_data(epoch, &cache_key).await {
+            match app_data {
                 Ok(()) => self.show_held_app_documents().await,
                 Err(error) => warn!("Failed to open local app data: {error}"),
             }
@@ -704,7 +722,7 @@ impl SyncEngine {
 
         // Start platform clipboard watcher where background reads are available.
         #[cfg(all(not(test), any(target_os = "macos", target_os = "linux")))]
-        {
+        if self.clipboard_watching_enabled() {
             let engine = Arc::clone(self);
             crate::clipboard_watcher::start_clipboard_watcher(engine);
         }
@@ -888,6 +906,8 @@ impl SyncEngine {
             self.schedule_history.lock().await.clear();
             #[cfg(not(target_family = "wasm"))]
             self.recipe_revisions.lock().await.clear();
+            #[cfg(not(target_family = "wasm"))]
+            self.kitchen_timers.lock().await.take();
             self.import_rules.lock().await.clear();
             #[cfg(not(target_family = "wasm"))]
             self.app_data.close().await;
@@ -2943,7 +2963,7 @@ impl SyncEngine {
         }
         let until = now + chrono::TimeDelta::hours(i64::from(within_hours.max(1)));
 
-        self.alarms_between_inner(now, until, observer_zone, true)
+        self.alarms_between_inner(now, until, observer_zone, true, None)
             .await
     }
 
@@ -2963,7 +2983,7 @@ impl SyncEngine {
                     "alarm window cannot exceed one year".into(),
                 ));
             }
-            self.alarms_between_inner(from, to, observer_zone, false)
+            self.alarms_between_inner(from, to, observer_zone, false, Some(from))
                 .await
         })
         .await
@@ -2975,6 +2995,7 @@ impl SyncEngine {
         until: chrono::DateTime<chrono::Utc>,
         observer_zone: &str,
         all_phones: bool,
+        timers_from: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Vec<AlarmView>, ClientError> {
         let device: DeviceId = self
             .current_device_id()
@@ -3095,7 +3116,9 @@ impl SyncEngine {
             );
         }
         #[cfg(not(target_family = "wasm"))]
-        alarms.extend(self.kitchen_timer_alarms(device, until).await?);
+        alarms.extend(self.kitchen_timer_alarms(device, timers_from, until).await);
+        #[cfg(target_family = "wasm")]
+        let _ = timers_from;
         alarms.sort_by_key(|alarm| alarm.fire_at_millis);
         Ok(alarms)
     }

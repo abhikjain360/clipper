@@ -22,6 +22,8 @@ mod error;
 mod handler;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod keychain;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod options;
 #[cfg(target_os = "linux")]
 mod platform_clipboard;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -134,23 +136,6 @@ fn log_dir() -> PathBuf {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn parse_args() -> String {
-    let args: Vec<String> = std::env::args().collect();
-    let mut server_url = "http://127.0.0.1:8787".to_string();
-
-    let mut i = 1;
-    while i < args.len() {
-        if args[i] == "--server-url" && i + 1 < args.len() {
-            server_url = args[i + 1].clone();
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    server_url
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn current_euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() as u32 }
@@ -240,7 +225,9 @@ async fn broadcast_state(client_mgr: &ClientManager, state: AppState) {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn run() -> DaemonResult<()> {
-    let default_server_url = parse_args();
+    use clap::Parser;
+
+    let options = options::Options::parse();
 
     let log_dir = log_dir();
     ensure_private_dir(&log_dir)?;
@@ -284,7 +271,15 @@ async fn run() -> DaemonResult<()> {
         }
     }
 
-    let engine_manager = EngineManager::load(data_dir.clone(), default_server_url).await;
+    if options.disable_clipboard_watching {
+        info!("Clipboard watching disabled");
+    }
+    let engine_manager = EngineManager::load(
+        data_dir.clone(),
+        options.server_url,
+        !options.disable_clipboard_watching,
+    )
+    .await;
 
     let client_mgr = Arc::new(ClientManager::new());
 

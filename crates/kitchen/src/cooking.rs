@@ -62,6 +62,10 @@ impl CookingSession {
                 .retain(|entry| (entry.step, entry.timer) != (timer.step, timer.timer));
             self.timers.push(timer);
         }
+        let steps_done = std::mem::take(&mut self.steps_done);
+        self.timers
+            .retain(|timer| steps_done.iter().all(|done| done.step != timer.step));
+        self.steps_done = steps_done;
         self.notes = self.notes.or(newer.notes);
         self
     }
@@ -187,7 +191,7 @@ impl CookingSession {
         }
         self.timers
             .iter()
-            .filter(|timer| timer.device_id == device)
+            .filter(|timer| timer.device_id == device && self.step_done_at(timer.step).is_none())
             .filter_map(|timer| Some((timer.step, timer.timer, timer.ends_at?)))
             .collect()
     }

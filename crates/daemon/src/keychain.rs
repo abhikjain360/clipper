@@ -8,6 +8,9 @@ use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(any(target_os = "macos", test))]
+mod session_store;
+
 #[cfg(all(target_os = "macos", not(test)))]
 const SERVICE: &str = "com.clipper.daemon";
 #[cfg(all(target_os = "macos", not(test)))]
@@ -17,8 +20,6 @@ const IPC_SECRET_ACCOUNT: &str = "ipc-secret-v1";
 const IPC_SECRET_BYTES: usize = 32;
 #[cfg(all(target_os = "macos", not(test)))]
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
-#[cfg(any(target_os = "linux", test))]
-const CREDENTIALS_FILE: &str = "credentials.json";
 const PROFILE_FILE: &str = "profile.json";
 #[cfg(any(target_os = "linux", test))]
 const IPC_SECRET_FILE: &str = "ipc-secret-v1";
@@ -84,10 +85,57 @@ impl From<SavedProfile> for Credentials {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct StoredProfile {
+    #[serde(flatten)]
+    pub profile: SavedProfile,
+    #[serde(default)]
+    pub signed_out: bool,
+}
+
+impl From<SavedProfile> for StoredProfile {
+    fn from(profile: SavedProfile) -> Self {
+        Self {
+            profile,
+            signed_out: false,
+        }
+    }
+}
+
+pub trait CredentialStore: Send + Sync {
+    fn supports_resume(&self) -> bool;
+    fn load(&self) -> KeychainResult<Option<Credentials>>;
+    fn store(&self, credentials: &Credentials) -> KeychainResult<()>;
+    fn clear(&self) -> KeychainResult<()>;
+}
+
+pub struct PlatformStore;
+
+impl CredentialStore for PlatformStore {
+    fn supports_resume(&self) -> bool {
+        cfg!(all(target_os = "macos", not(test)))
+    }
+
+    fn load(&self) -> KeychainResult<Option<Credentials>> {
+        load_credentials()
+    }
+
+    fn store(&self, credentials: &Credentials) -> KeychainResult<()> {
+        store_credentials(credentials)
+    }
+
+    fn clear(&self) -> KeychainResult<()> {
+        clear_credentials()
+    }
+}
+
 pub type KeychainResult<T> = Result<T, KeychainError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum KeychainError {
+    #[cfg(any(target_os = "linux", test))]
+    #[error("session resume requires a platform secret store")]
+    ResumeUnavailable,
     #[error("keychain entry encode failed: {0}")]
     Encode(#[source] serde_json::Error),
     #[error("keychain entry decode failed: {0}")]
@@ -98,38 +146,36 @@ pub enum KeychainError {
     #[cfg(all(target_os = "macos", not(test)))]
     #[error("keychain read failed: {0}")]
     Read(String),
+    #[cfg(any(target_os = "macos", test))]
+    #[error("keychain operation failed ({status}): {message}")]
+    Platform { status: i32, message: String },
     #[error("credential store I/O failed: {0}")]
     Io(#[from] std::io::Error),
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-pub fn store_credentials(_data_dir: &Path, creds: &Credentials) -> KeychainResult<()> {
-    let json = Zeroizing::new(serde_json::to_string(creds).map_err(KeychainError::Encode)?);
-    security_framework::passwords::set_generic_password(SERVICE, ACCOUNT, json.as_bytes())
-        .map_err(|e| KeychainError::Store(e.to_string()))?;
-    Ok(())
+fn store_credentials(creds: &Credentials) -> KeychainResult<()> {
+    session_store::store(
+        &session_store::MacKeychain::Protected,
+        &session_store::MacKeychain::Login,
+        creds,
+    )
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-pub fn load_credentials(_data_dir: &Path) -> KeychainResult<Option<Credentials>> {
-    match security_framework::passwords::get_generic_password(SERVICE, ACCOUNT) {
-        Ok(data) => {
-            let data = Zeroizing::new(data);
-            let creds = serde_json::from_slice(&data).map_err(KeychainError::Decode)?;
-            Ok(Some(creds))
-        }
-        Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
-        Err(e) => Err(KeychainError::Read(e.to_string())),
-    }
+fn load_credentials() -> KeychainResult<Option<Credentials>> {
+    session_store::load(
+        &session_store::MacKeychain::Protected,
+        &session_store::MacKeychain::Login,
+    )
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-pub fn clear_credentials(_data_dir: &Path) -> KeychainResult<()> {
-    match security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT) {
-        Ok(()) => Ok(()),
-        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
-        Err(error) => Err(KeychainError::Store(error.to_string())),
-    }
+fn clear_credentials() -> KeychainResult<()> {
+    session_store::clear(
+        &session_store::MacKeychain::Protected,
+        &session_store::MacKeychain::Login,
+    )
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
@@ -171,30 +217,29 @@ fn load_or_create_ipc_secret_uncached(_data_dir: &Path) -> KeychainResult<Zeroiz
 }
 
 #[cfg(any(target_os = "linux", test))]
-pub fn store_credentials(data_dir: &Path, creds: &Credentials) -> KeychainResult<()> {
-    let json = Zeroizing::new(serde_json::to_vec(creds).map_err(KeychainError::Encode)?);
-    write_private_file(&data_dir.join(CREDENTIALS_FILE), &json)?;
+fn store_credentials(_creds: &Credentials) -> KeychainResult<()> {
+    Err(KeychainError::ResumeUnavailable)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn load_credentials() -> KeychainResult<Option<Credentials>> {
+    Ok(None)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn clear_credentials() -> KeychainResult<()> {
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", test))]
-pub fn load_credentials(data_dir: &Path) -> KeychainResult<Option<Credentials>> {
-    let Some(bytes) = read_optional_file(&data_dir.join(CREDENTIALS_FILE))? else {
-        return Ok(None);
-    };
-    let bytes = Zeroizing::new(bytes);
-    let creds = serde_json::from_slice(&bytes).map_err(KeychainError::Decode)?;
-    Ok(Some(creds))
-}
-
-#[cfg(any(target_os = "linux", test))]
-pub fn clear_credentials(data_dir: &Path) -> KeychainResult<()> {
-    match std::fs::remove_file(data_dir.join(CREDENTIALS_FILE)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+#[cfg(target_os = "linux")]
+pub fn remove_plaintext_credentials(data_dir: &Path) -> KeychainResult<()> {
+    let path = data_dir.join("credentials.json");
+    reject_non_regular_existing_file(&path)?;
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
-    Ok(())
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -226,13 +271,13 @@ fn load_or_create_ipc_secret_uncached(data_dir: &Path) -> KeychainResult<Zeroizi
     }
 }
 
-pub fn store_profile(data_dir: &Path, profile: &SavedProfile) -> KeychainResult<()> {
+pub fn store_profile(data_dir: &Path, profile: &StoredProfile) -> KeychainResult<()> {
     let json = serde_json::to_vec(profile).map_err(KeychainError::Encode)?;
     write_private_file(&data_dir.join(PROFILE_FILE), &json)?;
     Ok(())
 }
 
-pub fn load_profile(data_dir: &Path) -> KeychainResult<Option<SavedProfile>> {
+pub fn load_profile(data_dir: &Path) -> KeychainResult<Option<StoredProfile>> {
     read_optional_file(&data_dir.join(PROFILE_FILE))?
         .map(|bytes| serde_json::from_slice(&bytes).map_err(KeychainError::Decode))
         .transpose()
@@ -299,25 +344,23 @@ fn read_optional_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
 }
 
 fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::{
-        io::Write,
-        os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    };
+    use std::{io::Write, os::unix::fs::PermissionsExt};
 
     if let Some(parent) = path.parent() {
         ensure_private_dir(parent)?;
     }
     reject_non_regular_existing_file(path)?;
 
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(PRIVATE_FILE_MODE)
-        .open(path)?;
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "file has no parent")
+    })?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
     file.write_all(bytes)?;
-    file.sync_all()?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -361,4 +404,55 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
     rand::rng().fill(&mut bytes);
     bytes
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub struct TestStore {
+    pub credentials: std::sync::Mutex<Option<Credentials>>,
+    pub fail_reads: std::sync::atomic::AtomicBool,
+    pub fail_deletes: std::sync::atomic::AtomicBool,
+    pub writes: std::sync::atomic::AtomicUsize,
+    pub reads: std::sync::atomic::AtomicUsize,
+    pub deletes: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl CredentialStore for TestStore {
+    fn supports_resume(&self) -> bool {
+        true
+    }
+
+    fn load(&self) -> KeychainResult<Option<Credentials>> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "test credential read denied",
+            )
+            .into());
+        }
+        Ok(self.credentials.lock().unwrap().clone())
+    }
+
+    fn store(&self, credentials: &Credentials) -> KeychainResult<()> {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.credentials.lock().unwrap() = Some(credentials.clone());
+        Ok(())
+    }
+
+    fn clear(&self) -> KeychainResult<()> {
+        self.deletes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail_deletes.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "test credential deletion denied",
+            )
+            .into());
+        }
+        *self.credentials.lock().unwrap() = None;
+        Ok(())
+    }
 }

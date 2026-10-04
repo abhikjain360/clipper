@@ -23,6 +23,8 @@ export type KitchenRecipeSummary = {
 
 export type KitchenOpenSession = {
   recipe_id: string;
+  session_id: string;
+  recipe_revision: number;
   title: string;
   started_at_millis: number;
   deleted: boolean;
@@ -116,6 +118,7 @@ export type KitchenRecipe = {
   steps: KitchenStep[];
   notes: string[];
   session: KitchenSession | null;
+  other_sessions: KitchenSession[];
   past_sessions: KitchenPastSession[];
   coming_blocks: KitchenBlock[];
 };

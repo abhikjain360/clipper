@@ -144,6 +144,11 @@ export function RecipePage({
                 This recipe was deleted. Finish or discard this cooking session.
               </Text>
             )}
+            {view.otherSessions.map((other) => (
+              <Text key={other.id} color={colors.warm}>
+                {`Another cooking session from revision ${other.recipeRevision}, started ${localTime(other.startedAtMillis)}, is open. It shows here once this one is finished or discarded.`}
+              </Text>
+            ))}
             {view.newerRevision !== undefined && (
               <Text color={colors.warm}>
                 {`This session cooks from revision ${view.revision}. Revision ${view.newerRevision} is newer and applies from the next cook.`}

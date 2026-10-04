@@ -8,6 +8,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use zeroize::Zeroizing;
 
 use super::*;
+use crate::keychain::CredentialStore;
 
 struct Server(Child);
 
@@ -66,9 +67,23 @@ fn start_server(directory: &Path) -> (Server, String) {
     (server, format!("http://{address}"))
 }
 
-fn register(directory: &Path, url: &str) -> clipper_client::engine::AppState {
+async fn load(directory: &Path, store: Arc<dyn CredentialStore>) -> Arc<EngineManager> {
+    EngineManager::load_with_store(
+        directory.into(),
+        "http://127.0.0.1:8787".into(),
+        store,
+        false,
+    )
+    .await
+}
+
+fn register(
+    directory: &Path,
+    url: &str,
+    store: Arc<dyn CredentialStore>,
+) -> clipper_client::engine::AppState {
     runtime().block_on(async {
-        let manager = EngineManager::load(directory.into(), "http://127.0.0.1:8787".into()).await;
+        let manager = load(directory, store).await;
         let response = cmd_register(
             "register".into(),
             RegisterParams {
@@ -82,6 +97,7 @@ fn register(directory: &Path, url: &str) -> clipper_client::engine::AppState {
         )
         .await;
         assert!(matches!(response, DaemonResponse::Success { .. }));
+        assert!(!manager.engine().await.unwrap().clipboard_watching_enabled());
         manager.current_state().await
     })
 }
@@ -92,10 +108,18 @@ fn registered_session_resumes_after_daemon_restart() {
     let directory = tempfile::tempdir().unwrap();
     let (server, url) = start_server(directory.path());
     let data = directory.path().join("desktop");
-    let before = register(&data, &url).session.unwrap();
+    let store = Arc::new(keychain::TestStore::default());
+    let before = register(&data, &url, store.clone()).session.unwrap();
     let after = runtime()
         .block_on(async {
-            let restarted = EngineManager::load(data.clone(), "http://127.0.0.1:8787".into()).await;
+            let restarted = load(&data, store.clone()).await;
+            assert!(
+                !restarted
+                    .engine()
+                    .await
+                    .unwrap()
+                    .clipboard_watching_enabled()
+            );
             restarted.current_state().await
         })
         .session
@@ -104,20 +128,14 @@ fn registered_session_resumes_after_daemon_restart() {
     assert_eq!(after.device_id, before.device_id);
     assert_eq!(after.device_name, "Test Mac");
     assert_eq!(after.server_url, url);
-    assert!(
-        keychain::load_credentials(&data)
-            .unwrap()
-            .unwrap()
-            .session
-            .is_some()
-    );
+    assert!(store.load().unwrap().unwrap().session.is_some());
     let profile: serde_json::Value =
         serde_json::from_slice(&std::fs::read(data.join("profile.json")).unwrap()).unwrap();
-    assert_eq!(profile.as_object().unwrap().len(), 3);
+    assert_eq!(profile.as_object().unwrap().len(), 4);
     assert!(profile.get("session").is_none());
     drop(server);
     runtime().block_on(async {
-        let restarted = EngineManager::load(data.clone(), "http://127.0.0.1:8787".into()).await;
+        let restarted = load(&data, store.clone()).await;
         let state = restarted.current_state().await;
         assert!(state.offline);
         let session = state.session.unwrap();
@@ -132,19 +150,20 @@ fn refused_saved_session_keeps_the_login_profile() {
     let directory = tempfile::tempdir().unwrap();
     let (_server, url) = start_server(directory.path());
     let data = directory.path().join("desktop");
-    register(&data, &url);
-    let mut credentials = keychain::load_credentials(&data).unwrap().unwrap();
+    let store = Arc::new(keychain::TestStore::default());
+    register(&data, &url, store.clone());
+    let mut credentials = store.load().unwrap().unwrap();
     credentials.session.as_mut().unwrap().token = Zeroizing::new("invalid-token".into());
-    keychain::store_credentials(&data, &credentials).unwrap();
+    store.store(&credentials).unwrap();
     runtime().block_on(async {
-        let manager = EngineManager::load(data.clone(), "http://127.0.0.1:8787".into()).await;
+        let manager = load(&data, store.clone()).await;
         assert!(manager.engine().await.is_none());
         let state = manager.current_state().await;
         assert!(state.session.is_none());
         let profile = state.saved_profile.unwrap();
         assert_eq!(profile.username, "alice");
         assert_eq!(profile.server_url, url);
-        assert!(keychain::load_credentials(&data).unwrap().is_none());
+        assert!(store.load().unwrap().is_none());
     });
 }
 
@@ -154,9 +173,10 @@ fn login_resumes_after_restart_and_logout_keeps_only_the_profile() {
     let directory = tempfile::tempdir().unwrap();
     let (_server, url) = start_server(directory.path());
     let data = directory.path().join("desktop");
-    register(&data, &url);
+    let store = Arc::new(keychain::TestStore::default());
+    register(&data, &url, store.clone());
     runtime().block_on(async {
-        let manager = EngineManager::load(data.clone(), "http://127.0.0.1:8787".into()).await;
+        let manager = load(&data, store.clone()).await;
         assert!(matches!(
             cmd_logout("logout".into(), true, &manager).await,
             DaemonResponse::Success { .. }
@@ -175,7 +195,7 @@ fn login_resumes_after_restart_and_logout_keeps_only_the_profile() {
         assert!(matches!(response, DaemonResponse::Success { .. }));
     });
     runtime().block_on(async {
-        let manager = EngineManager::load(data.clone(), "http://127.0.0.1:8787".into()).await;
+        let manager = load(&data, store.clone()).await;
         assert_eq!(
             manager.current_state().await.session.unwrap().server_url,
             url
@@ -186,12 +206,104 @@ fn login_resumes_after_restart_and_logout_keeps_only_the_profile() {
         ));
     });
     runtime().block_on(async {
-        let manager = EngineManager::load(data.clone(), "http://127.0.0.1:8787".into()).await;
+        let manager = load(&data, store.clone()).await;
         let state = manager.current_state().await;
         assert!(state.session.is_none());
         let profile = state.saved_profile.unwrap();
         assert_eq!(profile.username, "alice");
         assert_eq!(profile.server_url, url);
-        assert!(keychain::load_credentials(&data).unwrap().is_none());
+        assert!(store.load().unwrap().is_none());
+    });
+}
+
+#[test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+fn a_platform_without_a_secret_store_keeps_only_the_login_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_server, url) = start_server(directory.path());
+    let data = directory.path().join("desktop");
+    let store = Arc::new(keychain::PlatformStore);
+    assert!(!store.supports_resume());
+    let state = register(&data, &url, store.clone());
+    assert!(state.session.is_some());
+    assert!(store.load().unwrap().is_none());
+    assert!(!data.join("credentials.json").exists());
+    let profile: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(data.join("profile.json")).unwrap()).unwrap();
+    assert_eq!(profile.as_object().unwrap().len(), 4);
+    assert!(profile.get("session").is_none());
+    runtime().block_on(async {
+        let restarted = load(&data, store).await;
+        let state = restarted.current_state().await;
+        assert!(state.session.is_none());
+        let profile = state.saved_profile.unwrap();
+        assert_eq!(profile.username, "alice");
+        assert_eq!(profile.server_url, url);
+    });
+}
+
+#[test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+fn failed_credential_deletion_cannot_restore_a_signed_out_session() {
+    use std::sync::atomic::Ordering;
+
+    let directory = tempfile::tempdir().unwrap();
+    let (server, url) = start_server(directory.path());
+    let data = directory.path().join("desktop");
+    let store = Arc::new(keychain::TestStore::default());
+    register(&data, &url, store.clone());
+    drop(server);
+    store.fail_deletes.store(true, Ordering::SeqCst);
+    runtime().block_on(async {
+        let manager = load(&data, store.clone()).await;
+        assert!(manager.current_state().await.session.is_some());
+        assert!(matches!(
+            cmd_logout("logout".into(), true, &manager).await,
+            DaemonResponse::Success { .. }
+        ));
+        assert!(manager.current_state().await.session.is_none());
+    });
+    assert!(store.load().unwrap().is_some());
+    assert!(keychain::load_profile(&data).unwrap().unwrap().signed_out);
+    let reads = store.reads.load(Ordering::SeqCst);
+    let deletes = store.deletes.load(Ordering::SeqCst);
+    store.fail_reads.store(true, Ordering::SeqCst);
+    runtime().block_on(async {
+        let restarted = load(&data, store.clone()).await;
+        let state = restarted.current_state().await;
+        assert!(state.session.is_none());
+        let profile = state.saved_profile.unwrap();
+        assert_eq!(profile.username, "alice");
+        assert_eq!(profile.server_url, url);
+    });
+    assert_eq!(store.reads.load(Ordering::SeqCst), reads);
+    assert_eq!(store.deletes.load(Ordering::SeqCst), deletes + 1);
+    store.fail_deletes.store(false, Ordering::SeqCst);
+    runtime().block_on(async {
+        let restarted = load(&data, store.clone()).await;
+        assert!(restarted.current_state().await.session.is_none());
+    });
+    assert!(store.credentials.lock().unwrap().is_none());
+    assert_eq!(store.reads.load(Ordering::SeqCst), reads);
+    assert_eq!(store.deletes.load(Ordering::SeqCst), deletes + 2);
+}
+
+#[test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+fn logout_never_reports_success_when_the_signed_out_marker_cannot_be_saved() {
+    let directory = tempfile::tempdir().unwrap();
+    let (server, url) = start_server(directory.path());
+    let data = directory.path().join("desktop");
+    let store = Arc::new(keychain::TestStore::default());
+    register(&data, &url, store.clone());
+    drop(server);
+    runtime().block_on(async {
+        let manager = load(&data, store.clone()).await;
+        std::fs::remove_file(data.join("profile.json")).unwrap();
+        std::fs::create_dir(data.join("profile.json")).unwrap();
+        assert!(!matches!(
+            cmd_logout("logout".into(), true, &manager).await,
+            DaemonResponse::Success { .. }
+        ));
     });
 }

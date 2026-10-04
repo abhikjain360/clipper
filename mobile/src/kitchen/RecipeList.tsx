@@ -44,7 +44,7 @@ export function RecipeList({
                 <Text fontWeight="600">Cooking now</Text>
                 {view.openSessions.map((session) => (
                   <YStack
-                    key={session.recipeId}
+                    key={session.sessionId}
                     gap="$1"
                     py="$2"
                     onPress={() => onOpen(session.recipeId)}
@@ -56,7 +56,7 @@ export function RecipeList({
                       {session.title}
                     </Text>
                     <Muted>
-                      {`Started ${localTime(session.startedAtMillis)}${session.deleted ? " · Recipe deleted" : ""}`}
+                      {`Started ${localTime(session.startedAtMillis)} · Revision ${session.recipeRevision}${session.deleted ? " · Recipe deleted" : ""}`}
                     </Muted>
                   </YStack>
                 ))}

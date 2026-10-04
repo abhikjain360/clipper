@@ -42,39 +42,47 @@ impl SyncEngine {
     ) -> Result<KitchenRecipeList, ClientError> {
         self.run_work(None, async {
             let recipes = self.kitchen_rows::<Recipe>("").await?;
-            let mut started: BTreeMap<Uuid, DateTime<Utc>> = BTreeMap::new();
+            let mut by_recipe: BTreeMap<Uuid, Vec<Stored<CookingSession>>> = BTreeMap::new();
             for session in self.open_sessions("").await? {
-                let start = started
+                by_recipe
                     .entry(session.value.recipe)
-                    .or_insert(session.value.started_at);
-                *start = (*start).min(session.value.started_at);
+                    .or_default()
+                    .push(session);
             }
-            let cooking: HashSet<Uuid> = started.keys().copied().collect();
+            let cooking: HashSet<Uuid> = by_recipe.keys().copied().collect();
             let epoch = self.history_epoch.load(Ordering::SeqCst);
             let earlier = self.recipe_revisions.lock().await;
-            let mut open_sessions: Vec<KitchenOpenSession> = started
-                .iter()
-                .map(|(recipe_id, started_at)| {
-                    let current = recipes.iter().find(|recipe| recipe.id == *recipe_id);
+            let mut open_sessions = Vec::new();
+            for (recipe_id, sessions) in &by_recipe {
+                let current = recipes.iter().find(|recipe| recipe.id == *recipe_id);
+                for group in open_groups(sessions) {
+                    let revision = group.value.recipe_revision;
                     let title = current
                         .map(|recipe| recipe.value.title.clone())
                         .or_else(|| {
                             earlier
-                                .iter()
-                                .find(|((cached_epoch, cached, _), _)| {
-                                    *cached_epoch == epoch && cached == recipe_id
+                                .get(&(epoch, *recipe_id, revision))
+                                .or_else(|| {
+                                    earlier
+                                        .iter()
+                                        .find(|((cached_epoch, cached, _), _)| {
+                                            *cached_epoch == epoch && cached == recipe_id
+                                        })
+                                        .map(|(_, recipe)| recipe)
                                 })
-                                .map(|(_, recipe)| recipe.title.clone())
+                                .map(|recipe| recipe.title.clone())
                         })
                         .unwrap_or_else(|| "Deleted recipe".into());
-                    KitchenOpenSession {
+                    open_sessions.push(KitchenOpenSession {
                         recipe_id: recipe_id.to_string(),
+                        session_id: group.id.to_string(),
+                        recipe_revision: revision,
                         title,
-                        started_at_millis: started_at.timestamp_millis(),
+                        started_at_millis: group.value.started_at.timestamp_millis(),
                         deleted: current.is_none(),
-                    }
-                })
-                .collect();
+                    });
+                }
+            }
             drop(earlier);
             open_sessions.sort_by_key(|session| session.started_at_millis);
             let blocks = self.coming_blocks(zone).await;
@@ -141,8 +149,9 @@ impl SyncEngine {
             let mut sessions = self.sessions_of(id).await?;
             sessions
                 .sort_by_key(|session| std::cmp::Reverse((session.value.started_at, session.id)));
-            let open = open_session(&sessions);
-            let (revision, recipe) = match (&open, &current) {
+            let groups = open_groups(&sessions);
+            let open = groups.first();
+            let (revision, recipe) = match (open, &current) {
                 (Some(open), _) => {
                     let revision = open.value.recipe_revision;
                     (
@@ -154,15 +163,8 @@ impl SyncEngine {
                 (None, None) => return Err(ClientError::ItemNotFound { id: id.to_string() }),
             };
             let device = self.this_device().await?;
-            let mut view = recipe_view(
-                id,
-                revision,
-                &recipe,
-                servings,
-                open.as_ref(),
-                device,
-                Utc::now(),
-            );
+            let mut view = recipe_view(id, revision, &recipe, servings, open, device, Utc::now());
+            view.other_sessions = groups.iter().skip(1).map(session_view).collect();
             view.newer_revision = current
                 .as_ref()
                 .filter(|current| current.revision > revision)
@@ -232,7 +234,9 @@ impl SyncEngine {
         self.run_work(None, async {
             let _writing = KITCHEN_WRITES.lock().await;
             let recipe_id = parse_kitchen_id(recipe_id)?;
-            let open = open_session(&self.sessions_of(recipe_id).await?);
+            let open = open_groups(&self.sessions_of(recipe_id).await?)
+                .into_iter()
+                .next();
             let now = Utc::now();
             let (id, others, mut session) = match (open, &change) {
                 (Some(open), KitchenSessionChange::Discard) => {
@@ -466,8 +470,33 @@ impl SyncEngine {
     pub(super) async fn kitchen_timer_alarms(
         &self,
         device: DeviceId,
+        from: Option<DateTime<Utc>>,
         until: DateTime<Utc>,
-    ) -> Result<Vec<AlarmView>, ClientError> {
+    ) -> Vec<AlarmView> {
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
+        let timers = match self.read_timer_alarms(device).await {
+            Ok(timers) => {
+                *self.kitchen_timers.lock().await = Some((epoch, timers.clone()));
+                timers
+            }
+            Err(error) => {
+                warn!(%error, "Could not read the kitchen timers; planning the last ones read");
+                match self.kitchen_timers.lock().await.as_ref() {
+                    Some((read_in, timers)) if *read_in == epoch => timers.clone(),
+                    _ => Vec::new(),
+                }
+            }
+        };
+        timers
+            .into_iter()
+            .filter(|alarm| {
+                alarm.fire_at_millis <= until.timestamp_millis()
+                    && from.is_none_or(|from| alarm.fire_at_millis >= from.timestamp_millis())
+            })
+            .collect()
+    }
+
+    async fn read_timer_alarms(&self, device: DeviceId) -> Result<Vec<AlarmView>, ClientError> {
         let sessions = self.open_sessions("").await?;
         let recipes: BTreeMap<Uuid, Stored<Recipe>> = self
             .kitchen_rows::<Recipe>("")
@@ -478,33 +507,39 @@ impl SyncEngine {
         let epoch = self.history_epoch.load(Ordering::SeqCst);
         let earlier = self.recipe_revisions.lock().await;
         let device = device.into_uuid();
-        let mut alarms = Vec::new();
+        let mut by_recipe: BTreeMap<Uuid, Vec<Stored<CookingSession>>> = BTreeMap::new();
         for session in sessions {
-            let recipe_id = session.value.recipe;
+            by_recipe
+                .entry(session.value.recipe)
+                .or_default()
+                .push(session);
+        }
+        let mut alarms = Vec::new();
+        for (recipe_id, sessions) in by_recipe {
             let Some(current) = recipes.get(&recipe_id) else {
                 continue;
             };
-            let recipe = if current.revision == session.value.recipe_revision {
-                Some(&current.value)
-            } else {
-                earlier.get(&(epoch, recipe_id, session.value.recipe_revision))
-            };
-            for (step, timer, ends_at) in session.value.running_timers_on(device) {
-                if ends_at > until {
-                    continue;
+            for group in open_groups(&sessions) {
+                let revision = group.value.recipe_revision;
+                let recipe = if current.revision == revision {
+                    Some(&current.value)
+                } else {
+                    earlier.get(&(epoch, recipe_id, revision))
+                };
+                for (step, timer, ends_at) in group.value.running_timers_on(device) {
+                    let label = recipe
+                        .and_then(|recipe| recipe.steps.get(step as usize))
+                        .and_then(|entry| entry.timers.get(timer as usize))
+                        .map_or("Timer", |entry| entry.label.as_str());
+                    alarms.push(AlarmView {
+                        item_id: recipe_id.to_string(),
+                        occurrence_key: format!("timer:{step}:{timer}"),
+                        label: format!("{label} · {}", current.value.title),
+                        fire_at_millis: ends_at.timestamp_millis(),
+                        occurrence_start_millis: ends_at.timestamp_millis(),
+                        can_snooze: false,
+                    });
                 }
-                let label = recipe
-                    .and_then(|recipe| recipe.steps.get(step as usize))
-                    .and_then(|entry| entry.timers.get(timer as usize))
-                    .map_or("Timer", |entry| entry.label.as_str());
-                alarms.push(AlarmView {
-                    item_id: recipe_id.to_string(),
-                    occurrence_key: format!("timer:{step}:{timer}"),
-                    label: format!("{label} · {}", current.value.title),
-                    fire_at_millis: ends_at.timestamp_millis(),
-                    occurrence_start_millis: ends_at.timestamp_millis(),
-                    can_snooze: false,
-                });
             }
         }
         alarms.sort_by(|a, b| {
@@ -840,31 +875,46 @@ fn recipe_view(
         equipment: value.equipment.clone(),
         steps,
         notes: value.notes.clone(),
-        session: session.map(|session| KitchenSession {
-            id: session.id.to_string(),
-            servings: session.value.servings,
-            recipe_revision: session.value.recipe_revision,
-            started_at_millis: session.value.started_at.timestamp_millis(),
-        }),
+        session: session.map(session_view),
+        other_sessions: Vec::new(),
         past_sessions: Vec::new(),
         coming_blocks: Vec::new(),
     }
 }
 
-fn open_session(sessions: &[Stored<CookingSession>]) -> Option<OpenSession> {
+fn open_groups(sessions: &[Stored<CookingSession>]) -> Vec<OpenSession> {
     let mut open: Vec<&Stored<CookingSession>> = sessions
         .iter()
         .filter(|session| session.value.is_open())
         .collect();
     open.sort_by_key(|session| (session.value.started_at, session.id));
-    let (first, rest) = open.split_first()?;
-    Some(OpenSession {
-        id: first.id,
-        others: rest.iter().map(|session| session.id).collect(),
-        value: rest.iter().fold(first.value.clone(), |merged, newer| {
-            merged.merge(newer.value.clone())
-        }),
-    })
+    let mut groups: Vec<OpenSession> = Vec::new();
+    for session in open {
+        match groups
+            .iter_mut()
+            .find(|group| group.value.recipe_revision == session.value.recipe_revision)
+        {
+            Some(group) => {
+                group.others.push(session.id);
+                group.value = group.value.clone().merge(session.value.clone());
+            }
+            None => groups.push(OpenSession {
+                id: session.id,
+                others: Vec::new(),
+                value: session.value.clone(),
+            }),
+        }
+    }
+    groups
+}
+
+fn session_view(session: &OpenSession) -> KitchenSession {
+    KitchenSession {
+        id: session.id.to_string(),
+        servings: session.value.servings,
+        recipe_revision: session.value.recipe_revision,
+        started_at_millis: session.value.started_at.timestamp_millis(),
+    }
 }
 
 fn matches_search(recipe: &Recipe, words: &[String]) -> bool {

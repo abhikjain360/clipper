@@ -124,3 +124,32 @@ fn each_session_starts_with_an_empty_checklist() {
     assert_eq!(second.step_done_at(0), None);
     assert!(second.is_open() && second.timers.is_empty());
 }
+
+#[test]
+fn a_step_done_in_either_session_stops_its_timers() {
+    let recipe_id = Uuid::now_v7();
+    let phone = Uuid::now_v7();
+    let mut earlier = CookingSession::new(recipe_id, 1, 2, at(0));
+    earlier.start_timer(0, 0, 10.0, phone, at(1));
+    earlier.start_timer(1, 0, 10.0, phone, at(1));
+    let mut later = CookingSession::new(recipe_id, 1, 4, at(5));
+    later.set_step_done(1, true, at(6));
+
+    let merged = earlier.merge(later);
+
+    assert_eq!((merged.started_at, merged.servings), (at(0), 2));
+    assert_eq!(merged.step_done_at(1), Some(at(6)));
+    assert_eq!(merged.running_timers_on(phone), [(0, 0, at(11))]);
+    assert_eq!(merged.timer_state(1, 0, at(7)), TimerState::Idle);
+
+    let stored: CookingSession = decode(&json!({
+        "recipe": recipe_id,
+        "recipe_revision": 1,
+        "servings": 2,
+        "started_at": "2026-10-07T18:00:00Z",
+        "steps_done": [{"step": 1, "done_at": "2026-10-07T18:06:00Z"}],
+        "timers": [{"step": 1, "timer": 0, "device_id": phone, "ends_at": "2026-10-07T18:11:00Z"}]
+    }))
+    .unwrap();
+    assert!(stored.running_timers_on(phone).is_empty());
+}

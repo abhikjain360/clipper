@@ -1171,6 +1171,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
+ "clap",
  "clipper-client",
  "clipper-core",
  "clipper-daemon-types",

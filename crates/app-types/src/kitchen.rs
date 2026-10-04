@@ -29,6 +29,8 @@ pub struct KitchenRecipeSummary {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct KitchenOpenSession {
     pub recipe_id: String,
+    pub session_id: String,
+    pub recipe_revision: u64,
     pub title: String,
     pub started_at_millis: i64,
     pub deleted: bool,
@@ -148,6 +150,7 @@ pub struct KitchenRecipe {
     pub steps: Vec<KitchenStep>,
     pub notes: Vec<String>,
     pub session: Option<KitchenSession>,
+    pub other_sessions: Vec<KitchenSession>,
     pub past_sessions: Vec<KitchenPastSession>,
     pub coming_blocks: Vec<KitchenBlock>,
 }

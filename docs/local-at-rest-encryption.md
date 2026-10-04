@@ -38,34 +38,84 @@ labels (`crates/core/src/crypto.rs`):
   `clipper:opaque-export:device-identity-wrap-key:v1`. It wraps the persisted
   device signing secret at rest.
 
-**Neither key is persisted anywhere** — not on disk, not in the OS keychain, not
-in `localStorage`. Both are re-derived from the OPAQUE export key on every login
-or registration (`ApiClient::login_prepare` / `register_prepare`), held only in
-memory inside `SyncEngine` (`encryption_key` and, indirectly via the loaded
-signing key, the wrapping key), and dropped on logout. They live inside
-`Zeroizing` wrappers, but not every copy is wiped on drop:
+The passphrase and OPAQUE export key are not persisted. Both derived keys can
+be retained as session-resume material by clients with a suitable credential
+store. The resume record contains the server-revocable bearer token, the data
+key, the device-identity wrapping key, and the last confirmed session time.
+These derived keys can decrypt the cache and unwrap the existing device
+identity; they cannot re-run OPAQUE login or enroll a new device. In-memory
+derived keys use `Zeroizing` wrappers, but not every copy is wiped on drop:
 [`docs/issues.md`](issues.md), entry 42.
-
-This means a cold attacker who reads the on-disk cache (or `localStorage`) but
-does not know the passphrase cannot decrypt anything: the only persisted secret
-is the _wrapped_ device signing key, and unwrapping it requires the
-OPAQUE-derived wrapping key, which is gone once the process exits.
 
 ### What the OS keychain stores (and does not)
 
-For the desktop daemon, the platform credential store
-(`crates/daemon/src/keychain.rs`) holds only two things:
+For the macOS daemon, `crates/daemon/src/keychain.rs` stores:
 
 - The 32-byte **IPC secret** (`ipc-secret-v1`) used for the local daemon/UI HMAC
   handshake — unrelated to data encryption. See `docs/local-ipc-security.md`.
-- A `Credentials` record: `{ device_name, server_url, username }`.
+- A `Credentials` record under service `com.clipper.daemon`, account
+  `credentials`: device name, server URL, username, and session-resume material.
+  The daemon first tries the macOS data protection keychain with
+  `AccessibleWhenUnlockedThisDeviceOnly`, no iCloud synchronization, and no
+  user-presence constraint. An entitled build can resume unattended while the
+  device is unlocked, with a record that is not transferable to another device.
+  If that store rejects the build for a missing entitlement or code-signing
+  error, the daemon saves the record in the regular login keychain instead.
+  This lets local ad-hoc builds resume without an Apple team or access-group
+  entitlement.
 
-The passphrase and all encryption/wrapping/signing key material are
-**intentionally not persisted** (`crates/daemon/src/main.rs`: "The passphrase is
-intentionally not persisted, so the daemon waits for the app to provide it after
-startup"). The daemon cannot decrypt the local cache on its own after a restart;
-it waits for the UI to re-supply the passphrase, which re-derives the keys via
-OPAQUE login.
+The login keychain is local to this Mac and normally unlocked while the user
+is logged in. Its default access rule trusts the creating binary; other
+programs get a macOS prompt. The daemon uses the same default rule as its IPC
+secret, without an allow-all ACL or a user-presence requirement. This fallback
+uses the login keychain's locking and backup behaviour, rather than the data
+protection keychain's explicit when-unlocked, this-device-only class. Access
+to either resume item is enough to decrypt the cache and unwrap the device
+identity. This is the accepted trade-off for unattended local builds in issue 53.
+
+macOS applies the accessibility class to the data protection store rather than
+the regular login keychain. See
+[Apple's data protection keychain documentation](https://developer.apple.com/documentation/security/ksecusedataprotectionkeychain).
+See [Apple's default access-rule documentation](https://developer.apple.com/documentation/security/secaccesscreate%28_%3A_%3A_%3A%29)
+for trusted applications and prompts.
+
+Reads check the protected store first, then the login store if the protected
+item is absent or the build lacks entitlement/signing access. A successful
+save attempts to remove the superseded copy from the other store. Logout
+attempts deletion in both stores, even if either fails. Logs name the store
+used for every credential read or save. Locked stores, denied access, and
+other failures do not cause a storage downgrade. If the selected item's read
+is denied after an ad-hoc signature change, startup keeps sign-in prefilled
+with the remembered server URL and username. The IPC secret remains separate.
+
+The daemon keeps non-secret profile metadata in `Clipper/profile.json`, with
+`0700` directory and `0600` file permissions. This includes the username,
+device name, server URL, and a `signed_out` marker. Logout atomically saves and
+syncs that marker before reporting success. Startup checks it before reading
+session credentials, refuses resume, and retries credential deletion. A
+profile that cannot be read also prevents resume. The server URL and username
+remain available when a keychain read fails.
+
+Linux has no configured session secret store. It saves only the non-secret
+profile and requires login at every daemon start. It never writes a bearer token
+or either derived key to `credentials.json`, and startup removes that file if
+an earlier build left it behind. Its separate IPC secret remains a
+private file. Tests inject an explicit in-memory credential store; they do not
+use the Linux credential path or the owner's macOS keychain.
+
+The server session is validated on resume. The existing offline unlock rule
+allows a session confirmed within three days when the server cannot be reached.
+Unchanged session credentials are not rewritten for each minute's confirmation:
+the daemon persists a newer confirmation at most once every six hours. Token,
+key, or profile changes are saved immediately. The persisted confirmation can
+therefore shorten offline availability by up to six hours; it never extends it.
+
+The browser retains resume material in tab-scoped `sessionStorage`, rather than
+the durable object cache in `localStorage`. Android retains resume material in
+the platform secure store with authentication required. Native signing secrets
+remain wrapped on disk. Persistent derived keys improve restart behaviour but
+make access to the resume credential store sufficient to open the local cache;
+see issue 53 in `docs/issues.md` for the desktop trust decision.
 
 ## What is encrypted at rest
 

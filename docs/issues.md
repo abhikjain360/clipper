@@ -462,11 +462,12 @@ Each entry has:
 - **Status:** open; checked in code
 - **Severity:** low (accepted so far). On main.
 - **Where:** the `upload_file` and `download_file` daemon commands;
-  `crates/daemon/src/keychain.rs` (`set_generic_password`, default ACL);
+  `crates/daemon/src/keychain.rs` (IPC secret and session credentials);
   `web/src-tauri/src/ipc_secret.rs` (Linux read with plain `std::fs::read`).
-- **What happens:** another process of the same user can read the IPC secret
-  from the unlocked login keychain and then make the daemon read or write any
-  path. The daemon checks only the peer uid, not its code signature. The Tauri
+- **What happens:** another process of the same user can request the IPC secret
+  from the login keychain; macOS prompts unless that program is trusted. With
+  the secret, it can make the daemon read or write any path. The daemon checks
+  only the peer uid, not its code signature. The Tauri
   Linux secret read lacks the daemon's symlink and regular-file check (no new
   capability, since the same user can read the file anyway).
 - **Recommendation:** keep same-user trust and say so, or harden: byte-based
@@ -475,7 +476,24 @@ Each entry has:
 - **Linux options:** an AppArmor or SELinux profile, the Flatpak or Snap
   sandbox identity of the peer, and failing closed when a required peer label
   cannot be verified.
-- **Decision:**
+- **Decision:** retain same-user IPC trust for now. Desktop resume stores the
+  revocable bearer token and two derived keys, so credential-store access can
+  decrypt the cache and unwrap the existing signing identity without another
+  OPAQUE login. The passphrase and OPAQUE export key remain unpersisted.
+  First try the macOS data protection keychain with when-unlocked,
+  this-device-only protection and no iCloud synchronization. For missing
+  entitlement or code-signing errors, use the regular login keychain with its
+  default access rule, the same storage and trust as the IPC secret. That rule
+  trusts the creating binary; other programs get a macOS prompt. The login
+  keychain is local to this Mac and normally unlocked while the user is logged
+  in. It follows login-keychain locking and backup behaviour, without the data
+  protection store's explicit this-device-only guarantee. Accept this fallback
+  so local ad-hoc builds can resume. Neither case requires user presence for
+  the trusted daemon, which starts unattended. Reads check either store;
+  logout attempts deletion in both. Logs identify the chosen store. Locked or
+  denied keychain access does not trigger a storage downgrade. Linux has no
+  session secret store and requires login at each start. The broader IPC
+  peer-trust issue remains open.
 
 ### 54. Whether a username exists can still be learned
 
@@ -735,9 +753,46 @@ Each entry has:
 
 ## Bugs
 
-### 154. Desktop loses its session and server URL after the daemon restarts
+### 155. Desktop resume credentials had unsafe storage and excessive writes
 
 - **Status:** fixed in the working tree; not committed.
+- **Severity:** high. On main.
+- **Where:** daemon credential store and session persistence.
+- **What happened:** Linux wrote the token and derived keys to plaintext JSON.
+  macOS used the default login-keychain access rule. Minute confirmations
+  rewrote the entire credential item every minute.
+- **Fix:** Linux saves only the non-secret profile. Tests inject a memory store.
+  macOS prefers unlocked-only, device-only data protection without user presence,
+  with the default login-keychain rule for entitlement/signing failures so
+  local ad-hoc builds can resume. Both stores keep secrets out of plaintext files.
+  Unchanged sessions persist a new confirmation only every six hours; token
+  and key changes are immediate. Update the local encryption documentation.
+
+### 156. Failed credential deletion could undo logout after restart
+
+- **Status:** fixed in the working tree; not committed.
+- **Severity:** high. On main.
+- **Where:** daemon logout and startup.
+- **What happened:** logout reported success even if deleting stored credentials
+  failed, so an offline restart could restore the old session.
+- **Fix:** durably save a signed-out marker in the non-secret profile before
+  reporting success. Startup checks it before credential reads and retries
+  deletion. Reject logout success if the marker cannot be saved.
+
+### 157. A QA daemon captured the owner's clipboard into test accounts
+
+- **Status:** fixed in the working tree; not committed.
+- **Severity:** high. On main.
+- **Where:** daemon options and client clipboard watcher startup.
+- **What happened:** a second daemon signed into a test account automatically
+  watched the same macOS clipboard and uploaded the owner's content.
+- **Fix:** add `--disable-clipboard-watching` and
+  `CLIPPER_DISABLE_CLIPBOARD_WATCHING=true`. Apply the setting before login or
+  resume. Require it for every extra QA daemon in `AGENTS.md`.
+
+### 154. Desktop loses its session and server URL after the daemon restarts
+
+- **Status:** fixed in `7411747`; follow-up hardening is uncommitted.
 - **Severity:** medium. On main.
 - **Where:** daemon credential storage and startup, saved profiles, desktop login form.
 - **What happened:** the daemon stored only profile metadata and waited for a

@@ -47,7 +47,7 @@ export function RecipeList({
                 <KitchenCard>
                     <H2 size="$5">Cooking now</H2>
                     {value.open_sessions.map((session) => (
-                        <YStack key={session.recipe_id} gap="$1">
+                        <YStack key={session.session_id} gap="$1">
                             <Link
                                 href={`/kitchen/${session.recipe_id}`}
                                 className="kitchen-recipe-link"
@@ -55,7 +55,8 @@ export function RecipeList({
                                 {session.title}
                             </Link>
                             <Text color="#9aa4ad">
-                                Started {localTime(session.started_at_millis)}
+                                Started {localTime(session.started_at_millis)} · Revision{" "}
+                                {session.recipe_revision}
                                 {session.deleted ? " · Recipe deleted" : ""}
                             </Text>
                         </YStack>

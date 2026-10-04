@@ -129,6 +129,13 @@ export function RecipePage({
                             This recipe was deleted. Finish or discard this cooking session.
                         </Paragraph>
                     )}
+                    {recipe.other_sessions.map((other) => (
+                        <Paragraph key={other.id} role="status" color="#f3c969">
+                            Another cooking session from revision {other.recipe_revision}, started{" "}
+                            {localTime(other.started_at_millis)}, is open. It shows here once this
+                            one is finished or discarded.
+                        </Paragraph>
+                    ))}
                     {recipe.newer_revision !== null && (
                         <Paragraph role="status" color="#f3c969">
                             This session cooks from revision {recipe.revision}. Revision{" "}

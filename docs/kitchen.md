@@ -179,13 +179,13 @@ Quantities are formatted like this:
 - a step names each referenced ingredient with its scaled quantity, for
   example `Slice the Onion (3 pieces)`.
 
-- **Recipe list**: starts with Cooking now, one entry for each recipe with an
-  unfinished session, including a recipe that was deleted, so every session
-  can be reached and finished. Then the recipes, newest first, searchable by
-  title, summary, cuisine and tags; every search word must appear in one of
-  them. A recipe with a coming
-  plan shows the block's day and time; coming plans are looked up in the next
-  60 days of the schedule.
+- **Recipe list**: starts with Cooking now, one entry for each unfinished
+  session (after merging, see below) with its start and recipe revision,
+  including sessions of a recipe that was deleted, so every session can be
+  reached and finished. Then the recipes, newest first, searchable by title,
+  summary, cuisine and tags; every search word must appear in one of them. A
+  recipe with a coming plan shows the block's day and time; coming plans are
+  looked up in the next 60 days of the schedule.
 - **Recipe page**: summary, times, nutrition per serving, ingredients by
   group, a shopping list of `need_to_buy` ingredients, equipment, steps with
   scaled quantities in the text, notes, and past sessions with their duration
@@ -197,14 +197,20 @@ Quantities are formatted like this:
   shows. Finish asks "How was it?" and saves the notes; Discard deletes the
   row.
 - **Merging sessions**: two devices that each opened a session for the same
-  recipe offline both keep their rows. The page shows them merged into one,
-  and the next session change writes the merged session to the row that
-  started first and deletes the others. The merged session has every ticked
-  ingredient and done step (a step done on both keeps the earlier time),
-  every timer with the device that started it (a step and timer pair set on
-  both keeps the later session's), the earliest start, and the later
-  session's revision and servings only if the earlier session has no ticks
-  and no timers; otherwise the earlier session's.
+  recipe offline both keep their rows. Unfinished sessions that started from
+  the same recipe revision merge: the page shows them as one, and the next
+  session change writes the merged session to the row that started first and
+  deletes the others. The merged session has every ticked ingredient and done
+  step (a step done on both keeps the earlier time), every timer with the
+  device that started it (a step and timer pair set on both keeps the later
+  session's), except timers of steps that are done, the earliest start, and
+  the later session's servings only if the earlier session has no ticks and
+  no timers; otherwise the earlier session's.
+- **Sessions from different revisions** do not merge, because their step and
+  timer indexes refer to different steps. Each has its own Cooking now entry,
+  and each keeps its timers on the devices that started them. The recipe page
+  shows the one that started first and names the others; the next one shows
+  once that one is finished or discarded.
 - **Session revision**: while a session is open, the page shows and changes
   the recipe revision the session started from, so step and timer indexes and
   timer minutes stay those of that revision. When the recipe has a newer
@@ -213,8 +219,9 @@ Quantities are formatted like this:
   it in memory until sign-out.
 - **Deleted recipe**: an open session of a deleted recipe stays under Cooking
   now, titled from the revision the app last read or "Deleted recipe", and
-  its page still shows from its revision, without ticks or timers, and can be finished or discarded, which
-  returns to the recipe list. Its timers do not ring.
+  its page still shows from its revision, without ticks or timers, and can be
+  finished or discarded, which returns to the recipe list. Its timers do not
+  ring.
 - **Step timers**: each can be started, paused, resumed, extended by one
   minute and cleared. Starting one records this device as the one it rings on;
   resuming keeps that device. Pausing stores the time left. A minute added to
@@ -250,8 +257,11 @@ it.
   When a new plan no longer holds a ringing or waiting step timer, Android
   stops it, and a step timer that reaches the ring service after it left the
   plan does not ring. Alarms that can snooze are never stopped by a new plan.
-- If the alarm list cannot be read, the app sends no new plan, so the phone
-  keeps the previous one.
+- A timer whose step is done never rings.
+- If the kitchen tables cannot be read, the alarm list keeps the step timers
+  last read in this sign-in, never an empty set, logs the failure and still
+  carries every schedule alarm. When the app signs in, it opens the kitchen
+  tables before it shows the session, so the first alarm list can read them.
 - A step timer never replaces or silences a ringing alarm. While an alarm
   that can snooze rings, a step timer that fires waits; it rings on screen
   once the alarm is snoozed or dismissed. Each ringing alarm keeps its own
@@ -261,7 +271,9 @@ it.
   received, counts as a change of the app state. A step timer's ring screen
   offers Dismiss and no snooze; more time is added on the recipe page.
 - On a Mac, a step timer is delivered like an alarm targeted at that Mac: a
-  notification with sound while Clipper is running.
+  notification with sound while Clipper is running. The Mac asks for the
+  alarms in a time window and gets only the timers that end in it; the phone
+  plan also keeps timers that have ended, as above.
 - Ticking the step, finishing or discarding the session clears its timers and
   their alarms.
 
