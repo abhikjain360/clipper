@@ -17,9 +17,7 @@ use zeroize::Zeroizing;
 /// incompatibly — the desktop app and the daemon are separate binaries, and an
 /// old daemon can outlive an app update (it is reparented to PID 1, so it keeps
 /// running until killed).
-///
-/// v2: `AppState`'s session gained a required `server_url`.
-pub const IPC_AUTH_VERSION: u32 = 2;
+pub const IPC_AUTH_VERSION: u32 = 3;
 pub const IPC_AUTH_NONCE_BYTES: usize = 32;
 pub const IPC_AUTH_TAG_BYTES: usize = 32;
 
@@ -67,7 +65,7 @@ pub enum DaemonCommand {
     Authenticate(AuthenticateParams),
     Login(LoginParams),
     Register(RegisterParams),
-    Logout,
+    Logout(Option<LogoutParams>),
     GetState,
     SendClipboard(SendClipboardParams),
     SendClipboardPayload(SendClipboardPayloadParams),
@@ -97,6 +95,12 @@ pub enum DaemonCommand {
     StartActual(StartActualParams),
     StopActual(StopActualParams),
     ActualsBetween(ActualsBetweenParams),
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LogoutParams {
+    #[serde(default)]
+    pub cancel_running_work: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -376,10 +380,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_unit_request_without_params() {
+    fn logout_defaults_to_keeping_running_work() {
         let json = r#"{"id":"1","cmd":"logout"}"#;
         let req: DaemonRequest = serde_json::from_str(json).unwrap();
-        assert!(matches!(req.command, DaemonCommand::Logout));
+        assert!(matches!(req.command, DaemonCommand::Logout(None)));
+        let req: DaemonRequest =
+            serde_json::from_str(r#"{"id":"1","cmd":"logout","params":{}}"#).unwrap();
+        assert!(matches!(
+            req.command,
+            DaemonCommand::Logout(Some(LogoutParams {
+                cancel_running_work: false
+            }))
+        ));
+        let req: DaemonRequest = serde_json::from_str(
+            r#"{"id":"1","cmd":"logout","params":{"cancel_running_work":true}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            req.command,
+            DaemonCommand::Logout(Some(LogoutParams {
+                cancel_running_work: true
+            }))
+        ));
     }
 
     #[test]

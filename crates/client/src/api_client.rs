@@ -1248,6 +1248,11 @@ pub enum ClientError {
     /// key required for this action is missing. The client must log in first.
     #[error("Not authenticated; sign in first")]
     NotAuthenticated,
+    #[error("Session work was cancelled")]
+    WorkCancelled,
+    #[cfg(not(target_family = "wasm"))]
+    #[error("Session task failed: {0}")]
+    Task(tokio::task::JoinError),
     /// A session resume found no usable local device identity for the persisted
     /// keys (missing record, a wrapping key that fails to unwrap it, or no
     /// server-assigned device id). The client must perform a full login.
@@ -1407,6 +1412,9 @@ impl ClientError {
             }
             Self::Io { .. } => ErrorResponse::new(ApiErrorCode::Storage, self.to_string()),
             Self::Unsupported(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.clone()),
+            Self::WorkCancelled => ErrorResponse::new(ApiErrorCode::Unknown, self.to_string()),
+            #[cfg(not(target_family = "wasm"))]
+            Self::Task(_) => ErrorResponse::new(ApiErrorCode::Unknown, self.to_string()),
             Self::Other(error) => ErrorResponse::new(ApiErrorCode::Unknown, error.clone()),
         }
     }

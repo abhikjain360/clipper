@@ -1,5 +1,11 @@
 export type ConnectionStatus = "Disconnected" | "Connecting" | "Connected" | "DaemonNotRunning";
 
+export type RunningWorkView = { label: string };
+
+export type LogoutOutcome =
+  | { status: "signed_out" }
+  | { status: "work_running"; work: RunningWorkView[] };
+
 export type ClipboardItem = {
   id: string;
   text: string;
@@ -280,7 +286,7 @@ export type ClipperBackend = {
     deviceName: string,
     serverUrl: string,
   ) => Promise<string>;
-  logout: () => Promise<void>;
+  logout: (cancelRunningWork: boolean) => Promise<LogoutOutcome>;
   getState: () => Promise<AppState>;
   stateVersion: () => number | Promise<number>;
   waitForStateChange: (seenVersion: number, signal?: AbortSignal) => Promise<number>;

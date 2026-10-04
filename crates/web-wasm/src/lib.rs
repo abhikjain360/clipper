@@ -305,14 +305,17 @@ pub fn session_resume_material() -> Promise {
 }
 
 #[wasm_bindgen(js_name = logout)]
-pub fn logout() -> Promise {
-    ok_promise(async {
+pub fn logout(cancel_running_work: bool) -> Promise {
+    ok_promise(async move {
         let _auth = HOLDER.auth.lock().await;
         if let Some(engine) = HOLDER.engine() {
-            engine.logout().await.map_err(js_error)?;
-            HOLDER.clear_if_current(&engine);
+            let outcome = engine.logout(cancel_running_work).await.map_err(js_error)?;
+            if outcome == clipper_client::engine::LogoutOutcome::SignedOut {
+                HOLDER.clear_if_current(&engine);
+            }
+            return to_js(&outcome);
         }
-        Ok(JsValue::UNDEFINED)
+        to_js(&clipper_client::engine::LogoutOutcome::SignedOut)
     })
 }
 

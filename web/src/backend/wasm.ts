@@ -24,7 +24,7 @@ async function loadModule(): Promise<WasmModule> {
     const mod = wasmModule as unknown as WasmModule;
     await wasmInit();
     mod.initClient();
-    return mod;
+    return { ...mod, logout: (cancelRunningWork) => mod.logout(cancelRunningWork) };
 }
 
 export async function defaultServerUrl(): Promise<string> {

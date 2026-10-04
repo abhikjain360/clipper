@@ -81,7 +81,7 @@ fn run_clipboard_watcher(rt: tokio::runtime::Handle, engine: Arc<SyncEngine>) {
                 let engine = engine.clone();
                 rt.block_on(async {
                     match engine
-                        .send_clipboard_payload(payload.mime_type, &payload.bytes)
+                        .capture_clipboard_payload(payload.mime_type, &payload.bytes)
                         .await
                     {
                         Ok(id) => info!(clipboard_id = %id, "Uploaded macOS clipboard change"),

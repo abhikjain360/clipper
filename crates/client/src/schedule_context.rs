@@ -266,6 +266,14 @@ impl SyncEngine {
         &self,
         actual_id: &str,
     ) -> Result<Option<crate::schedule::RecordedPlan>, ClientError> {
+        self.run_work(None, self.recorded_plan_inner(actual_id))
+            .await
+    }
+
+    async fn recorded_plan_inner(
+        &self,
+        actual_id: &str,
+    ) -> Result<Option<crate::schedule::RecordedPlan>, ClientError> {
         let epoch = self.history_epoch.load(Ordering::SeqCst);
         let records = self.local_store.schedule_records_with_ids().await;
         let actual = records
