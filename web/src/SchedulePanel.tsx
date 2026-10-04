@@ -219,10 +219,22 @@ export function SchedulePanel({
             actuals,
             plans,
             doneMarks,
+            editing,
         ],
     );
     const hover = useCalendarHover(refresh);
     const closeHover = hover.close;
+    const editItem = (item: ScheduleItemView) => {
+        closeHover();
+        setEditing(item);
+    };
+    const editOccurrence = (occurrence: OccurrenceView) => {
+        if (occurrence.source !== null) return;
+        const item = items.find(
+            (candidate) => parseDefinition(candidate.definition_json)?.id === occurrence.item_id,
+        );
+        if (item) editItem(item);
+    };
 
     const loadWeek = useCallback(async () => {
         const generation = ++loadGeneration.current;
@@ -308,7 +320,12 @@ export function SchedulePanel({
 
     return (
         <YStack gap="$3">
-            <RunningTimer running={running} onState={onState} onError={onError} />
+            <RunningTimer
+                running={running}
+                canStart={mode === "next"}
+                onState={onState}
+                onError={onError}
+            />
             {warnings.length > 0 && (
                 <YStack role="status" gap="$1">
                     {warnings.map((warning, index) => (
@@ -435,7 +452,9 @@ export function SchedulePanel({
                             </Button>
                         )}
 
-                    <CalendarHoverContext.Provider value={hover}>
+                    <CalendarHoverContext.Provider
+                        value={editing ? { ...hover, key: null, enter: () => {} } : hover}
+                    >
                         {mode === "next" ? (
                             <NextList
                                 start={weekStart}
@@ -458,6 +477,7 @@ export function SchedulePanel({
                                 occurrences={occurrences}
                                 plans={plans}
                                 actuals={actuals}
+                                onEdit={editOccurrence}
                                 onDay={(day) => {
                                     setSelectedDate(day);
                                     setView("day");
@@ -472,7 +492,7 @@ export function SchedulePanel({
                                 occurrences={occurrences}
                                 plans={plans}
                                 actuals={actuals}
-                                onStart={startOccurrence}
+                                onEdit={editOccurrence}
                                 doneMarks={doneMarks}
                                 now={now}
                             />
@@ -530,7 +550,7 @@ export function SchedulePanel({
                     />
                     <SeriesList
                         items={items}
-                        onEdit={setEditing}
+                        onEdit={editItem}
                         onState={onState}
                         onError={onError}
                     />
@@ -755,6 +775,7 @@ function MonthGrid({
     occurrences,
     plans,
     actuals,
+    onEdit,
     onDay,
     doneMarks,
     now,
@@ -765,6 +786,7 @@ function MonthGrid({
     occurrences: OccurrenceView[];
     plans: KitchenPlan[];
     actuals: ActualView[];
+    onEdit: (occurrence: OccurrenceView) => void;
     onDay: (day: Date) => void;
     doneMarks: ReadonlySet<string>;
     now: number;
@@ -815,8 +837,14 @@ function MonthGrid({
                                     >
                                         <button
                                             className="month-event"
-                                            onClick={() => onDay(day)}
-                                            style={{ background: blockColor(event).fill }}
+                                            onClick={() => onEdit(event)}
+                                            aria-label={`${event.source === null ? "Edit" : "Imported meeting:"} ${event.title}, ${event.all_day ? "All day" : clockRange(event)}`}
+                                            aria-disabled={event.source !== null || undefined}
+                                            style={{
+                                                background: blockColor(event).fill,
+                                                cursor:
+                                                    event.source === null ? "pointer" : "default",
+                                            }}
                                         >
                                             {event.all_day ? "" : `${clock(event.start)} `}
                                             {event.title}
@@ -843,7 +871,7 @@ function WeekGrid({
     occurrences,
     plans,
     actuals,
-    onStart,
+    onEdit,
     doneMarks,
     now,
 }: {
@@ -852,7 +880,7 @@ function WeekGrid({
     occurrences: OccurrenceView[];
     plans: KitchenPlan[];
     actuals: ActualView[];
-    onStart: (occurrence: OccurrenceView) => void;
+    onEdit: (occurrence: OccurrenceView) => void;
     doneMarks: ReadonlySet<string>;
     now: number;
 }) {
@@ -985,7 +1013,10 @@ function WeekGrid({
                                                     : 1
                                             }
                                         >
-                                            <OccurrenceChip occurrence={occurrence} />
+                                            <OccurrenceChip
+                                                occurrence={occurrence}
+                                                onEdit={onEdit}
+                                            />
                                             <ScheduleRecipes
                                                 occurrence={occurrence}
                                                 plans={plans}
@@ -1035,7 +1066,7 @@ function WeekGrid({
                                     occurrence={occurrence}
                                     plans={plans}
                                     day={day}
-                                    onStart={onStart}
+                                    onEdit={onEdit}
                                     lane={lane}
                                     lanes={lanes}
                                     dimmed={occurrenceHidden(occurrence, doneMarks, now)}
@@ -1095,7 +1126,7 @@ function TimedBlock({
     occurrence,
     plans,
     day,
-    onStart,
+    onEdit,
     lane,
     lanes,
     dimmed,
@@ -1103,7 +1134,7 @@ function TimedBlock({
     occurrence: OccurrenceView;
     plans: KitchenPlan[];
     day: Date;
-    onStart: (occurrence: OccurrenceView) => void;
+    onEdit: (occurrence: OccurrenceView) => void;
     lane: number;
     lanes: number;
     dimmed: boolean;
@@ -1111,7 +1142,7 @@ function TimedBlock({
     const { top, height } = bandGeometry(occurrence, day);
     const drawnHeight = Math.max(4, height - 2);
     const color = blockColor(occurrence);
-    const label = `${occurrence.title}, ${clockRange(occurrence)}${
+    const label = `${occurrence.source === null ? "Edit" : "Imported meeting:"} ${occurrence.title}, ${clockRange(occurrence)}${
         occurrence.source ? `, from ${occurrence.source}` : ""
     }${occurrence.cancelled ? ", cancelled" : ""}`;
 
@@ -1126,7 +1157,7 @@ function TimedBlock({
                     display: "flex",
                     flexDirection: "column",
                     padding: "1px 4px",
-                    cursor: "pointer",
+                    cursor: occurrence.source === null ? "pointer" : "default",
                     top,
                     height: drawnHeight,
                     left: `calc(${(lane / lanes) * 100}% + 2px)`,
@@ -1140,15 +1171,16 @@ function TimedBlock({
                     opacity: dimmed ? 0.65 : 1,
                 }}
                 aria-label={label}
+                aria-disabled={occurrence.source !== null || undefined}
                 role="button"
                 tabIndex={0}
                 onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
-                        onStart(occurrence);
+                        onEdit(occurrence);
                     }
                 }}
-                onClick={() => onStart(occurrence)}
+                onClick={() => onEdit(occurrence)}
             >
                 {/* One complete 13px line plus 1px padding and 1px border above and below. */}
                 {drawnHeight >= 17 && (
@@ -1202,10 +1234,12 @@ function bandGeometry(
 /// The running timer, with what it is against and how long it has been going.
 function RunningTimer({
     running,
+    canStart,
     onState,
     onError,
 }: {
     running: ActualView | null;
+    canStart: boolean;
     onState: (state: AppState) => void;
     onError: (error: string | null) => void;
 }) {
@@ -1237,6 +1271,7 @@ function RunningTimer({
     }
 
     if (!running) {
+        if (!canStart) return null;
         return (
             <XStack gap="$2">
                 <Button
@@ -1285,13 +1320,31 @@ function pad(value: number): string {
     return String(value).padStart(2, "0");
 }
 
-function OccurrenceChip({ occurrence }: { occurrence: OccurrenceView }) {
+function OccurrenceChip({
+    occurrence,
+    onEdit,
+}: {
+    occurrence: OccurrenceView;
+    onEdit: (occurrence: OccurrenceView) => void;
+}) {
     return (
         <EventHover title={occurrence.title} detail="All day">
             <YStack
+                role="button"
+                tabIndex={0}
+                aria-label={`${occurrence.source === null ? "Edit" : "Imported meeting:"} ${occurrence.title}, All day`}
+                aria-disabled={occurrence.source !== null || undefined}
+                onClick={() => onEdit(occurrence)}
+                onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        onEdit(occurrence);
+                    }
+                }}
                 px={4}
                 py={1}
                 style={{
+                    cursor: occurrence.source === null ? "pointer" : "default",
                     borderRadius: 4,
                     backgroundColor: occurrence.overridden
                         ? scheduleColors.overridden.fill
