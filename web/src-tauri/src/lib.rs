@@ -237,8 +237,13 @@ async fn connect() -> CommandResult<()> {
 }
 
 #[tauri::command]
-fn default_server_url() -> String {
-    DEFAULT_BASE_URL.to_string()
+async fn default_server_url(backend: State<'_, DesktopBackend>) -> CommandResult<String> {
+    let state: AppState = backend.daemon.send_result(DaemonCommand::GetState).await?;
+    Ok(state
+        .saved_profile
+        .map(|profile| profile.server_url)
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()))
 }
 
 #[tauri::command]

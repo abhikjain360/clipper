@@ -1,13 +1,3 @@
-//! Lazily-initialized [`SyncEngine`] holder.
-//!
-//! The daemon does not know which server to talk to until the user logs in or
-//! registers, so the engine is built on the first login/register using the URL
-//! that request carries, rather than being constructed eagerly at startup with a
-//! hardcoded default. Once built it lives for the rest of the daemon's lifetime;
-//! the engine (API client, WebSocket, session keys, in-memory state) is bound to
-//! one server, so a later per-request URL is required to match
-//! (see [`ensure_requested_base_url`]).
-
 use std::{path::PathBuf, sync::Arc};
 
 use clipper_client::{
@@ -19,7 +9,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::keychain::Credentials;
+use crate::keychain::{self, Credentials};
 
 pub struct EngineManager {
     data_dir: PathBuf,
@@ -34,6 +24,65 @@ pub struct EngineManager {
 }
 
 impl EngineManager {
+    pub async fn load(data_dir: PathBuf, default_server_url: String) -> Arc<Self> {
+        let profile = match keychain::load_profile(&data_dir) {
+            Ok(profile) => profile.map(Credentials::from),
+            Err(error) => {
+                tracing::warn!(%error, "Failed to load remembered login profile");
+                None
+            }
+        };
+        let credentials = match keychain::load_credentials(&data_dir) {
+            Ok(credentials) => credentials.or(profile),
+            Err(error) => {
+                tracing::warn!(%error, "Failed to read saved session; showing login with the remembered server URL and username. Ad-hoc macOS code signature changes can deny keychain access");
+                profile
+            }
+        };
+        if let Some(credentials) = credentials.as_ref()
+            && let Err(error) = keychain::store_profile(&data_dir, &credentials.profile())
+        {
+            tracing::warn!(%error, "Failed to store remembered login profile");
+        }
+        let session = credentials
+            .as_ref()
+            .and_then(|credentials| credentials.session.clone());
+        let manager = Self::new(data_dir, default_server_url, credentials);
+        if let Some(session) = session {
+            let result = async {
+                let profile = manager.saved_profile().await.unwrap();
+                let (engine, _) = manager.get_or_build(None).await?;
+                engine
+                    .resume_saved_session(
+                        session.material(),
+                        &profile.username,
+                        &profile.device_name,
+                        true,
+                    )
+                    .await?;
+                manager.save_session(&engine).await;
+                manager.start_calendar_refresh(engine).await;
+                tracing::info!("Resumed saved desktop session");
+                Ok::<(), ClientError>(())
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(%error, "Failed to resume saved session; showing login with the remembered server URL and username");
+                if matches!(
+                    error,
+                    ClientError::Api {
+                        status: 401 | 403,
+                        ..
+                    } | ClientError::NoResumableDeviceIdentity
+                ) {
+                    manager.clear_credentials().await;
+                }
+                manager.discard_engine().await;
+            }
+        }
+        manager
+    }
+
     pub fn new(
         data_dir: PathBuf,
         default_server_url: String,
@@ -63,10 +112,7 @@ impl EngineManager {
             .read()
             .await
             .as_ref()
-            .map(|creds| SavedProfile {
-                username: creds.username.clone(),
-                device_name: creds.device_name.clone(),
-            })
+            .map(Credentials::profile)
     }
 
     /// Snapshot for `get-state`: the live engine state once built, otherwise a
@@ -146,14 +192,49 @@ impl EngineManager {
         self.bump_ready();
     }
 
-    /// Drop the current engine (on logout) so the next login/register can target a
-    /// different server without restarting the daemon. Also forgets the stored
-    /// profile, since the credentials have just been cleared.
     pub async fn clear(&self) {
         self.stop_calendar_refresh().await;
+        self.clear_credentials().await;
         *self.slot.write().await = None;
-        *self.stored_creds.write().await = None;
         self.bump_ready();
+    }
+
+    async fn clear_credentials(&self) {
+        if let Err(error) = keychain::clear_credentials(&self.data_dir) {
+            tracing::warn!(%error, "Failed to clear saved session");
+        }
+        if let Some(credentials) = self.stored_creds.write().await.as_mut() {
+            credentials.session = None;
+        }
+    }
+
+    pub async fn save_session(&self, engine: &SyncEngine) {
+        let state = engine.get_state().await;
+        let Some(session) = state.session else {
+            return;
+        };
+        let Some(material) = engine.session_resume_material().await else {
+            return;
+        };
+        let credentials = Credentials {
+            username: session.username,
+            device_name: session.device_name,
+            server_url: session.server_url,
+            session: Some(material.into()),
+        };
+        let mut stored = self.stored_creds.write().await;
+        if stored.as_ref() == Some(&credentials) {
+            return;
+        }
+        if let Err(error) = keychain::store_profile(&self.data_dir, &credentials.profile()) {
+            tracing::warn!(%error, "Failed to store remembered login profile");
+        }
+        if let Err(error) = keychain::store_credentials(&self.data_dir, &credentials) {
+            tracing::warn!(%error, "Failed to save session credentials; login will be required after restart");
+            *stored = Some(Credentials::from(credentials.profile()));
+        } else {
+            *stored = Some(credentials);
+        }
     }
 
     /// Watch handle for engine install/clear events so the state watcher can
@@ -185,9 +266,19 @@ impl EngineManager {
             return;
         };
         if state.session.is_some() {
+            self.save_session(engine).await;
             self.start_calendar_refresh(engine.clone()).await;
         } else {
             self.stop_calendar_refresh().await;
+            if self
+                .stored_creds
+                .read()
+                .await
+                .as_ref()
+                .is_some_and(|credentials| credentials.session.is_some())
+            {
+                self.clear_credentials().await;
+            }
         }
     }
 
@@ -221,7 +312,22 @@ fn normalize_server_url(url: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use tracing::instrument::WithSubscriber;
+
     use super::*;
+
+    struct Log(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn manager(name: &str, stored: Option<Credentials>) -> Arc<EngineManager> {
         let dir = std::env::temp_dir().join(format!("clipper-engine-manager-test-{name}"));
@@ -233,7 +339,92 @@ mod tests {
             device_name: "Test Device".to_string(),
             server_url: server_url.to_string(),
             username: username.to_string(),
+            session: None,
         }
+    }
+
+    #[tokio::test]
+    async fn restart_remembers_server_and_username_without_session_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        keychain::store_profile(
+            directory.path(),
+            &creds("https://stored.example", "alice").profile(),
+        )
+        .unwrap();
+        let manager =
+            EngineManager::load(directory.path().into(), "http://127.0.0.1:8787".into()).await;
+        let state = manager.current_state().await;
+        assert!(state.session.is_none());
+        let profile = state.saved_profile.unwrap();
+        assert_eq!(profile.server_url, "https://stored.example");
+        assert_eq!(profile.username, "alice");
+        let (engine, _) = manager.get_or_build(None).await.unwrap();
+        assert_eq!(engine.base_url(), profile.server_url);
+        assert_eq!(
+            engine.get_state().await.saved_profile.unwrap().server_url,
+            profile.server_url
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_read_failure_keeps_login_prefill() {
+        let directory = tempfile::tempdir().unwrap();
+        keychain::store_profile(
+            directory.path(),
+            &creds("https://stored.example", "alice").profile(),
+        )
+        .unwrap();
+        std::fs::create_dir(directory.path().join("credentials.json")).unwrap();
+        assert!(keychain::load_credentials(directory.path()).is_err());
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let output = Arc::clone(&log);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Log(Arc::clone(&output)))
+            .finish();
+        let manager = EngineManager::load(directory.path().into(), "http://127.0.0.1:8787".into())
+            .with_subscriber(subscriber)
+            .await;
+        assert!(manager.engine().await.is_none());
+        let state = manager.current_state().await;
+        assert!(state.session.is_none());
+        let profile = state.saved_profile.unwrap();
+        assert_eq!(profile.server_url, "https://stored.example");
+        assert_eq!(profile.username, "alice");
+        assert!(directory.path().join("credentials.json").is_dir());
+        let log = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("Failed to read saved session"));
+        assert!(log.contains("showing login with the remembered server URL and username"));
+        assert!(log.contains("code signature changes can deny keychain access"));
+    }
+
+    #[tokio::test]
+    async fn missing_device_identity_falls_back_to_remembered_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut credentials = creds("https://stored.example", "alice");
+        credentials.session = Some(keychain::StoredSession {
+            token: zeroize::Zeroizing::new("saved-token".into()),
+            data_key: zeroize::Zeroizing::new([7; 32]),
+            device_identity_wrapping_key: zeroize::Zeroizing::new([8; 32]),
+            last_confirmed_at: chrono::Utc::now().timestamp_millis(),
+        });
+        keychain::store_credentials(directory.path(), &credentials).unwrap();
+        let manager =
+            EngineManager::load(directory.path().into(), "http://127.0.0.1:8787".into()).await;
+        assert!(manager.engine().await.is_none());
+        let profile = manager.current_state().await.saved_profile.unwrap();
+        assert_eq!(profile.server_url, "https://stored.example");
+        assert_eq!(profile.username, "alice");
+        assert!(
+            keychain::load_credentials(directory.path())
+                .unwrap()
+                .is_none()
+        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.path().join("profile.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved.as_object().unwrap().len(), 3);
+        assert!(saved.get("session").is_none());
     }
 
     #[tokio::test]
@@ -323,10 +514,13 @@ mod tests {
         let profile = state.saved_profile.expect("prefill present");
         assert_eq!(profile.username, "bob");
         assert_eq!(profile.device_name, "Test Device");
+        assert_eq!(profile.server_url, "https://stored.example");
 
-        // Clearing forgets the prefill, matching the cleared keychain on logout.
         mgr.clear().await;
-        assert!(mgr.current_state().await.saved_profile.is_none());
+        assert_eq!(
+            mgr.current_state().await.saved_profile.unwrap().server_url,
+            "https://stored.example"
+        );
     }
 
     #[tokio::test]

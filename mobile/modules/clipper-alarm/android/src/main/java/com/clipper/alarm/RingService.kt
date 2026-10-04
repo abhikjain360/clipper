@@ -110,6 +110,11 @@ class RingService : Service() {
         val canSnooze = intent.getBooleanExtra(AlarmIntents.EXTRA_CAN_SNOOZE, true)
         val alarm = PlannedAlarm(itemId, occurrenceKey, label, fireAt,
             intent.getLongExtra(AlarmIntents.EXTRA_START, fireAt), canSnooze)
+        val plan = AlarmMirror.loadOrNull(this)
+        if (!canSnooze && plan != null && plan.none { sameAlarm(it, alarm) }) {
+            Log.i(TAG, "Ignoring a step timer that is no longer planned")
+            return ringingResult(startId)
+        }
         if (ringingAlarms.none { sameAlarm(it.alarm, alarm) }) {
             ringingAlarms.add(RingingAlarm(alarm, generation))
         }

@@ -8,6 +8,7 @@ import {
     KitchenCard,
     kitchenZone,
     Loading,
+    localTime,
     useKitchenData,
     type ErrorHandler,
 } from "./shared";
@@ -42,6 +43,25 @@ export function RecipeList({
                 </Button>
             </XStack>
             <Loading loading={loading} failed={failed} />
+            {value && value.open_sessions.length > 0 && (
+                <KitchenCard>
+                    <H2 size="$5">Cooking now</H2>
+                    {value.open_sessions.map((session) => (
+                        <YStack key={session.recipe_id} gap="$1">
+                            <Link
+                                href={`/kitchen/${session.recipe_id}`}
+                                className="kitchen-recipe-link"
+                            >
+                                {session.title}
+                            </Link>
+                            <Text color="#9aa4ad">
+                                Started {localTime(session.started_at_millis)}
+                                {session.deleted ? " · Recipe deleted" : ""}
+                            </Text>
+                        </YStack>
+                    ))}
+                </KitchenCard>
+            )}
             {!loading && !failed && !search.trim() && value?.next_block && (
                 <KitchenCard>
                     <H2 size="$5">

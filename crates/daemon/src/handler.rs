@@ -23,7 +23,7 @@ use zeroize::Zeroize;
 use crate::{
     clients::ClientManager,
     engine_manager::EngineManager,
-    keychain::{self, Credentials},
+    keychain,
     protocol::{
         ActualsBetweenParams, AddCalendarSourceParams, AuthChallenge, AuthenticateResult,
         ClipboardPayloadResult, CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest,
@@ -734,21 +734,8 @@ async fn cmd_login(id: String, params: LoginParams, manager: &EngineManager) -> 
         .await
     {
         Ok(()) => {
+            manager.save_session(&engine).await;
             manager.start_calendar_refresh(engine.clone()).await;
-            // Store credentials in Keychain
-            let url = engine.base_url();
-            let state = engine.get_state().await;
-            let creds = Credentials {
-                device_name: device_name.to_string(),
-                server_url: url,
-                username: state
-                    .session
-                    .map(|session| session.username)
-                    .unwrap_or(username),
-            };
-            if let Err(e) = keychain::store_credentials(&creds) {
-                warn!("Failed to store server profile: {}", e);
-            }
             DaemonResponse::success(id, None)
         }
         Err(e) => {
@@ -796,16 +783,8 @@ async fn cmd_register(
         .await
     {
         Ok(username) => {
+            manager.save_session(&engine).await;
             manager.start_calendar_refresh(engine.clone()).await;
-            let url = engine.base_url();
-            let creds = Credentials {
-                device_name: device_name.to_string(),
-                server_url: url,
-                username: username.clone(),
-            };
-            if let Err(e) = keychain::store_credentials(&creds) {
-                warn!("Failed to store server profile: {}", e);
-            }
             json_success(id, RegisterResult { username })
         }
         Err(e) => {
@@ -828,14 +807,12 @@ async fn cmd_logout(
     manager.stop_calendar_refresh().await;
     // Nothing to tear down if the user never logged in this daemon lifetime.
     let Some(engine) = manager.engine().await else {
+        manager.clear().await;
         return json_success(id, clipper_client::engine::LogoutOutcome::SignedOut);
     };
     match engine.logout(cancel_running_work).await {
         Ok(outcome) => {
             if outcome == clipper_client::engine::LogoutOutcome::SignedOut {
-                if let Err(e) = keychain::clear_credentials() {
-                    warn!("Failed to clear stored server profile: {}", e);
-                }
                 manager.clear().await;
             } else {
                 manager.start_calendar_refresh(engine.clone()).await;
@@ -1138,6 +1115,10 @@ fn platform_name() -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "session_tests.rs"]
+mod session_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1146,7 +1127,12 @@ mod tests {
         let (client, daemon) = tokio::net::UnixStream::pair().unwrap();
         let (read_half, write_half) = daemon.into_split();
         let writer = Arc::new(Mutex::new(write_half));
-        let manager = EngineManager::new(PathBuf::new(), "http://127.0.0.1:8787".into(), None);
+        let directory = tempfile::tempdir().unwrap();
+        let manager = EngineManager::new(
+            directory.path().into(),
+            "http://127.0.0.1:8787".into(),
+            None,
+        );
         let clients = Arc::new(ClientManager::new());
         let slots = Arc::new(Semaphore::new(MAX_IPC_REQUESTS_IN_FLIGHT));
         let _permits = Arc::clone(&slots)
@@ -1195,7 +1181,12 @@ mod tests {
         let (read_half, write_half) = daemon.into_split();
         let writer = Arc::new(Mutex::new(write_half));
         let held_writer = Arc::clone(&writer);
-        let manager = EngineManager::new(PathBuf::new(), "http://127.0.0.1:8787".into(), None);
+        let directory = tempfile::tempdir().unwrap();
+        let manager = EngineManager::new(
+            directory.path().into(),
+            "http://127.0.0.1:8787".into(),
+            None,
+        );
         let task = tokio::spawn(run_connection(
             BufReader::new(read_half),
             writer,

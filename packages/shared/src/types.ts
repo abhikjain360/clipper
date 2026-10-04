@@ -251,6 +251,7 @@ export type DeviceInfo = {
 export type SavedProfile = {
   username: string;
   device_name: string;
+  server_url: string;
 };
 
 export type AppState = {

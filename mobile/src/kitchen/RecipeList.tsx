@@ -4,7 +4,7 @@ import { Search } from "lucide-react-native";
 import { useCallback, useState } from "react";
 import { H2, Input, ScrollView, Text, XStack, YStack } from "tamagui";
 import { colors, GymCard, Muted } from "../gym/GymUi";
-import { blockTime, deviceZone, kitchen, useKitchenView } from "./kitchenClient";
+import { blockTime, deviceZone, kitchen, localTime, useKitchenView } from "./kitchenClient";
 import { LoadStatus } from "./KitchenUi";
 
 export function RecipeList({
@@ -38,6 +38,31 @@ export function RecipeList({
       <LoadStatus loading={loading} failed={failed} onRetry={reload} />
       <ScrollView flex={1} keyboardShouldPersistTaps="always">
         <YStack gap="$3" pb="$8">
+          {view && view.openSessions.length > 0 && (
+            <GymCard highlighted>
+              <YStack gap="$2">
+                <Text fontWeight="600">Cooking now</Text>
+                {view.openSessions.map((session) => (
+                  <YStack
+                    key={session.recipeId}
+                    gap="$1"
+                    py="$2"
+                    onPress={() => onOpen(session.recipeId)}
+                    pressStyle={{ opacity: 0.6 }}
+                    accessibilityRole="button"
+                    aria-label={`Open ${session.title}`}
+                  >
+                    <Text fontWeight="600" fontSize={18}>
+                      {session.title}
+                    </Text>
+                    <Muted>
+                      {`Started ${localTime(session.startedAtMillis)}${session.deleted ? " · Recipe deleted" : ""}`}
+                    </Muted>
+                  </YStack>
+                ))}
+              </YStack>
+            </GymCard>
+          )}
           {search.trim() === "" && view?.nextBlock && (
             <GymCard highlighted>
               <YStack gap="$2">

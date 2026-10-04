@@ -735,6 +735,20 @@ Each entry has:
 
 ## Bugs
 
+### 154. Desktop loses its session and server URL after the daemon restarts
+
+- **Status:** fixed in the working tree; not committed.
+- **Severity:** medium. On main.
+- **Where:** daemon credential storage and startup, saved profiles, desktop login form.
+- **What happened:** the daemon stored only profile metadata and waited for a
+  passphrase at startup. It never saved or resumed the token and derived keys.
+  Saved app profiles omitted the server URL, and the desktop form used the build default.
+- **Fix:** keep the token and derived keys in the macOS keychain and resume the
+  existing device session at startup. Keep the non-secret profile in a private
+  file and use its server URL and username for sign-in, including when a changed
+  ad-hoc code signature denies keychain access. Log credential read and resume failures.
+  Logout removes the saved session and keeps the login prefill.
+
 ### 143. Android startup hangs when the fingerprint prompt cannot start
 
 - **Status:** fixed; device QA pending.

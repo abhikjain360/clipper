@@ -46,33 +46,39 @@ impl SyncEngine {
                 return Ok(());
             }
             for id in ids {
-                match self.tombstone_schedule_object(&id).await {
+                match self.tombstone_override(&id).await {
                     Ok(()) | Err(ClientError::Api { status: 409, .. }) => {}
-                    Err(error @ ClientError::Api { status: 400, .. })
-                        if matches!(&error, ClientError::Api { error, .. }
-                            if error.code == ApiErrorCode::ObjectDeleteUnsupported) =>
-                    {
-                        let epoch = self.history_epoch.load(Ordering::SeqCst);
-                        let credentials = self.credentials_for_session(epoch).await?;
-                        let head = credentials.api.get_object_head(&id).await?;
-                        if head.id.to_string() != id
-                            || head.kind != ObjectKind::Schedule
-                            || head.envelope.body.operation != ObjectEnvelopeOperation::Delete
-                        {
-                            return Err(error);
-                        }
-                        verify_object_head_envelope(&head)?;
-                        self.accept_recovered_head(
-                            epoch,
-                            &credentials.api,
-                            &credentials.encryption_key,
-                            &head,
-                        )
-                        .await?;
-                    }
                     Err(error) => return Err(error),
                 }
             }
+        }
+    }
+
+    async fn tombstone_override(&self, id: &str) -> Result<(), ClientError> {
+        match self.tombstone_schedule_object(id).await {
+            Err(error @ ClientError::Api { status: 400, .. })
+                if matches!(&error, ClientError::Api { error, .. }
+                    if error.code == ApiErrorCode::ObjectDeleteUnsupported) =>
+            {
+                let epoch = self.history_epoch.load(Ordering::SeqCst);
+                let credentials = self.credentials_for_session(epoch).await?;
+                let head = credentials.api.get_object_head(id).await?;
+                if head.id.to_string() != id
+                    || head.kind != ObjectKind::Schedule
+                    || head.envelope.body.operation != ObjectEnvelopeOperation::Delete
+                {
+                    return Err(error);
+                }
+                verify_object_head_envelope(&head)?;
+                self.accept_recovered_head(
+                    epoch,
+                    &credentials.api,
+                    &credentials.encryption_key,
+                    &head,
+                )
+                .await
+            }
+            result => result,
         }
     }
 
@@ -257,12 +263,15 @@ impl SyncEngine {
             &NAMESPACE,
             format!(
                 "{}:{}",
-                item.id,
+                base.object_id,
                 crate::schedule::occurrence_key(&recurrence_id)
             )
             .as_bytes(),
         );
         let id = override_id.to_string();
+        for (other, _, _) in existing.iter().filter(|(other, _, _)| **other != id) {
+            self.tombstone_override(other).await?;
+        }
         let entry = OccurrenceOverride {
             base,
             override_data: OccurrenceOverrideData {

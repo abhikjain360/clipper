@@ -25,9 +25,19 @@ pub struct KitchenRecipeSummary {
     pub next_block: Option<KitchenBlock>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct KitchenOpenSession {
+    pub recipe_id: String,
+    pub title: String,
+    pub started_at_millis: i64,
+    pub deleted: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct KitchenRecipeList {
+    pub open_sessions: Vec<KitchenOpenSession>,
     pub next_block: Option<KitchenBlock>,
     pub next_block_recipes: Vec<KitchenRecipeSummary>,
     pub recipes: Vec<KitchenRecipeSummary>,

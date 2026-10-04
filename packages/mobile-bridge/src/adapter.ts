@@ -262,6 +262,7 @@ function mapAppState(state: NativeAppState): AppState {
       ? {
           device_name: state.savedProfile.deviceName,
           username: state.savedProfile.username,
+          server_url: state.savedProfile.serverUrl,
         }
       : null,
     session: state.session

@@ -7,6 +7,7 @@ export type {
   KitchenIngredient,
   KitchenIngredientGroup,
   KitchenNutrition,
+  KitchenOpenSession,
   KitchenPantry,
   KitchenPantryCategory,
   KitchenPantryChange,

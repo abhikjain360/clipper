@@ -628,6 +628,14 @@ async fn live_occurrence_conflicts_and_existing_duplicates_keep_the_series() {
         .move_occurrence(&id, key, tomorrow.and_hms_opt(12, 0, 0).unwrap(), None)
         .await
         .unwrap();
+    let live_overrides: Vec<_> = first
+        .local_store
+        .schedule_records_with_ids()
+        .await
+        .into_iter()
+        .filter_map(|(id, record)| matches!(record, ScheduleRecord::Override(_)).then_some(id))
+        .collect();
+    assert_eq!(live_overrides, [override_id.as_str()]);
     let expanded = first.expand_schedule(&from, &to, "UTC").await.unwrap();
     let occurrence = expanded
         .iter()
@@ -651,6 +659,58 @@ async fn live_occurrence_conflicts_and_existing_duplicates_keep_the_series() {
     assert_eq!(
         serde_json::to_value(first.expand_schedule(&from, &to, "UTC").await.unwrap()).unwrap(),
         serde_json::to_value(original).unwrap()
+    );
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_copies_of_one_item_keep_their_own_occurrence_changes() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let engine =
+        register_proxy_engine(&format!("http://{address}"), &temp.path().join("first")).await;
+    let tomorrow = Utc::now().date_naive().succ_opt().unwrap();
+    let item = ScheduleItem {
+        break_reminders: false,
+        id: ScheduleItemId::new(),
+        title: "Daily planning".into(),
+        span: ScheduleSpan::Timed {
+            start: TimedStart::Floating(tomorrow.and_hms_opt(9, 0, 0).unwrap()),
+            duration: BlockDuration::from_minutes(45).unwrap(),
+        },
+        recurrence: Recurrence::Every(clipper_schedule::Cadence::each(
+            clipper_schedule::Frequency::Daily,
+        )),
+        reference: None,
+        alarm: None,
+    };
+    let original = engine.create_schedule_item(item.clone()).await.unwrap();
+    let copy = engine.create_schedule_item(item).await.unwrap();
+    let from = tomorrow.and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let to = from + chrono::TimeDelta::days(1);
+    let occurrences = engine
+        .expand_schedule(&from.to_rfc3339(), &to.to_rfc3339(), "UTC")
+        .await
+        .unwrap();
+    assert_eq!(occurrences.len(), 2);
+    let key = &occurrences[0].occurrence_key;
+
+    engine.cancel_occurrence(&original, key).await.unwrap();
+    engine
+        .move_occurrence(&copy, key, tomorrow.and_hms_opt(11, 0, 0).unwrap(), None)
+        .await
+        .unwrap();
+    let occurrences = engine
+        .expand_schedule(&from.to_rfc3339(), &to.to_rfc3339(), "UTC")
+        .await
+        .unwrap();
+    assert_eq!(
+        occurrences
+            .iter()
+            .map(|occurrence| chrono::DateTime::parse_from_rfc3339(&occurrence.start).unwrap())
+            .collect::<Vec<_>>(),
+        [tomorrow.and_hms_opt(11, 0, 0).unwrap().and_utc()]
     );
 }
 
@@ -2294,9 +2354,12 @@ async fn copy_session(engine: &SyncEngine, url: &str, data: &Path) -> Arc<SyncEn
     *copy.encryption_key.write().await = engine.encryption_key.read().await.clone();
     *copy.device_signing_key.write().await = engine.device_signing_key.read().await.clone();
     copy.state.write().await.session = engine.state.read().await.session.clone();
-    copy.local_store.set_profile(profile_id_from_encryption_key(
-        &copy.current_encryption_key().await.unwrap(),
-    ));
+    let key = copy.current_encryption_key().await.unwrap();
+    copy.local_store
+        .set_profile(profile_id_from_encryption_key(&key));
+    copy.open_app_data(copy.history_epoch.load(Ordering::SeqCst), &key)
+        .await
+        .unwrap();
     copy
 }
 

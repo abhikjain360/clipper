@@ -257,6 +257,7 @@ impl SyncEngine {
         state.saved_profile = username.map(|username| SavedProfile {
             username,
             device_name: device_name.unwrap_or_default(),
+            server_url: self.base_url(),
         });
         drop(state);
         self.bump_version();
@@ -663,6 +664,7 @@ impl SyncEngine {
             state.saved_profile = Some(SavedProfile {
                 username,
                 device_name: device_name.to_string(),
+                server_url: self.base_url(),
             });
             state.connection_status = ConnectionStatus::Connecting;
             state.offline = self.offline.load(Ordering::SeqCst);
@@ -3093,7 +3095,7 @@ impl SyncEngine {
             );
         }
         #[cfg(not(target_family = "wasm"))]
-        alarms.extend(self.kitchen_timer_alarms(device, now, until).await);
+        alarms.extend(self.kitchen_timer_alarms(device, until).await?);
         alarms.sort_by_key(|alarm| alarm.fire_at_millis);
         Ok(alarms)
     }
@@ -6670,6 +6672,13 @@ mod tests {
         engine.local_store.set_profile("alarm-profile".into());
         open_session(&engine).await;
         *engine.encryption_key.write().await = Some(Zeroizing::new(HISTORY_TEST_KEY));
+        engine
+            .open_app_data(
+                engine.history_epoch.load(Ordering::SeqCst),
+                &HISTORY_TEST_KEY,
+            )
+            .await
+            .unwrap();
         let own: DeviceId = engine.current_device_id().await.unwrap().parse().unwrap();
         let other = DeviceId::from(uuid::Uuid::new_v4());
         let now = chrono::Utc::now();

@@ -108,7 +108,8 @@ One cooking session per row:
 
 Indexed by `recipe`. The checklist and the timers are part of the session, so
 they survive a restart, show on every device and start empty for each cook.
-One person cooks on one device at a time, so last write wins is enough.
+Last write wins within one row. Two devices that each start the same recipe
+offline write two rows, which the screens merge (see "Merging sessions").
 
 ### kitchen.plans (row collection, last write wins)
 
@@ -178,8 +179,11 @@ Quantities are formatted like this:
 - a step names each referenced ingredient with its scaled quantity, for
   example `Slice the Onion (3 pieces)`.
 
-- **Recipe list**: newest first, searchable by title, summary, cuisine and
-  tags; every search word must appear in one of them. A recipe with a coming
+- **Recipe list**: starts with Cooking now, one entry for each recipe with an
+  unfinished session, including a recipe that was deleted, so every session
+  can be reached and finished. Then the recipes, newest first, searchable by
+  title, summary, cuisine and tags; every search word must appear in one of
+  them. A recipe with a coming
   plan shows the block's day and time; coming plans are looked up in the next
   60 days of the schedule.
 - **Recipe page**: summary, times, nutrition per serving, ingredients by
@@ -190,18 +194,26 @@ Quantities are formatted like this:
   session is open it shows and changes the session's servings.
 - **Cooking session**: Start cooking, ticking an ingredient or a step, or
   starting a timer opens a session from the revision and servings the page
-  shows. A recipe has at most one session in use: the unfinished one with the
-  newest start. Two devices that each opened one offline keep both rows until
-  the next session change, which deletes the older ones. Finish asks "How was
-  it?" and saves the notes; Discard deletes the row.
+  shows. Finish asks "How was it?" and saves the notes; Discard deletes the
+  row.
+- **Merging sessions**: two devices that each opened a session for the same
+  recipe offline both keep their rows. The page shows them merged into one,
+  and the next session change writes the merged session to the row that
+  started first and deletes the others. The merged session has every ticked
+  ingredient and done step (a step done on both keeps the earlier time),
+  every timer with the device that started it (a step and timer pair set on
+  both keeps the later session's), the earliest start, and the later
+  session's revision and servings only if the earlier session has no ticks
+  and no timers; otherwise the earlier session's.
 - **Session revision**: while a session is open, the page shows and changes
   the recipe revision the session started from, so step and timer indexes and
   timer minutes stay those of that revision. When the recipe has a newer
   revision, the page says so; the newer one applies from the next cook.
   Reading an older revision needs the server once per app run; the app keeps
   it in memory until sign-out.
-- **Deleted recipe**: an open session of a deleted recipe still shows from its
-  revision, without ticks or timers, and can be finished or discarded, which
+- **Deleted recipe**: an open session of a deleted recipe stays under Cooking
+  now, titled from the revision the app last read or "Deleted recipe", and
+  its page still shows from its revision, without ticks or timers, and can be finished or discarded, which
   returns to the recipe list. Its timers do not ring.
 - **Step timers**: each can be started, paused, resumed, extended by one
   minute and cleared. Starting one records this device as the one it rings on;
@@ -227,15 +239,19 @@ the app closed or Do Not Disturb on. It rings only on the device that started
 it.
 
 - The alarm plan includes one alarm for each running timer whose device is
-  this one, in the session in use of each recipe that still exists, labelled
-  with the timer label and the recipe title, for example
-  `Simmer · French onion soup`. Its item is the session row id and its
-  occurrence is `timer:<step>:<timer>`. Alarms carry `can_snooze`, which is
-  false for step timers.
-- A timer stays in the plan for ten minutes after it ends, the time a phone
-  rings before it silences itself. When a new plan no longer holds a ringing
-  step timer, Android stops ringing it. Alarms that can snooze are never
-  stopped by a new plan.
+  this one, in every unfinished session of a recipe that still exists, so a
+  timer keeps ringing on its own device before and after sessions merge. It
+  is labelled with the timer label and the recipe title, for example
+  `Simmer · French onion soup`. Its item is the recipe id and its occurrence
+  is `timer:<step>:<timer>`. Alarms carry `can_snooze`, which is false for
+  step timers.
+- A timer stays in the plan with its end time until it is cleared, its step
+  is ticked or the session ends, also while it waits behind another alarm.
+  When a new plan no longer holds a ringing or waiting step timer, Android
+  stops it, and a step timer that reaches the ring service after it left the
+  plan does not ring. Alarms that can snooze are never stopped by a new plan.
+- If the alarm list cannot be read, the app sends no new plan, so the phone
+  keeps the previous one.
 - A step timer never replaces or silences a ringing alarm. While an alarm
   that can snooze rings, a step timer that fires waits; it rings on screen
   once the alarm is snoozed or dismissed. Each ringing alarm keeps its own

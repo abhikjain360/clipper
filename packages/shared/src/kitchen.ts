@@ -21,7 +21,15 @@ export type KitchenRecipeSummary = {
   next_block: KitchenBlock | null;
 };
 
+export type KitchenOpenSession = {
+  recipe_id: string;
+  title: string;
+  started_at_millis: number;
+  deleted: boolean;
+};
+
 export type KitchenRecipeList = {
+  open_sessions: KitchenOpenSession[];
   next_block: KitchenBlock | null;
   next_block_recipes: KitchenRecipeSummary[];
   recipes: KitchenRecipeSummary[];

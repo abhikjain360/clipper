@@ -32,6 +32,40 @@ impl CookingSession {
         self.finished_at.is_none()
     }
 
+    pub fn has_progress(&self) -> bool {
+        !self.gathered.is_empty() || !self.steps_done.is_empty() || !self.timers.is_empty()
+    }
+
+    pub fn merge(mut self, newer: CookingSession) -> CookingSession {
+        if !self.has_progress() {
+            self.recipe_revision = newer.recipe_revision;
+            self.servings = newer.servings;
+        }
+        self.started_at = self.started_at.min(newer.started_at);
+        for ingredient in newer.gathered {
+            if !self.is_gathered(&ingredient) {
+                self.gathered.push(ingredient);
+            }
+        }
+        for done in newer.steps_done {
+            match self
+                .steps_done
+                .iter_mut()
+                .find(|entry| entry.step == done.step)
+            {
+                Some(entry) => entry.done_at = entry.done_at.min(done.done_at),
+                None => self.steps_done.push(done),
+            }
+        }
+        for timer in newer.timers {
+            self.timers
+                .retain(|entry| (entry.step, entry.timer) != (timer.step, timer.timer));
+            self.timers.push(timer);
+        }
+        self.notes = self.notes.or(newer.notes);
+        self
+    }
+
     pub fn is_gathered(&self, ingredient: &str) -> bool {
         self.gathered.iter().any(|id| id == ingredient)
     }

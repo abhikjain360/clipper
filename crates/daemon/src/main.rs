@@ -284,25 +284,7 @@ async fn run() -> DaemonResult<()> {
         }
     }
 
-    // Determine server URL: prefer stored profile, fall back to CLI arg.
-    // The passphrase is intentionally not persisted, so the daemon waits for
-    // the app to provide it after startup.
-    let loaded_creds = match keychain::load_credentials() {
-        Ok(Some(creds)) => {
-            info!("Found stored server profile");
-            Some(creds)
-        }
-        Ok(None) => None,
-        Err(e) => {
-            warn!("Failed to load stored server profile: {}", e);
-            None
-        }
-    };
-    // The engine is built lazily on the first login/register using the URL that
-    // request carries; until then we only know the default and the stored
-    // profile (used to prefill the login form). The passphrase is never
-    // persisted, so there is nothing to authenticate at startup anyway.
-    let engine_manager = EngineManager::new(data_dir.clone(), default_server_url, loaded_creds);
+    let engine_manager = EngineManager::load(data_dir.clone(), default_server_url).await;
 
     let client_mgr = Arc::new(ClientManager::new());
 

@@ -181,7 +181,20 @@ class RingServiceTest {
         assertTrue(requireNotNull(activity).get().isFinishing)
     }
 
+    @Test
+    fun timerMissingFromThePlanDoesNotRing() {
+        val normal = normalAlarm()
+        deliver(normal)
+        RingService.start(context, timer(), AlarmMirror.generation(context))
+        handleRequest()
+
+        assertDisplayed(normal)
+        service.get().onStartCommand(action("Dismiss"), 0, ++startId)
+        assertStopped()
+    }
+
     private fun deliver(alarm: PlannedAlarm) {
+        if (!alarm.canSnooze) AlarmMirror.save(context, AlarmMirror.load(context) + alarm)
         RingService.start(context, alarm, AlarmMirror.generation(context))
         handleRequest()
     }

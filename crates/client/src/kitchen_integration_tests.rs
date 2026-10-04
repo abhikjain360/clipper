@@ -176,7 +176,7 @@ async fn live_an_open_session_cooks_from_the_revision_it_started_from() {
 
 #[tokio::test]
 #[ignore = "build clipper-server first; starts an isolated local server"]
-async fn live_two_open_sessions_of_one_recipe_settle_on_the_newest() {
+async fn live_open_sessions_from_two_devices_merge_and_keep_their_timers() {
     crate::ensure_crypto_provider();
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path();
@@ -189,63 +189,118 @@ async fn live_two_open_sessions_of_one_recipe_settle_on_the_newest() {
             "kitchen.recipes",
             None,
             None,
-            onion_soup(json!([simmer(20)])),
+            onion_soup(json!([
+                simmer(20),
+                {"text": "Taste the {onion}.", "timers": [{"label": "Taste", "minutes": 2}]}
+            ])),
         )
         .await
         .unwrap();
-    let device = second.current_device_id().await.unwrap();
+    let first_device = first.current_device_id().await.unwrap();
+    let second_device = second.current_device_id().await.unwrap();
     let now = Utc::now();
-    let session = |started: i64, ends_in: i64| {
-        AppDataWrite::Value(json!({
-            "recipe": id,
-            "recipe_revision": 1,
-            "servings": 2,
-            "started_at": (now - TimeDelta::minutes(started)).to_rfc3339(),
-            "timers": [{
-                "step": 0,
-                "timer": 0,
-                "device_id": device,
-                "ends_at": (now + TimeDelta::minutes(ends_in)).to_rfc3339()
-            }]
-        }))
-    };
-    second
-        .write_app_data("kitchen.sessions", None, session(30, 5))
+    let at = |minutes: i64| (now + TimeDelta::minutes(minutes)).to_rfc3339();
+    let older = second
+        .write_app_data(
+            "kitchen.sessions",
+            None,
+            AppDataWrite::Value(json!({
+                "recipe": id,
+                "recipe_revision": 1,
+                "servings": 3,
+                "started_at": at(-40),
+                "gathered": ["onion"],
+                "timers": [{"step": 0, "timer": 0, "device_id": second_device, "ends_at": at(-30)}]
+            })),
+        )
         .await
         .unwrap();
-    let newer = first
-        .write_app_data("kitchen.sessions", None, session(20, -2))
+    first
+        .write_app_data(
+            "kitchen.sessions",
+            None,
+            AppDataWrite::Value(json!({
+                "recipe": id,
+                "recipe_revision": 1,
+                "servings": 5,
+                "started_at": at(-10),
+                "steps_done": [{"step": 1, "done_at": at(-1)}],
+                "timers": [{"step": 1, "timer": 0, "device_id": first_device, "ends_at": at(15)}]
+            })),
+        )
         .await
         .unwrap();
     eventually("the second device holds both sessions", async || {
         second
             .kitchen_recipe(&id, None, "UTC")
             .await
-            .is_ok_and(|recipe| recipe.session.is_some_and(|session| session.id == newer))
+            .is_ok_and(|recipe| recipe.steps[1].done)
     })
     .await;
-    let alarms = second.next_alarms(24, "UTC").await.unwrap();
+    let recipe = second.kitchen_recipe(&id, None, "UTC").await.unwrap();
+    let session = recipe.session.unwrap();
+    assert_eq!((session.id.as_str(), session.servings), (older.as_str(), 3));
     assert_eq!(
+        session.started_at_millis,
+        (now - TimeDelta::minutes(40)).timestamp_millis()
+    );
+    assert!(recipe.groups[0].ingredients[0].gathered);
+    assert_eq!(
+        (
+            recipe.steps[0].timers[0].state,
+            recipe.steps[0].timers[0].rings_here
+        ),
+        (KitchenTimerState::Done, true)
+    );
+    assert_eq!(
+        (
+            recipe.steps[1].timers[0].state,
+            recipe.steps[1].timers[0].rings_here
+        ),
+        (KitchenTimerState::Running, false)
+    );
+    let planned = |alarms: Vec<AlarmView>| {
         alarms
-            .iter()
-            .map(|alarm| alarm.item_id.as_str())
-            .collect::<Vec<_>>(),
-        [newer.as_str()]
+            .into_iter()
+            .map(|alarm| (alarm.item_id, alarm.occurrence_key, alarm.fire_at_millis))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        planned(second.next_alarms(24, "UTC").await.unwrap()),
+        [(
+            id.clone(),
+            "timer:0:0".to_string(),
+            (now - TimeDelta::minutes(30)).timestamp_millis()
+        )]
+    );
+    let first_timer = [(
+        id.clone(),
+        "timer:1:0".to_string(),
+        (now + TimeDelta::minutes(15)).timestamp_millis(),
+    )];
+    assert_eq!(
+        planned(first.next_alarms(24, "UTC").await.unwrap()),
+        first_timer
     );
 
     second
-        .kitchen_change_session(&id, 1, 2, timer(KitchenTimerAction::Clear))
+        .kitchen_change_session(&id, 1, 3, timer(KitchenTimerAction::Clear))
         .await
         .unwrap();
-    let open = second
-        .query_app_data(
-            "SELECT id FROM kitchen.sessions WHERE json_extract(value, '$.finished_at') IS NULL",
-        )
-        .await
-        .unwrap();
-    assert_eq!(open.len(), 1);
-    assert_eq!(open[0]["id"], newer.as_str());
     assert!(second.next_alarms(24, "UTC").await.unwrap().is_empty());
+    let open_sql =
+        "SELECT id FROM kitchen.sessions WHERE json_extract(value, '$.finished_at') IS NULL";
+    eventually("the first device holds the merged session", async || {
+        first
+            .query_app_data(open_sql)
+            .await
+            .is_ok_and(|open| open.len() == 1 && open[0]["id"] == older.as_str())
+    })
+    .await;
+    assert_eq!(
+        planned(first.next_alarms(24, "UTC").await.unwrap()),
+        first_timer
+    );
     first.stop_session_work().await;
     second.stop_session_work().await;
 }

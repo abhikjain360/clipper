@@ -2,34 +2,86 @@
 
 use std::path::Path;
 
+use clipper_client::engine::{SavedProfile, SessionResumeMaterial};
 use clipper_daemon_types::ipc_secret_cache::{IpcSecretCache, cached_secret, empty_cache};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 const SERVICE: &str = "com.clipper.daemon";
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 const ACCOUNT: &str = "credentials";
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 const IPC_SECRET_ACCOUNT: &str = "ipc-secret-v1";
 const IPC_SECRET_BYTES: usize = 32;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
-#[cfg(target_os = "linux")]
-const CREDENTIALS_FILE: &str = "profile.json";
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
+const CREDENTIALS_FILE: &str = "credentials.json";
+const PROFILE_FILE: &str = "profile.json";
+#[cfg(any(target_os = "linux", test))]
 const IPC_SECRET_FILE: &str = "ipc-secret-v1";
-#[cfg(target_os = "linux")]
 const PRIVATE_DIR_MODE: u32 = 0o700;
-#[cfg(target_os = "linux")]
 const PRIVATE_FILE_MODE: u32 = 0o600;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credentials {
     pub device_name: String,
     pub server_url: String,
     pub username: String,
+    pub session: Option<StoredSession>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredSession {
+    pub token: Zeroizing<String>,
+    pub data_key: Zeroizing<[u8; 32]>,
+    pub device_identity_wrapping_key: Zeroizing<[u8; 32]>,
+    pub last_confirmed_at: i64,
+}
+
+impl From<SessionResumeMaterial> for StoredSession {
+    fn from(material: SessionResumeMaterial) -> Self {
+        Self {
+            token: Zeroizing::new(material.token),
+            data_key: material.data_key,
+            device_identity_wrapping_key: material.device_identity_wrapping_key,
+            last_confirmed_at: material.last_confirmed_at,
+        }
+    }
+}
+
+impl StoredSession {
+    pub fn material(&self) -> SessionResumeMaterial {
+        SessionResumeMaterial {
+            token: self.token.to_string(),
+            data_key: self.data_key.clone(),
+            device_identity_wrapping_key: self.device_identity_wrapping_key.clone(),
+            last_confirmed_at: self.last_confirmed_at,
+        }
+    }
+}
+
+impl Credentials {
+    pub fn profile(&self) -> SavedProfile {
+        SavedProfile {
+            device_name: self.device_name.clone(),
+            server_url: self.server_url.clone(),
+            username: self.username.clone(),
+        }
+    }
+}
+
+impl From<SavedProfile> for Credentials {
+    fn from(profile: SavedProfile) -> Self {
+        Self {
+            device_name: profile.device_name,
+            server_url: profile.server_url,
+            username: profile.username,
+            session: None,
+        }
+    }
 }
 
 pub type KeychainResult<T> = Result<T, KeychainError>;
@@ -40,45 +92,30 @@ pub enum KeychainError {
     Encode(#[source] serde_json::Error),
     #[error("keychain entry decode failed: {0}")]
     Decode(#[source] serde_json::Error),
-    #[error("keychain entry is not valid UTF-8: {0}")]
-    Utf8(#[from] std::string::FromUtf8Error),
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(test)))]
     #[error("keychain store failed: {0}")]
     Store(String),
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(test)))]
     #[error("keychain read failed: {0}")]
     Read(String),
-    #[cfg(target_os = "linux")]
-    #[error("credential store path is unavailable")]
-    DataDirUnavailable,
-    #[cfg(target_os = "linux")]
     #[error("credential store I/O failed: {0}")]
     Io(#[from] std::io::Error),
 }
 
-#[cfg(target_os = "macos")]
-pub fn store_credentials(creds: &Credentials) -> KeychainResult<()> {
-    let json = serde_json::to_string(creds).map_err(KeychainError::Encode)?;
-    // Delete existing entry first (ignore error if it doesn't exist)
-    _ = security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT);
+#[cfg(all(target_os = "macos", not(test)))]
+pub fn store_credentials(_data_dir: &Path, creds: &Credentials) -> KeychainResult<()> {
+    let json = Zeroizing::new(serde_json::to_string(creds).map_err(KeychainError::Encode)?);
     security_framework::passwords::set_generic_password(SERVICE, ACCOUNT, json.as_bytes())
         .map_err(|e| KeychainError::Store(e.to_string()))?;
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-pub fn load_credentials() -> KeychainResult<Option<Credentials>> {
+#[cfg(all(target_os = "macos", not(test)))]
+pub fn load_credentials(_data_dir: &Path) -> KeychainResult<Option<Credentials>> {
     match security_framework::passwords::get_generic_password(SERVICE, ACCOUNT) {
         Ok(data) => {
-            let json = String::from_utf8(data)?;
-            let value: serde_json::Value =
-                serde_json::from_str(&json).map_err(KeychainError::Decode)?;
-            let had_legacy_passphrase = value.get("passphrase").is_some();
-            let creds: Credentials =
-                serde_json::from_value(value).map_err(KeychainError::Decode)?;
-            if had_legacy_passphrase {
-                store_credentials(&creds)?;
-            }
+            let data = Zeroizing::new(data);
+            let creds = serde_json::from_slice(&data).map_err(KeychainError::Decode)?;
             Ok(Some(creds))
         }
         Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
@@ -86,13 +123,16 @@ pub fn load_credentials() -> KeychainResult<Option<Credentials>> {
     }
 }
 
-#[cfg(target_os = "macos")]
-pub fn clear_credentials() -> KeychainResult<()> {
-    _ = security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT);
-    Ok(())
+#[cfg(all(target_os = "macos", not(test)))]
+pub fn clear_credentials(_data_dir: &Path) -> KeychainResult<()> {
+    match security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT) {
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
+        Err(error) => Err(KeychainError::Store(error.to_string())),
+    }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn load_or_create_ipc_secret_uncached(_data_dir: &Path) -> KeychainResult<Zeroizing<Vec<u8>>> {
     match security_framework::passwords::get_generic_password(SERVICE, IPC_SECRET_ACCOUNT) {
         Ok(secret) if secret.len() == IPC_SECRET_BYTES => Ok(Zeroizing::new(secret)),
@@ -130,30 +170,26 @@ fn load_or_create_ipc_secret_uncached(_data_dir: &Path) -> KeychainResult<Zeroiz
     }
 }
 
-#[cfg(target_os = "linux")]
-pub fn store_credentials(creds: &Credentials) -> KeychainResult<()> {
-    let json = serde_json::to_vec(creds).map_err(KeychainError::Encode)?;
-    write_private_file(&credentials_path()?, &json)?;
+#[cfg(any(target_os = "linux", test))]
+pub fn store_credentials(data_dir: &Path, creds: &Credentials) -> KeychainResult<()> {
+    let json = Zeroizing::new(serde_json::to_vec(creds).map_err(KeychainError::Encode)?);
+    write_private_file(&data_dir.join(CREDENTIALS_FILE), &json)?;
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-pub fn load_credentials() -> KeychainResult<Option<Credentials>> {
-    let Some(bytes) = read_optional_file(&credentials_path()?)? else {
+#[cfg(any(target_os = "linux", test))]
+pub fn load_credentials(data_dir: &Path) -> KeychainResult<Option<Credentials>> {
+    let Some(bytes) = read_optional_file(&data_dir.join(CREDENTIALS_FILE))? else {
         return Ok(None);
     };
-    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(KeychainError::Decode)?;
-    let had_legacy_passphrase = value.get("passphrase").is_some();
-    let creds: Credentials = serde_json::from_value(value).map_err(KeychainError::Decode)?;
-    if had_legacy_passphrase {
-        store_credentials(&creds)?;
-    }
+    let bytes = Zeroizing::new(bytes);
+    let creds = serde_json::from_slice(&bytes).map_err(KeychainError::Decode)?;
     Ok(Some(creds))
 }
 
-#[cfg(target_os = "linux")]
-pub fn clear_credentials() -> KeychainResult<()> {
-    match std::fs::remove_file(credentials_path()?) {
+#[cfg(any(target_os = "linux", test))]
+pub fn clear_credentials(data_dir: &Path) -> KeychainResult<()> {
+    match std::fs::remove_file(data_dir.join(CREDENTIALS_FILE)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
@@ -161,7 +197,7 @@ pub fn clear_credentials() -> KeychainResult<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn load_or_create_ipc_secret_uncached(data_dir: &Path) -> KeychainResult<Zeroizing<Vec<u8>>> {
     ensure_private_dir(data_dir)?;
     let path = data_dir.join(IPC_SECRET_FILE);
@@ -190,16 +226,18 @@ fn load_or_create_ipc_secret_uncached(data_dir: &Path) -> KeychainResult<Zeroizi
     }
 }
 
-#[cfg(target_os = "linux")]
-fn credentials_path() -> KeychainResult<std::path::PathBuf> {
-    let dir = dirs::data_dir()
-        .map(|base| base.join("Clipper"))
-        .ok_or(KeychainError::DataDirUnavailable)?;
-    ensure_private_dir(&dir)?;
-    Ok(dir.join(CREDENTIALS_FILE))
+pub fn store_profile(data_dir: &Path, profile: &SavedProfile) -> KeychainResult<()> {
+    let json = serde_json::to_vec(profile).map_err(KeychainError::Encode)?;
+    write_private_file(&data_dir.join(PROFILE_FILE), &json)?;
+    Ok(())
 }
 
-#[cfg(target_os = "linux")]
+pub fn load_profile(data_dir: &Path) -> KeychainResult<Option<SavedProfile>> {
+    read_optional_file(&data_dir.join(PROFILE_FILE))?
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(KeychainError::Decode))
+        .transpose()
+}
+
 fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
@@ -246,13 +284,11 @@ fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 fn current_euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() as u32 }
 }
 
-#[cfg(target_os = "linux")]
 fn read_optional_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     reject_non_regular_existing_file(path)?;
     match std::fs::read(path) {
@@ -262,7 +298,6 @@ fn read_optional_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::{
         io::Write,
@@ -286,7 +321,6 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 fn reject_non_regular_existing_file(path: &Path) -> std::io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {

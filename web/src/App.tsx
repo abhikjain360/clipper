@@ -186,7 +186,11 @@ function MainApp() {
 
     if (!state.session) {
         return (
-            <LoginScreen initialUsername={state.saved_profile?.username ?? ""} onState={setState} />
+            <LoginScreen
+                initialUsername={state.saved_profile?.username ?? ""}
+                initialServerUrl={state.saved_profile?.server_url ?? ""}
+                onState={setState}
+            />
         );
     }
 
@@ -195,13 +199,15 @@ function MainApp() {
 
 function LoginScreen({
     initialUsername,
+    initialServerUrl,
     onState,
 }: {
     initialUsername: string;
+    initialServerUrl: string;
     onState: (state: AppState) => void;
 }) {
     const [mode, setMode] = useState<"login" | "register">("login");
-    const [serverUrl, setServerUrl] = useState("");
+    const [serverUrl, setServerUrl] = useState(initialServerUrl);
     const [username, setUsername] = useState(initialUsername);
     const [passphrase, setPassphrase] = useState("");
     const [accessKey, setAccessKey] = useState("");
@@ -210,17 +216,25 @@ function LoginScreen({
     const busyRef = useRef(false);
 
     useEffect(() => {
-        // Hosted builds bake the production API in via VITE_SERVER_URL; dev
-        // builds fall through to the wasm default (localhost).
+        if (initialServerUrl) {
+            setServerUrl(initialServerUrl);
+            return;
+        }
         const envUrl = import.meta.env.VITE_SERVER_URL as string | undefined;
         if (envUrl) {
             setServerUrl(envUrl);
             return;
         }
+        let cancelled = false;
         void defaultServerUrl()
-            .then(setServerUrl)
-            .catch(() => setServerUrl("http://127.0.0.1:8787"));
-    }, []);
+            .catch(() => "http://127.0.0.1:8787")
+            .then((url) => {
+                if (!cancelled) setServerUrl(url);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [initialServerUrl]);
 
     async function authenticate() {
         if (busyRef.current) return;

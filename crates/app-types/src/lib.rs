@@ -323,6 +323,7 @@ pub struct AuthenticatedSession {
 pub struct SavedProfile {
     pub username: String,
     pub device_name: String,
+    pub server_url: String,
 }
 
 /// A decrypted clipboard payload fetched on demand.
