@@ -766,9 +766,40 @@ Each entry has:
 
 ## Bugs
 
-### 177. Retained calendar history must share one group per snapshot
+### 179. Calendar manifests grow with the number of changed refreshes
+
+- **Status:** open; not fixed.
+- **Severity:** high; enough refreshes permanently prevent further refreshes.
+- **Where:** calendar delta supersession, retained groups and source size checks.
+- **What happens:** the `superseded` map is never pruned. Each changed refresh
+  can leave a retained group until all its events change again. Past one-off
+  meetings remain history and do not change again, so their groups remain too.
+  This grows the source record with refresh count even when the event count is
+  stable. Depending on the event mix, roughly 1,000 changed refreshes can reach
+  the 256 KiB record cap; the expanded delta also has a 2 MiB cap.
+- **Failure mode:** staging then fails its size check on every refresh. Near
+  the cap, source writes during cleanup at the start of a refresh can fail too,
+  preventing recovery before fetching the feed. Entry 79 covers event count;
+  this limit also depends on accumulated refresh history.
+- **Decision:** retention and supersession compaction remain unresolved.
+
+### 178. Pending calendar deltas must keep events and alarms visible
 
 - **Status:** fixed in the working tree; not committed.
+- **Severity:** high; interruption could hide all occurrences and alarms.
+- **Where:** shared calendar membership, display and alarm planning.
+- **Decision:** accept a written event listed in a pending delta when its
+  snapshot matches that batch. Keep source and recurrence validation and the
+  completeness check for all active and retained members. Whole-batch imports
+  still wait for activation.
+- **Tests:** interrupt the second event write after the first commits. Both
+  devices display all events and plan phone and desktop alarms before retry;
+  the changed unsupported rule uses its new snapshot. Retry completes the same
+  pending batch and preserves event IDs.
+
+### 177. Retained calendar history must share one group per snapshot
+
+- **Status:** fixed in `3d91144`.
 - **Where:** retired delta history retention.
 - **Decision:** append recovered outside-window events to their existing
   snapshot group, keeping IDs, UIDs and hashes aligned.
@@ -777,7 +808,7 @@ Each entry has:
 
 ### 176. Calendar delta planning must reuse cached snapshots
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `3d91144`; missing payloads also handled in `0be76c3`.
 - **Where:** native calendar snapshot reads.
 - **Decision:** check accepted local metadata and encrypted ciphertext before
   making requests. Verify payload hashes and decrypt locally; fetch and cache
@@ -787,7 +818,7 @@ Each entry has:
 
 ### 175. Confirmed calendar removals must leave the manifest
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `3d91144`.
 - **Where:** delta tombstones and retained history.
 - **Decision:** prune confirmed tombstones through a source revision. Retry
   interrupted removal work until confirmed; never carry it into retained groups.
@@ -796,7 +827,7 @@ Each entry has:
 
 ### 174. Imported rules must name their actual snapshot
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `3d91144`.
 - **Where:** calendar event provenance and completeness validation.
 - **Decision:** event ownership keeps the stable source anchor; an unsupported
   rule names its actual immutable snapshot. Updated clients validate both
@@ -808,7 +839,7 @@ Each entry has:
 
 ### 173. Large calendar deltas must fit the source record limit
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `3d91144`.
 - **Where:** encrypted calendar source serialization.
 - **Decision:** retain the old-readable full membership list and compress the
   repeated delta data using zlib and base64. Accept plain delta state on read.
@@ -819,7 +850,7 @@ Each entry has:
 
 ### 172. Interrupted calendar revisions must recover without old snapshots
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `3d91144`.
 - **Where:** delta planning, interrupted uploads and retired cleanup.
 - **Decision:** a verified partial record from a pending or recorded retired
   batch can stand in for a missing previous definition. Matching content still

@@ -3869,6 +3869,54 @@ fn imported_source_readiness_requires_a_complete_active_batch() {
     )];
     assert!(!calendar_import::ready_sources(&incomplete).contains(&source_id));
 
+    let pending_id = ObjectId::from(uuid::Uuid::new_v4());
+    let mut pending_event = event.clone();
+    pending_event.raw_import = Some(pending_id);
+    pending_event.recurrence = Recurrence::Imported {
+        import: pending_id,
+        uid: pending_event.uid.clone(),
+    };
+    for (listed, windowed, valid) in [
+        (true, true, true),
+        (false, true, false),
+        (true, false, false),
+    ] {
+        let mut active = batch.clone();
+        active.window = Some(clipper_schedule::ingest::ImportWindow::around(Utc::now()));
+        let mut pending = active.clone();
+        pending.object_id = pending_id;
+        if !listed {
+            pending.events.clear();
+        }
+        if !windowed {
+            pending.window = None;
+        }
+        let records = vec![
+            (
+                "source".into(),
+                source_record(Some(active), Some(pending)),
+                head,
+            ),
+            (
+                event_id.to_string(),
+                ScheduleRecord::Ingested(Box::new(pending_event.clone())),
+                head,
+            ),
+        ];
+        assert_eq!(
+            calendar_import::ready_sources(&records).contains(&source_id),
+            valid
+        );
+        assert_eq!(
+            records[0]
+                .1
+                .as_source()
+                .unwrap()
+                .contains_event(&event_id.to_string(), &pending_event),
+            valid
+        );
+    }
+
     let staged = vec![
         ("source".into(), source_record(None, Some(batch)), head),
         (

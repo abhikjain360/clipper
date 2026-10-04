@@ -178,11 +178,15 @@ impl CalendarSource {
     pub fn contains_event(&self, object_id: &str, event: &IngestedEvent) -> bool {
         self.id == event.source
             && event.has_valid_recurrence()
-            && self.imports().any(|batch| {
+            && (self.imports().any(|batch| {
                 (event.snapshot() == Some(batch.object_id)
                     || (batch.window.is_none() && event.import == Some(batch.object_id)))
                     && batch.events.iter().any(|id| id.to_string() == object_id)
-            })
+            }) || self.pending_imports.iter().any(|batch| {
+                batch.window.is_some()
+                    && event.snapshot() == Some(batch.object_id)
+                    && batch.events.iter().any(|id| id.to_string() == object_id)
+            }))
     }
 
     pub fn can_cleanup(&self, batch: &RetiredImport) -> bool {

@@ -47,7 +47,7 @@ intentionally duplicated.
 - The encrypted `delta.active` manifest records the newest completed refresh: raw File ID, fetch time,
   window, changed event IDs, UIDs, normalized hashes, and removed IDs.
   `delta.retained` owns unchanged events and history from earlier snapshots.
-  Each live event belongs to exactly one active or retained snapshot. Raw files
+  Completed membership assigns each live event to one active or retained snapshot. Raw files
   remain while any live event still refers to them.
 - The delta state is zlib-compressed JSON encoded as base64. Repeated membership
   lists, UUID aliases and hashes stay cheap while the top-level compatibility
@@ -193,7 +193,12 @@ imported alarms with user-authored alarms. Local agents can use
 
 There is no server transaction covering all objects. The source manifest
 controls visibility: devices hide an incomplete imported view and show a warning
-until its required records arrive. Cleanup authenticates source ownership, object
+until its required records arrive. During a pending delta, membership also
+accepts a written event whose snapshot matches that pending batch and whose
+object ID is listed in it. The changed revision appears immediately; the other
+events and their alarms remain visible after interruption, before any retry.
+Initial imports and whole-batch replacements still wait for activation.
+Cleanup authenticates source ownership, object
 identity, revisions and parent links. It never targets recordings, authored plans
 or authored overrides. Concurrent cleanup removes only the retired entries it
 finished and preserves entries added while it was running.

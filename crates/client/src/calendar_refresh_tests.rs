@@ -20,6 +20,217 @@ fn several_events(start: chrono::DateTime<Utc>, rule: &str) -> String {
     format!("{}{}{}", &text[..first], events, &text[last..])
 }
 
+async fn interrupted_calendar_proxy(
+    listener: tokio::net::TcpListener,
+    upstream: std::net::SocketAddr,
+    failure: Arc<std::sync::Mutex<Option<String>>>,
+) {
+    let mut connections = tokio::task::JoinSet::new();
+    loop {
+        let (mut client, _) = tokio::select! {
+            accepted = listener.accept() => accepted.unwrap(),
+            _ = connections.join_next(), if !connections.is_empty() => continue,
+        };
+        let failure = failure.clone();
+        connections.spawn(async move {
+            let mut bytes = Vec::new();
+            let mut buffer = [0; 8192];
+            let (end, length) = loop {
+                let count = client.read(&mut buffer).await.unwrap();
+                if count == 0 {
+                    return;
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+                if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    let fail = {
+                        let mut failure = failure.lock().unwrap();
+                        let fail = failure.as_ref().is_some_and(|request| headers.starts_with(request));
+                        if fail {
+                            failure.take();
+                        }
+                        fail
+                    };
+                    if fail {
+                        client.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                        return;
+                    }
+                    let length = headers.lines().find_map(|line| {
+                        line.to_ascii_lowercase().strip_prefix("content-length:").map(|value| value.trim().parse::<usize>().unwrap())
+                    }).unwrap_or(0);
+                    break (end, length);
+                }
+            };
+            while bytes.len() < end + 4 + length {
+                let count = client.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            let mut server = tokio::net::TcpStream::connect(upstream).await.unwrap();
+            server.write_all(&bytes[..end]).await.unwrap();
+            server.write_all(b"\r\nConnection: close\r\n\r\n").await.unwrap();
+            server.write_all(&bytes[end + 4..]).await.unwrap();
+            tokio::io::copy(&mut server, &mut client).await.unwrap();
+        });
+    }
+}
+
+async fn visible_calendar(engine: &Arc<SyncEngine>, now: chrono::DateTime<Utc>, changed: &[&str]) {
+    let from = now.to_rfc3339();
+    let to = (now + chrono::TimeDelta::days(10)).to_rfc3339();
+    let occurrences = engine.expand_schedule(&from, &to, "UTC").await.unwrap();
+    assert_eq!(occurrences.len(), 9, "{occurrences:?}");
+    assert_eq!(
+        occurrences
+            .iter()
+            .map(|occurrence| &occurrence.item_id)
+            .collect::<HashSet<_>>()
+            .len(),
+        3
+    );
+    let expected_hour = |title: &str| {
+        if title == "Changed one" {
+            [10, 18]
+        } else {
+            [9, 17]
+        }
+    };
+    for occurrence in &occurrences {
+        let start = chrono::DateTime::parse_from_rfc3339(&occurrence.start).unwrap();
+        assert!(expected_hour(&occurrence.title).contains(&chrono::Timelike::hour(&start)));
+    }
+    for title in changed {
+        assert_eq!(
+            occurrences
+                .iter()
+                .filter(|occurrence| occurrence.title == *title)
+                .count(),
+            3
+        );
+    }
+    for alarms in [
+        engine.next_alarms(24 * 10, "UTC").await.unwrap(),
+        engine.desktop_alarms(&from, &to, "UTC").await.unwrap(),
+    ] {
+        assert_eq!(alarms.len(), 9, "{alarms:?}");
+        for alarm in alarms {
+            let occurrence = occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.item_id == alarm.item_id
+                        && chrono::DateTime::parse_from_rfc3339(&occurrence.start)
+                            .unwrap()
+                            .timestamp_millis()
+                            == alarm.occurrence_start_millis
+                })
+                .unwrap();
+            assert_eq!(
+                alarm.fire_at_millis,
+                alarm.occurrence_start_millis - 300_000
+            );
+            assert!(alarm.label.contains(&occurrence.title));
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_calendar_pending_delta_keeps_events_and_alarms_visible() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let url = format!("http://{address}");
+    let first = register_proxy_engine(&url, &temp.path().join("first")).await;
+    first.stop_session_work().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+    let failure = Arc::new(std::sync::Mutex::new(None));
+    let proxy = tokio::spawn(interrupted_calendar_proxy(
+        listener,
+        address,
+        failure.clone(),
+    ));
+    let engine = copy_session(&first, &proxy_url, &temp.path().join("refreshing")).await;
+    let now = Utc::now();
+    let start = (now + chrono::TimeDelta::days(1))
+        .date_naive()
+        .and_hms_opt(9, 0, 0)
+        .unwrap()
+        .and_utc();
+    let original = several_events(start, "RRULE:FREQ=DAILY;COUNT=3;BYHOUR=9,17\r\n");
+    let (feed_url, feed, _, task) = calendar_feed_server(original.clone()).await;
+    let id = engine.add_calendar_source("Work", &feed_url).await.unwrap();
+    let device = engine.current_device_id().await.unwrap();
+    engine
+        .set_calendar_source_target_device(&id, Some(&device))
+        .await
+        .unwrap();
+    engine.sync_calendar_source(&id).await.unwrap();
+    visible_calendar(&engine, now, &[]).await;
+    let before = event_heads(&engine).await;
+    let mut updated = original
+        .replacen("SUMMARY:Meeting", "SUMMARY:Changed one", 1)
+        .replacen("BYHOUR=9,17", "BYHOUR=10,18", 1);
+    updated = updated.replacen("SUMMARY:Meeting", "SUMMARY:Changed two", 1);
+    *feed.write().await = updated;
+    *failure.lock().unwrap() = Some(format!("POST /api/objects/{}/revisions ", before["two"].0));
+    let result = tokio::time::timeout(Duration::from_secs(20), engine.sync_calendar_source(&id))
+        .await
+        .unwrap();
+    assert!(result.is_err(), "{result:?}");
+    assert!(failure.lock().unwrap().is_none());
+    let source = engine.read_calendar_source(&id).await.unwrap().0;
+    assert_eq!(source.pending_imports.len(), 1);
+    let pending = source.pending_imports[0].object_id;
+    let held = event_heads(&engine).await;
+    assert_eq!(held["one"].1.revision, before["one"].1.revision + 1);
+    assert_eq!(held["two"], before["two"]);
+    assert_eq!(held["three"], before["three"]);
+    let event = held_event(&engine, &before["one"].0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.as_ingested().unwrap().snapshot(), Some(pending));
+    visible_calendar(&engine, now, &["Changed one"]).await;
+    let second = copy_session(&first, &url, &temp.path().join("second")).await;
+    let generation = second.local_store.start_generation().await;
+    let seq = Utc::now().timestamp_micros();
+    second.snapshot_files(generation, seq).await.unwrap();
+    second.snapshot_schedule(generation, seq).await.unwrap();
+    visible_calendar(&second, now, &["Changed one"]).await;
+    assert_eq!(
+        second
+            .read_calendar_source(&id)
+            .await
+            .unwrap()
+            .0
+            .pending_imports
+            .len(),
+        1
+    );
+    let report = engine.sync_calendar_source(&id).await.unwrap();
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    let source = engine.read_calendar_source(&id).await.unwrap().0;
+    assert!(source.pending_imports.is_empty());
+    assert_eq!(source.active_import.as_ref().unwrap().object_id, pending);
+    assert_eq!(event_heads(&engine).await.len(), 3);
+    visible_calendar(&engine, now, &["Changed one", "Changed two"]).await;
+    let generation = second.local_store.start_generation().await;
+    let seq = Utc::now().timestamp_micros();
+    second.snapshot_files(generation, seq).await.unwrap();
+    second.snapshot_schedule(generation, seq).await.unwrap();
+    visible_calendar(&second, now, &["Changed one", "Changed two"]).await;
+    assert!(
+        engine
+            .sync_calendar_source(&id)
+            .await
+            .unwrap()
+            .feed_unchanged
+    );
+    proxy.abort();
+    task.abort();
+}
+
 #[tokio::test]
 #[ignore = "build clipper-server first; starts an isolated local server"]
 async fn live_calendar_removals_finish_once_and_leave_no_history_work() {
