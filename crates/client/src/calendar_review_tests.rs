@@ -309,7 +309,8 @@ async fn live_calendar_old_manifest_roundtrip_keeps_all_history_and_snapshots() 
     assert!(old.retired_imports.is_empty());
     for (event_id, record) in engine.local_store.schedule_records_with_ids().await {
         if let Some(event) = record.as_ingested() {
-            assert!(event.belongs_to_import(active.object_id));
+            assert_eq!(event.import, Some(active.object_id));
+            assert!(event.has_valid_recurrence());
             assert!(active.events.iter().any(|id| id.to_string() == event_id));
         }
     }

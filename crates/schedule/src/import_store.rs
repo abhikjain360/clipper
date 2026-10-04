@@ -1,4 +1,10 @@
+use std::io::{Read, Write};
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+
 use super::*;
+
+const MAX_DELTA_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct StoredSource {
@@ -21,8 +27,71 @@ pub(super) struct StoredSource {
     pending_imports: Vec<CalendarImport>,
     #[serde(default)]
     retired_imports: Vec<RetiredImport>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "write_delta",
+        deserialize_with = "read_delta"
+    )]
     delta: Option<StoredDelta>,
+}
+
+fn write_delta<S: serde::Serializer>(
+    delta: &Option<StoredDelta>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let Some(delta) = delta else {
+        return serializer.serialize_none();
+    };
+    let bytes = serde_json::to_vec(delta).map_err(serde::ser::Error::custom)?;
+    if bytes.len() > MAX_DELTA_BYTES {
+        return Err(serde::ser::Error::custom(
+            "Calendar delta exceeds the expanded size limit",
+        ));
+    }
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(&bytes)
+        .map_err(serde::ser::Error::custom)?;
+    let bytes = encoder.finish().map_err(serde::ser::Error::custom)?;
+    serializer.serialize_str(&format!("zlib:{}", STANDARD.encode(bytes)))
+}
+
+fn read_delta<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<StoredDelta>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Packed(String),
+        Plain(Box<StoredDelta>),
+    }
+    let Some(stored) = Option::<Stored>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    match stored {
+        Stored::Plain(delta) => Ok(Some(*delta)),
+        Stored::Packed(value) => {
+            let encoded = value
+                .strip_prefix("zlib:")
+                .ok_or_else(|| serde::de::Error::custom("Unknown calendar delta encoding"))?;
+            let bytes = STANDARD.decode(encoded).map_err(serde::de::Error::custom)?;
+            let mut decoder =
+                flate2::read::ZlibDecoder::new(bytes.as_slice()).take((MAX_DELTA_BYTES + 1) as u64);
+            let mut expanded = Vec::new();
+            decoder
+                .read_to_end(&mut expanded)
+                .map_err(serde::de::Error::custom)?;
+            if expanded.len() > MAX_DELTA_BYTES {
+                return Err(serde::de::Error::custom(
+                    "Calendar delta exceeds the expanded size limit",
+                ));
+            }
+            serde_json::from_slice(&expanded)
+                .map(Some)
+                .map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -143,5 +212,66 @@ impl From<CalendarSource> for StoredSource {
             retired_imports,
             delta,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source() -> serde_json::Value {
+        serde_json::json!({
+            "id": Uuid::new_v4(), "name": "Work", "enabled": true,
+            "kind": { "protocol": "ics", "url": "https://example.com/calendar.ics" },
+            "active_import": null, "pending_imports": [], "retired_imports": [],
+        })
+    }
+
+    #[test]
+    fn calendar_manifests_load_packed_and_plain_delta_state() {
+        let mut saved: CalendarSource = serde_json::from_value(source()).unwrap();
+        saved.delta_state = true;
+        saved.import_anchor = Some(Uuid::new_v4().into());
+        saved
+            .event_ids
+            .insert(Uuid::new_v4(), Uuid::new_v4().into());
+        let mut packed = serde_json::to_value(&saved).unwrap();
+        assert!(packed["delta"].as_str().unwrap().starts_with("zlib:"));
+        assert_eq!(
+            serde_json::from_value::<CalendarSource>(packed.clone()).unwrap(),
+            saved
+        );
+        let bytes = STANDARD
+            .decode(
+                packed["delta"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("zlib:")
+                    .unwrap(),
+            )
+            .unwrap();
+        let mut expanded = String::new();
+        flate2::read::ZlibDecoder::new(bytes.as_slice())
+            .read_to_string(&mut expanded)
+            .unwrap();
+        packed["delta"] = serde_json::from_str(&expanded).unwrap();
+        assert_eq!(
+            serde_json::from_value::<CalendarSource>(packed).unwrap(),
+            saved
+        );
+    }
+
+    #[test]
+    fn calendar_manifest_expansion_is_bounded() {
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&vec![b' '; MAX_DELTA_BYTES + 1]).unwrap();
+        let mut saved = source();
+        saved["delta"] = serde_json::Value::String(format!(
+            "zlib:{}",
+            STANDARD.encode(encoder.finish().unwrap())
+        ));
+        let error = serde_json::from_value::<CalendarSource>(saved).unwrap_err();
+        assert!(error.to_string().contains("expanded size limit"));
     }
 }

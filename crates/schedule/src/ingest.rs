@@ -177,12 +177,10 @@ impl From<CalendarImport> for RetiredImport {
 impl CalendarSource {
     pub fn contains_event(&self, object_id: &str, event: &IngestedEvent) -> bool {
         self.id == event.source
-            && event
-                .import
-                .is_some_and(|import| event.belongs_to_import(import))
+            && event.has_valid_recurrence()
             && self.imports().any(|batch| {
                 (event.snapshot() == Some(batch.object_id)
-                    || (batch.window.is_none() && event.belongs_to_import(batch.object_id)))
+                    || (batch.window.is_none() && event.import == Some(batch.object_id)))
                     && batch.events.iter().any(|id| id.to_string() == object_id)
             })
     }
@@ -257,6 +255,16 @@ pub struct Attendance {
 }
 
 impl IngestedEvent {
+    pub fn has_valid_recurrence(&self) -> bool {
+        match &self.recurrence {
+            Recurrence::Imported { import, uid } => {
+                *uid == self.uid
+                    && (Some(*import) == self.snapshot() || Some(*import) == self.import)
+            }
+            Recurrence::Once | Recurrence::Every(_) => self.import.is_some(),
+        }
+    }
+
     pub fn snapshot(&self) -> Option<ObjectId> {
         self.raw_import.or(self.import)
     }

@@ -6,6 +6,7 @@ struct HeldEvent {
     id: ObjectId,
     event: IngestedEvent,
     hash: String,
+    owned: bool,
 }
 
 pub(in crate::engine) struct CalendarDelta {
@@ -47,7 +48,7 @@ fn set_import(event: &mut IngestedEvent, batch: &CalendarImport, anchor: ObjectI
     event.raw_import = (anchor != batch.object_id).then_some(batch.object_id);
     event.import_fetched_at = Some(batch.fetched_at);
     if let clipper_schedule::Recurrence::Imported { import, .. } = &mut event.recurrence {
-        *import = anchor;
+        *import = batch.object_id;
     }
 }
 
@@ -83,6 +84,7 @@ fn activate_delta(source: &mut CalendarSource, batch: &CalendarImport) {
     }
     for previous in &mut source.retained_imports {
         remove_events(previous, &changed);
+        previous.removed.clear();
     }
     let mut retained = Vec::new();
     for previous in source.retained_imports.drain(..) {
@@ -192,19 +194,9 @@ impl SyncEngine {
         raw: ObjectId,
         source: &CalendarSource,
     ) -> Result<Option<clipper_schedule::IngestOutcome>, ClientError> {
-        let bytes = match self.download_file_bytes(&raw.to_string()).await {
-            Ok(bytes) => bytes,
-            Err(ClientError::Api { status: 404, .. }) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        if self
-            .local_store
-            .import_file_object(&raw.to_string())
-            .await?
-            .is_none_or(|object| object.envelope.body.revision != 1)
-        {
+        let Some(bytes) = self.read_import_snapshot(raw).await? else {
             return Ok(None);
-        }
+        };
         let text = String::from_utf8(bytes).map_err(|_| CalendarImportError::InvalidText)?;
         Ok(Some(validated_feed(&text, source)?))
     }
@@ -229,23 +221,51 @@ impl SyncEngine {
                 return Err(CalendarImportError::FeedChanged.into());
             }
             for (index, id) in batch.events.iter().enumerate() {
-                let stored = records
+                let current = match records
                     .get(&id.to_string())
                     .and_then(ScheduleRecord::as_ingested)
-                    .filter(|event| {
-                        event.source == source.id
-                            && event
-                                .import
-                                .is_some_and(|import| event.belongs_to_import(import))
-                            && (event.snapshot() == Some(batch.object_id)
-                                || (batch.window.is_none()
-                                    && event.belongs_to_import(batch.object_id)))
-                    });
-                let raw = stored
+                {
+                    Some(event) => Some(event.clone()),
+                    None => self
+                        .load_import_event(&id.to_string())
+                        .await?
+                        .and_then(|record| record.as_ingested().cloned()),
+                }
+                .filter(|event| {
+                    event.source == source.id
+                        && event.has_valid_recurrence()
+                        && (batch.window.is_none() || batch.uids[index] == event.uid)
+                });
+                let partial = current.as_ref().is_some_and(|event| {
+                    event.snapshot().is_some_and(|raw| {
+                        source.superseded.contains_key(&raw)
+                            || source
+                                .pending_imports
+                                .iter()
+                                .chain(
+                                    source
+                                        .retired_imports
+                                        .iter()
+                                        .filter_map(|retired| retired.delta.as_deref()),
+                                )
+                                .any(|pending| {
+                                    pending.object_id == raw && pending.events.contains(id)
+                                })
+                    }) && event.snapshot() != Some(batch.object_id)
+                });
+                let owned = current.as_ref().is_some_and(|event| {
+                    event.snapshot() == Some(batch.object_id)
+                        || (batch.window.is_none()
+                            && event.import == Some(batch.object_id)
+                            && !partial)
+                });
+                let mut stored = current.as_ref().filter(|_| owned).cloned();
+                let mut raw = stored
+                    .as_ref()
                     .and_then(IngestedEvent::snapshot)
                     .unwrap_or(batch.object_id);
                 if (stored.is_none()
-                    || stored.is_some_and(|event| {
+                    || stored.as_ref().is_some_and(|event| {
                         matches!(
                             event.recurrence,
                             clipper_schedule::Recurrence::Imported { .. }
@@ -254,6 +274,25 @@ impl SyncEngine {
                     && !snapshots.contains_key(&raw)
                 {
                     snapshots.insert(raw, self.import_outcome(raw, source).await?);
+                }
+                if stored.is_none()
+                    && snapshots.get(&raw).is_none_or(|parsed| parsed.is_none())
+                    && partial
+                {
+                    stored = current;
+                    raw = stored
+                        .as_ref()
+                        .and_then(IngestedEvent::snapshot)
+                        .unwrap_or(raw);
+                    if stored.as_ref().is_some_and(|event| {
+                        matches!(
+                            event.recurrence,
+                            clipper_schedule::Recurrence::Imported { .. }
+                        )
+                    }) && !snapshots.contains_key(&raw)
+                    {
+                        snapshots.insert(raw, self.import_outcome(raw, source).await?);
+                    }
                 }
                 let parsed = snapshots.get(&raw).and_then(Option::as_ref);
                 if batch.window.is_some()
@@ -265,7 +304,7 @@ impl SyncEngine {
                     return Err(CalendarImportError::FeedChanged.into());
                 }
                 let event = if let Some(event) = stored {
-                    event.clone()
+                    event
                 } else {
                     let mut event = parsed
                         .and_then(|outcome| {
@@ -314,6 +353,7 @@ impl SyncEngine {
                             id: *id,
                             event,
                             hash,
+                            owned,
                         },
                     )
                     .is_some()
@@ -359,7 +399,11 @@ impl SyncEngine {
             let stored = if incoming {
                 false
             } else if let Some(old) = old {
-                self.event_in_scope(&old.event, window).await?
+                if !old.owned {
+                    true
+                } else {
+                    self.event_in_scope(&old.event, window).await?
+                }
             } else {
                 false
             };
@@ -388,7 +432,16 @@ impl SyncEngine {
                     .is_some(),
                 _ => true,
             };
-            if raw_available && old.is_some_and(|held| held.hash == hash) {
+            let rule_current = old.is_none_or(|held| match &held.event.recurrence {
+                clipper_schedule::Recurrence::Imported { import, .. } => {
+                    Some(*import) == held.event.snapshot()
+                }
+                _ => true,
+            });
+            if raw_available
+                && rule_current
+                && old.is_some_and(|held| held.owned && held.hash == hash)
+            {
                 unchanged += 1;
                 continue;
             }
@@ -740,10 +793,7 @@ impl SyncEngine {
             }
         }
         if !report.superseded {
-            for event_id in &batch.removed {
-                self.tombstone_delta_event(id, event_id, &batch).await?;
-                report.tombstoned += 1;
-            }
+            report.tombstoned = self.complete_calendar_removals(id, &batch).await?;
         }
         if let Err(error) = self.cleanup_calendar_imports(id).await {
             report
@@ -860,7 +910,7 @@ impl SyncEngine {
         source_id: &str,
         id: &ObjectId,
         batch: &CalendarImport,
-    ) -> Result<(), ClientError> {
+    ) -> Result<bool, ClientError> {
         loop {
             let (source, _) = self.read_calendar_source(source_id).await?;
             if source
@@ -868,10 +918,10 @@ impl SyncEngine {
                 .as_ref()
                 .is_none_or(|active| active.object_id != batch.object_id)
             {
-                return Ok(());
+                return Ok(false);
             }
             let Some((event, head)) = self.read_delta_event(&id.to_string()).await? else {
-                return Ok(());
+                return Ok(true);
             };
             if event.source != source.id
                 || source.contains_event(&id.to_string(), &event)
@@ -881,12 +931,12 @@ impl SyncEngine {
                             > (batch.fetched_at, Some(uuid::Uuid::from(batch.object_id)))
                 })
             {
-                return Ok(());
+                return Ok(false);
             }
             if let Some(window) = &batch.window
                 && !self.event_in_scope(&event, window).await?
             {
-                return Ok(());
+                return Ok(false);
             }
             match self
                 .write_tombstone_at(&id.to_string(), ObjectKind::Schedule, Some(head))
@@ -904,12 +954,51 @@ impl SyncEngine {
                         )
                         .await?;
                     self.publish_visible_state(visible).await;
-                    return Ok(());
+                    return Ok(true);
                 }
                 Err(ClientError::Api { status: 409, .. }) => {}
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    pub(super) async fn complete_calendar_removals(
+        &self,
+        source_id: &str,
+        batch: &CalendarImport,
+    ) -> Result<u32, ClientError> {
+        let mut confirmed = HashSet::new();
+        for id in &batch.removed {
+            if self.tombstone_delta_event(source_id, id, batch).await? {
+                confirmed.insert(*id);
+            }
+        }
+        loop {
+            let (mut source, head) = self.read_calendar_source(source_id).await?;
+            let mut changed = false;
+            for retained in &mut source.retained_imports {
+                changed |= !retained.removed.is_empty();
+                retained.removed.clear();
+            }
+            if let Some(active) = source
+                .active_import
+                .as_mut()
+                .filter(|active| active.object_id == batch.object_id)
+            {
+                let count = active.removed.len();
+                active.removed.retain(|id| !confirmed.contains(id));
+                changed |= active.removed.len() != count;
+            }
+            if !changed {
+                break;
+            }
+            match self.save_calendar_source(source_id, &source, head).await {
+                Ok(_) => break,
+                Err(ClientError::Api { status: 409, .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(confirmed.len() as u32)
     }
 
     pub(super) async fn track_delta_orphan(
@@ -982,12 +1071,23 @@ impl SyncEngine {
             for retained in &mut source.retained_imports {
                 remove_events(retained, &HashSet::from([id]));
             }
-            let mut history = batch.clone();
-            history.events = vec![id];
-            history.uids = vec![batch.uids[index].clone()];
-            history.hashes = vec![batch.hashes[index].clone()];
-            history.removed.clear();
-            source.retained_imports.push(history);
+            if let Some(history) = source
+                .retained_imports
+                .iter_mut()
+                .find(|history| history.object_id == batch.object_id)
+            {
+                history.events.push(id);
+                history.uids.push(batch.uids[index].clone());
+                history.hashes.push(batch.hashes[index].clone());
+                history.removed.clear();
+            } else {
+                let mut history = batch.clone();
+                history.events = vec![id];
+                history.uids = vec![batch.uids[index].clone()];
+                history.hashes = vec![batch.hashes[index].clone()];
+                history.removed.clear();
+                source.retained_imports.push(history);
+            }
             match self.save_calendar_source(source_id, &source, head).await {
                 Ok(_) => return Ok(()),
                 Err(ClientError::Api { status: 409, .. }) => {}
@@ -1000,7 +1100,8 @@ impl SyncEngine {
         &self,
         source_id: &str,
         batch: &CalendarImport,
-    ) -> Result<(), ClientError> {
+    ) -> Result<bool, ClientError> {
+        let mut complete = true;
         for (index, id) in batch.events.iter().enumerate() {
             let (source, _) = self.read_calendar_source(source_id).await?;
             let Some(active) = source.active_import.as_ref() else {
@@ -1020,7 +1121,10 @@ impl SyncEngine {
                 return Err(CalendarImportError::EventChanged.into());
             }
             if event.snapshot() != Some(batch.object_id)
-                || source.contains_event(&id.to_string(), &event)
+                || (source.contains_event(&id.to_string(), &event)
+                    && source
+                        .imports()
+                        .any(|existing| Some(existing.object_id) == event.snapshot()))
             {
                 continue;
             }
@@ -1040,6 +1144,13 @@ impl SyncEngine {
                 let expected = held
                     .get(&event.uid)
                     .ok_or(CalendarImportError::EventChanged)?;
+                if !source.imports().any(|existing| {
+                    Some(existing.object_id) == expected.event.snapshot()
+                        && existing.events.contains(id)
+                }) {
+                    complete = false;
+                    continue;
+                }
                 let mut restored = expected.event.clone();
                 restored.import_fetched_at = Some(active.fetched_at);
                 self.save_delta_event(id, &restored, active, false, Some(batch.object_id))
@@ -1047,6 +1158,9 @@ impl SyncEngine {
             } else {
                 self.tombstone_delta_event(source_id, id, active).await?;
             }
+        }
+        if !complete {
+            return Ok(false);
         }
         let (source, _) = self.read_calendar_source(source_id).await?;
         if !source
@@ -1062,6 +1176,6 @@ impl SyncEngine {
             )
             .await?;
         }
-        Ok(())
+        Ok(true)
     }
 }

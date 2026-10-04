@@ -1320,10 +1320,12 @@ dependencies = [
 name = "clipper-schedule"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "calcard",
  "chrono",
  "chrono-tz",
  "clipper-api-types",
+ "flate2",
  "getrandom 0.3.4",
  "postcard",
  "rrule",

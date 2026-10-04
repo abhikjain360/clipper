@@ -33,7 +33,8 @@ intentionally duplicated.
 - Each parsed `IngestedEvent` carries its source, provider UID and a stable
   `import: ObjectId` identifying the source's first import. `raw_import`, when
   present, identifies the snapshot containing this event's actual definition.
-  Unsupported rules resolve from `raw_import`, falling back to `import`.
+  Stored `Recurrence::Imported` references name the actual raw snapshot too.
+  Rule resolution uses `raw_import`, falling back to `import` for older events.
   Provider overrides use their original recurrence ID.
   New object IDs are derived from source and UID, independently of snapshots.
   Overrides stay bundled with their series and have stable IDs derived from the
@@ -48,12 +49,22 @@ intentionally duplicated.
   `delta.retained` owns unchanged events and history from earlier snapshots.
   Each live event belongs to exactly one active or retained snapshot. Raw files
   remain while any live event still refers to them.
+- The delta state is zlib-compressed JSON encoded as base64. Repeated membership
+  lists, UUID aliases and hashes stay cheap while the top-level compatibility
+  list remains readable by older clients. Readers also accept uncompressed
+  delta state. Expanded delta data is limited to 2 MiB; the complete encrypted
+  schedule record still has its 256 KiB limit.
 - The top-level `active_import` is the compatibility view for older clients.
   Its ID stays fixed and its membership includes every live event, including
-  retained history. Every event's `import` and stored imported-rule ID use that
-  same ID. Pending and retired delta groups stay inside `delta`, so an older
+  retained history. Every event's `import` uses that same ID. Pending and retired delta groups stay inside `delta`, so an older
   reader cannot mistake them for whole-batch replacements. The anchor raw file
   is kept until explicit deletion or calendar removal.
+- Older readers require imported-rule references to match that anchor. A changed
+  or added unsupported series naming another snapshot fails their completeness
+  check, so they hide that imported calendar and suppress its alarms. They cannot
+  resolve it against an obsolete anchor rule. Updated readers validate the
+  actual snapshot reference and display it normally. Eligible events with older
+  anchor-only rule references are repaired on refresh even if the feed is unchanged.
 - Completed refreshes record which snapshots they supersede. Cleanup requires
   this positive evidence. The evidence remains after cleanup so late uploads
   can be recognized. A source saved by an older client can lose the `delta`
@@ -74,7 +85,9 @@ intentionally duplicated.
   warning. Eligible unsupported events with missing raw files are repaired from
   the next valid feed.
 - Native clients cache complete encrypted raw files needed for rule resolution
-  in SQLite, allowing offline expansion after hydration. The browser has a
+  in SQLite, allowing offline expansion after hydration. Delta planning checks
+  this cache before any snapshot request, verifies and decrypts the cached bytes,
+  and downloads only missing or invalid ciphertext. The browser has a
   bounded in-memory rule cache and can need another download after reload.
 - Parsed events store whether attendees exist and the owner's PARTSTAT.
   Other attendee addresses and replies remain in the raw file. Overrides store
@@ -136,6 +149,12 @@ imported alarms with user-authored alarms. Local agents can use
    a new response even after recovery. Unreadable or inconsistent pending data
    is retired through verified cleanup. Network failures leave it for retry.
    Record fetch completion locally before parsing or uploading.
+   Partially written events remain resumable when the previous raw file is
+   missing. Authenticated records belonging to a pending or recorded retired
+   batch provide the fallback definition. They must be claimed by the completed
+   delta even when their content already matches the feed. Cleanup that cannot
+   reconstruct the winning definition waits for a fresh feed instead of blocking
+   it. If the pending raw file is also gone, the fresh feed repairs membership.
 2. Validate the complete response before changing events. Duplicate UIDs,
    skipped or unreadable events and size-limit failures reject the refresh.
    An explicitly valid empty feed removes only held events that overlap the
@@ -162,8 +181,10 @@ imported alarms with user-authored alarms. Local agents can use
    recompute the delta against that batch before retrying activation. This also
    handles devices that changed different events from the same older baseline.
    Per-event fetch ordering prevents older writers overwriting newer content.
-6. Move unchanged events and history into retained snapshot groups. Tombstone
-   removed in-window events, preserving immutable revisions. Purge a superseded
+6. Move unchanged events and history into one retained group per snapshot.
+   Tombstone removed in-window events, preserving immutable revisions. Drop
+   confirmed removals from the manifest; retained history carries no removal
+   work. Retry unconfirmed removals after interruption. Purge a superseded
    raw file only with recorded supersession evidence and when no active,
    retained or pending group references it. Keep the compatibility anchor.
    Late writes from losing refreshes are restored to the winning content or

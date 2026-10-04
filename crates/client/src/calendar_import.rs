@@ -23,6 +23,82 @@ pub(super) struct CachedImportRules {
 const MAX_IMPORT_BYTES: i64 = 8 * 1024 * 1024;
 
 impl SyncEngine {
+    async fn read_import_snapshot(&self, raw: ObjectId) -> Result<Option<Vec<u8>>, ClientError> {
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
+        let id = raw.to_string();
+        let object = match self.local_store.import_file_object(&id).await? {
+            Some(object) => object,
+            None => {
+                let item = match self.api_for_session(epoch).await?.get_object(&id).await {
+                    Ok(item) => item,
+                    Err(ClientError::Api { status: 404, .. }) => return Ok(None),
+                    Err(error) => return Err(error),
+                };
+                verify_object_list_item_envelope(&item)?;
+                if item.id != raw || item.kind != ObjectKind::File {
+                    return Err(CalendarImportError::FeedChanged.into());
+                }
+                self.check_revision_advance(&item).await?;
+                let key = self.current_encryption_key().await?;
+                self.retain_downloaded_file(&item, &key, epoch).await?;
+                encrypted_object_from_list_item(&item)
+            }
+        };
+        if object.envelope.body.revision != 1 {
+            return Ok(None);
+        }
+        let head = LocalHead {
+            revision: object.envelope.body.revision,
+            parent_hash: crypto::object_envelope_parent_hash(&object.envelope.body)?,
+        };
+        let [payload] = object.payloads.as_slice() else {
+            return Err(CalendarImportError::FeedChanged.into());
+        };
+        check_payload_ciphertext_size(payload, MAX_IMPORT_BYTES + 16)?;
+        #[cfg(not(target_family = "wasm"))]
+        let cached = self.local_store.import_file_ciphertext(&id, head).await?;
+        #[cfg(target_family = "wasm")]
+        let cached: Option<Vec<u8>> = None;
+        let (ciphertext, downloaded) = match cached {
+            Some(bytes) if verify_payload_hash(payload, &bytes).is_ok() => (bytes, false),
+            _ => (
+                self.api_for_session(epoch)
+                    .await?
+                    .download_object_payload(&id, &payload.id.to_string(), payload.ciphertext_size)
+                    .await?,
+                true,
+            ),
+        };
+        verify_payload_hash(payload, &ciphertext)?;
+        let key_guard = self.encryption_key.read().await;
+        if !self.session_is_current(epoch) {
+            return Err(ClientError::NotAuthenticated);
+        }
+        let key = key_guard.as_ref().ok_or(ClientError::NotAuthenticated)?;
+        let bytes = decrypt_file_blob_bytes(
+            &payload.nonce,
+            &ciphertext,
+            key,
+            &object.envelope.body,
+            payload.id,
+        )?;
+        #[cfg(not(target_family = "wasm"))]
+        if downloaded {
+            self.local_store
+                .cache_import_file_ciphertext(&id, head, &ciphertext)
+                .await?;
+        }
+        #[cfg(target_family = "wasm")]
+        let _ = downloaded;
+        let Some(current) = self.local_store.import_file_object(&id).await? else {
+            return Ok(None);
+        };
+        if crypto::object_envelope_parent_hash(&current.envelope.body)? != head.parent_hash {
+            return Err(CalendarImportError::FeedChanged.into());
+        }
+        Ok(Some(bytes))
+    }
+
     /// An engine that can expand this recurrence, reading an imported rule
     /// back out of its authenticated snapshot.
     ///
@@ -1090,9 +1166,7 @@ impl SyncEngine {
             .as_ref()
             .filter(|batch| batch.window.is_some())
         {
-            for event in &batch.removed {
-                self.tombstone_delta_event(id, event, batch).await?;
-            }
+            self.complete_calendar_removals(id, batch).await?;
         }
         self.track_retired_events(id).await?;
         let (mut source, head) = self.calendar_source(id).await?;
@@ -1100,12 +1174,15 @@ impl SyncEngine {
             return Ok(());
         }
         let records = self.local_store.schedule_records_with_heads().await?;
+        let mut cleaned = Vec::new();
         for batch in &source.retired_imports {
             if !source.can_cleanup(batch) {
                 continue;
             }
             if let Some(delta) = &batch.delta {
-                self.cleanup_calendar_delta(id, delta).await?;
+                if self.cleanup_calendar_delta(id, delta).await? {
+                    cleaned.push(batch.clone());
+                }
                 continue;
             }
             if source
@@ -1126,7 +1203,9 @@ impl SyncEngine {
                     && !record.as_ingested().is_some_and(|event| {
                         event.source == source.id
                             && (event.snapshot() == Some(batch.object_id)
-                                || (source.removing && event.belongs_to_import(batch.object_id)))
+                                || (source.removing
+                                    && event.has_valid_recurrence()
+                                    && event.import == Some(batch.object_id)))
                     })
                 {
                     return Err(ClientError::InvalidArgument(
@@ -1148,13 +1227,11 @@ impl SyncEngine {
                 batch.object_id,
             )
             .await?;
+            cleaned.push(batch.clone());
         }
-        let cleaned: Vec<_> = source
-            .retired_imports
-            .iter()
-            .filter(|batch| source.can_cleanup(batch))
-            .cloned()
-            .collect();
+        if cleaned.is_empty() {
+            return Ok(());
+        }
         let mut head = head;
         loop {
             source

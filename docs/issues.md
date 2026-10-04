@@ -766,9 +766,72 @@ Each entry has:
 
 ## Bugs
 
-### 171. Older calendar clients could purge retained history
+### 177. Retained calendar history must share one group per snapshot
 
 - **Status:** fixed in the working tree; not committed.
+- **Where:** retired delta history retention.
+- **Decision:** append recovered outside-window events to their existing
+  snapshot group, keeping IDs, UIDs and hashes aligned.
+- **Tests:** three events from one interrupted snapshot become one retained
+  group; the raw file remains available and later refreshes converge.
+
+### 176. Calendar delta planning must reuse cached snapshots
+
+- **Status:** fixed in the working tree; not committed.
+- **Where:** native calendar snapshot reads.
+- **Decision:** check accepted local metadata and encrypted ciphertext before
+  making requests. Verify payload hashes and decrypt locally; fetch and cache
+  missing or invalid bytes. Recheck snapshot identity before using the result.
+- **Tests:** repeated refreshes with unsupported rules across two snapshots
+  make no raw-object or payload requests after caching.
+
+### 175. Confirmed calendar removals must leave the manifest
+
+- **Status:** fixed in the working tree; not committed.
+- **Where:** delta tombstones and retained history.
+- **Decision:** prune confirmed tombstones through a source revision. Retry
+  interrupted removal work until confirmed; never carry it into retained groups.
+- **Tests:** retry already completed tombstones, clear saved history removal
+  lists, and make no requests for removed IDs on subsequent refreshes.
+
+### 174. Imported rules must name their actual snapshot
+
+- **Status:** fixed in the working tree; not committed.
+- **Where:** calendar event provenance and completeness validation.
+- **Decision:** event ownership keeps the stable source anchor; an unsupported
+  rule names its actual immutable snapshot. Updated clients validate both
+  references. Older clients hide the imported view when their anchor-only
+  completeness check fails, preventing wrong occurrences and alarms.
+  Refresh repairs eligible anchor-only rule references even on unchanged feeds.
+- **Tests:** changed and added unsupported series expand and ring at the new
+  hours. Events decoded without newer fields fail the old completeness check.
+
+### 173. Large calendar deltas must fit the source record limit
+
+- **Status:** fixed in the working tree; not committed.
+- **Where:** encrypted calendar source serialization.
+- **Decision:** retain the old-readable full membership list and compress the
+  repeated delta data using zlib and base64. Accept plain delta state on read.
+  Bound expanded data to 2 MiB and the serialized record to 256 KiB.
+- **Tests:** 700 changed events over 1,246 legacy events stage and activate
+  twice, preserve every object ID and leave history unchanged. The equivalent
+  plain manifest exceeds 256 KiB. Oversized expanded state is rejected.
+
+### 172. Interrupted calendar revisions must recover without old snapshots
+
+- **Status:** fixed in the working tree; not committed.
+- **Where:** delta planning, interrupted uploads and retired cleanup.
+- **Decision:** a verified partial record from a pending or recorded retired
+  batch can stand in for a missing previous definition. Matching content still
+  needs completed membership. Defer cleanup that cannot reconstruct the winner
+  until a fresh feed repairs it; never infer deletion from missing fields.
+- **Tests:** restart after a partial revision with either or both snapshots
+  missing, including a move beyond the window. Refresh and subsequent checks
+  complete with stable IDs and no stale in-window occurrences.
+
+### 171. Older calendar clients could purge retained history
+
+- **Status:** fixed in `effc9b5`.
 - **Severity:** high; found before deploying `14f303a`.
 - **Where:** calendar source serialization and import cleanup.
 - **What happened:** older readers ignored retained groups and treated their
@@ -783,7 +846,7 @@ Each entry has:
 
 ### 170. Deleted original feeds blocked calendar refresh permanently
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `effc9b5`.
 - **Severity:** high; found before deploying `14f303a`.
 - **Where:** calendar delta planning and cleanup.
 - **What happened:** stored unsupported recurrence required a deleted raw
@@ -794,7 +857,7 @@ Each entry has:
 
 ### 169. Calendar scope ignored stored occurrences
 
-- **Status:** fixed in the working tree; not committed.
+- **Status:** fixed in `effc9b5`.
 - **Severity:** high; stale occurrences could keep ringing alarms.
 - **Where:** calendar delta eligibility.
 - **What happened:** only the incoming definition determined eligibility.

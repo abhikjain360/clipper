@@ -3,6 +3,9 @@ use super::*;
 #[path = "calendar_review_tests.rs"]
 mod review_tests;
 
+#[path = "calendar_refresh_tests.rs"]
+mod refresh_tests;
+
 async fn held_event(engine: &SyncEngine, id: &str) -> Result<Option<ScheduleRecord>, ClientError> {
     match engine.api.get_object(id).await {
         Ok(_) => Ok(Some(load_schedule_object(engine, id).await.0)),
