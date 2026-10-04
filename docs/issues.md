@@ -1266,7 +1266,8 @@ Each entry has:
     every write, version checks on updates, soft deletes, a change log with
     undo, and a separate rate limit. Making a collection visible or private
     again shows a warning: the server keeps what it has seen.
-- **Open:** an in-app chat backed by an API key, for the phone.
+  - No in-app chat. Agents work through desktop Claude Code or Codex, or
+    through the hosted MCP endpoint on visible collections.
 
 ## Code and features
 
