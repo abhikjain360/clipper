@@ -325,6 +325,21 @@ pub struct ClipboardPayload {
     pub text: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppDataWrite {
+    Value(serde_json::Value),
+    Delete,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AppDataStatus {
+    pub pending_changes: u32,
+    pub refused_changes: u32,
+    pub last_sync_error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

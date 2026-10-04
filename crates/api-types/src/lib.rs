@@ -645,8 +645,8 @@ pub struct AppDataChange {
     pub revision: u64,
     pub replaces_revision: u64,
     pub deleted: bool,
-    pub nonce: Option<Vec<u8>>,
-    pub ciphertext: Option<Vec<u8>>,
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
     pub device_id: DeviceId,
     pub signature: Vec<u8>,
 }
@@ -663,9 +663,10 @@ pub struct AppDataRow {
     pub revision: u64,
     pub sequence: i64,
     pub deleted: bool,
-    pub nonce: Option<Vec<u8>>,
-    pub ciphertext: Option<Vec<u8>>,
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
     pub device_id: Option<DeviceId>,
+    pub device_signing_public_key: Option<Vec<u8>>,
     pub signature: Vec<u8>,
 }
 

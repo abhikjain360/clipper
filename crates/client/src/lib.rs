@@ -1,6 +1,8 @@
 #![recursion_limit = "256"]
 
 pub mod api_client;
+#[cfg(not(target_family = "wasm"))]
+mod app_data;
 mod clipboard_privacy;
 pub mod engine;
 mod local_store;

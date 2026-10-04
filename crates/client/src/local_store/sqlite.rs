@@ -119,6 +119,7 @@ pub(super) fn open(path: &Path) -> Result<Connection, LocalStoreError> {
         content TEXT NOT NULL
     ) STRICT;",
     )?;
+    connection.execute_batch(super::app_data::SCHEMA)?;
     Ok(connection)
 }
 

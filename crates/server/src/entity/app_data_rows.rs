@@ -11,10 +11,10 @@ pub struct Model {
     #[sea_orm(unique)]
     pub sequence: i64,
     pub deleted: bool,
-    #[sea_orm(column_type = "Blob", nullable)]
-    pub nonce: Option<Vec<u8>>,
-    #[sea_orm(column_type = "Blob", nullable)]
-    pub ciphertext: Option<Vec<u8>>,
+    #[sea_orm(column_type = "Blob")]
+    pub nonce: Vec<u8>,
+    #[sea_orm(column_type = "Blob")]
+    pub ciphertext: Vec<u8>,
     pub device_id: Option<Uuid>,
     #[sea_orm(column_type = "Blob")]
     pub signature: Vec<u8>,

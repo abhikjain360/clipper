@@ -32,6 +32,7 @@ clipper-client = { path = "crates/client" }
 clipper-daemon-client = { path = "crates/daemon-client" }
 clipper-daemon-types = { path = "crates/daemon-types" }
 clipper-fs-txn = { path = "crates/fs-txn" }
+clipper-gym = { path = "crates/gym" }
 clipper-schedule = { path = "crates/schedule" }
 
 # shared third-party crates

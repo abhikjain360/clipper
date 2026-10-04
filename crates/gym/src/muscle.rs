@@ -46,6 +46,25 @@ impl Muscle {
         Self::Erectors,
     ];
 
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Chest => "chest",
+            Self::Shoulders => "shoulders",
+            Self::Triceps => "triceps",
+            Self::Lats => "lats",
+            Self::UpperBack => "upper_back",
+            Self::Biceps => "biceps",
+            Self::Forearms => "forearms",
+            Self::Quadriceps => "quadriceps",
+            Self::Hamstrings => "hamstrings",
+            Self::Glutes => "glutes",
+            Self::Calves => "calves",
+            Self::Abs => "abs",
+            Self::Obliques => "obliques",
+            Self::Erectors => "erectors",
+        }
+    }
+
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Chest => "Chest",

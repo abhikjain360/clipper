@@ -9,9 +9,10 @@ use std::{
 };
 
 pub use clipper_app_types::{
-    ActualView, AlarmView, AppState, AuthenticatedSession, CalendarSourceView, ClipboardPayload,
-    CollabItem, ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem, DeviceInfo,
-    IngestReport, LogoutOutcome, OccurrenceView, RunningWorkView, SavedProfile, ScheduleItemView,
+    ActualView, AlarmView, AppDataStatus, AppDataWrite, AppState, AuthenticatedSession,
+    CalendarSourceView, ClipboardPayload, CollabItem, ConnectionStatus, DecryptedClipboardItem,
+    DecryptedFileItem, DeviceInfo, IngestReport, LogoutOutcome, OccurrenceView, RunningWorkView,
+    SavedProfile, ScheduleItemView,
 };
 use clipper_core::{crypto, models::*};
 pub use clipper_schedule::{
@@ -42,6 +43,9 @@ use crate::{
     },
 };
 
+#[cfg(not(target_family = "wasm"))]
+#[path = "app_data_sync.rs"]
+mod app_data_sync;
 #[path = "calendar_import.rs"]
 mod calendar_import;
 #[path = "schedule_context.rs"]
@@ -168,6 +172,8 @@ pub struct SyncEngine {
     /// The stamp of the newest view published to `state`, so an older view
     /// arriving late is dropped rather than shown.
     published_stamp: std::sync::atomic::AtomicU64,
+    #[cfg(not(target_family = "wasm"))]
+    app_data: crate::app_data::AppDataHandle,
 }
 
 /// Secrets a browser client needs to resume a session after a page reload
@@ -216,6 +222,8 @@ impl SyncEngine {
             history_epoch: std::sync::atomic::AtomicU64::new(0),
             published_stamp: std::sync::atomic::AtomicU64::new(0),
             import_rules: Mutex::new(std::collections::VecDeque::new()),
+            #[cfg(not(target_family = "wasm"))]
+            app_data: Default::default(),
         }))
     }
 
@@ -499,6 +507,8 @@ impl SyncEngine {
             // database below is a different profile's, and a straggling write
             // that still passed the old generation would land in it.
             self.local_store.fence_and_clear_memory().await;
+            #[cfg(not(target_family = "wasm"))]
+            self.app_data.close().await;
             self.local_store
                 .set_profile(profile_id_from_encryption_key(&encryption_key));
             *active_key = Some(encryption_key);
@@ -533,6 +543,15 @@ impl SyncEngine {
         {
             Ok(visible) => self.publish_visible_state(visible).await,
             Err(error) => warn!("Failed to hydrate local ciphertext cache: {}", error),
+        }
+
+        #[cfg(not(target_family = "wasm"))]
+        {
+            if let Err(error) = self.open_app_data(epoch, &cache_key).await {
+                warn!("Failed to open local app data: {error}");
+            }
+            let engine = Arc::clone(self);
+            self.spawn_session_work(epoch, engine.app_data_sync_loop(epoch));
         }
 
         {
@@ -725,6 +744,8 @@ impl SyncEngine {
             *active_key = None;
             self.schedule_history.lock().await.clear();
             self.import_rules.lock().await.clear();
+            #[cfg(not(target_family = "wasm"))]
+            self.app_data.close().await;
         }
         *self.device_signing_key.write().await = None;
         *self.device_identity_wrapping_key.write().await = None;
@@ -3436,9 +3457,15 @@ impl SyncEngine {
                 warn!("Server rejected WS connection: {error}");
                 return Ok(false);
             }
-            Err(e) => {
-                warn!("Failed to parse WS message: {}", e);
-            }
+            Err(e) => match serde_json::from_str::<WsAppDataMessage>(text) {
+                Ok(WsAppDataMessage::Changed { sequence }) => {
+                    #[cfg(not(target_family = "wasm"))]
+                    self.app_data.announced(sequence);
+                    #[cfg(target_family = "wasm")]
+                    debug!(sequence, "Ignoring an app-data announcement in the browser");
+                }
+                Err(_) => warn!("Failed to parse WS message: {}", e),
+            },
         }
         Ok(true)
     }
@@ -4279,6 +4306,7 @@ impl SyncEngine {
             state.connection_status = ConnectionStatus::Connected;
         }
         self.bump_version();
+        self.app_data.request_pull();
         info!(
             stream_start_seq,
             generation, "WebSocket connected and reconciliation started"
@@ -4472,6 +4500,34 @@ impl SyncEngine {
 
         Ok(())
     }
+}
+
+#[cfg(target_family = "wasm")]
+impl SyncEngine {
+    pub async fn query_app_data(
+        &self,
+        _sql: &str,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, ClientError> {
+        Err(app_data_unavailable())
+    }
+
+    pub async fn write_app_data(
+        &self,
+        _collection: &str,
+        _row_id: Option<&str>,
+        _write: AppDataWrite,
+    ) -> Result<String, ClientError> {
+        Err(app_data_unavailable())
+    }
+
+    pub async fn app_data_status(&self) -> Result<AppDataStatus, ClientError> {
+        Err(app_data_unavailable())
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn app_data_unavailable() -> ClientError {
+    ClientError::Unsupported("App data is not available in the browser".into())
 }
 
 #[cfg(target_family = "wasm")]
@@ -5261,6 +5317,10 @@ fn hex_string(bytes: &[u8]) -> String {
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "schedule_integration_tests.rs"]
 mod schedule_integration_tests;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "app_data_integration_tests.rs"]
+mod app_data_integration_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "logout_tests.rs"]

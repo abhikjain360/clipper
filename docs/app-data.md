@@ -3,13 +3,12 @@
 This document specifies how Clipper stores data for apps built on top of it,
 such as the gym logger and later the kitchen. App data is end-to-end encrypted
 like every other Clipper object. Each device holds a full local copy it can
-query with SQL, writes reach that copy first and sync when the device is
-online, and the server stores only encrypted rows it cannot read.
+query with SQL, and the server stores only encrypted data it cannot read.
 
 Clipboard items, files, the schedule and collab documents keep their own
 object storage, described in [object-envelopes.md](object-envelopes.md) and
-[ws-sync-flow.md](ws-sync-flow.md). App data sits beside them and does not
-change them.
+[ws-sync-flow.md](ws-sync-flow.md). Row collections have their own storage
+beside it; document collections add one object kind to it.
 
 ## Terms
 
@@ -17,9 +16,17 @@ change them.
   `gym.sets`. A collection's definition is compiled into Clipper: its name,
   the Rust type every record must decode into, its conflict rule and the
   fields it indexes.
-- **Row**: one record in a collection, identified by a UUIDv7 row id chosen by
-  the device that creates it. A row's value is a JSON document. It can be flat,
-  like one logged set, or nested, like a recipe.
+- **Row**: one record in a row collection, identified by a UUIDv7 row id chosen
+  by the device that creates it, or by an id the collection derives from the
+  value, as `gym.recovery` does. A row's value is JSON. It can be flat, like
+  one logged set, or nested, like a workout template.
+- **Row collection** and **document collection**: the two ways a collection is
+  stored. Row collections hold many small records, accept writes offline and
+  keep only each row's newest revision. Document collections hold larger
+  records that are edited over time, such as recipes; each record is a Clipper
+  object with its full revision history, and writes need the server. Most of
+  this document describes row collections; "Document collections" below
+  describes the other kind.
 - **Row key**: the identifier the server stores for a row. It is a keyed hash
   of the collection name and row id, so the server cannot tell which
   collection a row belongs to or link it to its row id.
@@ -36,7 +43,8 @@ change them.
 For each row the server stores only its newest revision:
 
 - the row key, the revision and the change sequence;
-- the encrypted value, or a delete marker;
+- whether the revision is a delete, and its encrypted envelope (a value, or a
+  delete marker for a delete);
 - the id of the device that wrote it, its signature and the server's
   receive time.
 
@@ -62,16 +70,18 @@ Two keys are derived from the user's data key (see
 The row key is HMAC-SHA256 under the row-key key over the UTF-8 collection name, a
 zero byte and the 16 bytes of the row id.
 
-The value is encrypted with XChaCha20-Poly1305 under the value key with a
-random 24-byte nonce. The plaintext is the JSON encoding of
-`AppDataValueEnvelope` in `crates/core`. It holds the collection name, the row id, the
-collection's schema version, the device's write time and the row's JSON value,
-so a device that receives a row from the server learns which collection it
-belongs to. Its fields are `collection`, `row_id`, `schema_version`,
-`written_at` and `value`. The schema version is a u64 and the write time is
-an RFC 3339 string. The associated data is the 32-byte row key followed by
-the revision as eight big-endian bytes, so the
-server cannot move a value to another row or another revision.
+Every revision, a delete included, carries an envelope encrypted with
+XChaCha20-Poly1305 under the value key with a random 24-byte nonce. The
+plaintext is the JSON encoding of `AppDataValueEnvelope` in `crates/core`. It
+holds the collection name, the row id, the collection's schema version, the
+device's write time, whether the revision is a delete and the row's JSON
+value, so a device that receives a row from the server learns which collection
+it belongs to. Its fields are `collection`, `row_id`, `schema_version`,
+`written_at`, `deleted` and `value`. The schema version is a u64, the write
+time is an RFC 3339 string and `value` is `null` for a delete. The associated
+data is the 32-byte row key followed by the revision as eight big-endian
+bytes, so the server cannot move an envelope to another row or another
+revision, and cannot make up a delete.
 
 The writing device signs this message with its Ed25519 signing key:
 
@@ -80,14 +90,17 @@ ASCII("clipper:app-data-change:v1")
 ‖ row_key (32 bytes)
 ‖ revision (u64 big-endian)
 ‖ deleted (one byte, 0 or 1)
-‖ SHA256(nonce ‖ ciphertext) (32 bytes; all zero for a delete)
+‖ SHA256(nonce ‖ ciphertext) (32 bytes)
 ‖ device_id (16 bytes)
 ```
 
-The ciphertext includes its 16-byte authentication tag. A delete has no nonce
-or ciphertext. The signature is 64 bytes.
-The server verifies the signature with the device's registered public key
-before it accepts the change, and receiving devices verify it again.
+The ciphertext includes its 16-byte authentication tag. The signature is 64
+bytes. The server verifies the signature with the device's registered public
+key before it accepts the change, and receiving devices verify it again with
+the public key the server returns beside the row. When the writing device has
+been removed from the account the server has no key to return; a receiving
+device then skips the signature check, as it does for object envelopes, and
+relies on the envelope's authenticated encryption.
 
 ## Writing a row
 
@@ -103,7 +116,14 @@ before it accepts the change, and receiving devices verify it again.
    device removes it from its pending changes.
 
 A device that is offline keeps its pending changes across restarts and sends
-them when it reconnects.
+them when it reconnects. While online it sends them after each write, on
+reconnect, and every 30 seconds while any are waiting.
+
+A device holds at most one pending change per row. Writing the row again
+before the server accepts the change replaces the pending change, which keeps
+the revision it replaces. A row that has been deleted cannot be written
+again. When the server refuses a change, the device keeps it, stops sending
+it and reports it in its sync status; writing the row again replaces it.
 
 ## Conflicts
 
@@ -123,6 +143,11 @@ then applies the collection's conflict rule:
   later, the device resends it on top of the current revision; otherwise it
   drops its pending change and keeps the server's value.
 
+In both kinds a delete wins over an edit, whatever their write times, so a
+deleted row stays deleted. Two edits of an append-only row keep the server's
+value. A local change that wins is encrypted and signed again for the next
+revision and keeps its original write time.
+
 ## Server routes
 
 Both routes require a bearer session. Request and response bodies use
@@ -138,8 +163,8 @@ row_key, revision, replaces_revision, deleted, nonce, ciphertext, device_id, sig
 ```
 
 `replaces_revision` is zero for a new row. `nonce` and `ciphertext` are
-optional byte vectors and must both be absent for a delete. `device_id` must
-equal the authenticated device. The server verifies the signature against
+required for every change, a delete included. `device_id` must equal the
+authenticated device. The server verifies the signature against
 that device's registered public key, scoped to the authenticated user.
 
 The response is `AppDataChangesResponse` with a `results` list in request
@@ -151,21 +176,22 @@ order. Each result is one externally tagged postcard enum variant:
 - `Refused { reason }`, where the reason is `BadSignature`, `TooLarge`,
   `OverQuota` or `Malformed`.
 
-A malformed change includes a wrong device id, a wrong byte-field length,
-inconsistent delete fields or a revision that is not one higher than the
-revision it replaces. Refused and conflicting changes do not prevent other
+A malformed change includes a wrong device id, a wrong byte-field length or a
+revision that is not one higher than the revision it replaces. Refused and conflicting changes do not prevent other
 valid changes in the batch from being accepted. More than 200 changes rejects
 the request. An empty batch returns an empty results list.
 
 Stored state is `AppDataRow`, with these fields in serialization order:
 
 ```text
-row_key, revision, sequence, deleted, nonce, ciphertext, device_id, signature
+row_key, revision, sequence, deleted, nonce, ciphertext, device_id,
+device_signing_public_key, signature
 ```
 
-`device_id` becomes absent if that device is removed from the account. The row
-and signature remain. A receiving device can verify the signature only while
-it has the signing device's id and public key.
+`device_signing_public_key` is the writing device's registered Ed25519 public
+key, returned the same way object listings return
+`source_device_signing_public_key`. `device_id` and the key become absent if
+that device is removed from the account. The row and signature remain.
 
 `GET /api/app-data/changes?after=<sequence>&limit=<count>` returns
 `AppDataChangesPage`: `rows` followed by `newest_sequence`. `after` defaults
@@ -180,10 +206,12 @@ watermark, not proof that the client has applied those changes.
 
 ## Deletes
 
-A delete is a revision with a delete marker and no value. Devices remove the
-row from their queryable tables and keep the marker, so a delayed older
-change cannot bring the row back. The server keeps delete markers so a device
-that was offline during the delete still learns about it.
+A delete is a revision whose envelope has `deleted` set and no value. It is
+encrypted and signed like any other revision, so a receiving device
+authenticates it by decryption even when it cannot check the signature.
+Devices remove the row from their queryable tables and keep the marker, so a
+delayed older change cannot bring the row back. The server keeps delete
+markers so a device that was offline during the delete still learns about it.
 
 ## Sync between devices
 
@@ -193,7 +221,11 @@ from zero and receives every row. Over the WebSocket connection described in
 [ws-sync-flow.md](ws-sync-flow.md), the server announces the newest change
 sequence whenever any of the user's rows change; a device that sees a sequence
 higher than its own fetches the missing pages. A device applies a received
-change only if its revision is higher than the one it holds.
+change only if its revision is higher than the one it holds and the row has
+no pending local change; the conflict rule settles such a row when the pending
+change is sent. A received change that fails its signature check, does not
+decrypt, or names a different collection or row id than its row key is not
+applied: the device reports it in its sync status and moves past it.
 
 The WebSocket announcement is JSON:
 
@@ -210,6 +242,25 @@ fetch. Live announcements can arrive out of sequence; a client keeps the
 largest announced sequence and fetches through it. A lagged connection gets
 an `invalidate` for `all` and closes so the client reconnects and fetches.
 
+## Document collections
+
+Each record of a document collection is a Clipper object of kind
+`AppDocument`, stored, signed, synced and deleted like the other encrypted
+object kinds in [object-envelopes.md](object-envelopes.md) and
+[ws-sync-flow.md](ws-sync-flow.md). Its encrypted metadata names the
+collection, the document id and the schema version. Its first payload is the
+JSON value; further payloads hold attachments, such as a photo of a dish.
+
+Writing a document validates the value against the collection's Rust type and
+then creates or revises the object on the server, so a device cannot save a
+document while offline. Every revision is kept, as for other objects. A device
+fetches a document's earlier revisions only when they are asked for.
+
+On unlock, each device decrypts the newest revision of every document into the
+same in-memory tables as rows, with the object revision in the `revision`
+column, so queries treat both kinds alike. History is read from the object, not
+from the tables.
+
 ## Local storage and queries
 
 Each native device keeps app data in its existing `store.sqlite3`, in the
@@ -225,7 +276,21 @@ with SQL, using SQLite's JSON functions for fields inside `value`. Local
 writes and received changes update the in-memory tables and the stored
 ciphertext together. A few thousand rows decrypt in well under a second.
 
-The browser client does not sync app data.
+A collection's table is named after it: `gym.sets` is the table `sets` in the
+attached in-memory database `gym`, so `SELECT * FROM gym.sets` reads it. The
+index for a field `f` is on `json_extract(value, '$.f')`, and a query uses it
+when it filters on that same expression. `written_at` is the write time of the
+row's newest revision.
+
+A query is one statement. It runs under an SQLite authorizer that allows only
+reading tables and calling functions, so a statement that writes, changes the
+schema, attaches a database or sets a pragma is refused, as is a second
+statement or a query that runs longer than 5 seconds. Rows come back as JSON
+objects keyed by column name: text stays text, so `value` arrives as a JSON
+string, integers and reals become numbers, and blobs become base64 strings.
+
+The browser client does not sync app data, and its app-data calls return an
+error.
 
 ## Opening the app offline
 
@@ -257,10 +322,15 @@ authenticated socket (see [local-ipc-security.md](local-ipc-security.md)):
 - `query_app_data` runs one read-only SQL statement against the in-memory
   tables and returns the rows as JSON. The connection it uses cannot write.
 - `write_app_data` takes a collection, a row id and a value, or a delete, and
-  goes through the same validation and pending-change path as the app.
+  goes through the same validation and pending-change path as the app. A
+  value written without a row id gets a new UUIDv7, or the id its collection
+  derives from it.
+- `app_data_status` reports how many changes are waiting to be sent, how many
+  the server refused, and the last sync error.
 
-The `clipper` command-line client exposes both as `clipper data query` and
-`clipper data write`.
+The `clipper` command-line client exposes these as `clipper data query`,
+`clipper data write` and `clipper data status`, and lists a document's earlier
+revisions with `clipper data history`.
 
 ## Limits
 
@@ -293,7 +363,10 @@ The gym logger is the first app on app data. Its collections:
 - `gym.body_weight` (append-only): one weighing, with its time and weight in
   kilograms.
 - `gym.recovery` (last write wins): the user's own recovery time for one
-  muscle, replacing the default.
+  muscle, replacing the default. Its row id is a UUIDv5 of the muscle's name
+  under a fixed namespace (`Recovery::row_id` in `crates/gym`), so each muscle
+  has exactly one row and devices that set the same muscle settle it by last
+  write wins.
 
 The list of muscles and their default recovery times is part of the app, not a
 collection. Muscle fatigue is calculated on the device from recent working

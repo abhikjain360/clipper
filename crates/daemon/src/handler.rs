@@ -29,8 +29,8 @@ use crate::{
         ClipboardPayloadResult, CopyToLocalResult, DaemonCommand, DaemonEvent, DaemonRequest,
         DaemonResponse, DeviceListResult, ExpandScheduleParams, IPC_AUTH_NONCE_BYTES,
         IPC_AUTH_TAG_BYTES, IPC_AUTH_VERSION, LoginParams, RegisterParams, RegisterResult,
-        StartActualParams, UpdateScheduleItemParams, UploadFileResult, ipc_client_auth_message,
-        ipc_daemon_auth_message,
+        StartActualParams, UpdateScheduleItemParams, UploadFileResult, WriteAppDataResult,
+        ipc_client_auth_message, ipc_daemon_auth_message,
     },
 };
 
@@ -525,6 +525,25 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                         Err(error) => client_error(id, error),
                     }
                 }
+                DaemonCommand::QueryAppData(params) => {
+                    match engine.query_app_data(&params.sql).await {
+                        Ok(rows) => json_success(id, rows),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::WriteAppData(params) => {
+                    match engine
+                        .write_app_data(&params.collection, params.row_id.as_deref(), params.write)
+                        .await
+                    {
+                        Ok(row_id) => json_success(id, WriteAppDataResult { id: row_id }),
+                        Err(error) => client_error(id, error),
+                    }
+                }
+                DaemonCommand::AppDataStatus => match engine.app_data_status().await {
+                    Ok(status) => json_success(id, status),
+                    Err(error) => client_error(id, error),
+                },
                 DaemonCommand::Authenticate(_)
                 | DaemonCommand::Login(_)
                 | DaemonCommand::Register(_)

@@ -17,6 +17,7 @@ import {
   type ScheduleItemView as NativeScheduleItemView,
 } from "./generated/clipper_app_types";
 import {
+  MobileAppDataWrite,
   MobileClipperClient,
   MobileError,
   type MobileClipperClientLike,
@@ -24,6 +25,8 @@ import {
 import type {
   ActualView,
   AlarmView,
+  AppDataRow,
+  AppDataWrite,
   AppState,
   ClipboardItem,
   ClipboardPayload,
@@ -175,7 +178,24 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     // of leaking it past unmount.
     waitForStateChange: async (seenVersion, signal) =>
       client.waitForStateChange(seenVersion, signal ? { signal } : undefined),
+    queryAppData: async (sql) => JSON.parse(await client.queryAppData(sql)) as AppDataRow[],
+    writeAppData: async (collection, rowId, write) =>
+      client.writeAppData(collection, rowId ?? undefined, mapAppDataWrite(write)),
+    appDataStatus: async () => {
+      const status = await client.appDataStatus();
+      return {
+        pending_changes: status.pendingChanges,
+        refused_changes: status.refusedChanges,
+        last_sync_error: status.lastSyncError ?? null,
+      };
+    },
   };
+}
+
+function mapAppDataWrite(write: AppDataWrite): MobileAppDataWrite {
+  return write === "delete"
+    ? new MobileAppDataWrite.Delete()
+    : new MobileAppDataWrite.Value({ json: JSON.stringify(write.value) });
 }
 
 export default createMobileBackend;

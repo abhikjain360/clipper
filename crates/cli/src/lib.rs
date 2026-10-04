@@ -5,8 +5,9 @@ use chrono_tz::Tz;
 use clap::{Args, Parser, Subcommand};
 use clipper_daemon_client::{ClientError, Connection};
 use clipper_daemon_types::{
-    ActualsBetweenParams, AppState, CreateScheduleItemParams, DaemonCommand,
-    DeleteScheduleObjectParams, DeviceListResult, ExpandScheduleParams, UpdateScheduleItemParams,
+    ActualsBetweenParams, AppDataWrite, AppState, CreateScheduleItemParams, DaemonCommand,
+    DeleteScheduleObjectParams, DeviceListResult, ExpandScheduleParams, QueryAppDataParams,
+    UpdateScheduleItemParams, WriteAppDataParams,
 };
 use clipper_schedule::{
     AlarmPolicy, BlockDuration, Cadence, Frequency, Recurrence, ScheduleItem, ScheduleItemId,
@@ -20,7 +21,7 @@ use uuid::Uuid;
 #[command(
     name = "clipper",
     version,
-    about = "Read devices and manage the local Clipper daemon's schedule"
+    about = "Read devices and manage the local Clipper daemon's schedule and app data"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -38,6 +39,34 @@ pub enum Command {
     Actuals(RangeArgs),
     #[command(about = "List the account's devices, marking this device")]
     Devices,
+    #[command(about = "Query and write app data such as the gym log")]
+    Data {
+        #[command(subcommand)]
+        command: DataCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DataCommand {
+    #[command(about = "Run one read-only SQL statement and print the rows as JSON")]
+    Query { sql: String },
+    #[command(
+        about = "Write one row from JSON on stdin, or delete one; print its row id",
+        after_help = "Tables are named after their collection, for example gym.sets. A row id is generated when --id is absent."
+    )]
+    Write {
+        collection: String,
+        #[arg(long, help = "Row id; required with --delete")]
+        id: Option<Uuid>,
+        #[arg(
+            long,
+            requires = "id",
+            help = "Delete the row instead of reading a value"
+        )]
+        delete: bool,
+    },
+    #[command(about = "Show changes waiting to sync and the last sync error")]
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -79,6 +108,8 @@ pub enum Error {
     Daemon(#[from] ClientError),
     #[error("invalid schedule item JSON: {0}; see clipper schedule add --help")]
     Json(#[from] serde_json::Error),
+    #[error("invalid app-data value JSON: {0}")]
+    AppDataValue(serde_json::Error),
     #[error("CLI I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("cannot determine the system IANA zone: {0}; for occurrences, pass --zone")]
@@ -176,6 +207,39 @@ impl Command {
     fn request(self, input: impl Read) -> Result<(DaemonCommand, Output), Error> {
         match self {
             Self::Devices => Ok((DaemonCommand::ListDevices, Output::Devices)),
+            Self::Data {
+                command: DataCommand::Query { sql },
+            } => Ok((
+                DaemonCommand::QueryAppData(QueryAppDataParams { sql }),
+                Output::Result,
+            )),
+            Self::Data {
+                command:
+                    DataCommand::Write {
+                        collection,
+                        id,
+                        delete,
+                    },
+            } => {
+                let write = if delete {
+                    AppDataWrite::Delete
+                } else {
+                    AppDataWrite::Value(
+                        serde_json::from_reader(input).map_err(Error::AppDataValue)?,
+                    )
+                };
+                Ok((
+                    DaemonCommand::WriteAppData(WriteAppDataParams {
+                        collection,
+                        row_id: id.map(|id| id.to_string()),
+                        write,
+                    }),
+                    Output::Result,
+                ))
+            }
+            Self::Data {
+                command: DataCommand::Status,
+            } => Ok((DaemonCommand::AppDataStatus, Output::Result)),
             Self::Schedule {
                 command: ScheduleCommand::Items,
             } => Ok((DaemonCommand::GetState, Output::Items)),

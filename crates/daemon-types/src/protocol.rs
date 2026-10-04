@@ -7,7 +7,7 @@
 //! response, and event payloads cannot drift.
 
 use clipper_api_types::{ApiErrorCode, ErrorResponse};
-use clipper_app_types::{AppState, DeviceInfo};
+use clipper_app_types::{AppDataWrite, AppState, DeviceInfo};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 /// incompatibly — the desktop app and the daemon are separate binaries, and an
 /// old daemon can outlive an app update (it is reparented to PID 1, so it keeps
 /// running until killed).
-pub const IPC_AUTH_VERSION: u32 = 5;
+pub const IPC_AUTH_VERSION: u32 = 6;
 pub const IPC_AUTH_NONCE_BYTES: usize = 32;
 pub const IPC_AUTH_TAG_BYTES: usize = 32;
 
@@ -97,6 +97,9 @@ pub enum DaemonCommand {
     StartActual(StartActualParams),
     StopActual(StopActualParams),
     ActualsBetween(ActualsBetweenParams),
+    QueryAppData(QueryAppDataParams),
+    WriteAppData(WriteAppDataParams),
+    AppDataStatus,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -290,6 +293,23 @@ pub struct SetCalendarSourceAlarmsParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetCollabDocMetaParams {
     pub object_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryAppDataParams {
+    pub sql: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteAppDataParams {
+    pub collection: String,
+    pub row_id: Option<String>,
+    pub write: AppDataWrite,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteAppDataResult {
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

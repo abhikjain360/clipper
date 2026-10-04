@@ -11,5 +11,5 @@ pub use clipper_daemon_types::{
     LoginParams, RegisterParams, RegisterResult, RemoveDeviceParams, SendClipboardParams,
     SendClipboardPayloadParams, SetCalendarSourceAlarmsParams, StartActualParams, StopActualParams,
     SyncCalendarSourceParams, UpdateScheduleItemParams, UploadFileParams, UploadFileResult,
-    ipc_client_auth_message, ipc_daemon_auth_message,
+    WriteAppDataResult, ipc_client_auth_message, ipc_daemon_auth_message,
 };

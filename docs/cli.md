@@ -25,6 +25,11 @@ clipper schedule update <object-id> --revision <n> < replacement.json
 clipper schedule delete <object-id>
 clipper actuals --from 2026-10-12 --to 2026-10-19
 clipper schedule add --help
+clipper data query "SELECT id, value FROM gym.sets ORDER BY written_at DESC LIMIT 10"
+clipper data write gym.body_weight < weighing.json
+clipper data write gym.exercises --id <row-id> < exercise.json
+clipper data write gym.sets --id <row-id> --delete
+clipper data status
 ```
 
 - `devices` returns an array of `{id, name, platform, is_current}` records from
@@ -42,6 +47,27 @@ clipper schedule add --help
   before saving another replacement.
 - `delete` returns `null` on success.
 - `occurrences` and `actuals` return the daemon's result arrays.
+
+## App data
+
+App data is described in [app-data.md](app-data.md). Each collection, such as
+`gym.sets`, is a table of the same name with the columns `id`, `revision`,
+`written_at` and `value`. `value` is the row's JSON text; read fields with
+SQLite's JSON functions, for example `json_extract(value, '$.reps')`.
+
+- `data query` runs one read-only SQL statement and returns an array of
+  objects keyed by column name. A statement that writes, a second statement,
+  or a query running longer than 5 seconds fails.
+- `data write <collection>` reads one JSON value on stdin, validates it
+  against the collection's type and saves it. It returns `{id}`. Without
+  `--id` it creates a row with a new UUIDv7; `gym.recovery` rows always use the
+  id derived from their muscle. `--id` replaces an existing row.
+- `data write <collection> --id <row-id> --delete` deletes a row and reads
+  nothing from stdin. A deleted row cannot be written again.
+- `data status` returns `{pending_changes, refused_changes, last_sync_error}`.
+  Writes are saved locally first and sent when the daemon is online, so a
+  write succeeds offline and shows up in `pending_changes` until the server
+  accepts it.
 
 An alarm can include `target_device` with an ID from `devices`. Omit it to ring
 on all Android phones. A target can be a phone or a Mac; only that device rings.

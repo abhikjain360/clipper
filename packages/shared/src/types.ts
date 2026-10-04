@@ -352,4 +352,17 @@ export type ClipperBackend = {
     serverUrl: string,
   ) => Promise<void>;
   sessionResumeMaterial: () => Promise<SessionResumeMaterial | null>;
+  queryAppData?: (sql: string) => Promise<AppDataRow[]>;
+  writeAppData?: (collection: string, rowId: string | null, write: AppDataWrite) => Promise<string>;
+  appDataStatus?: () => Promise<AppDataStatus>;
+};
+
+export type AppDataRow = Record<string, unknown>;
+
+export type AppDataWrite = { value: unknown } | "delete";
+
+export type AppDataStatus = {
+  pending_changes: number;
+  refused_changes: number;
+  last_sync_error: string | null;
 };

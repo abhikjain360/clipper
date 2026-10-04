@@ -180,6 +180,11 @@ pub struct Recovery {
 impl Recovery {
     pub const COLLECTION_NAME: &'static str = "gym.recovery";
     pub const CONFLICT_RULE: ConflictRule = ConflictRule::LastWriteWins;
+    const ROW_ID_NAMESPACE: Uuid = Uuid::from_u128(0x5f0c_2b8e_9d41_4a37_b6e2_7c18_a3d9_0e54);
+
+    pub fn row_id(muscle: Muscle) -> Uuid {
+        Uuid::new_v5(&Self::ROW_ID_NAMESPACE, muscle.name().as_bytes())
+    }
 
     pub fn validate(&self) -> Result<(), ValidationError> {
         if !self.recovery_days.is_finite() || !(0.5..=14.0).contains(&self.recovery_days) {

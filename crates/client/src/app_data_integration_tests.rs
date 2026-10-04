@@ -1,0 +1,429 @@
+use std::{
+    net::SocketAddr,
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+};
+
+use clipper_gym::{Muscle, Recovery};
+use serde_json::{Value, json};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    task::JoinHandle,
+};
+use uuid::Uuid;
+
+use super::{
+    schedule_integration_tests::{start_server, wait_for},
+    *,
+};
+use crate::app_data::AppDataKeys;
+
+const TABLES: [&str; 6] = [
+    "gym.exercises",
+    "gym.workouts",
+    "gym.sessions",
+    "gym.sets",
+    "gym.body_weight",
+    "gym.recovery",
+];
+
+struct SwitchableProxy {
+    url: String,
+    online: Arc<AtomicBool>,
+    connections: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
+    listener: JoinHandle<()>,
+}
+
+impl SwitchableProxy {
+    async fn start(upstream: SocketAddr) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let online = Arc::new(AtomicBool::new(true));
+        let connections = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let accepting = Arc::clone(&online);
+        let tracked = Arc::clone(&connections);
+        let listener = tokio::spawn(async move {
+            loop {
+                let Ok((mut client, _)) = listener.accept().await else {
+                    return;
+                };
+                if !accepting.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let connection = tokio::spawn(async move {
+                    if let Ok(mut server) = TcpStream::connect(upstream).await {
+                        let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                    }
+                });
+                tracked.lock().unwrap().push(connection);
+            }
+        });
+        Self {
+            url,
+            online,
+            connections,
+            listener,
+        }
+    }
+
+    async fn go_offline(&self, engine: &SyncEngine) {
+        self.online.store(false, Ordering::SeqCst);
+        for connection in self.connections.lock().unwrap().drain(..) {
+            connection.abort();
+        }
+        wait_for(engine, |state| {
+            !matches!(state.connection_status, ConnectionStatus::Connected)
+        })
+        .await;
+    }
+
+    fn go_online(&self) {
+        self.online.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Drop for SwitchableProxy {
+    fn drop(&mut self) {
+        self.listener.abort();
+        for connection in self.connections.lock().unwrap().drain(..) {
+            connection.abort();
+        }
+    }
+}
+
+async fn signed_in(url: &str, data: &Path, name: &str, register: bool) -> Arc<SyncEngine> {
+    let engine = SyncEngine::new_with_data_dir(url, data.join(name));
+    if register {
+        engine
+            .register_with_platform(
+                "test-invite",
+                "app-data-test",
+                "local-test-passphrase",
+                name,
+                "test",
+            )
+            .await
+            .expect("register");
+    } else {
+        engine
+            .login_with_platform("local-test-passphrase", "app-data-test", name, "test")
+            .await
+            .expect("login");
+    }
+    wait_for(&engine, |state| {
+        matches!(state.connection_status, ConnectionStatus::Connected)
+    })
+    .await;
+    engine
+}
+
+async fn eventually(description: &str, mut check: impl AsyncFnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !check().await {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{description} within thirty seconds"));
+}
+
+async fn query(engine: &SyncEngine, sql: &str) -> Value {
+    Value::Array(
+        engine
+            .query_app_data(sql)
+            .await
+            .expect("query")
+            .into_iter()
+            .map(Value::Object)
+            .collect(),
+    )
+}
+
+async fn snapshot(engine: &SyncEngine) -> Vec<Value> {
+    let mut tables = Vec::new();
+    for table in TABLES {
+        tables.push(
+            query(
+                engine,
+                &format!("SELECT id, revision, written_at, value FROM {table} ORDER BY id"),
+            )
+            .await,
+        );
+    }
+    tables
+}
+
+async fn field(engine: &SyncEngine, table: &str, id: &str, path: &str) -> Value {
+    let rows = query(
+        engine,
+        &format!("SELECT json_extract(value, '$.{path}') AS field FROM {table} WHERE id = '{id}'"),
+    )
+    .await;
+    rows.get(0).map_or(Value::Null, |row| row["field"].clone())
+}
+
+async fn pending(engine: &SyncEngine) -> u32 {
+    engine
+        .app_data_status()
+        .await
+        .expect("status")
+        .pending_changes
+}
+
+async fn write(engine: &SyncEngine, collection: &str, id: Option<&str>, value: Value) -> String {
+    engine
+        .write_app_data(collection, id, AppDataWrite::Value(value))
+        .await
+        .expect("write")
+}
+
+async fn delete(engine: &SyncEngine, collection: &str, id: &str) {
+    engine
+        .write_app_data(collection, Some(id), AppDataWrite::Delete)
+        .await
+        .expect("delete");
+}
+
+fn set(session_id: Uuid, exercise_id: &str, reps: u32) -> Value {
+    json!({
+        "session_id": session_id,
+        "exercise_id": exercise_id,
+        "order": 1,
+        "kind": "working",
+        "weight_kg": 100.0,
+        "reps": reps,
+        "reps_in_reserve": 2,
+        "completed_at": "2026-10-07T10:00:00Z",
+    })
+}
+
+fn exercise(name: &str) -> Value {
+    json!({"name": name, "muscles": [{"muscle": "quadriceps", "share": 1.0}], "archived": false})
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_app_data_syncs_resolves_conflicts_and_rejects_tampered_rows() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data = temp.path();
+    let (_server, address) = start_server(data).await;
+    let url = format!("http://{address}");
+    let proxy = SwitchableProxy::start(address).await;
+    let first = signed_in(&url, data, "first", true).await;
+    let second = signed_in(&proxy.url, data, "second", false).await;
+
+    assert!(
+        first
+            .write_app_data("gym.notes", None, AppDataWrite::Value(json!({})))
+            .await
+            .is_err()
+    );
+    assert!(
+        first
+            .write_app_data(
+                "gym.body_weight",
+                None,
+                AppDataWrite::Value(json!({"time": "2026-10-07T07:00:00Z", "kg": -1.0}))
+            )
+            .await
+            .is_err()
+    );
+    assert!(first.query_app_data("DELETE FROM gym.sets").await.is_err());
+
+    let squat = write(&first, "gym.exercises", None, exercise("Squat")).await;
+    let session_id = Uuid::now_v7();
+    let logged = write(&first, "gym.sets", None, set(session_id, &squat, 5)).await;
+    let chest = write(
+        &first,
+        "gym.recovery",
+        None,
+        json!({"muscle": "chest", "recovery_days": 3.0}),
+    )
+    .await;
+    assert_eq!(chest, Recovery::row_id(Muscle::Chest).to_string());
+    eventually("the second device receives the first rows", async || {
+        field(&second, "gym.sets", &logged, "reps").await == json!(5)
+            && field(&second, "gym.recovery", &chest, "recovery_days").await == json!(3.0)
+    })
+    .await;
+
+    proxy.go_offline(&second).await;
+    write(
+        &first,
+        "gym.recovery",
+        None,
+        json!({"muscle": "chest", "recovery_days": 4.0}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    write(
+        &second,
+        "gym.recovery",
+        None,
+        json!({"muscle": "chest", "recovery_days": 5.0}),
+    )
+    .await;
+    let weighed = write(
+        &second,
+        "gym.body_weight",
+        None,
+        json!({"time": "2026-10-07T07:00:00Z", "kg": 80.5}),
+    )
+    .await;
+    assert_eq!(pending(&second).await, 2);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        field(&first, "gym.body_weight", &weighed, "kg").await,
+        Value::Null
+    );
+    proxy.go_online();
+    eventually("the later offline recovery edit wins", async || {
+        field(&first, "gym.recovery", &chest, "recovery_days").await == json!(5.0)
+            && field(&first, "gym.body_weight", &weighed, "kg").await == json!(80.5)
+            && pending(&second).await == 0
+    })
+    .await;
+    assert_eq!(
+        query(&second, "SELECT count(*) AS rows FROM gym.recovery").await,
+        json!([{"rows": 1}])
+    );
+
+    proxy.go_offline(&second).await;
+    write(
+        &second,
+        "gym.exercises",
+        Some(&squat),
+        exercise("Back squat"),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    write(
+        &first,
+        "gym.exercises",
+        Some(&squat),
+        exercise("Front squat"),
+    )
+    .await;
+    proxy.go_online();
+    eventually("the earlier offline exercise edit loses", async || {
+        field(&second, "gym.exercises", &squat, "name").await == json!("Front squat")
+            && pending(&second).await == 0
+    })
+    .await;
+    assert_eq!(
+        field(&first, "gym.exercises", &squat, "name").await,
+        json!("Front squat")
+    );
+
+    proxy.go_offline(&second).await;
+    delete(&second, "gym.sets", &logged).await;
+    write(
+        &first,
+        "gym.sets",
+        Some(&logged),
+        set(session_id, &squat, 6),
+    )
+    .await;
+    proxy.go_online();
+    eventually("an offline delete wins over an edit", async || {
+        field(&first, "gym.sets", &logged, "reps").await == Value::Null
+            && pending(&second).await == 0
+    })
+    .await;
+
+    let second_set = write(&first, "gym.sets", None, set(session_id, &squat, 8)).await;
+    eventually("the second device receives the new set", async || {
+        field(&second, "gym.sets", &second_set, "reps").await == json!(8)
+    })
+    .await;
+    proxy.go_offline(&second).await;
+    write(
+        &second,
+        "gym.sets",
+        Some(&second_set),
+        set(session_id, &squat, 9),
+    )
+    .await;
+    delete(&first, "gym.sets", &second_set).await;
+    proxy.go_online();
+    eventually(
+        "a delete on the server wins over an offline edit",
+        async || {
+            field(&second, "gym.sets", &second_set, "reps").await == Value::Null
+                && pending(&second).await == 0
+        },
+    )
+    .await;
+
+    eventually("both devices hold the same rows", async || {
+        snapshot(&first).await == snapshot(&second).await
+    })
+    .await;
+    let third = signed_in(&url, data, "third", false).await;
+    eventually("a new device receives every row", async || {
+        snapshot(&third).await == snapshot(&first).await
+    })
+    .await;
+
+    let tampered_value = write(
+        &first,
+        "gym.body_weight",
+        None,
+        json!({"time": "2026-10-08T07:00:00Z", "kg": 81.0}),
+    )
+    .await;
+    let tampered_signature = write(
+        &first,
+        "gym.body_weight",
+        None,
+        json!({"time": "2026-10-09T07:00:00Z", "kg": 81.5}),
+    )
+    .await;
+    eventually("the server holds the rows to tamper with", async || {
+        field(&second, "gym.body_weight", &tampered_signature, "kg").await == json!(81.5)
+            && field(&second, "gym.body_weight", &tampered_value, "kg").await == json!(81.0)
+    })
+    .await;
+    let keys = AppDataKeys::derive(&first.current_encryption_key().await.unwrap());
+    let server = rusqlite::Connection::open(data.join("server/clipper.db")).unwrap();
+    server.busy_timeout(Duration::from_secs(5)).unwrap();
+    for (id, column) in [
+        (&tampered_value, "ciphertext"),
+        (&tampered_signature, "signature"),
+    ] {
+        let row_key = keys
+            .row_key("gym.body_weight", id.parse().unwrap())
+            .to_vec();
+        let mut bytes: Vec<u8> = server
+            .query_row(
+                &format!("SELECT {column} FROM app_data_rows WHERE row_key = ?1"),
+                [&row_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        bytes[0] ^= 1;
+        server
+            .execute(
+                &format!("UPDATE app_data_rows SET {column} = ?1 WHERE row_key = ?2"),
+                rusqlite::params![bytes, row_key],
+            )
+            .unwrap();
+    }
+
+    let mut expected = snapshot(&first).await;
+    expected[4]
+        .as_array_mut()
+        .unwrap()
+        .retain(|row| row["id"] != json!(tampered_value) && row["id"] != json!(tampered_signature));
+    let fourth = signed_in(&url, data, "fourth", false).await;
+    eventually("a new device receives every untampered row", async || {
+        snapshot(&fourth).await == expected
+    })
+    .await;
+    let status = fourth.app_data_status().await.expect("status");
+    assert_eq!(
+        status.last_sync_error.as_deref(),
+        Some("Rejected 2 app-data changes from the server that failed verification")
+    );
+}

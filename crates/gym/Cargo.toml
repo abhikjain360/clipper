@@ -8,4 +8,4 @@ license-file.workspace = true
 chrono.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-uuid = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["serde", "v5"] }

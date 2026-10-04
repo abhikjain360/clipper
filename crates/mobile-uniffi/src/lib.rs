@@ -2,8 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clipper_app_types::{
-    ActualView, AlarmView, AppState, ClipboardPayload, CollabItem, DeviceInfo, IngestReport,
-    LogoutOutcome, OccurrenceView,
+    ActualView, AlarmView, AppDataStatus, AppDataWrite, AppState, ClipboardPayload, CollabItem,
+    DeviceInfo, IngestReport, LogoutOutcome, OccurrenceView,
 };
 use clipper_client::{
     api_client::ClientError,
@@ -54,6 +54,12 @@ fn decode_resume_key(value: &str) -> Result<Zeroizing<[u8; 32]>, MobileError> {
         .try_into()
         .map_err(|_| MobileError::InvalidResumeKey)?;
     Ok(Zeroizing::new(key))
+}
+
+#[derive(uniffi::Enum)]
+pub enum MobileAppDataWrite {
+    Value { json: String },
+    Delete,
 }
 
 impl From<ClientError> for MobileError {
@@ -372,6 +378,34 @@ impl MobileClipperClient {
 
     pub async fn get_collab_doc_meta(&self, object_id: String) -> Result<CollabItem, MobileError> {
         Ok(self.engine.get_collab_doc_meta(&object_id).await?)
+    }
+
+    pub async fn query_app_data(&self, sql: String) -> Result<String, MobileError> {
+        let rows = self.engine.query_app_data(&sql).await?;
+        serde_json::to_string(&rows).map_err(|error| MobileError::Client(error.to_string()))
+    }
+
+    pub async fn write_app_data(
+        &self,
+        collection: String,
+        row_id: Option<String>,
+        write: MobileAppDataWrite,
+    ) -> Result<String, MobileError> {
+        let write = match write {
+            MobileAppDataWrite::Value { json } => AppDataWrite::Value(
+                serde_json::from_str(&json)
+                    .map_err(|error| MobileError::Client(format!("invalid value JSON: {error}")))?,
+            ),
+            MobileAppDataWrite::Delete => AppDataWrite::Delete,
+        };
+        Ok(self
+            .engine
+            .write_app_data(&collection, row_id.as_deref(), write)
+            .await?)
+    }
+
+    pub async fn app_data_status(&self) -> Result<AppDataStatus, MobileError> {
+        Ok(self.engine.app_data_status().await?)
     }
 }
 

@@ -1756,7 +1756,7 @@ Each entry has:
 - **Decision:** keep the working installed layout during this upgrade. Review
   the workspace configuration before changing the linker.
 
-### 143. Entity generation replaces direct device-user relations with row-table joins
+### 144. Entity generation replaces direct device-user relations with row-table joins
 
 - **Status:** fixed
 - **Severity:** medium; generated relation queries can return the wrong rows.

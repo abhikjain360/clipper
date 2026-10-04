@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
 
-struct TestServer(Child);
+pub(super) struct TestServer(Child);
 
 impl Drop for TestServer {
     fn drop(&mut self) {
@@ -23,7 +23,7 @@ impl Drop for TestServer {
     }
 }
 
-async fn wait_for(engine: &SyncEngine, predicate: impl Fn(&AppState) -> bool) {
+pub(super) async fn wait_for(engine: &SyncEngine, predicate: impl Fn(&AppState) -> bool) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if predicate(&engine.get_state().await) {
@@ -86,7 +86,7 @@ async fn live_schedule_revisions_timers_feeds_and_two_devices() {
     check_schedule(first, second, &url, data).await;
 }
 
-async fn start_server(data: &Path) -> (TestServer, std::net::SocketAddr) {
+pub(super) async fn start_server(data: &Path) -> (TestServer, std::net::SocketAddr) {
     let binary = std::env::var_os("CLIPPER_TEST_SERVER_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| {

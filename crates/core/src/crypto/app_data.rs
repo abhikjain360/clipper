@@ -13,7 +13,8 @@ pub struct AppDataValueEnvelope {
     pub row_id: AppDataRowId,
     pub schema_version: u64,
     pub written_at: String,
-    pub value: serde_json::Value,
+    pub deleted: bool,
+    pub value: Option<serde_json::Value>,
 }
 
 pub fn derive_app_data_row_key_key(data_key: &[u8; 32]) -> Zeroizing<[u8; 32]> {
@@ -62,16 +63,13 @@ fn change_message(change: &AppDataChange) -> Result<Vec<u8>, CryptoError> {
     if change.row_key.len() != 32 {
         return Err(CryptoError::Signature("invalid row key length".into()));
     }
-    let hash: [u8; 32] = match (&change.nonce, &change.ciphertext, change.deleted) {
-        (None, None, true) => [0; 32],
-        (Some(nonce), Some(ciphertext), false) if nonce.len() == 24 && ciphertext.len() >= 16 => {
-            let mut hasher = Sha256::new();
-            hasher.update(nonce);
-            hasher.update(ciphertext);
-            hasher.finalize().into()
-        }
-        _ => return Err(CryptoError::Signature("invalid change value".into())),
-    };
+    if change.nonce.len() != 24 || change.ciphertext.len() < 16 {
+        return Err(CryptoError::Signature("invalid change value".into()));
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(&change.nonce);
+    hasher.update(&change.ciphertext);
+    let hash: [u8; 32] = hasher.finalize().into();
     let mut message = b"clipper:app-data-change:v1".to_vec();
     message.extend_from_slice(&change.row_key);
     message.extend_from_slice(&change.revision.to_be_bytes());

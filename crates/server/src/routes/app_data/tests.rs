@@ -27,9 +27,27 @@ struct TestDevice {
 }
 
 async fn test_state(rows: u64, bytes: usize) -> (AppState, TempDir) {
-    let dir = tempfile::tempdir().expect("tempdir");
     let mut options = sea_orm::ConnectOptions::new("sqlite::memory:");
     options.max_connections(1);
+    state_with(options, tempfile::tempdir().expect("tempdir"), rows, bytes).await
+}
+
+async fn file_backed_state(rows: u64, bytes: usize) -> (AppState, TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut options = sea_orm::ConnectOptions::new(format!(
+        "sqlite:{}?mode=rwc",
+        dir.path().join("test.db").display()
+    ));
+    options.max_connections(4);
+    state_with(options, dir, rows, bytes).await
+}
+
+async fn state_with(
+    options: sea_orm::ConnectOptions,
+    dir: TempDir,
+    rows: u64,
+    bytes: usize,
+) -> (AppState, TempDir) {
     let db = Database::connect(options).await.expect("database");
     let mut config = ServerConfig::default();
     config.server.data_dir = dir.path().to_path_buf();
@@ -116,18 +134,13 @@ fn signed_change(
     plaintext: &[u8],
 ) -> AppDataChange {
     let revision = replaces_revision + 1;
-    let (nonce, ciphertext) = if deleted {
-        (None, None)
-    } else {
-        let (nonce, ciphertext) = encrypt_app_data_value(
-            &derive_app_data_value_key(&[7; 32]),
-            &row_key,
-            revision,
-            plaintext,
-        )
-        .expect("encrypt");
-        (Some(nonce), Some(ciphertext))
-    };
+    let (nonce, ciphertext) = encrypt_app_data_value(
+        &derive_app_data_value_key(&[7; 32]),
+        &row_key,
+        revision,
+        plaintext,
+    )
+    .expect("encrypt");
     let mut change = AppDataChange {
         row_key: row_key.to_vec(),
         revision,
@@ -197,7 +210,8 @@ async fn accepts_new_rows_and_edits_and_returns_current_state_on_conflict() {
         row_id: Uuid::now_v7().into(),
         schema_version: 1,
         written_at: Utc::now().to_rfc3339(),
-        value: serde_json::json!({"reps": 8}),
+        deleted: false,
+        value: Some(serde_json::json!({"reps": 8})),
     };
     let row_key = app_data_row_key(
         &derive_app_data_row_key_key(&[7; 32]),
@@ -215,12 +229,16 @@ async fn accepts_new_rows_and_edits_and_returns_current_state_on_conflict() {
     let stored = page(&state, &device, 0, 500).await.rows.remove(0);
     assert_eq!(stored.sequence, first_sequence);
     assert_eq!(stored.signature, first.signature);
+    assert_eq!(
+        stored.device_signing_public_key,
+        Some(crypto::device_signing_public_key(&device.secret).to_vec())
+    );
     let plaintext = decrypt_app_data_value(
         &derive_app_data_value_key(&[7; 32]),
         &row_key,
         1,
-        stored.nonce.as_ref().expect("nonce"),
-        stored.ciphertext.as_ref().expect("ciphertext"),
+        &stored.nonce,
+        &stored.ciphertext,
     )
     .expect("decrypt");
     assert_eq!(
@@ -232,8 +250,8 @@ async fn accepts_new_rows_and_edits_and_returns_current_state_on_conflict() {
             &derive_app_data_value_key(&[7; 32]),
             &row_key,
             2,
-            stored.nonce.as_ref().expect("nonce"),
-            stored.ciphertext.as_ref().expect("ciphertext")
+            &stored.nonce,
+            &stored.ciphertext
         )
         .is_err()
     );
@@ -242,8 +260,8 @@ async fn accepts_new_rows_and_edits_and_returns_current_state_on_conflict() {
             &derive_app_data_value_key(&[7; 32]),
             &[0; 32],
             1,
-            stored.nonce.as_ref().expect("nonce"),
-            stored.ciphertext.as_ref().expect("ciphertext")
+            &stored.nonce,
+            &stored.ciphertext
         )
         .is_err()
     );
@@ -264,6 +282,10 @@ async fn accepts_new_rows_and_edits_and_returns_current_state_on_conflict() {
     let current = page(&state, &device, 0, 500).await.rows.remove(0);
     assert_eq!(current.revision, 2);
     assert_eq!(current.device_id, Some(other.auth.device_id.into()));
+    assert_eq!(
+        current.device_signing_public_key,
+        Some(crypto::device_signing_public_key(&other.secret).to_vec())
+    );
     assert_eq!(current.ciphertext, next.ciphertext);
     assert_eq!(
         write(&state, &device, vec![first]).await,
@@ -293,10 +315,10 @@ async fn refuses_bad_signatures_and_other_devices_without_losing_valid_changes()
     row.row_key[0] ^= 1;
     tampered.push(row);
     let mut row = valid.clone();
-    row.nonce.as_mut().expect("nonce")[0] ^= 1;
+    row.nonce[0] ^= 1;
     tampered.push(row);
     let mut row = valid.clone();
-    row.ciphertext.as_mut().expect("ciphertext")[0] ^= 1;
+    row.ciphertext[0] ^= 1;
     tampered.push(row);
     let mut row = valid.clone();
     row.revision = 2;
@@ -304,8 +326,6 @@ async fn refuses_bad_signatures_and_other_devices_without_losing_valid_changes()
     tampered.push(row);
     let mut row = valid.clone();
     row.deleted = true;
-    row.nonce = None;
-    row.ciphertext = None;
     tampered.push(row);
     let mut row = valid.clone();
     row.signature[0] ^= 1;
@@ -343,16 +363,10 @@ async fn refuses_malformed_changes_individually() {
     row.signature.pop();
     changes.push(row);
     let mut row = valid.clone();
-    row.nonce.as_mut().expect("nonce").pop();
+    row.nonce.pop();
     changes.push(row);
     let mut row = valid.clone();
-    row.ciphertext = None;
-    changes.push(row);
-    let mut row = valid.clone();
-    row.ciphertext = Some(vec![0; 15]);
-    changes.push(row);
-    let mut row = valid.clone();
-    row.deleted = true;
+    row.ciphertext = vec![0; 15];
     changes.push(row);
     let mut row = valid.clone();
     row.revision = 3;
@@ -568,8 +582,18 @@ async fn delete_markers_survive_device_removal_and_prevent_stale_writes() {
     assert!(row.deleted);
     assert_eq!(row.revision, 2);
     assert_eq!(row.device_id, None);
-    assert_eq!(row.nonce, None);
-    assert_eq!(row.ciphertext, None);
+    assert_eq!(row.device_signing_public_key, None);
+    assert_eq!(
+        decrypt_app_data_value(
+            &derive_app_data_value_key(&[7; 32]),
+            &[1; 32],
+            2,
+            &row.nonce,
+            &row.ciphertext
+        )
+        .expect("delete marker decrypts"),
+        b""
+    );
     assert_eq!(
         write(
             &state,
@@ -706,7 +730,7 @@ async fn broadcasts_changes_to_the_users_other_devices_after_commit() {
 
 #[tokio::test]
 async fn concurrent_writes_accept_one_revision_and_conflict_with_the_committed_row() {
-    let (state, _dir) = test_state(10, 65552).await;
+    let (state, _dir) = file_backed_state(10, 65552).await;
     let device = add_user(&state).await;
     let other = add_device(&state, device.auth.user_id).await;
     let (one, two) = tokio::join!(

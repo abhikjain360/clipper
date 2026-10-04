@@ -6,6 +6,8 @@
 //! record only for the operation that needs them.
 
 #[cfg(not(target_family = "wasm"))]
+mod app_data;
+#[cfg(not(target_family = "wasm"))]
 mod sqlite;
 
 #[cfg(not(target_family = "wasm"))]
@@ -30,6 +32,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
+#[cfg(not(target_family = "wasm"))]
+pub(crate) use self::app_data::StoredAppDataRow;
 use crate::{
     api_client::{decrypt_clipboard_meta, decrypt_clipboard_payload, decrypt_file_meta_bytes},
     schedule::{ScheduleRecord, actual_view, decrypt_schedule_payload, item_view, source_view},

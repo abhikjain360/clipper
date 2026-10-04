@@ -536,6 +536,47 @@ impl ApiClient {
         Self::postcard_response(resp).await
     }
 
+    // ── App data ──
+
+    pub async fn send_app_data_changes(
+        &self,
+        request: &AppDataChangesRequest,
+    ) -> Result<AppDataChangesResponse, ClientError> {
+        let resp = self
+            .deadline_post(self.api_url(&["app-data", "changes"])?)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .header("Content-Type", POSTCARD_CONTENT_TYPE)
+            .body(Self::postcard_body(request)?)
+            .send()
+            .await?;
+
+        Self::postcard_response(resp).await
+    }
+
+    pub async fn app_data_changes(
+        &self,
+        after: i64,
+        limit: u64,
+    ) -> Result<AppDataChangesPage, ClientError> {
+        let mut url = self.api_url(&["app-data", "changes"])?;
+        url.query_pairs_mut()
+            .append_pair("after", &after.to_string())
+            .append_pair("limit", &limit.to_string());
+        let resp = self
+            .deadline_get(url)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .send()
+            .await?;
+
+        Self::postcard_response(resp).await
+    }
+
     // ── Objects ──
 
     pub async fn object_init(

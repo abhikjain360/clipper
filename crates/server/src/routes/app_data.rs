@@ -62,13 +62,14 @@ pub async fn post_changes(
                 continue;
             }
             let current = app_data_rows::Entity::find_by_id((auth.user_id, change.row_key.clone()))
+                .find_also_related(devices::Entity)
                 .one(txn)
                 .await
                 .map_err(database_error)?;
-            let stored_revision = current.as_ref().map_or(0, |row| row.revision as u64);
+            let stored_revision = current.as_ref().map_or(0, |(row, _)| row.revision as u64);
             if stored_revision != change.replaces_revision {
                 results.push(AppDataChangeResult::Conflict {
-                    current: current.map(row_response),
+                    current: current.map(|(row, writer)| row_response(row, writer, auth.user_id)),
                 });
                 continue;
             }
@@ -121,14 +122,10 @@ fn refusal(
     public_key: &[u8],
     change: &AppDataChange,
 ) -> Option<AppDataChangeRefusal> {
-    let value_valid = match (&change.nonce, &change.ciphertext, change.deleted) {
-        (None, None, true) => true,
-        (Some(nonce), Some(ciphertext), false) => nonce.len() == 24 && ciphertext.len() >= 16,
-        _ => false,
-    };
     if change.row_key.len() != 32
         || change.signature.len() != 64
-        || !value_valid
+        || change.nonce.len() != 24
+        || change.ciphertext.len() < 16
         || change.device_id.into_uuid() != auth.device_id
         || change.revision == 0
         || change.revision > i64::MAX as u64
@@ -136,11 +133,7 @@ fn refusal(
     {
         return Some(AppDataChangeRefusal::Malformed);
     }
-    if change
-        .ciphertext
-        .as_ref()
-        .is_some_and(|value| value.len() > state.config().limits.max_app_data_ciphertext_bytes)
-    {
+    if change.ciphertext.len() > state.config().limits.max_app_data_ciphertext_bytes {
         return Some(AppDataChangeRefusal::TooLarge);
     }
     if verify_app_data_change_signature(public_key, change).is_err() {
@@ -166,6 +159,7 @@ pub async fn get_changes(
         .filter(app_data_rows::Column::Sequence.gt(query.after))
         .order_by_asc(app_data_rows::Column::Sequence)
         .limit(query.limit)
+        .find_also_related(devices::Entity)
         .all(&txn)
         .await
         .map_err(database_error)?;
@@ -174,7 +168,10 @@ pub async fn get_changes(
         .map_err(database_error)?;
     txn.commit().await.map_err(database_error)?;
     Ok(Postcard(AppDataChangesPage {
-        rows: rows.into_iter().map(row_response).collect(),
+        rows: rows
+            .into_iter()
+            .map(|(row, writer)| row_response(row, writer, auth.user_id))
+            .collect(),
         newest_sequence,
     }))
 }
@@ -194,7 +191,12 @@ pub(crate) async fn newest_sequence(
         .unwrap_or(0))
 }
 
-fn row_response(row: app_data_rows::Model) -> AppDataRow {
+fn row_response(
+    row: app_data_rows::Model,
+    writer: Option<devices::Model>,
+    user_id: Uuid,
+) -> AppDataRow {
+    let writer = writer.filter(|device| device.user_id == user_id);
     AppDataRow {
         row_key: row.row_key,
         revision: row.revision as u64,
@@ -203,6 +205,7 @@ fn row_response(row: app_data_rows::Model) -> AppDataRow {
         nonce: row.nonce,
         ciphertext: row.ciphertext,
         device_id: row.device_id.map(Into::into),
+        device_signing_public_key: writer.map(|device| device.signing_public_key),
         signature: row.signature,
     }
 }

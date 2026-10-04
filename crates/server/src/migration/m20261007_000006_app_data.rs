@@ -14,19 +14,16 @@ impl MigrationTrait for Migration {
                 revision BIGINT NOT NULL CHECK (revision > 0),
                 sequence BIGINT NOT NULL UNIQUE CHECK (sequence > 0),
                 deleted BOOLEAN NOT NULL,
-                nonce BLOB,
-                ciphertext BLOB,
+                nonce BLOB NOT NULL,
+                ciphertext BLOB NOT NULL,
                 device_id UUID,
                 signature BLOB NOT NULL,
                 received_at TEXT NOT NULL,
                 PRIMARY KEY (user_id, row_key),
                 CHECK (length(row_key) = 32),
                 CHECK (length(signature) = 64),
-                CHECK (
-                    (deleted = 1 AND nonce IS NULL AND ciphertext IS NULL)
-                    OR (deleted = 0 AND nonce IS NOT NULL AND length(nonce) = 24
-                        AND ciphertext IS NOT NULL AND length(ciphertext) >= 16)
-                ),
+                CHECK (length(nonce) = 24),
+                CHECK (length(ciphertext) >= 16),
                 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE ON UPDATE CASCADE,
                 FOREIGN KEY (device_id) REFERENCES devices (id) ON DELETE SET NULL ON UPDATE CASCADE
             )",

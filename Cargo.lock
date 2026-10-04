@@ -1071,6 +1071,7 @@ version = "0.1.0"
 dependencies = [
  "postcard",
  "serde",
+ "serde_json",
  "strum",
  "uniffi",
 ]
@@ -1109,6 +1110,7 @@ dependencies = [
  "chrono-tz",
  "clipper-app-types",
  "clipper-core",
+ "clipper-gym",
  "clipper-schedule",
  "futures-util",
  "getrandom 0.4.3",
@@ -1274,6 +1276,7 @@ dependencies = [
  "clipper-app-types",
  "clipper-client",
  "dirs",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
