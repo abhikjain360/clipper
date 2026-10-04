@@ -4,21 +4,30 @@
 
 Clipper is **early, experimental, and pre-1.0**. It has **not** had an external
 security audit, and there are known, unfixed security and correctness issues
-tracked in [`docs/rust-code-review.md`](docs/rust-code-review.md). Until that
-list is cleared and the project reaches a tagged release, **do not rely on
-Clipper to protect secrets you cannot afford to lose.**
+tracked in [`docs/issues.md`](docs/issues.md). Until that list is cleared and
+the project reaches a tagged release, **do not rely on Clipper to protect
+secrets you cannot afford to lose.**
 
 ## Threat model
 
-The intended model (see [`docs/backend-review-flow.md`](docs/backend-review-flow.md)
-and [`docs/rust-code-review.md`](docs/rust-code-review.md) for the full version):
+- The server is not trusted with plaintext. It is storage and coordination: it
+  holds ciphertext and sync metadata.
+- Clients derive keys, encrypt, decrypt, sign and verify locally. This work, the
+  local cache and the sync state live in the shared Rust client. The browser,
+  Tauri and React Native frontends are thin adapters over it.
+- A relevant attacker may hold a server database dump plus the on-disk payload
+  files, be a malicious authenticated client, be a malicious or buggy server or
+  relay that tampers with ciphertext, or be another OS user on the same machine.
+- Processes running as the same OS user are trusted. The daemon accepts only
+  same-user peers, but it cannot tell Clipper's own UI from other same-user
+  software (see [`docs/issues.md`](docs/issues.md), entry 53).
 
-- Every client is untrusted; clients encrypt content locally before upload.
-- The server is honest-but-curious storage and coordination — it holds
-  ciphertext and sync metadata and is not trusted with plaintext.
-- A relevant attacker may hold a database dump plus on-disk blobs, be a
-  malicious authenticated client, be a malicious or buggy server/relay tampering
-  with ciphertext, or (for daemon IPC) be same-user local software.
+The design relies on two rules in the frontends. A break of either one is a
+vulnerability:
+
+- No Tauri command returns the bearer token, the keys or the IPC secret to the
+  webview.
+- Decrypted text reaches the DOM only as text nodes.
 
 Transport security (TLS) is assumed to be terminated by a reverse proxy in front
 of the server for any non-loopback deployment; OPAQUE does not protect bearer
@@ -43,14 +52,14 @@ requests.
   **Security** tab and choose **"Report a vulnerability"**.
   (Maintainers: enable this under _Settings → Code security and analysis →
   Private vulnerability reporting_.)
-- Before reporting, please skim [`docs/rust-code-review.md`](docs/rust-code-review.md):
-  many issues are already known and tracked there. Confirming that a tracked
-  issue is exploitable in practice is still useful, but a brand-new finding is
-  the most valuable.
+- Before reporting, please skim [`docs/issues.md`](docs/issues.md): many issues
+  are already known and tracked there. Confirming that a tracked issue is
+  exploitable in practice is still useful, but a brand-new finding is the most
+  valuable.
 
 Please include enough detail to reproduce: the affected component
-(`crates/server`, `crates/client`, `crates/daemon`, `app`), the version/commit,
-and a proof of concept if you have one.
+(`crates/server`, `crates/client`, `crates/daemon`, `web`, `mobile`), the
+version/commit, and a proof of concept if you have one.
 
 ### What to expect
 
@@ -63,9 +72,10 @@ As a small pre-release project, response is best-effort. A rough target:
 
 ## Scope notes
 
-Some residual risks are intentional tradeoffs for now and are listed in the
-"Accepted / Intentional Tradeoffs" section of
-[`docs/rust-code-review.md`](docs/rust-code-review.md) (for example, the
-same-user local IPC trust boundary and the plaintext local clipboard cache).
-Reporting that these _documented_ tradeoffs exist is not a vulnerability — but
-reporting that one is materially worse than documented is welcome.
+Some residual risks are intentional tradeoffs for now and are recorded in
+[`docs/issues.md`](docs/issues.md): the same-user trust of local IPC (entry 53),
+the web client's dependence on the host that serves it (entry 60), collab docs
+being readable by the server and open to anyone with the link (entry 63), and
+the limits of rollback and provenance checks (entry 64). Reporting that these
+_documented_ tradeoffs exist is not a vulnerability — but reporting that one is
+materially worse than documented is welcome.
