@@ -2717,6 +2717,26 @@ impl SyncEngine {
             // any timer mutation rather than silently adopting a newer plan.
             let refreshed = self.local_store.schedule_records_with_heads().await?;
             self.validate_plan_context(planned, &refreshed).await?;
+            let already_running = self
+                .local_store
+                .schedule_records_with_ids()
+                .await
+                .into_iter()
+                .find_map(|(object_id, record)| match record {
+                    ScheduleRecord::Actual(actual)
+                        if matches!(actual.span, clipper_schedule::ActualSpan::Running { .. })
+                            && actual.planned.as_ref().is_some_and(|current| {
+                                current.item == planned.item
+                                    && current.recurrence_id == planned.recurrence_id
+                            }) =>
+                    {
+                        Some(object_id)
+                    }
+                    _ => None,
+                });
+            if let Some(object_id) = already_running {
+                return Ok(object_id);
+            }
         }
         for running in self.running_actual_ids().await {
             self.stop_actual_inner(epoch, &running).await?;

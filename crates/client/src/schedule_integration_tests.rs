@@ -3395,6 +3395,13 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
             .id,
         timer
     );
+    assert_eq!(
+        first
+            .start_actual(Some(&berlin[0].plan_context))
+            .await
+            .expect("start the running occurrence again"),
+        timer
+    );
     assert_eq!(first.stop_actual(&timer).await.expect("stop"), timer);
     assert_eq!(
         first.local_head(&timer).await.expect("timer head").revision,
