@@ -1,0 +1,7 @@
+<resources>
+    <string name="clipper_alarm_snooze">Snooze</string>
+    <string name="clipper_alarm_dismiss">Dismiss</string>
+    <string name="clipper_alarm_slide_description">Slide left to snooze or right to dismiss</string>
+    <item name="clipper_alarm_snooze_action" type="id" />
+    <item name="clipper_alarm_dismiss_action" type="id" />
+</resources>

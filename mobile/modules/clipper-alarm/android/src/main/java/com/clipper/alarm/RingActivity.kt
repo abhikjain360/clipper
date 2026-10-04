@@ -8,9 +8,10 @@ import android.os.Build
 import android.os.Bundle
 import android.text.format.DateFormat
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.util.Date
@@ -66,6 +67,12 @@ class RingActivity : Activity() {
     @Suppress("DEPRECATION")
     private fun showOverKeyguard() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+        } else {
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -77,42 +84,52 @@ class RingActivity : Activity() {
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun buildLayout(label: String): ViewGroup {
         val density = resources.displayMetrics.density
         fun dp(value: Int) = (value * density).toInt()
 
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
+            gravity = Gravity.CENTER_HORIZONTAL
             setBackgroundColor(Color.parseColor("#101214"))
-            setPadding(dp(32), dp(32), dp(32), dp(32))
+            setPadding(dp(24), dp(24), dp(24), dp(32))
+            setOnApplyWindowInsetsListener { view, insets ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                    view.setPadding(dp(24) + bars.left, dp(24) + bars.top,
+                        dp(24) + bars.right, dp(32) + bars.bottom)
+                } else {
+                    view.setPadding(dp(24) + insets.systemWindowInsetLeft,
+                        dp(24) + insets.systemWindowInsetTop,
+                        dp(24) + insets.systemWindowInsetRight,
+                        dp(32) + insets.systemWindowInsetBottom)
+                }
+                insets
+            }
 
-            addView(
-                TextView(this@RingActivity).apply {
+            val details = LinearLayout(this@RingActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                addView(TextView(this@RingActivity).apply {
                     text = DateFormat.getTimeFormat(this@RingActivity).format(Date())
                     textSize = 56f
                     setTextColor(Color.WHITE)
                     gravity = Gravity.CENTER
-                },
-            )
-            addView(
-                TextView(this@RingActivity).apply {
+                })
+                addView(TextView(this@RingActivity).apply {
                     text = label
                     textSize = 22f
                     setTextColor(Color.parseColor("#8b949e"))
                     gravity = Gravity.CENTER
-                    setPadding(0, dp(12), 0, dp(48))
-                },
-            )
-            addView(
-                Button(this@RingActivity).apply {
-                    text = "Dismiss"
-                    setOnClickListener {
-                        RingService.dismiss(this@RingActivity)
-                        finish()
-                    }
-                },
-            )
+                    setPadding(0, dp(12), 0, dp(24))
+                })
+            }
+            addView(details, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(AlarmSlideControl(this@RingActivity).apply {
+                onSnooze = { RingService.snooze(this@RingActivity) }
+                onDismiss = { RingService.dismiss(this@RingActivity) }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(96)))
         }
     }
 

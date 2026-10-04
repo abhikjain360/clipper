@@ -16,6 +16,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.Process
 import android.util.Log
+import android.widget.Toast
 
 /**
  * Holds a ringing alarm alive.
@@ -39,6 +40,8 @@ class RingService : Service() {
     }
     private var ringer: Ringer? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var activeAlarm: PlannedAlarm? = null
+    private var activeGeneration = -1L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -53,15 +56,42 @@ class RingService : Service() {
         }
 
         when (intent?.action) {
+            AlarmIntents.ACTION_SNOOZE -> {
+                val alarm = activeAlarm
+                if (alarm == null) {
+                    stopSelf(startId)
+                    return START_NOT_STICKY
+                }
+                return try {
+                    AlarmScheduler(this).snooze(alarm, activeGeneration)
+                    stopRinging()
+                    START_NOT_STICKY
+                } catch (error: Throwable) {
+                    Log.e(TAG, "Could not snooze the alarm", error)
+                    Toast.makeText(this, "Could not snooze the alarm", Toast.LENGTH_LONG).show()
+                    START_STICKY
+                }
+            }
             AlarmIntents.ACTION_DISMISS -> {
                 stopRinging()
                 return START_NOT_STICKY
             }
         }
 
+        val generation = intent.getLongExtra(AlarmIntents.EXTRA_GENERATION, -1L)
+        if (generation != AlarmMirror.generation(this)) {
+            Log.i(TAG, "Ignoring cancelled ring request")
+            if (activeAlarm == null) stopSelf(startId)
+            return START_NOT_STICKY
+        }
+
         val label = intent?.getStringExtra(AlarmIntents.EXTRA_LABEL) ?: DEFAULT_LABEL
         val itemId = intent?.getStringExtra(AlarmIntents.EXTRA_ITEM_ID).orEmpty()
         val occurrenceKey = intent?.getStringExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY).orEmpty()
+        val fireAt = intent.getLongExtra(AlarmIntents.EXTRA_FIRE_AT, System.currentTimeMillis())
+        activeAlarm = PlannedAlarm(itemId, occurrenceKey, label, fireAt,
+            intent.getLongExtra(AlarmIntents.EXTRA_START, fireAt))
+        activeGeneration = generation
         // Android 10+ restricts background activity launches. The full-screen
         // intent on the alarm notification is the supported path while the
         // app is backgrounded or the device is locked; a direct launch is
@@ -72,6 +102,7 @@ class RingService : Service() {
         startForegroundWithNotification(label, itemId, occurrenceKey)
 
         isRinging = true
+        ClipperClockWidget.updateAll(this)
         // A newly delivered alarm gets a full ring window; dismiss/destroy
         // removes the old callback so it cannot silence a later alarm.
         handler.removeCallbacks(autoSilence)
@@ -103,6 +134,9 @@ class RingService : Service() {
     private fun stopRinging() {
         handler.removeCallbacks(autoSilence)
         isRinging = false
+        activeAlarm = null
+        activeGeneration = -1L
+        ClipperClockWidget.updateAll(this)
         stoppedListeners.toList().forEach { it() }
         ringer?.stop()
         ringer = null
@@ -143,12 +177,6 @@ class RingService : Service() {
             RingActivity.intent(this, label, itemId, occurrenceKey),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val dismiss = PendingIntent.getService(
-            this,
-            1,
-            Intent(this, RingService::class.java).setAction(AlarmIntents.ACTION_DISMISS),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
 
         val notification = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
@@ -163,9 +191,6 @@ class RingService : Service() {
             .setOngoing(true)
             .setContentIntent(fullScreen)
             .setFullScreenIntent(fullScreen, true)
-            .addAction(
-                Notification.Action.Builder(null, "Dismiss", dismiss).build(),
-            )
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -196,10 +221,19 @@ class RingService : Service() {
         internal val stoppedListeners = mutableSetOf<() -> Unit>()
 
         fun start(context: Context, label: String, itemId: String, occurrenceKey: String) {
+            val now = System.currentTimeMillis()
+            start(context, PlannedAlarm(itemId, occurrenceKey, label, now, now),
+                AlarmMirror.generation(context))
+        }
+
+        internal fun start(context: Context, alarm: PlannedAlarm, generation: Long) {
             val intent = Intent(context, RingService::class.java).apply {
-                putExtra(AlarmIntents.EXTRA_LABEL, label)
-                putExtra(AlarmIntents.EXTRA_ITEM_ID, itemId)
-                putExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY, occurrenceKey)
+                putExtra(AlarmIntents.EXTRA_LABEL, alarm.label)
+                putExtra(AlarmIntents.EXTRA_ITEM_ID, alarm.itemId)
+                putExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY, alarm.occurrenceKey)
+                putExtra(AlarmIntents.EXTRA_FIRE_AT, alarm.fireAtMillis)
+                putExtra(AlarmIntents.EXTRA_START, alarm.occurrenceStartMillis)
+                putExtra(AlarmIntents.EXTRA_GENERATION, generation)
             }
             runCatching {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -215,6 +249,13 @@ class RingService : Service() {
             val intent = Intent(context, RingService::class.java)
                 .setAction(AlarmIntents.ACTION_DISMISS)
             runCatching { context.startService(intent) }
+        }
+
+        fun snooze(context: Context) {
+            val intent = Intent(context, RingService::class.java)
+                .setAction(AlarmIntents.ACTION_SNOOZE)
+            runCatching { context.startService(intent) }
+                .onFailure { Log.e(TAG, "Could not snooze the alarm", it) }
         }
 
         /**

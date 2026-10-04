@@ -39,8 +39,8 @@ class ClipperAlarmModule : Module() {
         }
 
         Function("cancelAll") {
-            AlarmScheduler(context).cancelAll()
             AlarmMirror.clear(context)
+            RingService.dismiss(context)
         }
 
         /**
@@ -116,7 +116,7 @@ class ClipperAlarmModule : Module() {
         /** What the device-protected mirror currently holds, for diagnostics. */
         Function("plannedCount") {
             val now = System.currentTimeMillis()
-            AlarmMirror.load(context).count { alarm -> alarm.fireAtMillis > now }
+            AlarmMirror.loadUpcoming(context).count { alarm -> alarm.fireAtMillis > now }
         }
 
         /**

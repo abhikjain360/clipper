@@ -11,6 +11,7 @@ import android.util.Log
 /** Intent actions and extras for the alarm path, in one place so no string drifts. */
 object AlarmIntents {
     const val ACTION_FIRE = "com.clipper.alarm.action.FIRE"
+    const val ACTION_SNOOZE_FIRE = "com.clipper.alarm.action.SNOOZE_FIRE"
     const val ACTION_DISMISS = "com.clipper.alarm.action.DISMISS"
     const val ACTION_SNOOZE = "com.clipper.alarm.action.SNOOZE"
     // Sent by the system after the user grants exact-alarm access. Keeping the
@@ -24,6 +25,8 @@ object AlarmIntents {
     const val EXTRA_ITEM_ID = "com.clipper.alarm.extra.ITEM_ID"
     const val EXTRA_OCCURRENCE_KEY = "com.clipper.alarm.extra.OCCURRENCE_KEY"
     const val EXTRA_FIRE_AT = "com.clipper.alarm.extra.FIRE_AT"
+    const val EXTRA_START = "com.clipper.alarm.extra.START"
+    const val EXTRA_GENERATION = "com.clipper.alarm.extra.GENERATION"
 }
 
 /**
@@ -49,18 +52,52 @@ class AlarmScheduler(private val context: Context) {
      * pending intents. Each fire re-arms from the mirror, so the alarm window
      * moves forward on its own. Returns how many were registered.
      */
-    fun replaceAll(plan: List<PlannedAlarm>): Int {
-        cancelAll()
+    fun replaceAll(plan: List<PlannedAlarm>): Int = synchronized(AlarmMirror) {
+        cancelPlan()
         AlarmMirror.save(context, plan)
         // Arm from the mirror rather than from `plan`, so the index used as a
         // request code is always the mirror's own index. Sorting in two places
         // would let two alarms sharing a fire time swap positions, and a fired
         // alarm would then look up the wrong label.
-        return armFromMirror()
+        val count = arm(AlarmMirror.load(context))
+        armSnoozes()
+        count
     }
 
     /** Register from whatever the mirror currently holds. Safe before unlock. */
-    fun armFromMirror(): Int = arm(AlarmMirror.load(context))
+    fun armFromMirror(): Int = synchronized(AlarmMirror) {
+        arm(AlarmMirror.load(context)) + armSnoozes()
+    }
+
+    @SuppressLint("MissingPermission")
+    fun snooze(alarm: PlannedAlarm, generation: Long): Unit = synchronized(AlarmMirror) {
+        check(generation == AlarmMirror.generation(context)) { "The alarm was cancelled" }
+        check(canScheduleExactAlarms()) { "Exact alarms are not permitted" }
+        val snooze = AlarmMirror.addSnooze(context,
+            alarm.copy(fireAtMillis = System.currentTimeMillis() + SNOOZE_MS))
+        try {
+            registerSnooze(snooze)
+        } catch (error: Throwable) {
+            cancelSnooze(snooze)
+            AlarmMirror.removeSnooze(context, snooze)
+            throw error
+        }
+    }
+
+    private fun armSnoozes(): Int {
+        if (!canScheduleExactAlarms()) return 0
+        val snoozes = AlarmMirror.loadSnoozes(context)
+        snoozes.forEach(::registerSnooze)
+        return snoozes.size
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun registerSnooze(snooze: SnoozedAlarm) {
+        val fireAt = maxOf(snooze.alarm.fireAtMillis, System.currentTimeMillis() + 1_000L)
+        val info = AlarmManager.AlarmClockInfo(fireAt, showIntent())
+        alarmManager.setAlarmClock(info,
+            firePendingIntent(snooze.requestCode, snooze.alarm, AlarmIntents.ACTION_SNOOZE_FIRE))
+    }
 
     /** [plan] must be in mirror order. See [replaceAll]. */
     @SuppressLint("MissingPermission")
@@ -87,7 +124,20 @@ class AlarmScheduler(private val context: Context) {
         return registered
     }
 
-    fun cancelAll() {
+    fun cancelAll(): Unit = synchronized(AlarmMirror) {
+        cancelPlan()
+        AlarmMirror.loadSnoozes(context).forEach(::cancelSnooze)
+        AlarmMirror.clearSnoozes(context)
+    }
+
+    private fun cancelSnooze(snooze: SnoozedAlarm) {
+        pendingIntentOrNull(snooze.requestCode, AlarmIntents.ACTION_SNOOZE_FIRE)?.let {
+            alarmManager.cancel(it)
+            it.cancel()
+        }
+    }
+
+    private fun cancelPlan() {
         // Sweep the whole index space the previous plan could have used, not
         // just MAX_REGISTERED of it. A request code is the alarm's index in
         // the mirror, and a past entry is skipped rather than armed. So a plan
@@ -109,9 +159,13 @@ class AlarmScheduler(private val context: Context) {
             true
         }
 
-    private fun firePendingIntent(index: Int, alarm: PlannedAlarm): PendingIntent {
+    private fun firePendingIntent(
+        index: Int,
+        alarm: PlannedAlarm,
+        fireAction: String = AlarmIntents.ACTION_FIRE,
+    ): PendingIntent {
         val intent = Intent(context, AlarmReceiver::class.java).apply {
-            action = AlarmIntents.ACTION_FIRE
+            action = fireAction
             putExtra(AlarmIntents.EXTRA_INDEX, index)
             // Carried in the intent as well as the mirror so a fire can ring
             // even if the mirror is somehow unreadable.
@@ -119,6 +173,8 @@ class AlarmScheduler(private val context: Context) {
             putExtra(AlarmIntents.EXTRA_ITEM_ID, alarm.itemId)
             putExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY, alarm.occurrenceKey)
             putExtra(AlarmIntents.EXTRA_FIRE_AT, alarm.fireAtMillis)
+            putExtra(AlarmIntents.EXTRA_START, alarm.occurrenceStartMillis)
+            putExtra(AlarmIntents.EXTRA_GENERATION, AlarmMirror.generation(context))
         }
         return PendingIntent.getBroadcast(
             context,
@@ -128,10 +184,13 @@ class AlarmScheduler(private val context: Context) {
         )
     }
 
-    private fun pendingIntentOrNull(index: Int): PendingIntent? {
+    private fun pendingIntentOrNull(
+        index: Int,
+        fireAction: String = AlarmIntents.ACTION_FIRE,
+    ): PendingIntent? {
         // PendingIntent matching ignores extras; component plus action is enough.
         val intent = Intent(context, AlarmReceiver::class.java).apply {
-            action = AlarmIntents.ACTION_FIRE
+            action = fireAction
         }
         return PendingIntent.getBroadcast(
             context,
@@ -150,6 +209,7 @@ class AlarmScheduler(private val context: Context) {
 
     companion object {
         private const val TAG = "ClipperAlarm"
+        internal const val SNOOZE_MS = 10 * 60 * 1000L
 
         /**
          * How many alarms are held in the system registry at once. Each fire

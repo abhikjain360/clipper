@@ -37,6 +37,7 @@ class BootReceiver : BroadcastReceiver() {
                 } catch (error: Throwable) {
                     Log.e(TAG, "Failed to re-arm alarms after ${intent.action}", error)
                 } finally {
+                    ClipperClockWidget.updateAll(context.applicationContext)
                     pending.finish()
                 }
             }

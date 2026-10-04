@@ -1,0 +1,15 @@
+<resources>
+    <string name="clipper_clock_name">Clipper Clock</string>
+    <string name="clipper_clock_description">Large clock with date, next alarm, and optional time zones</string>
+    <string name="clipper_clock_next_alarm_label">Next alarm</string>
+    <string name="clipper_clock_setup">Clock widget</string>
+    <string name="clipper_clock_instructions">Choose up to two secondary clocks.</string>
+    <string name="clipper_clock_first_zone">First time zone</string>
+    <string name="clipper_clock_second_zone">Second time zone</string>
+    <string name="clipper_clock_zone">Time zone</string>
+    <string name="clipper_clock_label">Label</string>
+    <string name="clipper_clock_search">Search</string>
+    <string name="clipper_clock_none">None</string>
+    <string name="clipper_clock_save">Save</string>
+    <string name="clipper_clock_cancel">Cancel</string>
+</resources>

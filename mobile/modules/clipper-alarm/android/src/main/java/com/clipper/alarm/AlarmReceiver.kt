@@ -15,7 +15,8 @@ import android.util.Log
 class AlarmReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != AlarmIntents.ACTION_FIRE) return
+        val snoozed = intent.action == AlarmIntents.ACTION_SNOOZE_FIRE
+        if (!snoozed && intent.action != AlarmIntents.ACTION_FIRE) return
         val appContext = context.applicationContext
         val index = intent.getIntExtra(AlarmIntents.EXTRA_INDEX, -1)
 
@@ -25,14 +26,27 @@ class AlarmReceiver : BroadcastReceiver() {
         val deliveredItem = intent.getStringExtra(AlarmIntents.EXTRA_ITEM_ID).orEmpty()
         val deliveredKey = intent.getStringExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY).orEmpty()
         val deliveredAt = intent.getLongExtra(AlarmIntents.EXTRA_FIRE_AT, -1)
-        val mirror = AlarmMirror.loadOrNull(appContext)
-        val planned = mirror?.firstOrNull {
-            it.itemId == deliveredItem && it.occurrenceKey == deliveredKey
-                && it.fireAtMillis == deliveredAt
-        }
-        if (mirror != null && planned == null) {
-            Log.i(TAG, "Ignoring cancelled or superseded alarm delivery")
-            return
+        val generation = intent.getLongExtra(AlarmIntents.EXTRA_GENERATION, -1L)
+        val planned = synchronized(AlarmMirror) {
+            if (generation != AlarmMirror.generation(appContext)) {
+                Log.i(TAG, "Ignoring cancelled alarm delivery")
+                return
+            }
+            if (snoozed) {
+                AlarmMirror.takeSnooze(appContext, index, deliveredItem, deliveredKey, deliveredAt)
+                    ?: return
+            } else {
+                val mirror = AlarmMirror.loadOrNull(appContext)
+                val alarm = mirror?.firstOrNull {
+                    it.itemId == deliveredItem && it.occurrenceKey == deliveredKey &&
+                        it.fireAtMillis == deliveredAt
+                }
+                if (mirror != null && alarm == null) {
+                    Log.i(TAG, "Ignoring cancelled or superseded alarm delivery")
+                    return
+                }
+                alarm
+            }
         }
         // If the mirror is corrupt, the concrete intent still has enough data
         // to ring. A deliberately cleared mirror, including logout, never does.
@@ -44,13 +58,16 @@ class AlarmReceiver : BroadcastReceiver() {
             ?: intent.getStringExtra(AlarmIntents.EXTRA_OCCURRENCE_KEY).orEmpty()
 
         Log.i(TAG, "Alarm $index fired: $label")
-        RingService.start(appContext, label, itemId, occurrenceKey)
+        val alarm = planned ?: PlannedAlarm(itemId, occurrenceKey, label, deliveredAt,
+            intent.getLongExtra(AlarmIntents.EXTRA_START, deliveredAt))
+        RingService.start(appContext, alarm, generation)
 
         // Move the alarm window forward. Re-arming reads only the device-protected
         // mirror, so it works before unlock, when the schedule itself is still
         // sealed.
         runCatching { AlarmScheduler(appContext).armFromMirror() }
             .onFailure { Log.w(TAG, "Failed to re-arm after firing", it) }
+        ClipperClockWidget.updateAll(appContext)
     }
 
     private companion object {
