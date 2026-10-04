@@ -295,6 +295,12 @@ the client removes its local copy at the sweep.
 
 If the clipboard snapshot fails, the client does not sweep clipboard state.
 
+Cache and revision checks and marking held items seen finish outside the
+bounded download buffer. Buffered futures only download, verify and decrypt;
+they never acquire store locks. Each downloaded item is then persisted with
+the storage-boundary revision check. This lets store operations finish without
+waiting for buffered futures that the consumer has stopped polling.
+
 For N held unchanged schedule or clipboard objects, a reconnect needs only
 the list pages, rather than N payload requests. Rollback, same-revision
 conflict, parent-link, signature, generation and sweep checks still apply.

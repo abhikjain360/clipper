@@ -31,7 +31,7 @@ fn start_server(directory: &Path) -> (Server, String) {
     drop(listener);
     let config = directory.join("config.toml");
     std::fs::write(&config, format!(
-        "[server]\ndata_dir = {:?}\naddr = {:?}\n[rate_limit]\nauth_per_client_per_minute = 200\nauth_per_username_per_minute = 200\n",
+        "[server]\ndata_dir = {:?}\naddr = {:?}\n[rate_limit]\nauth_per_client_per_minute = 200\nauth_per_username_per_minute = 200\napi_per_client_per_minute = 100000\napi_per_user_per_minute = 100000\n",
         directory.join("server").to_str().unwrap(), address.to_string()
     )).unwrap();
     let command = || {
@@ -100,6 +100,76 @@ fn register(
         assert!(!manager.engine().await.unwrap().clipboard_watching_enabled());
         manager.current_state().await
     })
+}
+
+#[test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+fn large_calendar_and_clipboard_reconcile_after_restart() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let directory = tempfile::tempdir().unwrap();
+    let (_server, url) = start_server(directory.path());
+    let data = directory.path().join("desktop");
+    let store = Arc::new(keychain::TestStore::default());
+    register(&data, &url, store.clone());
+    let feed_runtime = runtime();
+    let (feed_url, feed) = feed_runtime.block_on(async {
+        let text = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{}END:VCALENDAR\r\n", (0..1246).map(|index| {
+            format!("BEGIN:VEVENT\r\nUID:meeting-{index}\r\nSUMMARY:Meeting {index}\r\nDTSTART:20261010T090000Z\r\nDTEND:20261010T100000Z\r\nDTSTAMP:20261008T000000Z\r\nRRULE:FREQ=DAILY;COUNT=3;BYHOUR=9,17\r\nEND:VEVENT\r\n")
+        }).collect::<String>());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/feed.ics", listener.local_addr().unwrap());
+        let feed = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                if stream.read(&mut request).await.unwrap() == 0 {
+                    continue;
+                }
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).as_bytes()).await.unwrap();
+            }
+        });
+        (url, feed)
+    });
+    let id = runtime().block_on(async {
+        let manager = load(&data, store.clone()).await;
+        let engine = manager.engine().await.unwrap();
+        for index in 0..40 {
+            engine
+                .send_clipboard_payload("text/plain", format!("QA clipboard {index}").as_bytes())
+                .await
+                .unwrap();
+        }
+        let id = engine.add_calendar_source("Work", &feed_url).await.unwrap();
+        let report =
+            tokio::time::timeout(Duration::from_secs(120), engine.sync_calendar_source(&id))
+                .await
+                .expect("large import finishes")
+                .unwrap();
+        assert_eq!(report.added, 1246);
+        manager.stop_calendar_refresh().await;
+        manager.save_session(&engine).await;
+        id
+    });
+    runtime().block_on(async {
+        let manager = load(&data, store).await;
+        let engine = manager.engine().await.unwrap();
+        assert!(!engine.clipboard_watching_enabled());
+        tokio::time::timeout(Duration::from_secs(20), async {
+            engine.refresh().await.unwrap();
+            engine.sync_calendar_source(&id).await.unwrap();
+            engine.set_calendar_source_alarms(&id, false).await.unwrap();
+            let events = engine
+                .expand_schedule("2026-10-10T00:00:00Z", "2026-10-11T00:00:00Z", "UTC")
+                .await
+                .unwrap();
+            assert_eq!(events.len(), 2492);
+        })
+        .await
+        .expect("reconciliation, calendar refresh, writes and expansion finish after restart");
+        manager.stop_calendar_refresh().await;
+    });
+    feed.abort();
 }
 
 #[test]

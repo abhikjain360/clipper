@@ -3582,6 +3582,8 @@ impl SyncEngine {
                 file_engine
                     .end_refused_session_for(generation, &error)
                     .await;
+            } else {
+                info!(generation, "File reconciliation complete");
             }
         });
 
@@ -3595,6 +3597,8 @@ impl SyncEngine {
                 clipboard_engine
                     .end_refused_session_for(generation, &error)
                     .await;
+            } else {
+                info!(generation, "Clipboard reconciliation complete");
             }
         });
 
@@ -3608,6 +3612,8 @@ impl SyncEngine {
                 collab_engine
                     .end_refused_session_for(generation, &error)
                     .await;
+            } else {
+                info!(generation, "Collab doc reconciliation complete");
             }
         });
 
@@ -3621,6 +3627,8 @@ impl SyncEngine {
                 schedule_engine
                     .end_refused_session_for(generation, &error)
                     .await;
+            } else {
+                info!(generation, "Schedule reconciliation complete");
             }
         });
 
@@ -3636,6 +3644,8 @@ impl SyncEngine {
                     document_engine
                         .end_refused_session_for(generation, &error)
                         .await;
+                } else {
+                    info!(generation, "Document reconciliation complete");
                 }
             });
         }
@@ -3893,25 +3903,35 @@ impl SyncEngine {
                 )
                 .await?;
             validate_snapshot_page(&page, after, stream_start_seq)?;
-            let mut objects = stream::iter(page.items)
+            let mut downloads = Vec::new();
+            for item in page.items {
+                let held = if item.kind == ObjectKind::Clipboard {
+                    self.holds_listed_head(&item).await
+                } else {
+                    Err(ClientError::UnexpectedObjectKind {
+                        expected: ObjectKind::Clipboard,
+                        actual: item.kind,
+                    })
+                };
+                match held {
+                    Ok(true) => {
+                        self.local_store
+                            .mark_snapshot_seen(&item.id.to_string(), generation)
+                            .await?;
+                    }
+                    Ok(false) => downloads.push(item),
+                    Err(error) => {
+                        if let Err(error) = self.keep_held_revision(&item, generation, error).await
+                        {
+                            warn!(id = %item.id, "Failed to load clipboard object: {}", error);
+                        }
+                    }
+                }
+            }
+            let mut objects = stream::iter(downloads)
                 .map(|item| async move {
-                    if item.kind != ObjectKind::Clipboard {
-                        let error = ClientError::UnexpectedObjectKind {
-                            expected: ObjectKind::Clipboard,
-                            actual: item.kind,
-                        };
-                        return Err((item, error));
-                    }
-                    match self.holds_listed_head(&item).await {
-                        Ok(true) => return Ok((item, None)),
-                        Ok(false) => {}
-                        Err(error) => return Err((item, error)),
-                    }
-                    match self
-                        .decrypt_clipboard_object_item_with_api(api, &item, encryption_key)
-                        .await
-                    {
-                        Ok(object) => Ok((item, Some(object))),
+                    match Self::download_clipboard_object(api, &item, encryption_key).await {
+                        Ok(object) => Ok((item, object)),
                         Err(error) => Err((item, error)),
                     }
                 })
@@ -3919,13 +3939,8 @@ impl SyncEngine {
 
             while let Some(loaded) = objects.next().await {
                 match loaded {
-                    Ok((item, Some(object))) => {
+                    Ok((item, object)) => {
                         self.persist_clipboard_snapshot_item(&object, item.created_seq, generation)
-                            .await?;
-                    }
-                    Ok((item, None)) => {
-                        self.local_store
-                            .mark_snapshot_seen(&item.id.to_string(), generation)
                             .await?;
                     }
                     Err((item, error)) => {
@@ -4075,6 +4090,14 @@ impl SyncEngine {
     ) -> Result<DecryptedClipboardObject, ClientError> {
         verify_object_list_item_envelope(item)?;
         self.check_revision_advance(item).await?;
+        Self::download_clipboard_object(api, item, encryption_key).await
+    }
+
+    async fn download_clipboard_object(
+        api: &ApiClient,
+        item: &ObjectListItem,
+        encryption_key: &[u8; 32],
+    ) -> Result<DecryptedClipboardObject, ClientError> {
         let meta = decrypt_clipboard_meta(
             &item.meta_nonce,
             &item.meta_ciphertext,

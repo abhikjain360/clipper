@@ -150,6 +150,8 @@ async fn serve(listener: tokio::net::TcpListener, state: Arc<std::sync::Mutex<Se
                     }
                 });
                 postcard::to_allocvec(&ObjectListResponse { items, next_after }).unwrap()
+            } else if url.path() == "/api/objects/init" {
+                postcard::to_allocvec(&ObjectInitResponse::Complete { created_seq: 3 }).unwrap()
             } else {
                 let id = url.path().split('/').nth(3).unwrap();
                 let (item, ciphertext) = state
@@ -243,6 +245,101 @@ async fn reconnect_snapshots_of_held_objects_request_only_list_pages() {
         assert_eq!(state.lock().unwrap().requests.len(), 1);
         assert!(!state.lock().unwrap().requests[0].contains("/payloads/"));
         assert_eq!(restarted.local_store.payload_read_count(), payload_reads);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+#[cfg(not(target_family = "wasm"))]
+async fn clipboard_reconnect_finishes_when_database_reads_wait() {
+    for legacy in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let state = Arc::new(std::sync::Mutex::new(ServerState {
+            objects: (1..=2)
+                .map(|seq| {
+                    encrypted_item(
+                        ObjectKind::Clipboard,
+                        uuid::Uuid::now_v7().into(),
+                        seq,
+                        None,
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        }));
+        let server = tokio::spawn(serve(listener, state.clone()));
+        let first = SyncEngine::new_with_data_dir(&url, directory.path());
+        activate(&first, "profile", KEY).await;
+        snapshot(&first, ObjectKind::Clipboard, 2).await;
+        let engine = SyncEngine::new_with_data_dir(&url, directory.path());
+        activate(&engine, "profile", KEY).await;
+        *engine.device_signing_key.write().await = Some(Zeroizing::new(SIGNING_KEY));
+        engine
+            .local_store
+            .hydrate_ciphertext_cache(&KEY, RECENT_CLIPBOARD_LIMIT)
+            .await
+            .unwrap();
+        if legacy {
+            engine.local_store.remove_payload_metadata_for_test().await;
+        }
+        state.lock().unwrap().requests.clear();
+        let generation = engine.local_store.start_generation().await;
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let holding = engine.clone();
+        let database = tokio::spawn(async move {
+            holding
+                .local_store
+                .hold_database_for_test(entered, released)
+                .await
+        });
+        ready.await.unwrap();
+        let mut reconcile = Box::pin(engine.snapshot_clipboard(generation, 2));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !engine.local_store.sync_locked_for_test() {
+                assert!(futures_util::poll!(reconcile.as_mut()).is_pending());
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reconciliation reaches the held database");
+        release.send(()).unwrap();
+        database.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), reconcile)
+            .await
+            .expect("reconciliation resumes after the database is released")
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            engine.expand_schedule("2026-10-10T00:00:00Z", "2026-10-11T00:00:00Z", "UTC"),
+        )
+        .await
+        .expect("schedule expansion is not blocked by clipboard reconciliation")
+        .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            engine.add_calendar_source("Work", "https://example.invalid/calendar"),
+        )
+        .await
+        .expect("schedule writes are not blocked by clipboard reconciliation")
+        .unwrap();
+        assert_eq!(
+            state.lock().unwrap().requests.len(),
+            if legacy { 4 } else { 2 }
+        );
+        let objects = state.lock().unwrap().objects.clone();
+        for (item, _) in &objects {
+            assert!(
+                engine
+                    .local_store
+                    .local_head(&item.id.to_string())
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
         server.abort();
     }
 }

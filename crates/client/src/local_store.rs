@@ -358,6 +358,19 @@ impl LocalStore {
         release.await.expect("release the database");
     }
 
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn sync_locked_for_test(&self) -> bool {
+        self.sync.try_lock().is_err()
+    }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) async fn remove_payload_metadata_for_test(&self) {
+        self.with_database(|connection| {
+            connection.execute("UPDATE objects SET content = CAST(json_remove(CAST(content AS TEXT), '$.data.payloads[0].ciphertext_size', '$.data.payloads[0].sha256_ciphertext') AS BLOB) WHERE kind = 'clipboard'", [])?;
+            Ok(())
+        }).await.unwrap();
+    }
+
     pub fn set_profile(&self, profile_id: String) {
         let mut current = self
             .profile_id

@@ -766,6 +766,25 @@ Each entry has:
 
 ## Bugs
 
+### 167. Clipboard reconciliation could deadlock the shared store
+
+- **Status:** fixed in the working tree; not committed.
+- **Severity:** high. Found in `7597c27` on a desktop with imported calendars.
+- **Where:** the clipboard snapshot's buffered futures in the client engine.
+- **What happened:** buffered cache and revision checks acquired the store's
+  sync lock and waited for its database lock. Another buffered future queued
+  for the sync lock. When a result became ready, the consumer waited for that
+  lock to mark or persist the item, stopping polling of the buffered futures
+  that had to release it. Schedule snapshots, expansion and writes also needed
+  the sync lock and stopped. The copied production store had complete payload
+  metadata; database contention was enough to trigger the deadlock.
+- **Fix:** finish cache and revision checks and mark held items before buffering
+  downloads. Buffered futures only download, verify and decrypt; they take no
+  store locks. Persistence still validates revisions at the storage boundary.
+  A regression holds the database lock during a reconnect, then checks that
+  reconciliation, schedule expansion and writes finish. It covers both complete
+  and missing payload metadata, requiring verified downloads in the latter case.
+
 ### 166. Reconnect skip checks read and hashed every held payload
 
 - **Status:** fixed in the working tree; not committed.
