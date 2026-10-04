@@ -235,6 +235,7 @@ struct MemoryState {
 
 #[derive(Debug, Clone)]
 pub struct LocalVisibleState {
+    pub session_epoch: u64,
     /// When this view was built, counted by the store. A publisher drops a view
     /// stamped lower than one it has already published, so two concurrent
     /// snapshots cannot leave the older one on screen.
@@ -276,6 +277,7 @@ pub struct LocalStore {
     base_dir: PathBuf,
     profile_id: RwLock<Option<String>>,
     sync: Mutex<LocalSyncControl>,
+    session_epoch: atomic::AtomicU64,
     memory: Mutex<MemoryState>,
     /// Counts the views built, so a publisher can tell which of two views is
     /// the newer one. Incremented while the sync lock is held.
@@ -302,6 +304,7 @@ impl LocalStore {
                 generation: u64::try_from(chrono::Utc::now().timestamp_micros())
                     .unwrap_or_default(),
             }),
+            session_epoch: atomic::AtomicU64::new(0),
             memory: Mutex::new(MemoryState::default()),
             visible_stamp: atomic::AtomicU64::new(0),
             #[cfg(not(target_family = "wasm"))]
@@ -410,7 +413,12 @@ impl LocalStore {
     pub async fn fence_and_clear_memory(&self) {
         let mut sync = self.sync.lock().await;
         sync.generation += 1;
+        self.session_epoch.fetch_add(1, atomic::Ordering::SeqCst);
         *self.memory.lock().await = MemoryState::default();
+    }
+
+    pub fn session_epoch(&self) -> u64 {
+        self.session_epoch.load(atomic::Ordering::SeqCst)
     }
 
     pub async fn persist_local_clipboard_present_encrypted(
@@ -697,6 +705,37 @@ impl LocalStore {
                 .await?;
             return Ok(None);
         }
+        self.visible_state_inner(visible_clipboard_limit)
+            .await
+            .map(Some)
+    }
+
+    pub async fn retain_file_present_encrypted(
+        &self,
+        item: &DecryptedFileItem,
+        encrypted: &EncryptedObject,
+        created_seq: i64,
+        visible_clipboard_limit: usize,
+    ) -> Result<Option<LocalVisibleState>, LocalStoreError> {
+        let item_id = validate_item_id(&item.id)?;
+        let sync = self.sync.lock().await;
+        self.validate_encrypted_revision_advance(&item_id, &encrypted.envelope.body)
+            .await?;
+        if let Some(record) = self.stored_object_record(&item_id).await?
+            && revision_anchor_for_record(&record)?
+                .is_some_and(|anchor| anchor.head.revision == encrypted.envelope.body.revision)
+        {
+            return Ok(None);
+        }
+        self.persist_file_present_encrypted_inner(
+            &item_id,
+            item,
+            encrypted,
+            created_seq,
+            created_seq,
+            Some(sync.generation),
+        )
+        .await?;
         self.visible_state_inner(visible_clipboard_limit)
             .await
             .map(Some)
@@ -1187,17 +1226,15 @@ impl LocalStore {
                 let StoredObjectRecord::Deleted(mut marker) = record.clone() else {
                     unreachable!();
                 };
-                let may_upgrade = marker
-                    .revision_anchor
-                    .is_none_or(|anchor| head.revision >= anchor.head.revision);
-                if may_upgrade {
-                    marker.revision_anchor = Some(StoredRevisionAnchor {
-                        head,
-                        kind: StoredRevisionAnchorKind::Tombstone,
-                    });
-                    self.write_stored_object_record(&StoredObjectRecord::Deleted(marker))
-                        .await?;
+                if let Some(anchor) = marker.revision_anchor {
+                    validate_retained_head(object_id, head, anchor.head)?;
                 }
+                marker.revision_anchor = Some(StoredRevisionAnchor {
+                    head,
+                    kind: StoredRevisionAnchorKind::Tombstone,
+                });
+                self.write_stored_object_record(&StoredObjectRecord::Deleted(marker))
+                    .await?;
             }
             return Ok(());
         }
@@ -1213,22 +1250,7 @@ impl LocalStore {
             // between be replayed.
             Some(head) => {
                 if let Some(anchor) = retained_anchor {
-                    if head.revision < anchor.head.revision {
-                        return Err(revision_anchor_error(
-                            object_id,
-                            head.revision,
-                            "rolls back the retained revision anchor",
-                        ));
-                    }
-                    if head.revision == anchor.head.revision
-                        && head.parent_hash != anchor.head.parent_hash
-                    {
-                        return Err(revision_anchor_error(
-                            object_id,
-                            head.revision,
-                            "changes the already accepted revision body",
-                        ));
-                    }
+                    validate_retained_head(object_id, head, anchor.head)?;
                 }
                 Some(StoredRevisionAnchor {
                     head,
@@ -1777,6 +1799,7 @@ impl LocalStore {
         sort_records_desc(&mut records);
         let running = self.running_actual_inner(&records).await;
         Ok(LocalVisibleState {
+            session_epoch: self.session_epoch(),
             clipboard_items: Self::recent_clipboard_items_inner(&records, visible_clipboard_limit),
             files: Self::file_items_inner(&records),
             collab_docs: Self::collab_items_inner(&records),
@@ -2450,6 +2473,28 @@ fn validate_revision_against_head(
     Ok(())
 }
 
+fn validate_retained_head(
+    object_id: &str,
+    incoming: LocalHead,
+    retained: LocalHead,
+) -> Result<(), LocalStoreError> {
+    if incoming.revision < retained.revision {
+        return Err(revision_anchor_error(
+            object_id,
+            incoming.revision,
+            "rolls back the retained revision anchor",
+        ));
+    }
+    if incoming.revision == retained.revision && incoming.parent_hash != retained.parent_hash {
+        return Err(revision_anchor_error(
+            object_id,
+            incoming.revision,
+            "changes the already accepted revision body",
+        ));
+    }
+    Ok(())
+}
+
 fn revision_anchor_error(object_id: &str, revision: u64, reason: &str) -> LocalStoreError {
     LocalStoreError::RevisionRejected(format!(
         "revision {revision} of object {object_id} {reason}",
@@ -2946,14 +2991,211 @@ pub enum LocalStoreError {
 
 #[cfg(test)]
 mod tests {
+    fn encrypted_file(
+        id: ObjectId,
+        placement: EnvelopePlacement,
+        name: &str,
+    ) -> (DecryptedFileItem, EncryptedObject) {
+        let device_id: DeviceId = uuid::Uuid::now_v7().into();
+        let created_at = "2026-10-06T12:00:00Z".to_string();
+        let payload_id: ObjectPayloadId = uuid::Uuid::now_v7().into();
+        let deleting = matches!(placement, EnvelopePlacement::Delete(_));
+        let (revision, parent_hash, operation) = match placement {
+            EnvelopePlacement::Create => (1, None, ObjectEnvelopeOperation::Create),
+            EnvelopePlacement::Revise(head) => (
+                head.revision + 1,
+                Some(head.parent_hash),
+                ObjectEnvelopeOperation::Revise,
+            ),
+            EnvelopePlacement::Delete(head) => (
+                head.revision + 1,
+                Some(head.parent_hash),
+                ObjectEnvelopeOperation::Delete,
+            ),
+        };
+        let aad_body = ObjectEnvelopeBody {
+            object_id: id,
+            object_type: ObjectKind::File,
+            envelope_version: crypto::OBJECT_ENVELOPE_VERSION,
+            revision,
+            parent_hash,
+            source_device_id: device_id,
+            created_at: created_at.clone(),
+            operation,
+            meta_nonce: Vec::new(),
+            sha256_meta_ciphertext: Vec::new(),
+            payloads: if deleting {
+                Vec::new()
+            } else {
+                vec![ObjectEnvelopePayload {
+                    id: payload_id,
+                    nonce: Vec::new(),
+                    ciphertext_size: 0,
+                    sha256_ciphertext: Vec::new(),
+                }]
+            },
+        };
+        let (nonce, ciphertext) = encrypt_file_meta_bytes(
+            &FileMeta {
+                filename: name.into(),
+                mime_type: "text/plain".into(),
+                size: Some(0),
+            },
+            &[7; 32],
+            &aad_body,
+        )
+        .unwrap();
+        let (payload_nonce, payload_ciphertext) =
+            encrypt_file_blob_bytes(&[], &[7; 32], &aad_body, payload_id).unwrap();
+        let payloads = if deleting {
+            Vec::new()
+        } else {
+            vec![ObjectEnvelopePayload {
+                id: payload_id,
+                nonce: payload_nonce,
+                ciphertext_size: payload_ciphertext.len() as i64,
+                sha256_ciphertext: crypto::sha256(&payload_ciphertext).to_vec(),
+            }]
+        };
+        let body = ObjectEnvelopeBody {
+            meta_nonce: nonce.clone(),
+            sha256_meta_ciphertext: crypto::sha256(&ciphertext).to_vec(),
+            payloads: payloads.clone(),
+            ..aad_body
+        };
+        let signature =
+            crypto::sign_object_envelope_body(&crypto::generate_device_signing_secret_key(), &body)
+                .unwrap();
+        (
+            DecryptedFileItem {
+                id: id.to_string(),
+                filename: name.into(),
+                mime_type: "text/plain".into(),
+                blob_size: 0,
+                created_at: created_at.clone(),
+                source_device_id: device_id.to_string(),
+            },
+            EncryptedObject {
+                meta_nonce: nonce,
+                meta_ciphertext: ciphertext,
+                payloads: payloads
+                    .into_iter()
+                    .map(|p| ObjectPayloadDescriptor {
+                        id: p.id,
+                        nonce: p.nonce,
+                        ciphertext_size: p.ciphertext_size,
+                        sha256_ciphertext: p.sha256_ciphertext,
+                    })
+                    .collect(),
+                created_at,
+                source_device_id: device_id.to_string(),
+                envelope: ObjectEnvelope { body, signature },
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn an_equal_sequence_tombstone_preserves_the_accepted_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalStore::new(tmp.path());
+        store.set_profile("a".into());
+        let id: ObjectId = uuid::Uuid::now_v7().into();
+        let (first, genesis) = encrypted_file(id, EnvelopePlacement::Create, "genesis");
+        store
+            .persist_local_file_present_encrypted(&first, &genesis, 10, 10, 100)
+            .await
+            .unwrap();
+        let head = store.local_head(&id.to_string()).await.unwrap().unwrap();
+        let (_, deleted) = encrypted_file(id, EnvelopePlacement::Delete(head), "delete branch");
+        let tombstone = LocalHead {
+            revision: 2,
+            parent_hash: crypto::object_envelope_parent_hash(&deleted.envelope.body).unwrap(),
+        };
+        let (other, fork) = encrypted_file(id, EnvelopePlacement::Revise(head), "accepted branch");
+        store
+            .persist_local_file_present_encrypted(&other, &fork, 20, 20, 100)
+            .await
+            .unwrap();
+        let accepted = store.local_head(&id.to_string()).await.unwrap().unwrap();
+        assert_ne!(accepted.parent_hash, tombstone.parent_hash);
+        store
+            .apply_live_delete(
+                ObjectKind::File,
+                &id.to_string(),
+                30,
+                store.current_generation().await,
+                100,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .apply_local_tombstone(ObjectKind::File, &id.to_string(), 30, tombstone, 100)
+                .await,
+            Err(LocalStoreError::RevisionRejected(_))
+        ));
+        assert_eq!(
+            revision_anchor_for_record(
+                &store
+                    .stored_object_record(&id.to_string())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap()
+            .unwrap()
+            .head,
+            accepted
+        );
+        let (_, next) = encrypted_file(
+            id,
+            EnvelopePlacement::Revise(tombstone),
+            "follows replaced hash",
+        );
+        assert!(matches!(
+            store
+                .validate_incoming_revision(&id.to_string(), &next.envelope.body)
+                .await,
+            Err(LocalStoreError::RevisionRejected(_))
+        ));
+        let lower = LocalHead {
+            revision: 1,
+            parent_hash: head.parent_hash,
+        };
+        assert!(matches!(
+            store
+                .apply_local_tombstone(ObjectKind::File, &id.to_string(), 30, lower, 100)
+                .await,
+            Err(LocalStoreError::RevisionRejected(_))
+        ));
+        assert_eq!(
+            revision_anchor_for_record(
+                &store
+                    .stored_object_record(&id.to_string())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap()
+            .unwrap()
+            .head,
+            accepted
+        );
+    }
+
     use clipper_core::models::{
-        ClipboardMeta, FileMeta, OBJECT_ENVELOPE_SIGNATURE_BYTES, ObjectEnvelopeBody,
-        ObjectEnvelopeOperation, ObjectEnvelopePayload,
+        ClipboardMeta, DeviceId, FileMeta, OBJECT_ENVELOPE_SIGNATURE_BYTES, ObjectEnvelope,
+        ObjectEnvelopeBody, ObjectEnvelopeOperation, ObjectEnvelopePayload, ObjectId,
+        ObjectPayloadId,
     };
 
     use super::*;
-    use crate::api_client::{
-        encrypt_clipboard_meta, encrypt_clipboard_payload, encrypt_file_meta_bytes,
+    use crate::{
+        api_client::{
+            encrypt_clipboard_meta, encrypt_clipboard_payload, encrypt_file_blob_bytes,
+            encrypt_file_meta_bytes,
+        },
+        engine::EnvelopePlacement,
     };
 
     const TEST_KEY: [u8; 32] = [7; 32];
