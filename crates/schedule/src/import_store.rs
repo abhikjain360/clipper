@@ -16,6 +16,8 @@ pub(super) struct StoredSource {
     owner_email: Option<String>,
     #[serde(default = "alarms_on_by_default")]
     alarms_on: bool,
+    #[serde(default = "alarm_lead_by_default")]
+    alarm_lead_minutes: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_device: Option<DeviceId>,
     active_import: Option<CalendarImport>,
@@ -130,6 +132,7 @@ impl From<StoredSource> for CalendarSource {
             enabled: stored.enabled,
             owner_email: stored.owner_email,
             alarms_on: stored.alarms_on,
+            alarm_lead_minutes: stored.alarm_lead_minutes,
             target_device: stored.target_device,
             active_import: delta.active,
             pending_imports: delta.pending,
@@ -206,6 +209,7 @@ impl From<CalendarSource> for StoredSource {
             enabled: source.enabled,
             owner_email: source.owner_email,
             alarms_on: source.alarms_on,
+            alarm_lead_minutes: source.alarm_lead_minutes,
             target_device: source.target_device,
             active_import,
             pending_imports,
@@ -225,6 +229,29 @@ mod tests {
             "kind": { "protocol": "ics", "url": "https://example.com/calendar.ics" },
             "active_import": null, "pending_imports": [], "retired_imports": [],
         })
+    }
+
+    #[test]
+    fn calendar_alarm_lead_defaults_and_is_accepted_by_older_readers() {
+        #[derive(Deserialize)]
+        struct SourceSettings {
+            name: String,
+            #[serde(default = "alarms_on_by_default")]
+            alarms_on: bool,
+        }
+        let mut saved: CalendarSource = serde_json::from_value(source()).unwrap();
+        assert_eq!(saved.alarm_lead_minutes, 5);
+        saved.alarm_lead_minutes = 10;
+        let value = serde_json::to_value(&saved).unwrap();
+        let older: SourceSettings = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(older.name, "Work");
+        assert!(older.alarms_on);
+        assert_eq!(
+            serde_json::from_value::<CalendarSource>(value)
+                .unwrap()
+                .alarm_lead_minutes,
+            10
+        );
     }
 
     #[test]

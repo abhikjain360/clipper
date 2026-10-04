@@ -8,8 +8,8 @@ use clipper_daemon_types::{
     ActualsBetweenParams, AppDataWrite, AppDocumentHistoryParams, AppDocumentRevisionParams,
     AppState, CreateScheduleItemParams, DaemonCommand, DeleteScheduleObjectParams,
     DeviceListResult, ExpandScheduleParams, MoveOccurrenceParams, OccurrenceParams, OccurrenceView,
-    QueryAppDataParams, SetCalendarSourceTargetDeviceParams, UpdateScheduleItemParams,
-    WriteAppDataParams,
+    QueryAppDataParams, SetCalendarSourceAlarmLeadParams, SetCalendarSourceTargetDeviceParams,
+    UpdateScheduleItemParams, WriteAppDataParams,
 };
 use clipper_schedule::{
     AlarmPolicy, BlockDuration, Cadence, Frequency, PlannedRef, Recurrence, ScheduleItem,
@@ -59,6 +59,12 @@ pub enum Command {
 pub enum CalendarCommand {
     #[command(about = "List calendar sources with their object ids and alarm settings")]
     List,
+    #[command(about = "Set the reminder lead used when the calendar feed has no reminder")]
+    Lead {
+        source_id: Uuid,
+        #[arg(value_parser = clap::value_parser!(u32).range(0..=120))]
+        minutes: u32,
+    },
     #[command(about = "Ring a calendar on one registered device, or all phones")]
     RingOn {
         source_id: Uuid,
@@ -328,6 +334,15 @@ impl Command {
                         CalendarTarget::Phones => None,
                         CalendarTarget::Device(id) => Some(id.to_string()),
                     },
+                }),
+                Output::Result,
+            )),
+            Self::Calendar {
+                command: CalendarCommand::Lead { source_id, minutes },
+            } => Ok((
+                DaemonCommand::SetCalendarSourceAlarmLead(SetCalendarSourceAlarmLeadParams {
+                    object_id: source_id.to_string(),
+                    minutes,
                 }),
                 Output::Result,
             )),

@@ -568,6 +568,15 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                         Err(error) => client_error(id, error),
                     }
                 }
+                DaemonCommand::SetCalendarSourceAlarmLead(params) => {
+                    match engine
+                        .set_calendar_source_alarm_lead(&params.object_id, params.minutes)
+                        .await
+                    {
+                        Ok(()) => DaemonResponse::success(id, None),
+                        Err(error) => client_error(id, error),
+                    }
+                }
                 DaemonCommand::SetCalendarSourceTargetDevice(params) => {
                     match engine
                         .set_calendar_source_target_device(

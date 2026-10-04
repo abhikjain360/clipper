@@ -65,6 +65,8 @@ export function tauriBackend(): ClipperBackend {
             invoke<IngestReport>("sync_calendar_source", { objectId }),
         setCalendarSourceAlarms: (objectId, alarmsOn) =>
             invoke<void>("set_calendar_source_alarms", { objectId, alarmsOn }),
+        setCalendarSourceAlarmLead: (objectId, minutes) =>
+            invoke<void>("set_calendar_source_alarm_lead", { objectId, minutes }),
         setCalendarSourceTargetDevice: (objectId, targetDevice) =>
             invoke<void>("set_calendar_source_target_device", { objectId, targetDevice }),
         createScheduleItem: (item: ScheduleItem) =>

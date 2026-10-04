@@ -560,10 +560,7 @@ function NextList({
     );
 
     return (
-        <YStack
-            gap="$3"
-            style={{ maxHeight: "max(320px, calc(100dvh - 240px))", overflowY: "auto" }}
-        >
+        <YStack gap="$3">
             {days.map((day, index) => {
                 const dayPlanned = planned.filter((occurrence) =>
                     overlapsDay(occurrence, day, now),
@@ -1272,6 +1269,20 @@ function CalendarSources({
         }
     }
 
+    async function setAlarmLead(source: CalendarSourceView, minutes: number) {
+        onError(null);
+        setBusy(source.id);
+        try {
+            const backend = await clipperBackend();
+            await backend.setCalendarSourceAlarmLead(source.id, minutes);
+            onState(await backend.getState());
+        } catch (caught) {
+            onError(formatBackendError(caught));
+        } finally {
+            setBusy(null);
+        }
+    }
+
     async function sync(id: string) {
         onError(null);
         setBusy(id);
@@ -1489,6 +1500,28 @@ function CalendarSources({
                                 )}
                         </select>
                         {devicesLoading && <Spinner size="small" />}
+                        <Label htmlFor={`calendar-lead-${source.id}`} size="$2">
+                            When feed has no reminder
+                        </Label>
+                        <select
+                            id={`calendar-lead-${source.id}`}
+                            value={source.alarm_lead_minutes ?? 5}
+                            disabled={busy !== null}
+                            onChange={(event) =>
+                                void setAlarmLead(source, Number(event.target.value))
+                            }
+                        >
+                            {![0, 5, 10, 15, 30].includes(source.alarm_lead_minutes ?? 5) && (
+                                <option value={source.alarm_lead_minutes}>
+                                    {source.alarm_lead_minutes} minutes before
+                                </option>
+                            )}
+                            {[0, 5, 10, 15, 30].map((minutes) => (
+                                <option key={minutes} value={minutes}>
+                                    {minutes === 0 ? "At start" : `${minutes} minutes before`}
+                                </option>
+                            ))}
+                        </select>
                         {source.raw_import_file_id && source.raw_import_available && (
                             <Button
                                 size="$2"

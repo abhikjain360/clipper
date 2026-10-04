@@ -208,6 +208,7 @@ export type CalendarSourceView = {
   location: string;
   enabled: boolean;
   alarms_on: boolean;
+  alarm_lead_minutes: number;
   target_device?: string | null;
   fetched_at: string | null;
   checked_at: string | null;
@@ -336,6 +337,7 @@ export type ClipperBackend = {
   // are pulled by the desktop or mobile app and reach the browser as objects.
   syncCalendarSource: (objectId: string) => Promise<IngestReport>;
   setCalendarSourceAlarms: (objectId: string, alarmsOn: boolean) => Promise<void>;
+  setCalendarSourceAlarmLead: (objectId: string, minutes: number) => Promise<void>;
   setCalendarSourceTargetDevice: (objectId: string, targetDevice: string | null) => Promise<void>;
   deleteScheduleObject: (objectId: string) => Promise<void>;
   // `observerZone` is an IANA name; it resolves floating and all-day spans,

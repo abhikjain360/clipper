@@ -54,6 +54,125 @@ fn server_command(binary: &Path, data: &Path) -> Command {
 
 #[tokio::test]
 #[ignore = "build clipper-server first; starts an isolated local server"]
+async fn live_calendar_alarm_lead_preserves_feed_reminders_and_legacy_events() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, address) = start_server(temp.path()).await;
+    let url = format!("http://{address}");
+    let first = register_proxy_engine(&url, &temp.path().join("first")).await;
+    let second = SyncEngine::new_with_data_dir(&url, temp.path().join("second"));
+    second
+        .login_with_platform("local-test-passphrase", "recovery-test", "Phone", "android")
+        .await
+        .unwrap();
+    let start =
+        chrono::DateTime::from_timestamp(Utc::now().timestamp() / 60 * 60 + 10800, 0).unwrap();
+    let text = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:default\r\nSUMMARY:Default\r\nDTSTART:{0}\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:explicit\r\nSUMMARY:Explicit\r\nDTSTART:{0}\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-P0DT0H5M0S\r\nDESCRIPTION:Reminder\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        start.format("%Y%m%dT%H%M%SZ")
+    );
+    let (feed_url, _, _, feed_task) = calendar_feed_server(text).await;
+    let id = first.add_calendar_source("Work", &feed_url).await.unwrap();
+    first.sync_calendar_source(&id).await.unwrap();
+    assert_eq!(
+        first.get_state().await.calendar_sources[0].alarm_lead_minutes,
+        5
+    );
+    assert!(
+        first
+            .set_calendar_source_alarm_lead(&id, 121)
+            .await
+            .is_err()
+    );
+    for legacy in [false, true] {
+        if legacy {
+            for (object_id, record, head) in first
+                .local_store
+                .schedule_records_with_heads()
+                .await
+                .unwrap()
+            {
+                if let ScheduleRecord::Ingested(mut event) = record {
+                    event.alarm_uses_default = None;
+                    for entry in &mut event.alarm_overrides {
+                        entry.uses_default = None;
+                    }
+                    first
+                        .write_schedule_record(
+                            &object_id,
+                            ScheduleRecord::Ingested(event),
+                            EnvelopePlacement::Revise(head),
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+        for minutes in [10, 0, 120] {
+            first
+                .set_calendar_source_alarm_lead(&id, minutes)
+                .await
+                .unwrap();
+            wait_for(&second, |state| {
+                state.calendar_sources.iter().any(|source| {
+                    source.id == id
+                        && source.event_count == 2
+                        && source.alarm_lead_minutes == minutes
+                })
+            })
+            .await;
+            for engine in [&first, &second] {
+                let alarms = engine.next_alarms(6, "UTC").await.unwrap();
+                assert_eq!(alarms.len(), 2);
+                for alarm in alarms {
+                    let lead = if alarm.label == "Default" { minutes } else { 5 };
+                    assert_eq!(
+                        alarm.fire_at_millis,
+                        (start - chrono::TimeDelta::minutes(i64::from(lead))).timestamp_millis()
+                    );
+                }
+            }
+            first
+                .set_calendar_source_target_device(
+                    &id,
+                    Some(&first.current_device_id().await.unwrap()),
+                )
+                .await
+                .unwrap();
+            let alarms = first
+                .desktop_alarms(
+                    &Utc::now().to_rfc3339(),
+                    &(start + chrono::TimeDelta::seconds(1)).to_rfc3339(),
+                    "UTC",
+                )
+                .await
+                .unwrap();
+            assert_eq!(alarms.len(), 2);
+            for alarm in alarms {
+                let lead = if alarm.label == "Default" { minutes } else { 5 };
+                assert_eq!(
+                    alarm.fire_at_millis,
+                    (start - chrono::TimeDelta::minutes(i64::from(lead))).timestamp_millis()
+                );
+            }
+            first
+                .set_calendar_source_target_device(&id, None)
+                .await
+                .unwrap();
+            wait_for(&second, |state| {
+                state
+                    .calendar_sources
+                    .iter()
+                    .any(|source| source.id == id && source.target_device.is_none())
+            })
+            .await;
+        }
+    }
+    feed_task.abort();
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
 async fn live_calendar_alarms_follow_source_targets_on_phones_and_mac() {
     crate::ensure_crypto_provider();
     let temp = tempfile::tempdir().unwrap();
@@ -3808,6 +3927,7 @@ fn imported_source_readiness_requires_a_complete_active_batch() {
                 enabled: true,
                 owner_email: None,
                 alarms_on: true,
+                alarm_lead_minutes: 5,
                 target_device: None,
                 active_import,
                 pending_imports: pending_import.into_iter().collect(),

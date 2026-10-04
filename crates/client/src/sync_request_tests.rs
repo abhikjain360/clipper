@@ -42,6 +42,7 @@ fn encrypted_item_with_text(
                 enabled: true,
                 owner_email: None,
                 alarms_on: true,
+                alarm_lead_minutes: 5,
                 target_device: None,
                 active_import: None,
                 pending_imports: Vec::new(),

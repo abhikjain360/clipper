@@ -71,6 +71,8 @@ pub struct CalendarSource {
     pub owner_email: Option<String>,
     #[serde(default = "alarms_on_by_default")]
     pub alarms_on: bool,
+    #[serde(default = "alarm_lead_by_default")]
+    pub alarm_lead_minutes: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_device: Option<DeviceId>,
     pub active_import: Option<CalendarImport>,
@@ -135,6 +137,10 @@ impl ImportWindow {
 
 fn alarms_on_by_default() -> bool {
     true
+}
+
+fn alarm_lead_by_default() -> u32 {
+    5
 }
 
 fn pending_imports<'de, D>(deserializer: D) -> Result<Vec<CalendarImport>, D::Error>
@@ -242,6 +248,8 @@ pub struct IngestedEvent {
     pub attendance: Attendance,
     #[serde(default)]
     pub alarm_seconds_before: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alarm_uses_default: Option<bool>,
     #[serde(default)]
     pub alarm_overrides: Vec<AlarmOverride>,
 }
@@ -254,6 +262,8 @@ pub struct AlarmOverride {
     pub organizer: Option<String>,
     pub attendance: Option<Attendance>,
     pub seconds_before: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uses_default: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +273,20 @@ pub struct Attendance {
 }
 
 impl IngestedEvent {
+    pub fn with_alarm_lead(&self, minutes: u32) -> Self {
+        let mut event = self.clone();
+        let seconds = u64::from(minutes) * 60;
+        if event.alarm_uses_default == Some(true) {
+            event.alarm_seconds_before = vec![seconds];
+        }
+        for entry in &mut event.alarm_overrides {
+            if entry.uses_default == Some(true) {
+                entry.seconds_before = vec![seconds];
+            }
+        }
+        event
+    }
+
     pub fn has_valid_recurrence(&self) -> bool {
         match &self.recurrence {
             Recurrence::Imported { import, uid } => {
@@ -903,7 +927,7 @@ fn event_from_component(
     let status = event_status(component).unwrap_or(IngestedStatus::Confirmed);
     let organizer = property(component, "ORGANIZER").and_then(email_address);
     let attendance = attendance(component, owner);
-    let alarm_seconds_before = alarm_offsets(component, calendar);
+    let (alarm_seconds_before, alarm_uses_default) = alarm_offsets(component, calendar);
     let mut alarm_overrides = std::collections::BTreeMap::new();
     for entry in provider_overrides {
         let time = date_time_property(entry, "RECURRENCE-ID", resolver)?
@@ -921,6 +945,15 @@ fn event_from_component(
                     OverrideChange::Cancelled => false,
                 },
             );
+        let (seconds_before, uses_default) = if entry.component_ids.iter().any(|id| {
+            calendar.components.get(*id as usize).is_some_and(|entry| {
+                entry.component_type == calcard::icalendar::ICalendarComponentType::VAlarm
+            })
+        }) {
+            alarm_offsets(entry, calendar)
+        } else {
+            (alarm_seconds_before.clone(), alarm_uses_default)
+        };
         alarm_overrides.insert(
             recurrence_id,
             AlarmOverride {
@@ -933,15 +966,8 @@ fn event_from_component(
                     organizer.clone()
                 },
                 attendance: property(entry, "ATTENDEE").map(|_| self::attendance(entry, owner)),
-                seconds_before: if entry.component_ids.iter().any(|id| {
-                    calendar.components.get(*id as usize).is_some_and(|entry| {
-                        entry.component_type == calcard::icalendar::ICalendarComponentType::VAlarm
-                    })
-                }) {
-                    alarm_offsets(entry, calendar)
-                } else {
-                    alarm_seconds_before.clone()
-                },
+                seconds_before,
+                uses_default: Some(uses_default),
             },
         );
     }
@@ -963,6 +989,7 @@ fn event_from_component(
         organizer,
         attendance,
         alarm_seconds_before,
+        alarm_uses_default: Some(alarm_uses_default),
         alarm_overrides,
     })
 }
@@ -1028,7 +1055,7 @@ fn attendance(
 fn alarm_offsets(
     component: &calcard::icalendar::ICalendarComponent,
     calendar: &calcard::icalendar::ICalendar,
-) -> Vec<u64> {
+) -> (Vec<u64>, bool) {
     use calcard::icalendar::{
         ICalendarAction, ICalendarComponentType, ICalendarParameterValue, ICalendarRelated,
         ICalendarValue,
@@ -1075,10 +1102,11 @@ fn alarm_offsets(
         .collect();
     offsets.sort_unstable();
     offsets.dedup();
-    if offsets.is_empty() {
+    let uses_default = offsets.is_empty();
+    if uses_default {
         offsets.push(300);
     }
-    offsets
+    (offsets, uses_default)
 }
 
 /// A start as the feed expresses it, before it becomes a [`ScheduleSpan`].

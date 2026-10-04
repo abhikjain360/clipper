@@ -27,6 +27,28 @@ use zeroize::Zeroizing;
 const SECRET: [u8; 32] = [7; 32];
 const DEVICE: &str = "11111111-1111-4111-8111-111111111111";
 
+#[test]
+fn calendar_lead_accepts_only_zero_to_120_minutes() {
+    for minutes in ["0", "5", "10", "120"] {
+        let cli = Cli::try_parse_from(["clipper", "calendar", "lead", DEVICE, minutes]).unwrap();
+        let Command::Calendar {
+            command:
+                clipper_cli::CalendarCommand::Lead {
+                    source_id,
+                    minutes: lead,
+                },
+        } = cli.command
+        else {
+            panic!("calendar lead command");
+        };
+        assert_eq!(source_id.to_string(), DEVICE);
+        assert_eq!(lead.to_string(), minutes);
+    }
+    for minutes in ["-1", "121", "1.5", "ten"] {
+        assert!(Cli::try_parse_from(["clipper", "calendar", "lead", DEVICE, minutes]).is_err());
+    }
+}
+
 async fn execute(path: &Path, command: Command, input: &[u8]) -> Result<Value, Error> {
     let mut connection =
         Connection::connect_with_secret(path, || Ok(Zeroizing::new(SECRET.to_vec()))).await?;
@@ -155,6 +177,7 @@ async fn schedule_changes_use_authenticated_connections_and_reject_stale_writes(
         let sources = execute(&path, list, b"").await.unwrap();
         assert_eq!(sources.as_array().unwrap().len(), 1);
         assert_eq!(sources[0]["target_device"], Value::Null);
+        assert_eq!(sources[0]["alarm_lead_minutes"], 5);
         let source_id = sources[0]["id"].as_str().unwrap();
         for target in [DEVICE, "phones"] {
             let command =
@@ -351,6 +374,7 @@ async fn serve(listener: UnixListener) {
                             id: source_id.clone(),
                             name: "Work".into(),
                             alarms_on: true,
+                            alarm_lead_minutes: 5,
                             target_device: target_device.clone(),
                             ..Default::default()
                         }],

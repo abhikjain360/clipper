@@ -123,7 +123,14 @@ Display includes invitations regardless of RSVP. Ringing uses these rules:
 Each DISPLAY or AUDIO VALARM with a duration TRIGGER relative to DTSTART at or
 before the start produces one alarm. Equal offsets are deduplicated; seconds
 are preserved. Absolute, end-relative, positive and other-action triggers do
-not qualify. Without a qualifying alarm, the lead is five minutes.
+not qualify. Without a qualifying alarm, the source's `alarm_lead_minutes`
+sets the lead. It defaults to five minutes when absent and accepts 0 to 120
+minutes. Zero rings at the start. Qualifying feed reminders always keep their
+own offsets, including an explicit five-minute reminder.
+
+The planner reads reminder information from the cached raw snapshot for older
+events that do not record whether their lead is a fallback. If that snapshot
+is unavailable, those events keep their recorded offsets until refreshed.
 
 Moved occurrences ring relative to their new start, and cancelled occurrences
 do not ring. A provider override can change attendance, status or alarms;
@@ -137,10 +144,16 @@ invitation and VALARM rules still apply. An unavailable target has no fallback.
 
 The calendar list has a **Ring on** choice in the web/desktop and Android
 schedule screens. It offers **All phones** and the registered devices.
-Callers change the settings through `SyncEngine::set_calendar_source_alarms`
-and `SyncEngine::set_calendar_source_target_device`; `next_alarms` combines
+Beside it, **When feed has no reminder** offers 0, 5, 10, 15 or 30 minutes.
+Callers change the settings through `SyncEngine::set_calendar_source_alarms`,
+`SyncEngine::set_calendar_source_target_device` and
+`SyncEngine::set_calendar_source_alarm_lead`; `next_alarms` combines
 imported alarms with user-authored alarms. Local agents can use
-`clipper calendar list` and `clipper calendar ring-on <source-id> <device-id|phones>`.
+`clipper calendar list`, `clipper calendar ring-on <source-id> <device-id|phones>`
+and `clipper calendar lead <source-id> <minutes>`. The list includes
+`alarm_lead_minutes`. Both phone and desktop use the same source setting and
+planner. Google Calendar ICS feeds omit reminders, so their imported meetings
+use this fallback.
 
 ## Refresh and failure behavior
 

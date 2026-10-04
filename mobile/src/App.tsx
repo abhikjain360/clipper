@@ -1193,6 +1193,26 @@ function MobileCalendars({
                   ))
                 )}
                 {devicesError && <Paragraph color="#f87171">{devicesError}</Paragraph>}
+                <Paragraph size="$2">
+                  When feed has no reminder: {source.alarm_lead_minutes ?? 5} minutes before
+                </Paragraph>
+                <XStack gap="$2" flexWrap="wrap">
+                  {[0, 5, 10, 15, 30].map((minutes) => (
+                    <Button
+                      key={minutes}
+                      size="$3"
+                      theme={(source.alarm_lead_minutes ?? 5) === minutes ? "blue" : undefined}
+                      disabled={busy !== null}
+                      onPress={() =>
+                        void change(source.id, () =>
+                          backend.setCalendarSourceAlarmLead(source.id, minutes),
+                        )
+                      }
+                    >
+                      {minutes === 0 ? "At start" : `${minutes} min before`}
+                    </Button>
+                  ))}
+                </XStack>
                 <Button size="$3" disabled={busy !== null} onPress={() => setRingOnSource(null)}>
                   Close
                 </Button>

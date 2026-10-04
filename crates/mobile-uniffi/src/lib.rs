@@ -309,6 +309,17 @@ impl MobileClipperClient {
         Ok(())
     }
 
+    pub async fn set_calendar_source_alarm_lead(
+        &self,
+        object_id: String,
+        minutes: u32,
+    ) -> Result<(), MobileError> {
+        self.engine
+            .set_calendar_source_alarm_lead(&object_id, minutes)
+            .await?;
+        Ok(())
+    }
+
     pub async fn delete_schedule_object(&self, object_id: String) -> Result<(), MobileError> {
         self.engine.delete_schedule_object(&object_id).await?;
         Ok(())

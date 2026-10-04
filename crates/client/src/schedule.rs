@@ -306,6 +306,7 @@ pub fn source_view(
         location,
         enabled: source.enabled,
         alarms_on: source.alarms_on,
+        alarm_lead_minutes: source.alarm_lead_minutes,
         target_device: source.target_device.map(|device| device.to_string()),
         fetched_at: source
             .active_import

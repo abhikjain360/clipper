@@ -766,6 +766,18 @@ Each entry has:
 
 ## Bugs
 
+### 182. Google Calendar ICS feeds omit meeting reminders
+
+- **Status:** open; provider limitation.
+- **Where:** calendar ICS imports and imported alarm planning.
+- **What happens:** Google's ICS feeds contain no VALARM components. The
+  calendar default and per-meeting reminder overrides are absent, so Clipper
+  cannot import those overrides from the feed.
+- **Decision:** each source has a fallback lead, defaulting to five minutes.
+  Users can set it through the calendar UI or CLI. Feeds that provide qualifying
+  VALARM components keep those offsets. Per-meeting Google reminder overrides
+  require a provider API or another feed that carries reminders.
+
 ### 181. The desktop schedule did not show how to start a block timer
 
 - **Status:** fixed in the working tree; uncommitted

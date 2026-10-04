@@ -3022,10 +3022,12 @@ impl SyncEngine {
             .collect();
         let ready_sources = calendar_import::ready_sources(&records);
         let mut alarms = Vec::new();
+        let mut feeds = HashMap::new();
         for (object_id, record, head) in &records {
             let Some(item) = schedule_context::series(record) else {
                 continue;
             };
+            let mut alarm_event = None;
             let offsets = match record {
                 ScheduleRecord::Item(item) => match item.alarm {
                     Some(policy)
@@ -3050,7 +3052,50 @@ impl SyncEngine {
                     {
                         continue;
                     }
-                    event.alarm_offsets()
+                    let mut event = event.clone();
+                    if source.alarm_lead_minutes != 5
+                        && event.alarm_uses_default.is_none()
+                        && let Some(raw) = event.snapshot()
+                    {
+                        if let std::collections::hash_map::Entry::Vacant(entry) = feeds.entry(raw) {
+                            let parsed = match self.read_import_snapshot(raw).await {
+                                Ok(Some(bytes)) => {
+                                    std::str::from_utf8(&bytes).ok().and_then(|text| {
+                                        clipper_schedule::ingest::parse_ics_for_owner(
+                                            text,
+                                            source.id,
+                                            raw,
+                                            source.owner_email.as_deref(),
+                                        )
+                                        .ok()
+                                    })
+                                }
+                                Ok(None) => None,
+                                Err(error) => {
+                                    warn!(%raw, %error, "Unable to recover imported reminder settings");
+                                    None
+                                }
+                            };
+                            entry.insert(parsed);
+                        }
+                        if let Some(parsed) = feeds.get(&raw).and_then(Option::as_ref)
+                            && let Some(original) =
+                                parsed.events.iter().find(|entry| entry.uid == event.uid)
+                        {
+                            event.alarm_uses_default = original.alarm_uses_default;
+                            for entry in &mut event.alarm_overrides {
+                                entry.uses_default = original
+                                    .alarm_overrides
+                                    .iter()
+                                    .find(|original| original.recurrence_id == entry.recurrence_id)
+                                    .and_then(|original| original.uses_default);
+                            }
+                        }
+                    }
+                    let event = event.with_alarm_lead(source.alarm_lead_minutes);
+                    let offsets = event.alarm_offsets();
+                    alarm_event = Some(event);
+                    offsets
                 }
                 _ => continue,
             };
@@ -3103,7 +3148,7 @@ impl SyncEngine {
             let occurrences: Vec<_> = found.into_values().collect();
             let planned = match record {
                 ScheduleRecord::Ingested(event) => clipper_schedule::plan_imported_alarms(
-                    event,
+                    alarm_event.as_ref().unwrap_or(event),
                     &occurrences,
                     sources
                         .get(&event.source)
@@ -3180,6 +3225,7 @@ impl SyncEngine {
             enabled: true,
             owner_email: calendar_import::owner_email(&parsed),
             alarms_on: true,
+            alarm_lead_minutes: 5,
             target_device: None,
             active_import: None,
             pending_imports: Vec::new(),
@@ -7753,6 +7799,7 @@ mod adversarial_history_tests {
             enabled: true,
             owner_email: None,
             alarms_on: true,
+            alarm_lead_minutes: 5,
             target_device: None,
             active_import: None,
             pending_imports: Vec::new(),

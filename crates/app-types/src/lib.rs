@@ -219,6 +219,10 @@ fn can_snooze_by_default() -> bool {
     true
 }
 
+fn alarm_lead_by_default() -> u32 {
+    5
+}
+
 /// A calendar source, rendered for a list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -234,6 +238,8 @@ pub struct CalendarSourceView {
     pub location: String,
     pub enabled: bool,
     pub alarms_on: bool,
+    #[serde(default = "alarm_lead_by_default")]
+    pub alarm_lead_minutes: u32,
     #[serde(default)]
     pub target_device: Option<String>,
     pub fetched_at: Option<String>,

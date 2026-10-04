@@ -99,6 +99,7 @@ pub enum DaemonCommand {
     AddCalendarSource(AddCalendarSourceParams),
     SyncCalendarSource(SyncCalendarSourceParams),
     SetCalendarSourceAlarms(SetCalendarSourceAlarmsParams),
+    SetCalendarSourceAlarmLead(SetCalendarSourceAlarmLeadParams),
     SetCalendarSourceTargetDevice(SetCalendarSourceTargetDeviceParams),
     StartActual(StartActualParams),
     StopActual(StopActualParams),
@@ -323,6 +324,12 @@ pub struct SetCalendarSourceAlarmsParams {
 pub struct SetCalendarSourceTargetDeviceParams {
     pub object_id: String,
     pub target_device: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetCalendarSourceAlarmLeadParams {
+    pub object_id: String,
+    pub minutes: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

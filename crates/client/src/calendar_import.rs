@@ -23,7 +23,10 @@ pub(super) struct CachedImportRules {
 const MAX_IMPORT_BYTES: i64 = 8 * 1024 * 1024;
 
 impl SyncEngine {
-    async fn read_import_snapshot(&self, raw: ObjectId) -> Result<Option<Vec<u8>>, ClientError> {
+    pub(super) async fn read_import_snapshot(
+        &self,
+        raw: ObjectId,
+    ) -> Result<Option<Vec<u8>>, ClientError> {
         let epoch = self.history_epoch.load(Ordering::SeqCst);
         let id = raw.to_string();
         let object = match self.local_store.import_file_object(&id).await? {
@@ -734,6 +737,34 @@ impl SyncEngine {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    pub async fn set_calendar_source_alarm_lead(
+        &self,
+        id: &str,
+        minutes: u32,
+    ) -> Result<(), ClientError> {
+        if minutes > 120 {
+            return Err(ClientError::InvalidArgument(
+                "Calendar alarm lead must be from 0 to 120 minutes".into(),
+            ));
+        }
+        self.run_work(None, async {
+            let _write = self.calendar_write.lock().await;
+            loop {
+                let (mut source, head) = self.read_calendar_source(id).await?;
+                if source.alarm_lead_minutes == minutes {
+                    return Ok(());
+                }
+                source.alarm_lead_minutes = minutes;
+                match self.save_calendar_source(id, &source, head).await {
+                    Ok(_) => return Ok(()),
+                    Err(ClientError::Api { status: 409, .. }) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+        .await
     }
 
     pub async fn set_calendar_source_target_device(
