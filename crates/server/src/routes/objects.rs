@@ -985,7 +985,7 @@ pub async fn revise_object(
     }
 
     let (kind, was_tombstoned, head) =
-        head_revision_for_write(&state, auth.user_id, object_uuid).await?;
+        head_revision_for_write(state.db(), auth.user_id, object_uuid).await?;
     let head_body: clipper_core::models::ObjectEnvelope = postcard::from_bytes(&head.envelope)
         .map_err(|e| {
             error!(
@@ -1199,6 +1199,15 @@ pub async fn revise_object(
     let user_id = auth.user_id;
     let device_id = auth.device_id;
     let inserted_event = with_txn(state.db(), "revise_object", async move |txn| {
+        check_revision_head(
+            txn,
+            user_id,
+            object_uuid,
+            (kind, was_tombstoned),
+            revision,
+            parent_hash,
+        )
+        .await?;
         object_revisions::ActiveModel {
             object_id: Set(object_uuid),
             revision: Set(revision),
@@ -1356,14 +1365,60 @@ fn kind_supports_revisions(kind: ObjectKind) -> bool {
 /// Rejects an object with a revision still in flight: a chain extends from a
 /// published head, and letting a second write start while the first is
 /// mid-upload would produce two siblings claiming the same parent.
-async fn head_revision_for_write(
-    state: &AppState,
+async fn check_revision_head<C>(
+    db: &C,
     user_id: Uuid,
     object_id: Uuid,
-) -> Result<(ObjectKind, bool, object_revisions::Model), ApiError> {
+    expected: (ObjectKind, bool),
+    revision: i64,
+    parent_hash: [u8; SHA256_BYTES],
+) -> Result<(), ApiError>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let (kind, tombstone, head) = head_revision_for_write(db, user_id, object_id)
+        .await
+        .map_err(|error| {
+            if error.body().code == ApiErrorCode::ObjectNotFound {
+                ApiError::from_code_with_message(
+                    ApiErrorCode::ObjectRevisionConflict,
+                    "Object revision does not follow the current head",
+                )
+            } else {
+                error
+            }
+        })?;
+    let envelope: clipper_core::models::ObjectEnvelope = postcard::from_bytes(&head.envelope).map_err(|error| {
+        error!(object_id = %object_id, error = %error, "Stored head envelope could not be decoded");
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+    })?;
+    let stored_parent = crypto::object_envelope_parent_hash(&envelope.body).map_err(|error| {
+        error!(object_id = %object_id, error = %error, "Failed to hash head envelope");
+        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+    })?;
+    if head.revision.checked_add(1) != Some(revision)
+        || stored_parent != parent_hash
+        || (kind, tombstone) != expected
+    {
+        return Err(ApiError::from_code_with_message(
+            ApiErrorCode::ObjectRevisionConflict,
+            "Object revision does not follow the current head",
+        ));
+    }
+    Ok(())
+}
+
+async fn head_revision_for_write<C>(
+    db: &C,
+    user_id: Uuid,
+    object_id: Uuid,
+) -> Result<(ObjectKind, bool, object_revisions::Model), ApiError>
+where
+    C: sea_orm::ConnectionTrait,
+{
     let object = objects::Entity::find_by_id(object_id)
         .filter(objects::Column::UserId.eq(user_id))
-        .one(state.db())
+        .one(db)
         .await
         .map_err(|e| {
             error!(object_id = %object_id, error = %e, "Failed to look up object for revision");
@@ -1391,7 +1446,7 @@ async fn head_revision_for_write(
         .filter(object_revisions::Column::Status.ne("complete"))
         .limit(1)
         .into_partial_model::<RevisionUploadRow>()
-        .all(state.db())
+        .all(db)
         .await
         .map_err(|e| {
             error!(object_id = %object_id, error = %e, "Failed to count pending revisions");
@@ -1410,7 +1465,7 @@ async fn head_revision_for_write(
     }
 
     let head = object_revisions::Entity::find_by_id((object_id, head_revision))
-        .one(state.db())
+        .one(db)
         .await
         .map_err(|e| {
             error!(object_id = %object_id, error = %e, "Failed to load head revision");
@@ -3021,9 +3076,6 @@ where
         ));
     }
 
-    // `head_revision < revision` refuses to move a head backwards even if a
-    // caller passes a stale number, which no current path does but a future one
-    // could. The IS NULL arm is the genesis case.
     let advanced = objects::Entity::update_many()
         .col_expr(objects::Column::HeadRevision, Expr::value(revision))
         .col_expr(objects::Column::PublishedSeq, Expr::value(created_seq))
@@ -3034,11 +3086,11 @@ where
         )
         .filter(objects::Column::Id.eq(object_id))
         .filter(objects::Column::UserId.eq(user_id))
-        .filter(
-            Condition::any()
-                .add(objects::Column::HeadRevision.is_null())
-                .add(objects::Column::HeadRevision.lt(revision)),
-        )
+        .filter(if revision == GENESIS_REVISION {
+            Condition::all().add(objects::Column::HeadRevision.is_null())
+        } else {
+            Condition::all().add(objects::Column::HeadRevision.eq(revision - 1))
+        })
         .exec(db)
         .await
         .map_err(|e| {
@@ -3059,8 +3111,8 @@ where
             "Advancing an object head affected an unexpected row count",
         );
         return Err(ApiError::from_code_with_message(
-            ApiErrorCode::Database,
-            "Database error",
+            ApiErrorCode::ObjectRevisionConflict,
+            "Object revision does not follow the current head",
         ));
     }
     Ok(())
@@ -3836,6 +3888,130 @@ mod tests {
     /// Revision-chain acceptance tests: what a chain has to do beyond compiling.
     mod revisions {
         use super::*;
+
+        #[tokio::test]
+        async fn a_delayed_revision_cannot_skip_the_head_after_recreation() {
+            let (state, _dir) = test_state().await;
+            let (user_id, device_id, object_id, key) = seeded(&state).await;
+            let object_uuid = object_id.parse::<Uuid>().unwrap();
+            let (_, old_parent) = head_of(&state, object_uuid).await;
+            for _ in 0..2 {
+                revise_with(
+                    &state,
+                    user_id,
+                    device_id,
+                    &object_id,
+                    ObjectKind::Schedule,
+                    b"old revision",
+                    &key,
+                )
+                .await
+                .unwrap();
+            }
+            let old_head = object_revisions::Entity::find_by_id((object_uuid, 3))
+                .one(state.db())
+                .await
+                .unwrap()
+                .unwrap();
+            tombstone_object(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                &key,
+            )
+            .await
+            .unwrap();
+            purge_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path(object_id.clone()),
+            )
+            .await
+            .unwrap();
+            init_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                postcard(init_request(
+                    object_id.clone(),
+                    Uuid::now_v7().to_string(),
+                    ObjectKind::Schedule,
+                    b"recreated",
+                    true,
+                    device_id,
+                    &key,
+                )),
+            )
+            .await
+            .unwrap();
+            let meta_nonce = vec![4_u8; XCHACHA20_NONCE_BYTES];
+            let meta_ciphertext = b"delayed metadata".to_vec();
+            let payload_id: clipper_core::models::ObjectPayloadId = Uuid::now_v7().into();
+            let payload_nonce = vec![5_u8; XCHACHA20_NONCE_BYTES];
+            let envelope = signed_envelope_at(
+                object_uuid.into(),
+                ObjectKind::Schedule,
+                2,
+                Some(old_parent),
+                ObjectEnvelopeOperation::Revise,
+                meta_nonce.clone(),
+                &meta_ciphertext,
+                vec![ObjectEnvelopePayload {
+                    id: payload_id,
+                    nonce: payload_nonce.clone(),
+                    ciphertext_size: 0,
+                    sha256_ciphertext: sha256(b"").to_vec(),
+                }],
+                device_id,
+                &key,
+            );
+            let conflict = revise_object(
+                State(state.clone()),
+                Extension(auth(user_id, device_id)),
+                Path(object_id.clone()),
+                postcard(ObjectReviseRequest {
+                    meta_nonce,
+                    meta_ciphertext,
+                    payloads: vec![ObjectPayloadInit {
+                        id: payload_id,
+                        nonce: payload_nonce,
+                        ciphertext_size: 0,
+                        sha256_ciphertext: sha256(b"").to_vec(),
+                        inline_ciphertext: Some(Vec::new()),
+                    }],
+                    envelope,
+                }),
+            )
+            .await
+            .expect_err("the recreated genesis has a different parent hash");
+            assert_eq!(conflict.body().code, ApiErrorCode::ObjectRevisionConflict);
+            let result = with_txn(state.db(), "delayed_revision", async |txn| {
+                let mut delayed: object_revisions::ActiveModel = old_head.into();
+                delayed.revision = Set(4);
+                delayed.status = Set("pending".into());
+                delayed.created_seq = Set(None);
+                delayed.insert(txn).await.unwrap();
+                advance_object_head(txn, user_id, object_uuid, 4, state.next_event_seq(), false)
+                    .await
+            })
+            .await;
+            assert_eq!(
+                result
+                    .expect_err("revision four cannot follow revision one")
+                    .body()
+                    .code,
+                ApiErrorCode::ObjectRevisionConflict
+            );
+            assert_eq!(head_of(&state, object_uuid).await.0, 1);
+            assert!(
+                object_revisions::Entity::find_by_id((object_uuid, 4))
+                    .one(state.db())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
 
         /// Set up one completed schedule object and return everything a
         /// revision needs.
