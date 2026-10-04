@@ -3,13 +3,32 @@ import {
     Button as TamaguiButton,
     Input as TamaguiInput,
     TextArea as TamaguiTextArea,
+    createFont,
     createTamagui,
     styled,
 } from "tamagui";
 import { createDarkThemes, darkDefaults, buttonStyles, inputStyles } from "@clipper/shared";
 
+function libronFont(font: typeof defaultConfig.fonts.body) {
+    return createFont({
+        ...font,
+        family: "Libron, Georgia, serif",
+        weight: Object.fromEntries(
+            Object.entries(font.weight).map(([size, weight]) => [
+                size,
+                Number(weight) >= 600 ? "700" : "400",
+            ]),
+        ),
+    });
+}
+
 const tamaguiConfig = createTamagui({
     ...defaultConfig,
+    fonts: {
+        ...defaultConfig.fonts,
+        body: libronFont(defaultConfig.fonts.body),
+        heading: libronFont(defaultConfig.fonts.heading),
+    },
     themes: createDarkThemes(defaultConfig.themes),
     defaultProps: darkDefaults,
 });

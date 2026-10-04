@@ -15,6 +15,54 @@
         "backgroundImage": "../assets/icon/android-background.png"
       }
     },
-    "plugins": ["expo-secure-store", "expo-sharing", "./plugins/clipboard-lint.cjs"]
+    "plugins": [
+      "expo-secure-store",
+      "expo-sharing",
+      "./plugins/clipboard-lint.cjs",
+      [
+        "expo-font",
+        {
+          "fonts": [
+            "./assets/fonts/libron/Libron-Regular.ttf",
+            "./assets/fonts/libron/Libron-Italic.ttf",
+            "./assets/fonts/libron/Libron-Bold.ttf",
+            "./assets/fonts/libron/Libron-BoldItalic.ttf"
+          ],
+          "android": {
+            "fonts": [
+              {
+                "fontFamily": "Libron",
+                "fontDefinitions": [
+                  { "path": "./assets/fonts/libron/Libron-Regular.ttf", "weight": 400 },
+                  { "path": "./assets/fonts/libron/Libron-Regular.ttf", "weight": 500 },
+                  { "path": "./assets/fonts/libron/Libron-Bold.ttf", "weight": 600 },
+                  { "path": "./assets/fonts/libron/Libron-Bold.ttf", "weight": 700 },
+                  {
+                    "path": "./assets/fonts/libron/Libron-Italic.ttf",
+                    "weight": 400,
+                    "style": "italic"
+                  },
+                  {
+                    "path": "./assets/fonts/libron/Libron-Italic.ttf",
+                    "weight": 500,
+                    "style": "italic"
+                  },
+                  {
+                    "path": "./assets/fonts/libron/Libron-BoldItalic.ttf",
+                    "weight": 600,
+                    "style": "italic"
+                  },
+                  {
+                    "path": "./assets/fonts/libron/Libron-BoldItalic.ttf",
+                    "weight": 700,
+                    "style": "italic"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    ]
   }
 }
