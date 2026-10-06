@@ -58,10 +58,16 @@ import {
   XStack,
   YStack,
 } from "tamagui";
-import type { AppState, ClipboardItem, CollabItem, DeviceInfo, FileItem } from "@clipper/shared";
+import type {
+  AppState,
+  ClipboardItem,
+  CollabItem,
+  DeviceInfo,
+  FileItem,
+  RunningWorkView,
+} from "@clipper/shared";
 import {
   backend,
-  clearCredentials,
   devDefaultServerUrl,
   formatBackendError,
   isResumeRejected,
@@ -400,6 +406,8 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
   const [tab, setTab] = useState<TabName>("clipboard");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [runningWork, setRunningWork] = useState<RunningWorkView[] | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   async function refresh() {
     setBusy(true);
@@ -414,32 +422,27 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
     }
   }
 
-  async function logout() {
+  async function logout(cancelRunningWork = false) {
     setError(null);
-    // Forget stored session material so the device stops auto-resuming.
-    await clearCredentials();
+    setLoggingOut(true);
     try {
-      cancelAllAlarms();
-    } catch {
-      // Native cleanup is best-effort; backend logout must still run.
-    }
-    try {
-      dismissAlarm();
-    } catch {
-      // The ring service may already be gone.
-    }
-    try {
-      await backend.logout();
-    } catch (caught) {
-      // logout tears down local state best-effort even when the server call
-      // fails; surface the error but still refresh below so the UI leaves the
-      // authenticated screen rather than stranding the user with keys cleared.
-      setError(formatBackendError(caught));
-    }
-    try {
+      const outcome = await backend.logout(cancelRunningWork);
+      if (outcome.status === "work_running") {
+        setRunningWork(outcome.work);
+        return;
+      }
+      setRunningWork(null);
+      try {
+        cancelAllAlarms();
+      } catch {}
+      try {
+        dismissAlarm();
+      } catch {}
       onState(await backend.getState());
     } catch (caught) {
       setError(formatBackendError(caught));
+    } finally {
+      setLoggingOut(false);
     }
   }
 
@@ -468,9 +471,31 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
             onPress={refresh}
             disabled={busy}
           />
-          <Button size="$3" icon={<LogOut size={16} />} onPress={() => void logout()} />
+          <Button
+            size="$3"
+            icon={<LogOut size={16} />}
+            disabled={loggingOut}
+            onPress={() => void logout(false)}
+          />
         </XStack>
       </XStack>
+
+      {runningWork && (
+        <Card m="$3" p="$3" gap="$2" borderWidth={1} borderColor="#303940">
+          <Paragraph>Work is still running</Paragraph>
+          {runningWork.map((work, index) => (
+            <Text key={index}>{work.label}</Text>
+          ))}
+          <XStack gap="$2" flexWrap="wrap">
+            <Button disabled={loggingOut} onPress={() => setRunningWork(null)}>
+              Wait
+            </Button>
+            <Button theme="red" disabled={loggingOut} onPress={() => void logout(true)}>
+              Cancel them and log out
+            </Button>
+          </XStack>
+        </Card>
+      )}
 
       <YStack p="$4" gap="$3" flex={1}>
         <Tabs

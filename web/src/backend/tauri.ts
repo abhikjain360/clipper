@@ -7,6 +7,7 @@ import type {
     CollabItem,
     DeviceInfo,
     IngestReport,
+    LogoutOutcome,
     OccurrenceView,
     ScheduleItem,
 } from "@clipper/shared";
@@ -25,7 +26,7 @@ export function tauriBackend(): ClipperBackend {
             invoke<void>("login", { passphrase, username, deviceName, serverUrl }),
         register: (accessKey, username, passphrase, deviceName, serverUrl) =>
             invoke<string>("register", { accessKey, username, passphrase, deviceName, serverUrl }),
-        logout: () => invoke<void>("logout"),
+        logout: (cancelRunningWork) => invoke<LogoutOutcome>("logout", { cancelRunningWork }),
         getState: () => invoke<AppState>("get_state"),
         stateVersion: () => invoke<number>("state_version"),
         waitForStateChange: (seenVersion) =>

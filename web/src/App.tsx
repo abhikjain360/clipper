@@ -56,7 +56,14 @@ import {
     saveSessionResume,
     writeClipboardText,
 } from "./backend";
-import type { AppState, ClipboardItem, CollabItem, DeviceInfo, FileItem } from "@clipper/shared";
+import type {
+    AppState,
+    ClipboardItem,
+    CollabItem,
+    DeviceInfo,
+    FileItem,
+    RunningWorkView,
+} from "@clipper/shared";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { SchedulePanel } from "./SchedulePanel";
 
@@ -343,6 +350,8 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
     const [location, setLocation] = useLocation();
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [runningWork, setRunningWork] = useState<RunningWorkView[] | null>(null);
+    const [loggingOut, setLoggingOut] = useState(false);
 
     async function refresh() {
         setBusy(true);
@@ -358,15 +367,24 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
         }
     }
 
-    async function logout() {
+    async function logout(cancelRunningWork = false) {
         setError(null);
-        clearSessionResume();
+        setLoggingOut(true);
         try {
             const backend = await clipperBackend();
-            await backend.logout();
+            const outcome = await backend.logout(cancelRunningWork);
+            if (outcome.status === "work_running") {
+                setRunningWork(outcome.work);
+                setNavExpanded(true);
+                return;
+            }
+            setRunningWork(null);
+            clearSessionResume();
             onState(await backend.getState());
         } catch (caught) {
             setError(formatBackendError(caught));
+        } finally {
+            setLoggingOut(false);
         }
     }
 
@@ -439,11 +457,38 @@ function HomeScreen({ state, onState }: { state: AppState; onState: (state: AppS
                 <Button
                     aria-label="Logout"
                     icon={<LogOut size={20} />}
-                    onPress={logout}
+                    onPress={() => void logout(false)}
+                    disabled={loggingOut}
                     justify={expanded ? "flex-start" : "center"}
                 >
                     {expanded ? "Logout" : null}
                 </Button>
+                {runningWork && (
+                    <Card
+                        p="$3"
+                        gap="$2"
+                        borderWidth={1}
+                        borderColor="#303940"
+                        aria-label="Running work"
+                    >
+                        <Paragraph>Work is still running</Paragraph>
+                        {runningWork.map((work, index) => (
+                            <Text key={index}>{work.label}</Text>
+                        ))}
+                        <Button disabled={loggingOut} onPress={() => setRunningWork(null)}>
+                            Wait
+                        </Button>
+                        <Button
+                            theme="red"
+                            height="auto"
+                            py="$2"
+                            disabled={loggingOut}
+                            onPress={() => void logout(true)}
+                        >
+                            <Text>Cancel them and log out</Text>
+                        </Button>
+                    </Card>
+                )}
                 <div className="nav-brand" aria-label={`Clipper: ${state.connection_status}`}>
                     <Clipboard size={22} aria-hidden="true" />
                     {expanded && <span>Clipper</span>}

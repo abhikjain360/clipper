@@ -409,7 +409,9 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
         DaemonCommand::Login(params) => cmd_login(id, params, manager).await,
         DaemonCommand::Register(params) => cmd_register(id, params, manager).await,
         DaemonCommand::GetState => cmd_get_state(id, manager).await,
-        DaemonCommand::Logout => cmd_logout(id, manager).await,
+        DaemonCommand::Logout(params) => {
+            cmd_logout(id, params.unwrap_or_default().cancel_running_work, manager).await
+        }
         // Everything else needs a session: resolve the engine once, or report
         // that the user has not logged in yet.
         command => {
@@ -482,7 +484,7 @@ async fn dispatch_command(req: DaemonRequest, manager: &Arc<EngineManager>) -> D
                 | DaemonCommand::Login(_)
                 | DaemonCommand::Register(_)
                 | DaemonCommand::GetState
-                | DaemonCommand::Logout => unreachable!("handled by the outer match"),
+                | DaemonCommand::Logout(_) => unreachable!("handled by the outer match"),
             }
         }
     }
@@ -604,20 +606,24 @@ async fn cmd_register(
     }
 }
 
-async fn cmd_logout(id: String, manager: &EngineManager) -> DaemonResponse {
+async fn cmd_logout(
+    id: String,
+    cancel_running_work: bool,
+    manager: &EngineManager,
+) -> DaemonResponse {
     // Nothing to tear down if the user never logged in this daemon lifetime.
     let Some(engine) = manager.engine().await else {
-        return DaemonResponse::success(id, None);
+        return json_success(id, clipper_client::engine::LogoutOutcome::SignedOut);
     };
-    match engine.logout().await {
-        Ok(()) => {
-            if let Err(e) = keychain::clear_credentials() {
-                warn!("Failed to clear stored server profile: {}", e);
+    match engine.logout(cancel_running_work).await {
+        Ok(outcome) => {
+            if outcome == clipper_client::engine::LogoutOutcome::SignedOut {
+                if let Err(e) = keychain::clear_credentials() {
+                    warn!("Failed to clear stored server profile: {}", e);
+                }
+                manager.clear().await;
             }
-            // Drop the engine so the next login/register can target a different
-            // server without restarting the daemon.
-            manager.clear().await;
-            DaemonResponse::success(id, None)
+            json_success(id, outcome)
         }
         Err(e) => client_error(id, e),
     }

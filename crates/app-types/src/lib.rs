@@ -11,6 +11,20 @@ use strum::{AsRefStr, Display, EnumString};
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct RunningWorkView {
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "status", content = "work", rename_all = "snake_case")]
+pub enum LogoutOutcome {
+    SignedOut,
+    WorkRunning(Vec<RunningWorkView>),
+}
+
 /// A decrypted clipboard item for display.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]

@@ -8,15 +8,16 @@ use std::{
 };
 
 use clipper_app_types::{
-    ActualView, AppState, CollabItem, DeviceInfo, IngestReport, OccurrenceView,
+    ActualView, AppState, CollabItem, DeviceInfo, IngestReport, LogoutOutcome, OccurrenceView,
 };
 use clipper_daemon_types::{
     ActualsBetweenParams, AddCalendarSourceParams, ClipboardPayloadParams, ClipboardPayloadResult,
     CreateScheduleItemParams, DaemonCommand, DeleteCollabDocParams, DeleteFileParams,
     DeleteScheduleObjectParams, DeviceListResult, DownloadFileParams, ExpandScheduleParams,
-    GetCollabDocMetaParams, LoginParams, RegisterParams, RegisterResult, RemoveDeviceParams,
-    RenameCollabDocParams, SendClipboardPayloadParams, StartActualParams, StopActualParams,
-    SyncCalendarSourceParams, UpdateScheduleItemParams, UploadFileParams, UploadFileResult,
+    GetCollabDocMetaParams, LoginParams, LogoutParams, RegisterParams, RegisterResult,
+    RemoveDeviceParams, RenameCollabDocParams, SendClipboardPayloadParams, StartActualParams,
+    StopActualParams, SyncCalendarSourceParams, UpdateScheduleItemParams, UploadFileParams,
+    UploadFileResult,
 };
 use clipper_schedule::ScheduleItem;
 use daemon_client::{DaemonClient, DaemonClientError};
@@ -225,9 +226,16 @@ async fn register(
 }
 
 #[tauri::command]
-async fn logout(backend: State<'_, DesktopBackend>) -> CommandResult<()> {
-    backend.daemon.send_ok(DaemonCommand::Logout).await?;
-    Ok(())
+async fn logout(
+    backend: State<'_, DesktopBackend>,
+    cancel_running_work: bool,
+) -> CommandResult<LogoutOutcome> {
+    Ok(backend
+        .daemon
+        .send_result(DaemonCommand::Logout(Some(LogoutParams {
+            cancel_running_work,
+        })))
+        .await?)
 }
 
 #[tauri::command]

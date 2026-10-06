@@ -1,7 +1,9 @@
 use std::{path::PathBuf, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use clipper_app_types::{AlarmView, AppState, ClipboardPayload, CollabItem, DeviceInfo};
+use clipper_app_types::{
+    AlarmView, AppState, ClipboardPayload, CollabItem, DeviceInfo, LogoutOutcome,
+};
 use clipper_client::{
     api_client::ClientError,
     engine::{SyncEngine, TEXT_CLIPBOARD_MIME_TYPE},
@@ -150,9 +152,8 @@ impl MobileClipperClient {
             .await?)
     }
 
-    pub async fn logout(&self) -> Result<(), MobileError> {
-        self.engine.logout().await?;
-        Ok(())
+    pub async fn logout(&self, cancel_running_work: bool) -> Result<LogoutOutcome, MobileError> {
+        Ok(self.engine.logout(cancel_running_work).await?)
     }
 
     pub async fn session_resume_material(&self) -> Option<MobileSessionResumeMaterial> {

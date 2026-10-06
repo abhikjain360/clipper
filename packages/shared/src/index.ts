@@ -12,6 +12,8 @@ export type {
   DeviceInfo,
   FileItem,
   IngestReport,
+  LogoutOutcome,
+  RunningWorkView,
   Frequency,
   MonthDay,
   MonthName,

@@ -197,6 +197,18 @@ impl SyncEngine {
     /// gets its own storage ids, so a recording's reference is never pointed
     /// at a replacement event.
     pub async fn sync_calendar_source(&self, object_id: &str) -> Result<IngestReport, ClientError> {
+        self.run_work(
+            Some("Syncing a calendar".into()),
+            self.sync_calendar_source_inner(object_id),
+        )
+        .await
+    }
+
+    async fn sync_calendar_source_inner(
+        &self,
+        object_id: &str,
+    ) -> Result<IngestReport, ClientError> {
+        self.set_calendar_work_label("Syncing", object_id).await;
         let _write = self.calendar_write.lock().await;
         self.cleanup_calendar_imports(object_id).await?;
         let (mut source, mut head) = self.calendar_source(object_id).await?;

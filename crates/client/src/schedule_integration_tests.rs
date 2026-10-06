@@ -319,7 +319,7 @@ async fn lost_timer_replies_recover_committed_starts_and_stops() {
     assert!(engine.get_state().await.running_actual.is_none());
     let next = engine.start_actual(None).await.unwrap();
     engine.stop_actual(&next).await.unwrap();
-    engine.logout().await.unwrap();
+    engine.logout(true).await.unwrap();
     proxy.abort();
 }
 
@@ -403,7 +403,7 @@ async fn calendar_sync_retries_reuse_raw_feeds_and_remove_rejected_uploads() {
         engine.local_head(&source).await.unwrap().revision,
         head.revision + 1
     );
-    engine.logout().await.unwrap();
+    engine.logout(true).await.unwrap();
     feed.abort();
     proxy.abort();
 }
@@ -1305,7 +1305,7 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
             .expect("original session")
             .device_id
     );
-    first.logout().await.expect("logout first");
+    first.logout(true).await.expect("logout first");
     assert!(
         resumed
             .resume_with_platform(
@@ -1319,8 +1319,8 @@ async fn check_schedule(first: Arc<SyncEngine>, second: Arc<SyncEngine>, url: &s
             .is_err(),
         "revoked token cannot resume"
     );
-    second.logout().await.expect("logout second");
-    third.logout().await.expect("logout third");
+    second.logout(true).await.expect("logout second");
+    third.logout(true).await.expect("logout third");
 }
 
 #[test]

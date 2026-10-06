@@ -2,6 +2,8 @@ import "./index";
 
 import {
   ConnectionStatus as NativeConnectionStatus,
+  LogoutOutcome_Tags as NativeLogoutOutcomeTags,
+  type LogoutOutcome as NativeLogoutOutcome,
   type AppState as NativeAppState,
   type ClipboardPayload as NativeClipboardPayload,
   type CollabItem as NativeCollabItem,
@@ -30,6 +32,7 @@ import type {
   DeviceInfo,
   CalendarSourceView,
   FileItem,
+  LogoutOutcome,
   ScheduleItemView,
 } from "@clipper/shared";
 
@@ -94,7 +97,7 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
     listDevices: async () => (await client.listDevices()).map(mapDeviceInfo),
     login: async (passphrase, username, deviceName, serverUrl) =>
       clientFor(serverUrl).login(passphrase, username, deviceName, serverUrl),
-    logout: async () => client.logout(),
+    logout: async (cancelRunningWork) => mapLogoutOutcome(await client.logout(cancelRunningWork)),
     refresh: async () => client.refresh(),
     register: async (accessKey, username, passphrase, deviceName, serverUrl) =>
       clientFor(serverUrl).register(accessKey, username, passphrase, deviceName, serverUrl),
@@ -180,6 +183,18 @@ export function createMobileBackend(options: CreateMobileBackendOptions = {}): C
 }
 
 export default createMobileBackend;
+
+function mapLogoutOutcome(outcome: NativeLogoutOutcome): LogoutOutcome {
+  switch (outcome.tag) {
+    case NativeLogoutOutcomeTags.SignedOut:
+      return { status: "signed_out" };
+    case NativeLogoutOutcomeTags.WorkRunning:
+      return {
+        status: "work_running",
+        work: outcome.inner[0].map((work) => ({ label: work.label })),
+      };
+  }
+}
 
 function mapAppState(state: NativeAppState): AppState {
   return {

@@ -11,7 +11,7 @@ use std::{
 pub use clipper_app_types::{
     ActualView, AlarmView, AppState, AuthenticatedSession, CalendarSourceView, ClipboardPayload,
     CollabItem, ConnectionStatus, DecryptedClipboardItem, DecryptedFileItem, DeviceInfo,
-    IngestReport, OccurrenceView, SavedProfile, ScheduleItemView,
+    IngestReport, LogoutOutcome, OccurrenceView, RunningWorkView, SavedProfile, ScheduleItemView,
 };
 use clipper_core::{crypto, models::*};
 pub use clipper_schedule::{
@@ -160,6 +160,8 @@ pub struct SyncEngine {
     /// Serialize this device's timer commands across UI/IPC callers.
     actual_write: Mutex<()>,
     calendar_write: Mutex<()>,
+    session_change: Mutex<()>,
+    session_work: std::sync::Mutex<(u64, Arc<crate::session_work::SessionWork>)>,
     import_rules: Mutex<std::collections::VecDeque<calendar_import::CachedImportRules>>,
     schedule_history: Mutex<HashMap<(u64, clipper_schedule::ObjectRevisionRef), ScheduleRecord>>,
     history_epoch: std::sync::atomic::AtomicU64,
@@ -208,6 +210,8 @@ impl SyncEngine {
             suppressed_payload: RwLock::new(None),
             actual_write: Mutex::new(()),
             calendar_write: Mutex::new(()),
+            session_change: Mutex::new(()),
+            session_work: std::sync::Mutex::new((0, crate::session_work::SessionWork::new())),
             schedule_history: Mutex::new(HashMap::new()),
             history_epoch: std::sync::atomic::AtomicU64::new(0),
             published_stamp: std::sync::atomic::AtomicU64::new(0),
@@ -268,6 +272,8 @@ impl SyncEngine {
         device_name: &str,
         platform: &str,
     ) -> Result<(), ClientError> {
+        let _change = self.session_change.lock().await;
+        self.stop_session_work().await;
         let _calendar = self.calendar_write.lock().await;
         self.clear_local_session().await;
         let prepared = self.api.login_prepare(passphrase, username).await?;
@@ -332,6 +338,8 @@ impl SyncEngine {
         device_name: &str,
         platform: &str,
     ) -> Result<String, ClientError> {
+        let _change = self.session_change.lock().await;
+        self.stop_session_work().await;
         let _calendar = self.calendar_write.lock().await;
         self.clear_local_session().await;
         let prepared = self
@@ -410,6 +418,8 @@ impl SyncEngine {
         username: &str,
         device_name: &str,
     ) -> Result<(), ClientError> {
+        let _change = self.session_change.lock().await;
+        self.stop_session_work().await;
         let _calendar = self.calendar_write.lock().await;
         self.clear_local_session().await;
         self.api.restore_token(token);
@@ -512,6 +522,7 @@ impl SyncEngine {
             state.connection_status = ConnectionStatus::Connecting;
             state.error = None;
         }
+        *self.session_work.lock().unwrap() = (epoch, crate::session_work::SessionWork::new());
         drop(active_key);
         self.bump_version();
 
@@ -526,7 +537,7 @@ impl SyncEngine {
 
         {
             let engine = Arc::clone(self);
-            spawn_background(async move {
+            self.spawn_session_work(epoch, async move {
                 engine.ws_loop(epoch).await;
             });
         }
@@ -570,7 +581,119 @@ impl SyncEngine {
         Ok((device_id, device_id_typed, signing_key))
     }
 
-    pub async fn logout(&self) -> Result<(), ClientError> {
+    fn work_for_epoch(
+        &self,
+        epoch: u64,
+    ) -> Result<Arc<crate::session_work::SessionWork>, ClientError> {
+        let work = self.session_work.lock().unwrap();
+        if !self.session_is_current(epoch) || work.0 != epoch {
+            return Err(ClientError::NotAuthenticated);
+        }
+        Ok(work.1.clone())
+    }
+
+    async fn run_work<T>(
+        &self,
+        label: Option<String>,
+        future: impl std::future::Future<Output = Result<T, ClientError>>,
+    ) -> Result<T, ClientError> {
+        self.work_for_epoch(self.history_epoch.load(Ordering::SeqCst))?
+            .run(label, future)
+            .await
+    }
+
+    async fn stop_session_work(&self) {
+        let work = self.session_work.lock().unwrap().1.clone();
+        let _ = work.stop(true);
+        work.wait().await;
+    }
+
+    async fn set_file_work_label(&self, action: &str, id: &str) {
+        if let Some(file) = self
+            .state
+            .read()
+            .await
+            .files
+            .iter()
+            .find(|file| file.id == id)
+            && let Ok(work) = self.work_for_epoch(self.history_epoch.load(Ordering::SeqCst))
+        {
+            work.set_label(
+                &format!("{action} a file"),
+                format!("{action} {}", file.filename),
+            );
+        }
+    }
+
+    async fn set_calendar_work_label(&self, action: &str, id: &str) {
+        if let Some(source) = self
+            .state
+            .read()
+            .await
+            .calendar_sources
+            .iter()
+            .find(|source| source.id == id)
+            && let Ok(work) = self.work_for_epoch(self.history_epoch.load(Ordering::SeqCst))
+        {
+            let expected = match action {
+                "Deleting" => "Deleting a schedule item",
+                _ => "Syncing a calendar",
+            };
+            work.set_label(expected, format!("{action} calendar {}", source.name));
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn spawn_session_work<F>(&self, epoch: u64, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        if let Ok(work) = self.work_for_epoch(epoch) {
+            spawn_background(async move {
+                let _ = work
+                    .run(None, async {
+                        future.await;
+                        Ok(())
+                    })
+                    .await;
+            });
+        }
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn spawn_session_work<F>(&self, epoch: u64, future: F)
+    where
+        F: std::future::Future<Output = ()> + 'static,
+    {
+        if let Ok(work) = self.work_for_epoch(epoch) {
+            spawn_background(async move {
+                let _ = work
+                    .run(None, async {
+                        future.await;
+                        Ok(())
+                    })
+                    .await;
+            });
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub(crate) async fn capture_clipboard_payload(
+        &self,
+        mime_type: &str,
+        data: &[u8],
+    ) -> Result<String, ClientError> {
+        self.run_work(None, self.send_clipboard_payload(mime_type, data))
+            .await
+    }
+
+    pub async fn logout(&self, cancel_running_work: bool) -> Result<LogoutOutcome, ClientError> {
+        let _change = self.session_change.lock().await;
+        let work = self.session_work.lock().unwrap().1.clone();
+        if let Err(running) = work.stop(cancel_running_work) {
+            return Ok(LogoutOutcome::WorkRunning(running));
+        }
+        work.wait().await;
         let _calendar = self.calendar_write.lock().await;
         // Best-effort server-side revocation: an offline or failed call must not
         // leave key material resident, so tear down local state unconditionally.
@@ -579,7 +702,7 @@ impl SyncEngine {
         }
         self.clear_local_session().await;
         info!("Logged out");
-        Ok(())
+        Ok(LogoutOutcome::SignedOut)
     }
 
     /// Drop everything this session holds.
@@ -591,6 +714,7 @@ impl SyncEngine {
     /// still passes the generation check and writes into whichever profile
     /// database the next login opens.
     async fn clear_local_session(&self) {
+        self.stop_session_work().await;
         let mut active_key = self.encryption_key.write().await;
         self.api.clear_token();
         {
@@ -621,47 +745,34 @@ impl SyncEngine {
         true
     }
 
-    /// End a session the server has refused, named by the store `generation`
-    /// the refused request was issued under.
-    ///
-    /// A 401 can arrive long after the request that earned it, by which time
-    /// the user may have logged out and back in. Taking `calendar_write` makes
-    /// this a session change like login and logout, so it cannot interleave
-    /// with one, and the generation check then tells whether the refused
-    /// session is still the one installed. Callers that already hold
-    /// `calendar_write` must use [`SyncEngine::end_refused_session`] instead.
     async fn end_refused_session_for(&self, generation: u64, error: &ClientError) -> bool {
         if !session_refused(error) {
             return false;
         }
-        let _calendar = self.calendar_write.lock().await;
+        let _change = self.session_change.lock().await;
         if self.local_store.current_generation().await != generation {
             debug!("A later session replaced the refused one; keeping it signed in");
             return false;
         }
         warn!("The server refused this session; signing out");
+        self.stop_session_work().await;
+        let _calendar = self.calendar_write.lock().await;
         self.clear_local_session().await;
         true
     }
 
-    /// End a session the server has refused, named by the `epoch` the refused
-    /// request was issued under.
-    ///
-    /// The WebSocket loop holds an epoch and not a store generation: it is
-    /// refused during the handshake, before it has claimed one. Taking
-    /// `calendar_write` makes this a session change like login and logout, so
-    /// it cannot interleave with one, and the epoch check then tells whether
-    /// the refused session is still the installed one.
     async fn end_refused_session_for_epoch(&self, epoch: u64, error: &ClientError) -> bool {
         if !session_refused(error) {
             return false;
         }
-        let _calendar = self.calendar_write.lock().await;
+        let _change = self.session_change.lock().await;
         if !self.session_is_current(epoch) {
             debug!("A later session replaced the refused one; keeping it signed in");
             return false;
         }
         warn!("The server refused this session; signing out");
+        self.stop_session_work().await;
+        let _calendar = self.calendar_write.lock().await;
         self.clear_local_session().await;
         true
     }
@@ -761,6 +872,10 @@ impl SyncEngine {
     /// List the user's registered devices, marking the one this client is
     /// logged in on (`is_current`) so the UI can keep it out of harm's way.
     pub async fn list_devices(&self) -> Result<Vec<DeviceInfo>, ClientError> {
+        self.run_work(None, self.list_devices_inner()).await
+    }
+
+    async fn list_devices_inner(&self) -> Result<Vec<DeviceInfo>, ClientError> {
         let current_device_id = self.current_device_id().await?;
         let response = self.api.list_devices().await?;
         Ok(response
@@ -784,22 +899,32 @@ impl SyncEngine {
     /// this session server-side, so we tear down local auth state the way
     /// `logout` does and let the UI return to the login screen.
     pub async fn remove_device(&self, device_id: &str) -> Result<(), ClientError> {
-        let _calendar = self.calendar_write.lock().await;
+        self.run_work(
+            Some("Removing a device".into()),
+            self.remove_device_inner(device_id),
+        )
+        .await
+    }
+
+    async fn remove_device_inner(&self, device_id: &str) -> Result<(), ClientError> {
         let current_device_id = self.current_device_id().await?;
         let is_current = device_id == current_device_id;
-        let result = self.api.remove_device(device_id).await;
         if is_current {
+            let _change = self.session_change.lock().await;
+            self.stop_session_work().await;
+            let _calendar = self.calendar_write.lock().await;
             // Removing the current device revokes this session server-side, so
             // tear down local auth state regardless of whether the server call
             // succeeded — a failed/offline call must not leave keys resident.
-            if let Err(error) = &result {
+            if let Err(error) = self.api.remove_device(device_id).await {
                 warn!(%error, "Removing current device failed server-side; clearing local session anyway");
             }
             self.clear_local_session().await;
             info!("Removed the current device; local session cleared");
             return Ok(());
         }
-        result?;
+        let _calendar = self.calendar_write.lock().await;
+        self.api.remove_device(device_id).await?;
         self.bump_version();
         Ok(())
     }
@@ -815,6 +940,18 @@ impl SyncEngine {
     // ── Clipboard ──
 
     pub async fn send_clipboard_payload(
+        &self,
+        mime_type: &str,
+        data: &[u8],
+    ) -> Result<String, ClientError> {
+        self.run_work(
+            Some("Sending clipboard".into()),
+            self.send_clipboard_payload_inner(mime_type, data),
+        )
+        .await
+    }
+
+    async fn send_clipboard_payload_inner(
         &self,
         mime_type: &str,
         data: &[u8],
@@ -1026,6 +1163,10 @@ impl SyncEngine {
     }
 
     pub async fn clipboard_payload(&self, id: &str) -> Result<ClipboardPayload, ClientError> {
+        self.run_work(None, self.clipboard_payload_inner(id)).await
+    }
+
+    async fn clipboard_payload_inner(&self, id: &str) -> Result<ClipboardPayload, ClientError> {
         let item = {
             let state = self.state.read().await;
             state.clipboard_items.iter().find(|i| i.id == id).cloned()
@@ -1060,6 +1201,14 @@ impl SyncEngine {
     }
 
     pub async fn copy_to_local(&self, id: &str) -> Result<String, ClientError> {
+        self.run_work(
+            Some("Copying clipboard".into()),
+            self.copy_to_local_inner(id),
+        )
+        .await
+    }
+
+    async fn copy_to_local_inner(&self, id: &str) -> Result<String, ClientError> {
         let item = {
             let state = self.state.read().await;
             state.clipboard_items.iter().find(|i| i.id == id).cloned()
@@ -1172,6 +1321,20 @@ impl SyncEngine {
 
     #[cfg(not(target_family = "wasm"))]
     pub async fn upload_file_path(&self, path: &std::path::Path) -> Result<String, ClientError> {
+        self.run_work(
+            Some(format!(
+                "Uploading {}",
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("unknown")
+            )),
+            self.upload_file_path_inner(path),
+        )
+        .await
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    async fn upload_file_path_inner(&self, path: &std::path::Path) -> Result<String, ClientError> {
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -1194,6 +1357,19 @@ impl SyncEngine {
     }
 
     pub async fn upload_file_bytes(
+        &self,
+        filename: &str,
+        mime_type: Option<&str>,
+        data: &[u8],
+    ) -> Result<String, ClientError> {
+        self.run_work(
+            Some(format!("Uploading {}", safe_object_filename(filename))),
+            self.upload_file_bytes_inner(filename, mime_type, data),
+        )
+        .await
+    }
+
+    async fn upload_file_bytes_inner(
         &self,
         filename: &str,
         mime_type: Option<&str>,
@@ -1322,6 +1498,15 @@ impl SyncEngine {
     }
 
     pub async fn download_file_bytes(&self, file_id: &str) -> Result<Vec<u8>, ClientError> {
+        self.run_work(
+            Some("Downloading a file".into()),
+            self.download_file_bytes_inner(file_id),
+        )
+        .await
+    }
+
+    async fn download_file_bytes_inner(&self, file_id: &str) -> Result<Vec<u8>, ClientError> {
+        self.set_file_work_label("Downloading", file_id).await;
         // Read before the network work, so the retention below can tell
         // whether the session that asked for this file is still the one
         // running when the bytes come back.
@@ -1423,13 +1608,30 @@ impl SyncEngine {
         file_id: &str,
         target_path: &std::path::Path,
     ) -> Result<(), ClientError> {
+        self.run_work(
+            Some("Downloading a file".into()),
+            self.download_file_path_inner(file_id, target_path),
+        )
+        .await
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    async fn download_file_path_inner(
+        &self,
+        file_id: &str,
+        target_path: &std::path::Path,
+    ) -> Result<(), ClientError> {
+        self.set_file_work_label("Downloading", file_id).await;
         let plaintext = self.download_file_bytes(file_id).await?;
-        tokio::fs::write(target_path, &plaintext)
-            .await
-            .map_err(|source| ClientError::Io {
-                context: "write file",
-                source,
-            })?;
+        let path = target_path.to_path_buf();
+        self.work_for_epoch(self.history_epoch.load(Ordering::SeqCst))?
+            .blocking(move || {
+                std::fs::write(path, plaintext).map_err(|source| ClientError::Io {
+                    context: "write file",
+                    source,
+                })
+            })
+            .await?;
 
         info!(file_id = %file_id, path = %target_path.display(), "File downloaded");
         Ok(())
@@ -1452,6 +1654,15 @@ impl SyncEngine {
     /// an object that has not been tombstoned. Reclaiming the blob is that
     /// separate purge, which nothing calls yet.
     pub async fn delete_file(&self, file_id: &str) -> Result<(), ClientError> {
+        self.run_work(
+            Some("Deleting a file".into()),
+            self.delete_file_inner(file_id),
+        )
+        .await
+    }
+
+    async fn delete_file_inner(&self, file_id: &str) -> Result<(), ClientError> {
+        self.set_file_work_label("Deleting", file_id).await;
         let _write = self.calendar_write.lock().await;
         if self
             .local_store
@@ -1497,6 +1708,14 @@ impl SyncEngine {
 
     /// Create a schedule series.
     pub async fn create_schedule_item(&self, item: ScheduleItem) -> Result<String, ClientError> {
+        self.run_work(
+            Some("Saving a schedule item".into()),
+            self.create_schedule_item_inner(item),
+        )
+        .await
+    }
+
+    async fn create_schedule_item_inner(&self, item: ScheduleItem) -> Result<String, ClientError> {
         self.create_schedule_record(ScheduleRecord::Item(Box::new(item)))
             .await
     }
@@ -1862,6 +2081,14 @@ impl SyncEngine {
     /// Start unplanned time, or time against the exact context rendered by the calendar.
     /// Validate the plan before stopping another timer.
     pub async fn start_actual(&self, plan_context: Option<&str>) -> Result<String, ClientError> {
+        self.run_work(
+            Some("Saving a timer".into()),
+            self.start_actual_inner(plan_context),
+        )
+        .await
+    }
+
+    async fn start_actual_inner(&self, plan_context: Option<&str>) -> Result<String, ClientError> {
         let epoch = self.history_epoch.load(Ordering::SeqCst);
         let planned: Option<clipper_schedule::PlannedRef> = plan_context
             .map(|text| {
@@ -1914,9 +2141,12 @@ impl SyncEngine {
     /// and replaced on stop. Persisting progress on a tick would turn an hour
     /// of work into sixty retained revisions.
     pub async fn stop_actual(&self, object_id: &str) -> Result<String, ClientError> {
-        let epoch = self.history_epoch.load(Ordering::SeqCst);
-        let _write = self.actual_write.lock().await;
-        self.stop_actual_inner(epoch, object_id).await
+        self.run_work(Some("Saving a timer".into()), async {
+            let epoch = self.history_epoch.load(Ordering::SeqCst);
+            let _write = self.actual_write.lock().await;
+            self.stop_actual_inner(epoch, object_id).await
+        })
+        .await
     }
 
     async fn stop_actual_inner(&self, epoch: u64, object_id: &str) -> Result<String, ClientError> {
@@ -1955,6 +2185,15 @@ impl SyncEngine {
 
     /// Records of time spent that overlap `[from, to)`, plus any running timer.
     pub async fn actuals_between(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<ActualView>, ClientError> {
+        self.run_work(None, self.actuals_between_inner(from, to))
+            .await
+    }
+
+    async fn actuals_between_inner(
         &self,
         from: &str,
         to: &str,
@@ -2020,6 +2259,19 @@ impl SyncEngine {
     /// Preserve identity while appending a new definition. The expected revision
     /// comes from the editor, not from whatever head arrived just before saving.
     pub async fn update_schedule_item(
+        &self,
+        object_id: &str,
+        item: ScheduleItem,
+        expected_revision: u64,
+    ) -> Result<String, ClientError> {
+        self.run_work(
+            Some("Saving a schedule item".into()),
+            self.update_schedule_item_inner(object_id, item, expected_revision),
+        )
+        .await
+    }
+
+    async fn update_schedule_item_inner(
         &self,
         object_id: &str,
         item: ScheduleItem,
@@ -2120,6 +2372,15 @@ impl SyncEngine {
     /// earlier one. Reclaiming the bytes is a separate purge, which nothing in
     /// the UI calls yet.
     pub async fn delete_schedule_object(&self, object_id: &str) -> Result<(), ClientError> {
+        self.run_work(
+            Some("Deleting a schedule item".into()),
+            self.delete_schedule_object_inner(object_id),
+        )
+        .await
+    }
+
+    async fn delete_schedule_object_inner(&self, object_id: &str) -> Result<(), ClientError> {
+        self.set_calendar_work_label("Deleting", object_id).await;
         let _write = self.calendar_write.lock().await;
         self.remove_calendar_imports(object_id).await?;
         self.tombstone_schedule_object(object_id).await
@@ -2151,6 +2412,16 @@ impl SyncEngine {
     /// the caller's choice rather than a fixed horizon — a grid asks for a
     /// week, an alarm scheduler asks for the next day.
     pub async fn expand_schedule(
+        &self,
+        from: &str,
+        to: &str,
+        observer_zone: &str,
+    ) -> Result<Vec<OccurrenceView>, ClientError> {
+        self.run_work(None, self.expand_schedule_inner(from, to, observer_zone))
+            .await
+    }
+
+    async fn expand_schedule_inner(
         &self,
         from: &str,
         to: &str,
@@ -2300,6 +2571,15 @@ impl SyncEngine {
         within_hours: u32,
         observer_zone: &str,
     ) -> Result<Vec<AlarmView>, ClientError> {
+        self.run_work(None, self.next_alarms_inner(within_hours, observer_zone))
+            .await
+    }
+
+    async fn next_alarms_inner(
+        &self,
+        within_hours: u32,
+        observer_zone: &str,
+    ) -> Result<Vec<AlarmView>, ClientError> {
         let now = chrono::Utc::now();
         if within_hours > 24 * 366 {
             return Err(ClientError::InvalidArgument(
@@ -2368,6 +2648,18 @@ impl SyncEngine {
 
     /// Register a calendar to pull events from.
     pub async fn add_calendar_source(&self, name: &str, url: &str) -> Result<String, ClientError> {
+        self.run_work(
+            Some(format!("Adding calendar {}", name.trim())),
+            self.add_calendar_source_inner(name, url),
+        )
+        .await
+    }
+
+    async fn add_calendar_source_inner(
+        &self,
+        name: &str,
+        url: &str,
+    ) -> Result<String, ClientError> {
         // Reject a URL the fetcher could never use, while the user is still
         // here to fix the typo.
         let mut parsed = url::Url::parse(url)
@@ -2546,6 +2838,14 @@ impl SyncEngine {
     /// of the same magnitude sorts correctly and is superseded by any later
     /// `deleted` event).
     pub async fn create_collab_doc(&self) -> Result<CollabItem, ClientError> {
+        self.run_work(
+            Some("Creating a document".into()),
+            self.create_collab_doc_inner(),
+        )
+        .await
+    }
+
+    async fn create_collab_doc_inner(&self) -> Result<CollabItem, ClientError> {
         // Read before the network work, so the persist below can tell whether
         // the session that created the doc is still the one running.
         let epoch = self.history_epoch.load(Ordering::SeqCst);
@@ -2575,6 +2875,18 @@ impl SyncEngine {
     /// rather than waiting for its own event back (the server suppresses the
     /// originating device's broadcast, exactly as for `created`).
     pub async fn rename_collab_doc(
+        &self,
+        object_id: &str,
+        title: &str,
+    ) -> Result<CollabItem, ClientError> {
+        self.run_work(
+            Some("Renaming a document".into()),
+            self.rename_collab_doc_inner(object_id, title),
+        )
+        .await
+    }
+
+    async fn rename_collab_doc_inner(
         &self,
         object_id: &str,
         title: &str,
@@ -2614,6 +2926,14 @@ impl SyncEngine {
     /// so a local wall-clock microsecond seq tombstones the record; it is always
     /// later than the create seq, so the delete wins.
     pub async fn delete_collab_doc(&self, object_id: &str) -> Result<(), ClientError> {
+        self.run_work(
+            Some("Deleting a document".into()),
+            self.delete_collab_doc_inner(object_id),
+        )
+        .await
+    }
+
+    async fn delete_collab_doc_inner(&self, object_id: &str) -> Result<(), ClientError> {
         // Read before the network work, so the tombstone below can tell whether
         // the session that deleted the doc is still the one running.
         let epoch = self.history_epoch.load(Ordering::SeqCst);
@@ -2638,6 +2958,11 @@ impl SyncEngine {
     /// Fetch a collab doc's current metadata from the server. Used by the per-doc
     /// detail view, which needs the share token as the Y-sync WS credential.
     pub async fn get_collab_doc_meta(&self, object_id: &str) -> Result<CollabItem, ClientError> {
+        self.run_work(None, self.get_collab_doc_meta_inner(object_id))
+            .await
+    }
+
+    async fn get_collab_doc_meta_inner(&self, object_id: &str) -> Result<CollabItem, ClientError> {
         let meta = self.api.get_collab_doc_meta(object_id).await?;
         Ok(collab_item_from_meta(&meta))
     }
@@ -2650,6 +2975,11 @@ impl SyncEngine {
     /// inside the `send` call would hold the channel's read lock while `send`
     /// takes its write lock, and the caller would block there forever.
     pub async fn refresh(&self) -> Result<(), ClientError> {
+        self.run_work(Some("Refreshing".into()), self.refresh_inner())
+            .await
+    }
+
+    async fn refresh_inner(&self) -> Result<(), ClientError> {
         self.ws_restart_tx.send_modify(|requested| *requested += 1);
         Ok(())
     }
@@ -2709,7 +3039,7 @@ impl SyncEngine {
 
     async fn start_reconciliation(self: &Arc<Self>, generation: u64, stream_start_seq: i64) {
         let file_engine = Arc::clone(self);
-        spawn_background(async move {
+        self.spawn_session_work(self.history_epoch.load(Ordering::SeqCst), async move {
             if let Err(error) = file_engine
                 .snapshot_files(generation, stream_start_seq)
                 .await
@@ -2722,7 +3052,7 @@ impl SyncEngine {
         });
 
         let clipboard_engine = Arc::clone(self);
-        spawn_background(async move {
+        self.spawn_session_work(self.history_epoch.load(Ordering::SeqCst), async move {
             if let Err(error) = clipboard_engine
                 .snapshot_clipboard(generation, stream_start_seq)
                 .await
@@ -2735,7 +3065,7 @@ impl SyncEngine {
         });
 
         let collab_engine = Arc::clone(self);
-        spawn_background(async move {
+        self.spawn_session_work(self.history_epoch.load(Ordering::SeqCst), async move {
             if let Err(error) = collab_engine
                 .snapshot_collab_docs(generation, stream_start_seq)
                 .await
@@ -2748,7 +3078,7 @@ impl SyncEngine {
         });
 
         let schedule_engine = Arc::clone(self);
-        spawn_background(async move {
+        self.spawn_session_work(self.history_epoch.load(Ordering::SeqCst), async move {
             if let Err(error) = schedule_engine
                 .snapshot_schedule(generation, stream_start_seq)
                 .await
@@ -3225,7 +3555,7 @@ impl SyncEngine {
 
         if should_materialize {
             let engine = Arc::clone(self);
-            spawn_background(async move {
+            self.spawn_session_work(self.history_epoch.load(Ordering::SeqCst), async move {
                 if let Err(error) = engine
                     .materialize_object(generation, kind, object_id, event_seq)
                     .await
@@ -3264,7 +3594,7 @@ impl SyncEngine {
         }
 
         let engine = Arc::clone(self);
-        spawn_background(async move {
+        self.spawn_session_work(self.history_epoch.load(Ordering::SeqCst), async move {
             if let Err(error) = engine
                 .materialize_object(generation, kind, object_id, event_seq)
                 .await
@@ -3356,7 +3686,7 @@ impl SyncEngine {
         event_seq: i64,
     ) {
         let engine = Arc::clone(self);
-        spawn_background(async move {
+        self.spawn_session_work(self.history_epoch.load(Ordering::SeqCst), async move {
             if let Err(error) = engine.materialize_collab(generation, object_id).await {
                 warn!(
                     object_id = %object_id,
@@ -3520,10 +3850,6 @@ impl SyncEngine {
 
     /// Keep a WebSocket up for the session `epoch` names.
     ///
-    /// Every login spawns one of these, so a logout followed by a new login
-    /// leaves two running. The epoch check is how the older one stops: without
-    /// it, it sees the new session's state and token and reconnects as the new
-    /// user, and every event is then handled twice.
     #[cfg(not(target_family = "wasm"))]
     async fn ws_loop(self: &Arc<Self>, epoch: u64) {
         let mut backoff = Duration::from_secs(1);
@@ -3745,10 +4071,6 @@ impl SyncEngine {
 
     /// Keep a WebSocket up for the session `epoch` names.
     ///
-    /// Every login spawns one of these, so a logout followed by a new login
-    /// leaves two running. The epoch check is how the older one stops: without
-    /// it, it sees the new session's state and token and reconnects as the new
-    /// user, and every event is then handled twice.
     #[cfg(target_family = "wasm")]
     async fn ws_loop(self: &Arc<Self>, epoch: u64) {
         let mut backoff = Duration::from_secs(1);
@@ -4661,10 +4983,14 @@ fn hex_string(bytes: &[u8]) -> String {
 #[path = "schedule_integration_tests.rs"]
 mod schedule_integration_tests;
 
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "logout_tests.rs"]
+mod logout_tests;
+
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    async fn request(socket: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
+    pub(super) async fn request(socket: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
         let mut bytes = Vec::new();
         let mut buffer = [0; 4096];
         loop {
@@ -4686,7 +5012,7 @@ mod tests {
         }
     }
 
-    async fn response(socket: &mut tokio::net::TcpStream, body: &[u8]) {
+    pub(super) async fn response(socket: &mut tokio::net::TcpStream, body: &[u8]) {
         socket.write_all(format!(
             "HTTP/1.1 200 OK\r\nContent-Type: {POSTCARD_CONTENT_TYPE}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()
         ).as_bytes()).await.unwrap();
@@ -4695,7 +5021,11 @@ mod tests {
 
     const KEY: [u8; 32] = [7; 32];
 
-    async fn activate(engine: &SyncEngine, name: &str, key: [u8; 32]) {
+    pub(super) async fn activate(engine: &SyncEngine, name: &str, key: [u8; 32]) {
+        *engine.session_work.lock().unwrap() = (
+            engine.history_epoch.load(Ordering::SeqCst),
+            crate::session_work::SessionWork::new(),
+        );
         engine.local_store.set_profile(name.into());
         *engine.encryption_key.write().await = Some(Zeroizing::new(key));
         engine.api.restore_token(name.into());
@@ -5085,7 +5415,7 @@ mod tests {
         let signing_b = crypto::generate_device_signing_secret_key();
         let public_b = crypto::device_signing_public_key(&signing_b);
         let device_b = uuid::Uuid::now_v7().to_string();
-        {
+        let replace = async {
             let _calendar = engine.calendar_write.lock().await;
             engine.clear_local_session().await;
             engine.api.restore_token("token-b".into());
@@ -5103,7 +5433,8 @@ mod tests {
                 )
                 .await
                 .unwrap();
-        }
+        };
+        let ((), push_result) = tokio::join!(replace, push);
         let (sent, mut received) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             loop {
@@ -5151,7 +5482,7 @@ mod tests {
             }
         });
         drop(suppressed);
-        assert!(matches!(push.await, Err(ClientError::NotAuthenticated)));
+        assert!(matches!(push_result, Err(ClientError::WorkCancelled)));
         let request_sent = received.try_recv();
         server.abort();
         assert!(matches!(
@@ -5411,7 +5742,7 @@ mod tests {
         assert!(futures_util::poll!(&mut replace).is_pending());
         drop(guard);
         let (result, ()) = tokio::join!(download, replace);
-        assert!(matches!(result, Err(ClientError::NotAuthenticated)));
+        assert!(matches!(result, Err(ClientError::WorkCancelled)));
         assert_eq!(
             engine.get_state().await.session.unwrap().username,
             "account-b"
@@ -5696,6 +6027,10 @@ mod tests {
     }
 
     async fn open_session(engine: &Arc<SyncEngine>) {
+        *engine.session_work.lock().unwrap() = (
+            engine.history_epoch.load(Ordering::SeqCst),
+            crate::session_work::SessionWork::new(),
+        );
         engine.state.write().await.session = Some(AuthenticatedSession {
             username: "tester".into(),
             device_id: "22222222-2222-4222-8222-222222222222".into(),
@@ -5748,7 +6083,10 @@ mod tests {
         open_session(&engine).await;
         let generation = engine.local_store.start_generation().await;
 
-        engine.logout().await.expect("logout clears local state");
+        engine
+            .logout(true)
+            .await
+            .expect("logout clears local state");
 
         assert!(
             !engine
@@ -5862,11 +6200,10 @@ mod tests {
             "logout must leave no record of the signed-out account in memory",
         );
         assert!(
-            engine
-                .next_alarms(3, "UTC")
-                .await
-                .expect("alarms")
-                .is_empty(),
+            matches!(
+                engine.next_alarms(3, "UTC").await,
+                Err(ClientError::NotAuthenticated)
+            ),
             "and no alarm of that account can still be read without a session",
         );
     }
@@ -6076,7 +6413,10 @@ mod tests {
 
         // The download was started here; the user then logged out and logged
         // in as someone else while the bytes were still coming.
-        engine.logout().await.expect("logout clears local state");
+        engine
+            .logout(true)
+            .await
+            .expect("logout clears local state");
         engine.local_store.set_profile("profile-b".into());
         open_session(&engine).await;
 
@@ -6136,9 +6476,6 @@ mod tests {
         );
     }
 
-    /// The upload's HTTP round trip is held open while the user logs out and
-    /// logs in as someone else, so the response comes back into a session that
-    /// is no longer the one that encrypted the file.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn an_upload_that_outlives_its_session_is_not_persisted() {
@@ -6188,7 +6525,6 @@ mod tests {
             sent.send(init.id.to_string())
                 .expect("report the object id");
 
-            // Answer only once the replacement session is installed.
             resumed.await.expect("release");
             let response =
                 postcard::to_allocvec(&ObjectInitResponse::Complete { created_seq: 100 })
@@ -6240,7 +6576,7 @@ mod tests {
         assert!(
             matches!(
                 writer.await.expect("the upload task"),
-                Err(ClientError::NotAuthenticated),
+                Err(ClientError::WorkCancelled),
             ),
             "an upload whose session ended must fail instead of persisting",
         );
@@ -6308,7 +6644,7 @@ mod tests {
             error: ErrorResponse::new(ApiErrorCode::Unauthorized, "expired"),
         };
 
-        let held = engine.calendar_write.lock().await;
+        let held = engine.session_change.lock().await;
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(100),
@@ -6818,7 +7154,10 @@ mod adversarial_history_tests {
             .await
             .insert((epoch_before, pin), source_record("leftover"));
 
-        engine.logout().await.expect("logout clears local state");
+        engine
+            .logout(true)
+            .await
+            .expect("logout clears local state");
 
         assert!(
             engine.schedule_history.lock().await.is_empty(),

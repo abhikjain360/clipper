@@ -5,10 +5,19 @@ import * as SecureStore from "expo-secure-store";
 import * as Sharing from "expo-sharing";
 import { createMobileBackend } from "@clipper/mobile-bridge/adapter";
 
-export const backend = createMobileBackend({
+const nativeBackend = createMobileBackend({
   dataDir: resolveDataDir(),
   serverUrl: devDefaultServerUrl(),
 });
+
+export const backend = {
+  ...nativeBackend,
+  logout: async (cancelRunningWork: boolean) => {
+    const outcome = await nativeBackend.logout(cancelRunningWork);
+    if (outcome.status === "signed_out") await clearCredentials();
+    return outcome;
+  },
+};
 
 // The native engine persists its SQLite store and blobs under this path.
 // expo-file-system reports locations as `file://` URIs, but the Rust side
