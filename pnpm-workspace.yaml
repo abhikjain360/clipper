@@ -32,8 +32,6 @@ overrides:
 allowBuilds:
   esbuild: true
   msgpackr-extract: true
-patchedDependencies:
-  uniffi-bindgen-react-native@0.31.0-5: patches/uniffi-bindgen-react-native@0.31.0-5.patch
 minimumReleaseAgeExclude:
   - "@expo/cli@57.0.18 || 57.0.28"
   - "@expo/config-plugins@57.0.9 || 57.0.10"
