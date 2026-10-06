@@ -1536,7 +1536,7 @@ impl<'de> serde::Deserialize<'de> for ObjectListQuery {
 /// wants and saves a separate `published_seq IS NOT NULL` filter from having to
 /// be remembered.
 fn head_revision_join() -> sea_orm::RelationDef {
-    use sea_orm::sea_query::{Expr, IntoCondition};
+    use sea_orm::sea_query::{Expr, ExprTrait, IntoCondition};
 
     objects::Relation::ObjectRevisions
         .def()

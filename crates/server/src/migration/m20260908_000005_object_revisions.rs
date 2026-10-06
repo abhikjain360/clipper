@@ -335,7 +335,7 @@ mod tests {
         .insert(&db)
         .await
         .expect("collab doc");
-        db.execute(Statement::from_sql_and_values(
+        db.execute_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "INSERT INTO objects (id, user_id, kind, created_at, updated_at, status, created_seq, collab_doc_id)
              VALUES (?, ?, 'collab', ?, ?, 'complete', 1, ?)",

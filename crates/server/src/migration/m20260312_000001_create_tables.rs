@@ -201,8 +201,7 @@ impl MigrationTrait for Migration {
                     .check(
                         Cond::any()
                             .add(Expr::col(Objects::Status).ne("complete"))
-                            .add(Expr::col(Objects::CreatedSeq).is_not_null())
-                            .into(),
+                            .add(Expr::col(Objects::CreatedSeq).is_not_null()),
                     )
                     .foreign_key(
                         ForeignKey::create()
@@ -314,8 +313,7 @@ impl MigrationTrait for Migration {
                                 Cond::all()
                                     .add(Expr::col(EventLog::EventType).eq("deleted"))
                                     .add(Expr::col(EventLog::ObjectKind).eq("file")),
-                            )
-                            .into(),
+                            ),
                     )
                     .foreign_key(
                         ForeignKey::create()
