@@ -295,9 +295,18 @@ impl SyncEngine {
             match self.save_calendar_source(object_id, &source, head).await {
                 Ok(saved) => head = saved,
                 Err(error) => {
-                    // A lost response may still have committed the source, so
-                    // keep the raw file rather than delete a snapshot the
-                    // server accepted.
+                    if matches!(error, ClientError::Api { status: 409, .. })
+                        && let Err(cleanup_error) = self
+                            .purge_import_object(
+                                &raw_id,
+                                ObjectKind::File,
+                                source.id,
+                                batch.object_id,
+                            )
+                            .await
+                    {
+                        warn!(object_id = %raw_id, "Failed to remove rejected calendar upload: {cleanup_error}");
+                    }
                     return Err(error);
                 }
             }

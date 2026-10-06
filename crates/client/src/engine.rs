@@ -1627,7 +1627,7 @@ impl SyncEngine {
                     envelope,
                 };
                 let encrypted = encrypted_object_from_init(&init_req);
-                let resp = api.object_init(&init_req).await?;
+                let resp = api.object_init(&init_req).await;
                 (encrypted, resp)
             }
             EnvelopePlacement::Revise(_) | EnvelopePlacement::Delete(_) => {
@@ -1638,7 +1638,7 @@ impl SyncEngine {
                     envelope,
                 };
                 let encrypted = encrypted_object_from_revise(&revise_req);
-                let resp = api.object_revise(object_id, &revise_req).await?;
+                let resp = api.object_revise(object_id, &revise_req).await;
                 (encrypted, resp)
             }
         };
@@ -1647,16 +1647,45 @@ impl SyncEngine {
             object: encrypted_object,
             payload_ciphertext: encrypted_payload.clone(),
         };
-        let created_seq = Self::finish_single_payload_object(
-            &api,
-            object_id,
-            &payload_id,
-            write_resp,
-            encrypted_payload,
-            payload_size,
-            payload_hash,
-        )
-        .await?;
+        let created_seq = match write_resp {
+            Ok(response) => {
+                Self::finish_single_payload_object(
+                    &api,
+                    object_id,
+                    &payload_id,
+                    response,
+                    encrypted_payload,
+                    payload_size,
+                    payload_hash,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        let created_seq = match created_seq {
+            Ok(seq) => seq,
+            Err(error) => {
+                if matches!(
+                    error,
+                    ClientError::Http(_) | ClientError::Api { status: 409, .. }
+                ) {
+                    match self
+                        .recover_schedule_write(epoch, &api, &encryption_key, &encrypted, record)
+                        .await
+                    {
+                        Ok(Some(seq)) => return Ok(seq),
+                        Ok(None) => {}
+                        Err(recovery_error) => {
+                            warn!(
+                                object_id,
+                                "Failed to recover schedule write: {recovery_error}"
+                            );
+                        }
+                    }
+                }
+                return Err(error);
+            }
+        };
 
         let _session = self.hold_session_for_write(epoch).await?;
         let persisted = self
@@ -1681,6 +1710,60 @@ impl SyncEngine {
         )
         .await?;
         Ok(created_seq)
+    }
+
+    async fn recover_schedule_write(
+        &self,
+        epoch: u64,
+        api: &ApiClient,
+        encryption_key: &[u8; 32],
+        sent: &EncryptedInlineObject,
+        record: ScheduleRecord,
+    ) -> Result<Option<i64>, ClientError> {
+        let sent_body = &sent.object.envelope.body;
+        let object_id = sent_body.object_id.to_string();
+        let item = match api.get_object(&object_id).await {
+            Ok(item) => item,
+            Err(error) if is_not_found_error(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if item.id != sent_body.object_id || item.kind != ObjectKind::Schedule {
+            return Err(ClientError::UnexpectedResponse(format!(
+                "schedule object {object_id} returned mismatched identity"
+            )));
+        }
+        if !self.session_is_current(epoch) {
+            return Err(ClientError::NotAuthenticated);
+        }
+        verify_object_list_item_envelope(&item)?;
+        let committed = item.revision == sent_body.revision
+            && crypto::object_envelope_parent_hash(&item.envelope.body)?
+                == crypto::object_envelope_parent_hash(sent_body)?;
+        let (record, encrypted) = if committed {
+            (record, sent.clone())
+        } else {
+            self.decrypt_schedule_object_item(api, &item, encryption_key)
+                .await?
+        };
+        let _session = self.hold_session_for_write(epoch).await?;
+        let persisted = self
+            .local_store
+            .persist_local_schedule_present_encrypted(
+                StoredObjectIdentity {
+                    object_id: &object_id,
+                    created_at: &item.created_at,
+                    source_device_id: &item.source_device_id.to_string(),
+                },
+                record,
+                &encrypted,
+                item.created_seq,
+                item.created_seq,
+                RECENT_CLIPBOARD_LIMIT,
+            )
+            .await;
+        self.publish_accepted_write(&object_id, item.revision, persisted)
+            .await?;
+        Ok(committed.then_some(item.created_seq))
     }
 
     async fn publish_accepted_write(
@@ -2344,6 +2427,13 @@ impl SyncEngine {
                 .await?;
             validate_snapshot_page(&page, after, stream_start_seq)?;
             for item in page.items {
+                if item.kind != ObjectKind::Schedule {
+                    self.local_store
+                        .mark_snapshot_seen(&item.id.to_string(), generation)
+                        .await?;
+                    warn!(id = %item.id, kind = %item.kind, "Skipped a non-schedule object in the schedule snapshot");
+                    continue;
+                }
                 match self
                     .decrypt_schedule_object_item(api, &item, &encryption_key)
                     .await
@@ -2776,8 +2866,17 @@ impl SyncEngine {
                 .await?;
             validate_snapshot_page(&page, after, stream_start_seq)?;
             for item in page.items {
+                if item.kind != ObjectKind::File {
+                    self.local_store
+                        .mark_snapshot_seen(&item.id.to_string(), generation)
+                        .await?;
+                    warn!(id = %item.id, kind = %item.kind, "Skipped a non-file object in the file snapshot");
+                    continue;
+                }
                 if let Err(error) = verify_object_list_item_envelope(&item) {
-                    warn!(id = %item.id, "Rejected file object envelope: {}", error);
+                    if let Err(error) = self.keep_held_revision(&item, generation, error).await {
+                        warn!(id = %item.id, "Rejected file object envelope: {}", error);
+                    }
                     continue;
                 }
                 if let Err(error) = self.check_revision_advance(&item).await {
@@ -2794,7 +2893,12 @@ impl SyncEngine {
                         )
                         .await?;
                     }
-                    Err(e) => warn!(id = %item.id, "Failed to decrypt file object: {}", e),
+                    Err(error) => {
+                        if let Err(error) = self.keep_held_revision(&item, generation, error).await
+                        {
+                            warn!(id = %item.id, "Failed to decrypt file object: {}", error);
+                        }
+                    }
                 }
             }
             match page.next_after {
@@ -2881,6 +2985,13 @@ impl SyncEngine {
             let mut objects = stream::iter(page.items)
                 .map(|item| async move {
                     let created_seq = item.created_seq;
+                    if item.kind != ObjectKind::Clipboard {
+                        let error = ClientError::UnexpectedObjectKind {
+                            expected: ObjectKind::Clipboard,
+                            actual: item.kind,
+                        };
+                        return Err((item, error));
+                    }
                     match self
                         .decrypt_clipboard_object_item_with_api(api, &item, encryption_key)
                         .await
@@ -4599,6 +4710,115 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn snapshots_keep_held_objects_of_a_different_kind() {
+        for kind in [
+            ObjectKind::Clipboard,
+            ObjectKind::Schedule,
+            ObjectKind::File,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let engine = SyncEngine::new_with_data_dir(
+                &format!("http://{}", listener.local_addr().unwrap()),
+                temp.path(),
+            );
+            activate(&engine, "profile-a", KEY).await;
+            let (held, payload) = file_item(1);
+            let visible = hold_file(&engine, &held).await;
+            engine.publish_visible_state(visible).await;
+            let mut listed = held.clone();
+            if kind == ObjectKind::File {
+                listed.kind = ObjectKind::Clipboard;
+            }
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let (headers, _) = request(&mut socket).await;
+                    let body = if headers.contains("/payloads/") {
+                        payload.clone()
+                    } else {
+                        postcard::to_allocvec(&ObjectListResponse {
+                            items: vec![listed.clone()],
+                            next_after: None,
+                        })
+                        .unwrap()
+                    };
+                    response(&mut socket, &body).await;
+                }
+            });
+            let generation = engine.local_store.start_generation().await;
+            match kind {
+                ObjectKind::Clipboard => engine.snapshot_clipboard(generation, 10).await,
+                ObjectKind::Schedule => engine.snapshot_schedule(generation, 10).await,
+                ObjectKind::File => engine.snapshot_files(generation, 10).await,
+                ObjectKind::Collab => unreachable!(),
+            }
+            .unwrap();
+            server.abort();
+            let state = engine.get_state().await;
+            assert!(state.clipboard_items.is_empty());
+            assert_eq!(state.files.len(), 1);
+            assert_eq!(state.files[0].id, held.id.to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn file_snapshots_keep_held_copies_when_verification_or_decryption_fails() {
+        for damaged_signature in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let engine = SyncEngine::new_with_data_dir(
+                &format!("http://{}", listener.local_addr().unwrap()),
+                temp.path(),
+            );
+            activate(&engine, "profile-a", KEY).await;
+            let (held, _) = file_item(1);
+            let visible = hold_file(&engine, &held).await;
+            engine.publish_visible_state(visible).await;
+            let mut listed = if damaged_signature {
+                held.clone()
+            } else {
+                file_item_at(held.id, 2).0
+            };
+            if damaged_signature {
+                listed.envelope.signature[0] ^= 1;
+            } else {
+                listed.envelope.body.parent_hash =
+                    Some(crypto::object_envelope_parent_hash(&held.envelope.body).unwrap());
+                listed.envelope.signature =
+                    crypto::sign_object_envelope_body(&[9; 32], &listed.envelope.body).unwrap();
+            }
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                request(&mut socket).await;
+                response(
+                    &mut socket,
+                    &postcard::to_allocvec(&ObjectListResponse {
+                        items: vec![listed],
+                        next_after: None,
+                    })
+                    .unwrap(),
+                )
+                .await;
+            });
+            let generation = engine.local_store.start_generation().await;
+            engine.snapshot_files(generation, 10).await.unwrap();
+            server.await.unwrap();
+            let state = engine.get_state().await;
+            assert_eq!(state.files.len(), 1);
+            assert_eq!(state.files[0].id, held.id.to_string());
+            assert_eq!(
+                engine
+                    .local_head(&held.id.to_string())
+                    .await
+                    .unwrap()
+                    .revision,
+                1
+            );
+        }
     }
 
     #[tokio::test]
