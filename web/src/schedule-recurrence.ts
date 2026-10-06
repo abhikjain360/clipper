@@ -1,4 +1,4 @@
-import type { Frequency, Recurrence, RecurrenceEnd, Weekday } from "@clipper/shared";
+import type { Recurrence, RecurrenceEnd, Weekday } from "@clipper/shared";
 
 // The repeat row of the schedule composer, kept out of the component so it can
 // be tested directly. Every function here is pure: a stored `Recurrence` in, a
@@ -8,7 +8,7 @@ export type RepeatChoice = "once" | "daily" | "weekly" | "weekdays" | "monthly";
 
 /// What the repeat row is showing, which is not always something it can offer.
 ///
-/// A stored rule can be an every-two-weeks, a "second Tuesday", a yearly, or a
+/// A stored rule can be a "second Tuesday", a yearly, or a
 /// provider rule Clipper only passes through. The row has no pill for any of
 /// those, and showing "Once" would claim the event never repeats. `custom`
 /// says the stored cadence is outside these choices. Picking a supported
@@ -24,21 +24,24 @@ export type RepeatSelection = RepeatChoice | "custom";
 /// composer shows its full summary alongside.
 export function repeatChoiceOf(recurrence: Recurrence): RepeatSelection {
     if (recurrence.kind === "once") return "once";
-    if (recurrence.kind !== "every" || recurrence.interval !== 1) return "custom";
+    if (recurrence.kind !== "every") return "custom";
     switch (recurrence.frequency.unit) {
         case "daily":
             return "daily";
         case "weekly":
             return isWeekdaySet(recurrence.frequency.weekdays) ? "weekdays" : "weekly";
         case "monthly":
-            return recurrence.frequency.by === "on_day" ? "monthly" : "custom";
+            return recurrence.frequency.by === "on_day" &&
+                recurrence.frequency.from === "from_start"
+                ? "monthly"
+                : "custom";
         default:
             return "custom";
     }
 }
 
 export function isDerivedMonthlyRule(recurrence: Recurrence, date: string): boolean {
-    if (recurrence.kind !== "every" || recurrence.interval !== 1) return false;
+    if (recurrence.kind !== "every") return false;
     const frequency = recurrence.frequency;
     const day = Number.parseInt(date.slice(8, 10), 10);
     return (
@@ -62,24 +65,19 @@ export function isWeekdaySet(days: Weekday[]): boolean {
 
 /// Rebuilds the recurrence from the repeat row's coarser controls.
 ///
-/// The row names a cadence unit, plus the weekdays for a weekly one. It has no
+/// The row names a cadence unit, interval, and weekdays for a weekly one. It has no
 /// control for the rest of a stored rule, such as when the rule stops. Those
 /// fields carry over from `previous` rather than reset, so toggling one weekday
 /// cannot drop an end date the form never showed.
-///
-/// `interval` carries over only when the unit stays the same. A fortnightly
-/// series stays fortnightly when its weekdays move, and resets when the unit
-/// changes, where keeping "2" would mean something else entirely.
 export function buildRecurrence(
     choice: RepeatSelection,
     days: Weekday[],
     date: string,
+    interval: number,
     previous: Recurrence | null,
 ): Recurrence {
     const carried = previous?.kind === "every" ? previous : null;
     const end: RecurrenceEnd = carried?.end ?? { when: "never" };
-    const intervalFor = (unit: Frequency["unit"]): number =>
-        carried?.frequency.unit === unit ? carried.interval : 1;
 
     switch (choice) {
         // submit() never reaches this: it keeps the stored rule whenever the
@@ -93,7 +91,7 @@ export function buildRecurrence(
             return {
                 kind: "every",
                 frequency: { unit: "daily" },
-                interval: intervalFor("daily"),
+                interval,
                 end,
             };
         case "weekdays":
@@ -103,14 +101,14 @@ export function buildRecurrence(
                     unit: "weekly",
                     weekdays: ["mon", "tue", "wed", "thu", "fri"],
                 },
-                interval: intervalFor("weekly"),
+                interval,
                 end,
             };
         case "weekly":
             return {
                 kind: "every",
                 frequency: { unit: "weekly", weekdays: days },
-                interval: intervalFor("weekly"),
+                interval,
                 end,
             };
         case "monthly":
@@ -120,11 +118,9 @@ export function buildRecurrence(
                     unit: "monthly",
                     by: "on_day",
                     from: "from_start",
-                    // The day the block starts on, so "monthly" means "this
-                    // date every month" without a second question.
                     day: Number.parseInt(date.slice(8, 10), 10) || 1,
                 },
-                interval: intervalFor("monthly"),
+                interval,
                 end,
             };
     }
