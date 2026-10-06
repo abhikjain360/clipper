@@ -409,7 +409,7 @@ fn validate_value_count(text: &str) -> Result<(), IngestError> {
                     in_value = true;
                     values += 1;
                 }
-                b',' if !quoted_parameter => values += 1,
+                b',' | b';' if !quoted_parameter => values += 1,
                 _ => {}
             }
             if values > MAX_PROPERTIES {

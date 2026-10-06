@@ -1365,11 +1365,6 @@ fn kind_supports_revisions(kind: ObjectKind) -> bool {
     }
 }
 
-/// The object's kind, whether it is currently tombstoned, and its head revision.
-///
-/// Rejects an object with a revision still in flight: a chain extends from a
-/// published head, and letting a second write start while the first is
-/// mid-upload would produce two siblings claiming the same parent.
 async fn check_revision_head<C>(
     db: &C,
     user_id: Uuid,
@@ -1413,6 +1408,11 @@ where
     Ok(())
 }
 
+/// The object's kind, whether it is currently tombstoned, and its head revision.
+///
+/// Rejects an object with a revision still in flight: a chain extends from a
+/// published head, and letting a second write start while the first is
+/// mid-upload would produce two siblings claiming the same parent.
 async fn head_revision_for_write<C>(
     db: &C,
     user_id: Uuid,
@@ -1789,39 +1789,55 @@ pub async fn get_object(
     Extension(auth): Extension<AuthInfo>,
     Path(object_id): Path<String>,
 ) -> Result<Postcard<ObjectListItem>, ApiError> {
+    load_object_head(&state, &auth, &object_id, false).await
+}
+
+pub async fn get_object_head(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
+    Path(object_id): Path<String>,
+) -> Result<Postcard<ObjectListItem>, ApiError> {
+    load_object_head(&state, &auth, &object_id, true).await
+}
+
+async fn load_object_head(
+    state: &AppState,
+    auth: &AuthInfo,
+    object_id: &str,
+    include_deleted: bool,
+) -> Result<Postcard<ObjectListItem>, ApiError> {
     let object_uuid =
-        Uuid::parse_str(&object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
-    let object = select_revision_columns(
-        objects::Entity::find_by_id(object_uuid)
-            .join(JoinType::InnerJoin, head_revision_join())
-            .filter(objects::Column::UserId.eq(auth.user_id))
-            .filter(objects::Column::DeletedAt.is_null())
-            // Collab objects are served by the dedicated collab-docs endpoints,
-            // not this encrypted-object getter (see `list_objects`).
-            .filter(objects::Column::CollabDocId.is_null()),
-    )
-    .into_model::<ListedObjectRow>()
-    .one(state.db())
-    .await
-    .map_err(|e| {
-        error!(
-            object_id = %object_uuid,
-            user_id = %auth.user_id,
-            error = %e,
-            "Failed to load object by id",
-        );
-        ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
-    })?
-    .ok_or_else(|| {
-        debug!(
-            object_id = %object_uuid,
-            user_id = %auth.user_id,
-            "Object by id not found",
-        );
-        ApiError::from_code_with_message(ApiErrorCode::ObjectNotFound, "Object not found")
-    })?;
-    ensure_object_read_retained(&state, auth.user_id, object_uuid, &object.kind).await?;
-    let mut items = object_list_items(&state, auth.user_id, &[object]).await?;
+        Uuid::parse_str(object_id).map_err(|_| ApiError::from_code(ApiErrorCode::InvalidId))?;
+    let mut query = objects::Entity::find_by_id(object_uuid)
+        .join(JoinType::InnerJoin, head_revision_join())
+        .filter(objects::Column::UserId.eq(auth.user_id))
+        .filter(objects::Column::CollabDocId.is_null());
+    if !include_deleted {
+        query = query.filter(objects::Column::DeletedAt.is_null());
+    }
+    let object = select_revision_columns(query)
+        .into_model::<ListedObjectRow>()
+        .one(state.db())
+        .await
+        .map_err(|e| {
+            error!(
+                object_id = %object_uuid,
+                user_id = %auth.user_id,
+                error = %e,
+                "Failed to load object by id",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::Database, "Database error")
+        })?
+        .ok_or_else(|| {
+            debug!(
+                object_id = %object_uuid,
+                user_id = %auth.user_id,
+                "Object by id not found",
+            );
+            ApiError::from_code_with_message(ApiErrorCode::ObjectNotFound, "Object not found")
+        })?;
+    ensure_object_read_retained(state, auth.user_id, object_uuid, &object.kind).await?;
+    let mut items = object_list_items(state, auth.user_id, &[object]).await?;
     let item = items.pop().ok_or_else(|| {
         error!(
             object_id = %object_uuid,
@@ -3896,6 +3912,52 @@ mod tests {
     /// Revision-chain acceptance tests: what a chain has to do beyond compiling.
     mod revisions {
         use super::*;
+
+        #[tokio::test]
+        async fn a_revision_waits_for_another_connection_to_finish_writing() {
+            let data_dir = tempfile::tempdir().unwrap();
+            let url = format!(
+                "sqlite:{}?mode=rwc",
+                data_dir.path().join("test.db").display()
+            );
+            let db = Database::connect(&url).await.unwrap();
+            let mut config = crate::config::ServerConfig::default();
+            config.server.data_dir = data_dir.path().to_path_buf();
+            let state = AppState::open_with_db_and_config(
+                db,
+                config,
+                crate::secret::ServerSecrets::test_fixture(),
+            )
+            .await
+            .unwrap();
+            let (user_id, device_id, object_id, key) = seeded(&state).await;
+            let other = Database::connect(&url).await.unwrap();
+            let txn = other.begin().await.unwrap();
+            txn.execute_unprepared("UPDATE users SET updated_at = updated_at")
+                .await
+                .unwrap();
+            let release = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                txn.commit().await.unwrap();
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let started = std::time::Instant::now();
+            let result = revise_with(
+                &state,
+                user_id,
+                device_id,
+                &object_id,
+                ObjectKind::Schedule,
+                b"second",
+                &key,
+            )
+            .await;
+            let elapsed = started.elapsed();
+            release.await.unwrap();
+            result.expect("revision waits for the write lock");
+            assert!(elapsed >= std::time::Duration::from_millis(250));
+            assert_eq!(head_of(&state, object_id.parse().unwrap()).await.0, 2);
+        }
 
         #[tokio::test]
         async fn a_delayed_revision_cannot_skip_the_head_after_recreation() {

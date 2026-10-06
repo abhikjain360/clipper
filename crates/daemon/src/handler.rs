@@ -66,6 +66,23 @@ pub async fn handle_connection(
         return;
     }
 
+    run_connection(
+        reader,
+        writer,
+        engine_manager,
+        client_mgr,
+        Arc::new(Semaphore::new(MAX_IPC_REQUESTS_IN_FLIGHT)),
+    )
+    .await;
+}
+
+async fn run_connection(
+    mut reader: BufReader<OwnedReadHalf>,
+    writer: Arc<Mutex<OwnedWriteHalf>>,
+    engine_manager: Arc<EngineManager>,
+    client_mgr: Arc<ClientManager>,
+    requests_in_flight: Arc<Semaphore>,
+) {
     let (client_id, mut broadcast_rx) = client_mgr.register().await;
 
     // Send initial state
@@ -81,7 +98,6 @@ pub async fn handle_connection(
     }
 
     let writer_for_broadcast = Arc::clone(&writer);
-    let requests_in_flight = Arc::new(Semaphore::new(MAX_IPC_REQUESTS_IN_FLIGHT));
 
     // Run read loop and broadcast loop concurrently
     tokio::select! {
@@ -98,12 +114,19 @@ pub async fn handle_connection(
                         trimmed.zeroize();
                         match parsed {
                             Ok(req) => {
-                                let Ok(permit) = Arc::clone(&requests_in_flight).acquire_owned().await else {
-                                    break;
-                                };
+                                let bypasses_slots = matches!(req.command, DaemonCommand::Logout(_));
+                                let requests_in_flight = Arc::clone(&requests_in_flight);
                                 let engine_manager = Arc::clone(&engine_manager);
                                 let writer = Arc::clone(&writer);
                                 tokio::spawn(async move {
+                                    let permit = if bypasses_slots {
+                                        None
+                                    } else {
+                                        match requests_in_flight.acquire_owned().await {
+                                            Ok(permit) => Some(permit),
+                                            Err(_) => return,
+                                        }
+                                    };
                                     let response = dispatch_command(req, &engine_manager).await;
                                     _ = write_response(&writer, response).await;
                                     drop(permit);
@@ -122,15 +145,6 @@ pub async fn handle_connection(
                     }
                     Err(RequestLineError::TooLong) => {
                         warn!(client_id, max_bytes = MAX_IPC_REQUEST_LINE_BYTES, "IPC request line too large");
-                        let response = DaemonResponse::error_message(
-                            String::new(),
-                            "Request line too large",
-                        );
-                        if let Ok(json) = serde_json::to_string(&response) {
-                            let mut w = writer.lock().await;
-                            let resp_line = format!("{}\n", json);
-                            _ = w.write_all(resp_line.as_bytes()).await;
-                        }
                         break;
                     }
                     Err(RequestLineError::Utf8) => {
@@ -165,8 +179,20 @@ pub async fn handle_connection(
         } => {}
     }
 
+    if let Err(error) = shutdown_connection(reader.get_ref()) {
+        warn!(client_id, %error, "Failed to shut down IPC connection");
+    }
     client_mgr.unregister(client_id).await;
     debug!(client_id, "Client disconnected");
+}
+
+fn shutdown_connection(reader: &OwnedReadHalf) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    if unsafe { libc::shutdown(reader.as_ref().as_raw_fd(), libc::SHUT_RDWR) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 async fn authenticate_connection(
@@ -923,6 +949,100 @@ fn platform_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn logout_is_read_when_all_request_slots_are_taken() {
+        let (client, daemon) = tokio::net::UnixStream::pair().unwrap();
+        let (read_half, write_half) = daemon.into_split();
+        let writer = Arc::new(Mutex::new(write_half));
+        let manager = EngineManager::new(PathBuf::new(), "http://127.0.0.1:8787".into(), None);
+        let clients = Arc::new(ClientManager::new());
+        let slots = Arc::new(Semaphore::new(MAX_IPC_REQUESTS_IN_FLIGHT));
+        let _permits = Arc::clone(&slots)
+            .acquire_many_owned(MAX_IPC_REQUESTS_IN_FLIGHT as u32)
+            .await
+            .unwrap();
+        let task = tokio::spawn(run_connection(
+            BufReader::new(read_half),
+            writer,
+            manager,
+            clients,
+            slots,
+        ));
+        let (client_read, mut client_write) = client.into_split();
+        let mut reader = BufReader::new(client_read);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        for request in [
+            DaemonRequest::new("waiting".into(), DaemonCommand::GetState),
+            DaemonRequest::new("logout".into(), DaemonCommand::Logout(None)),
+        ] {
+            client_write
+                .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            loop {
+                line.clear();
+                reader.read_line(&mut line).await.unwrap();
+                if let DaemonResponse::Success { id, .. } = serde_json::from_str(&line).unwrap()
+                    && id == "logout"
+                {
+                    break;
+                }
+            }
+        })
+        .await;
+        task.abort();
+        result.expect("logout bypasses occupied request slots");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_request_closes_the_socket_with_other_writer_owners() {
+        let (client, daemon) = tokio::net::UnixStream::pair().unwrap();
+        let (read_half, write_half) = daemon.into_split();
+        let writer = Arc::new(Mutex::new(write_half));
+        let held_writer = Arc::clone(&writer);
+        let manager = EngineManager::new(PathBuf::new(), "http://127.0.0.1:8787".into(), None);
+        let task = tokio::spawn(run_connection(
+            BufReader::new(read_half),
+            writer,
+            manager,
+            Arc::new(ClientManager::new()),
+            Arc::new(Semaphore::new(MAX_IPC_REQUESTS_IN_FLIGHT)),
+        ));
+        let (client_read, mut client_write) = client.into_split();
+        let mut reader = BufReader::new(client_read);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        client_write
+            .write_all(&vec![b'x'; MAX_IPC_REQUEST_LINE_BYTES + 1])
+            .await
+            .unwrap();
+        task.await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "the client sees EOF while request writers still exist"
+        );
+        assert!(
+            held_writer
+                .lock()
+                .await
+                .write_all(b"late reply\n")
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn read_limited_line_accepts_normal_line() {

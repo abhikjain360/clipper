@@ -669,6 +669,19 @@ impl ApiClient {
         Self::postcard_response(resp).await
     }
 
+    pub async fn get_object_head(&self, object_id: &str) -> Result<ObjectListItem, ClientError> {
+        let url = self.api_url(&["objects", object_id, "head"])?;
+        let resp = self
+            .deadline_get(url)
+            .header(
+                "Authorization",
+                self.auth_header().ok_or(ClientError::NotAuthenticated)?,
+            )
+            .send()
+            .await?;
+        Self::postcard_response(resp).await
+    }
+
     /// Fetch a pinned historical revision. Callers must verify its identity and
     /// envelope hash and must not install it as the current object head.
     pub async fn get_object_revision(

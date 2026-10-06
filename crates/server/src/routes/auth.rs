@@ -16,7 +16,7 @@ use clipper_core::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DerivePartialModel, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, Set, SqlErr, TransactionTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, Set, SqlErr,
 };
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -193,7 +193,7 @@ pub async fn register_finish(
         })?;
 
     let now = Utc::now().to_rfc3339();
-    let txn = state.db().begin().await.map_err(|e| {
+    let txn = crate::state::begin_write(state.db()).await.map_err(|e| {
         error!(error = %e, "Failed to begin register_finish transaction");
         error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
     })?;
@@ -443,7 +443,7 @@ pub async fn login(
     // row and then the session row; on a pooled (auto-commit) connection a failed
     // session insert would leave an orphan device permanently consuming a per-user
     // device-cap slot. A transaction rolls both back together (as register_finish).
-    let txn = state.db().begin().await.map_err(|e| {
+    let txn = crate::state::begin_write(state.db()).await.map_err(|e| {
         error!(error = %e, "Failed to begin login transaction");
         error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
     })?;

@@ -1,6 +1,6 @@
 use chrono::{Duration, Utc};
 use futures_util::{StreamExt, stream};
-use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QuerySelect, TransactionTrait};
+use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QuerySelect};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -192,7 +192,7 @@ async fn cleanup_orphan_object_uploads_batch(state: &AppState) -> CleanupResult<
         - Duration::seconds(state.config().cleanup.orphan_upload_ttl_secs as i64))
     .to_rfc3339();
 
-    let txn = state.db().begin().await?;
+    let txn = crate::state::begin_write(state.db()).await?;
 
     // An abandoned upload is now a pending *revision*, not a pending object,
     // and the difference matters: a failed edit must cost the object nothing.
@@ -354,7 +354,7 @@ async fn delete_objects_and_release_usage(
         return Ok(0);
     }
 
-    let txn = state.db().begin().await?;
+    let txn = crate::state::begin_write(state.db()).await?;
     let payload_paths: Vec<String> = object_payloads::Entity::find()
         .filter(object_payloads::Column::ObjectId.is_in(ids.to_vec()))
         .select_only()

@@ -104,6 +104,27 @@ fn spring_forward_expansion() -> Expansion {
 /// Oct 25 02:30 Berlin is in the fall-back fold and takes the earlier instant,
 /// 00:30Z, which is before the 01:15Z cutoff, so Oct 25 stays in.
 #[test]
+fn instant_until_expands_through_the_last_day_of_year_9999() {
+    let item = cadence_item(
+        "99991230T100000",
+        RecurrenceEnd::On(utc(9999, 12, 31, 22, 59)),
+    );
+    let expansion = Expansion {
+        window: TimeRange::new(utc(9999, 12, 30, 0, 0), utc(9999, 12, 31, 23, 0)).unwrap(),
+        observer: Tz::Europe__Berlin,
+    };
+    assert_eq!(
+        expand(&item, &expansion).expect("expands through year 9999"),
+        vec![utc(9999, 12, 30, 9, 0), utc(9999, 12, 31, 9, 0)]
+    );
+    let (item, rules) = imported_item("99991230T100000", "FREQ=DAILY;UNTIL=99991231T225900Z");
+    assert_eq!(
+        expand_imported(&item, rules, &expansion).expect("imported rule expands through year 9999"),
+        vec![utc(9999, 12, 30, 9, 0), utc(9999, 12, 31, 9, 0)]
+    );
+}
+
+#[test]
 fn instant_until_includes_fold_day_before_the_cutoff() {
     let item = cadence_item(
         "20261024T023000",

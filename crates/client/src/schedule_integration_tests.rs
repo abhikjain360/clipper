@@ -140,6 +140,16 @@ async fn lossy_proxy(
     upstream: std::net::SocketAddr,
     armed: Arc<std::sync::Mutex<Option<&'static [u8]>>>,
 ) {
+    failing_proxy(listener, upstream, armed, None, false).await;
+}
+
+async fn failing_proxy(
+    listener: tokio::net::TcpListener,
+    upstream: std::net::SocketAddr,
+    armed: Arc<std::sync::Mutex<Option<&'static [u8]>>>,
+    status: Option<u16>,
+    before_write: bool,
+) {
     loop {
         let Ok((client, _)) = listener.accept().await else {
             return;
@@ -174,6 +184,10 @@ async fn lossy_proxy(
                     };
                     if hit {
                         marks.store(true, Ordering::SeqCst);
+                        if before_write {
+                            server_write.shutdown().await.unwrap();
+                            break;
+                        }
                     }
                     if server_write.write_all(chunk).await.is_err() {
                         break;
@@ -187,6 +201,12 @@ async fn lossy_proxy(
                     Ok(read) => read,
                 };
                 if swallow.load(Ordering::SeqCst) {
+                    if let Some(status) = status {
+                        let response = format!(
+                            "HTTP/1.1 {status} Gateway Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        client_write.write_all(response.as_bytes()).await.unwrap();
+                    }
                     break;
                 }
                 if client_write.write_all(&buffer[..read]).await.is_err() {
@@ -275,6 +295,190 @@ async fn server_running_timers(engine: &SyncEngine) -> usize {
         }
     }
     running
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn gateway_errors_recover_committed_timer_writes() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, upstream) = start_server(temp.path()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let armed = Arc::new(std::sync::Mutex::new(None));
+    let proxy = tokio::spawn(failing_proxy(
+        listener,
+        upstream,
+        Arc::clone(&armed),
+        Some(502),
+        false,
+    ));
+    let registered = register_proxy_engine(&url, &temp.path().join("registration")).await;
+    let engine = copy_session(&registered, &url, &temp.path().join("client")).await;
+    *armed.lock().unwrap() = Some(b"/objects/init HTTP/1.1");
+    let timer = engine
+        .start_actual(None)
+        .await
+        .expect("recover the committed start after 502");
+    assert!(armed.lock().unwrap().is_none());
+    assert_eq!(engine.get_state().await.running_actual.unwrap().id, timer);
+    assert_eq!(server_running_timers(&engine).await, 1);
+    *armed.lock().unwrap() = Some(b"/revisions HTTP/1.1");
+    engine
+        .stop_actual(&timer)
+        .await
+        .expect("recover the committed stop after 502");
+    assert!(engine.get_state().await.running_actual.is_none());
+    for status in [502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527] {
+        let error = ClientError::Api {
+            status,
+            error: ErrorResponse::new(ApiErrorCode::Unknown, "gateway"),
+        };
+        assert!(ambiguous_write_error(&error));
+    }
+    for status in [400, 401, 403, 404, 409, 413, 429, 500, 501, 505, 519, 528] {
+        let error = ClientError::Api {
+            status,
+            error: ErrorResponse::new(ApiErrorCode::Unknown, "rejected"),
+        };
+        assert!(!ambiguous_write_error(&error));
+    }
+    registered.logout(true).await.unwrap();
+    proxy.abort();
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn lost_delete_replies_recover_tombstones_and_competing_heads() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, upstream) = start_server(temp.path()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let armed = Arc::new(std::sync::Mutex::new(None));
+    let proxy = tokio::spawn(lossy_proxy(listener, upstream, Arc::clone(&armed)));
+    let registered = register_proxy_engine(&url, &temp.path().join("registration")).await;
+    let engine = copy_session(&registered, &url, &temp.path().join("client")).await;
+    let file = engine
+        .upload_file_bytes("delete.txt", Some("text/plain"), b"file")
+        .await
+        .unwrap();
+    let timer = engine.start_actual(None).await.unwrap();
+    engine.stop_actual(&timer).await.unwrap();
+    for (id, kind) in [(&file, ObjectKind::File), (&timer, ObjectKind::Schedule)] {
+        let old = engine.local_head(id).await.unwrap();
+        *armed.lock().unwrap() = Some(b"/revisions HTTP/1.1");
+        let result = if kind == ObjectKind::File {
+            engine.delete_file(id).await
+        } else {
+            engine.delete_schedule_object(id).await
+        };
+        result.expect("recover the committed delete");
+        assert!(armed.lock().unwrap().is_none());
+        let head = engine.local_head(id).await.unwrap();
+        assert_eq!(head.revision, old.revision + 1);
+        let deleted = engine
+            .api
+            .get_object_revision(id, head.revision)
+            .await
+            .unwrap();
+        assert_eq!(
+            deleted.envelope.body.operation,
+            ObjectEnvelopeOperation::Delete
+        );
+        assert_eq!(
+            head.parent_hash,
+            crypto::object_envelope_parent_hash(&deleted.envelope.body).unwrap()
+        );
+    }
+    let timer = engine.start_actual(None).await.unwrap();
+    let copy = copy_session(
+        &engine,
+        &format!("http://{upstream}"),
+        &temp.path().join("copy"),
+    )
+    .await;
+    load_schedule_object(&copy, &timer).await;
+    copy.stop_actual(&timer).await.unwrap();
+    assert!(matches!(
+        engine.delete_schedule_object(&timer).await,
+        Err(ClientError::Api { status: 409, .. })
+    ));
+    assert_eq!(
+        engine.local_head(&timer).await.unwrap(),
+        copy.local_head(&timer).await.unwrap()
+    );
+    assert!(engine.get_state().await.running_actual.is_none());
+    copy.delete_schedule_object(&timer).await.unwrap();
+    assert!(matches!(
+        engine.delete_schedule_object(&timer).await,
+        Err(ClientError::Api { status: 409, .. })
+    ));
+    assert_eq!(
+        engine.local_head(&timer).await.unwrap(),
+        copy.local_head(&timer).await.unwrap()
+    );
+    registered.logout(true).await.unwrap();
+    proxy.abort();
+}
+
+#[tokio::test]
+#[ignore = "build clipper-server first; starts an isolated local server"]
+async fn an_uncommitted_calendar_source_save_removes_its_raw_upload() {
+    crate::ensure_crypto_provider();
+    let temp = tempfile::tempdir().unwrap();
+    let (_server, upstream) = start_server(temp.path()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let armed = Arc::new(std::sync::Mutex::new(None));
+    let proxy = tokio::spawn(failing_proxy(
+        listener,
+        upstream,
+        Arc::clone(&armed),
+        None,
+        true,
+    ));
+    let registered = register_proxy_engine(&url, &temp.path().join("registration")).await;
+    let engine = copy_session(&registered, &url, &temp.path().join("client")).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let feed_url = format!("http://{}/feed.ics", listener.local_addr().unwrap());
+    let feed = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0_u8; 4096];
+        assert!(socket.read(&mut buffer).await.unwrap() > 0);
+        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:meeting\r\nDTSTART:20260908T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let source = engine.add_calendar_source("Work", &feed_url).await.unwrap();
+    let old = engine.local_head(&source).await.unwrap();
+    *armed.lock().unwrap() = Some(b"/revisions HTTP/1.1");
+    assert!(matches!(
+        engine.sync_calendar_source(&source).await,
+        Err(ClientError::Http(_))
+    ));
+    assert!(armed.lock().unwrap().is_none());
+    assert_eq!(engine.local_head(&source).await.unwrap(), old);
+    assert!(
+        engine
+            .api
+            .list_objects(Some(ObjectKind::File), Some(100), None, None)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    registered.logout(true).await.unwrap();
+    feed.await.unwrap();
+    proxy.abort();
 }
 
 #[tokio::test]

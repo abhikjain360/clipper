@@ -7,7 +7,7 @@ use axum::{
 };
 use clipper_core::models::{ApiErrorCode, ErrorResponse, POSTCARD_CONTENT_TYPE};
 use garde::Validate;
-use sea_orm::{DatabaseConnection, DatabaseTransaction, DbErr, TransactionTrait};
+use sea_orm::{DatabaseConnection, DatabaseTransaction, DbErr};
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::{debug, error, trace, warn};
 
@@ -197,8 +197,7 @@ pub(crate) async fn with_txn<F, T>(
 where
     F: AsyncFnOnce(&DatabaseTransaction) -> Result<T, ApiError>,
 {
-    let txn = db
-        .begin()
+    let txn = crate::state::begin_write(db)
         .await
         .map_err(|e| txn_db_error(operation, "begin", e))?;
     match f(&txn).await {

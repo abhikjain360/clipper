@@ -592,14 +592,17 @@ impl SyncEngine {
         Ok(work.1.clone())
     }
 
-    async fn run_work<T>(
-        &self,
+    fn run_work<'a, T: 'a>(
+        &'a self,
         label: Option<String>,
-        future: impl std::future::Future<Output = Result<T, ClientError>>,
-    ) -> Result<T, ClientError> {
-        self.work_for_epoch(self.history_epoch.load(Ordering::SeqCst))?
-            .run(label, future)
-            .await
+        future: impl std::future::Future<Output = Result<T, ClientError>> + 'a,
+    ) -> impl std::future::Future<Output = Result<T, ClientError>> + 'a {
+        let future = Box::pin(future);
+        async move {
+            self.work_for_epoch(self.history_epoch.load(Ordering::SeqCst))?
+                .run(label, future)
+                .await
+        }
     }
 
     async fn stop_session_work(&self) {
@@ -1739,8 +1742,7 @@ impl SyncEngine {
     /// Genesis and revise differ only in the placement they are given and the
     /// route that starts the write. Sealing is the same for both, and so is
     /// riding a small record inline, which completes without a second
-    /// round-trip. Deleting is not routed through here: a tombstone carries no
-    /// payload, so it shares nothing with this beyond the envelope.
+    /// round-trip.
     async fn write_schedule_record(
         &self,
         object_id: &str,
@@ -1884,10 +1886,9 @@ impl SyncEngine {
         let created_seq = match created_seq {
             Ok(seq) => seq,
             Err(error) => {
-                if matches!(
-                    error,
-                    ClientError::Http(_) | ClientError::Api { status: 409, .. }
-                ) {
+                if ambiguous_write_error(&error)
+                    || matches!(error, ClientError::Api { status: 409, .. })
+                {
                     match self
                         .recover_schedule_write(epoch, &api, &encryption_key, &encrypted, record)
                         .await
@@ -1941,7 +1942,7 @@ impl SyncEngine {
     ) -> Result<Option<i64>, ClientError> {
         let sent_body = &sent.object.envelope.body;
         let object_id = sent_body.object_id.to_string();
-        let item = match api.get_object(&object_id).await {
+        let item = match api.get_object_head(&object_id).await {
             Ok(item) => item,
             Err(error) if is_not_found_error(&error) => return Ok(None),
             Err(error) => return Err(error),
@@ -1954,16 +1955,15 @@ impl SyncEngine {
         if !self.session_is_current(epoch) {
             return Err(ClientError::NotAuthenticated);
         }
-        verify_object_list_item_envelope(&item)?;
+        verify_object_head_envelope(&item)?;
         let committed = item.revision == sent_body.revision
             && crypto::object_envelope_parent_hash(&item.envelope.body)?
                 == crypto::object_envelope_parent_hash(sent_body)?;
-        let (record, encrypted) = if committed {
-            (record, sent.clone())
-        } else {
-            self.decrypt_schedule_object_item(api, &item, encryption_key)
-                .await?
-        };
+        if !committed {
+            self.accept_recovered_head(epoch, api, encryption_key, &item)
+                .await?;
+            return Ok(None);
+        }
         let _session = self.hold_session_for_write(epoch).await?;
         let persisted = self
             .local_store
@@ -1974,7 +1974,7 @@ impl SyncEngine {
                     source_device_id: &item.source_device_id.to_string(),
                 },
                 record,
-                &encrypted,
+                sent,
                 item.created_seq,
                 item.created_seq,
                 RECENT_CLIPBOARD_LIMIT,
@@ -1982,7 +1982,7 @@ impl SyncEngine {
             .await;
         self.publish_accepted_write(&object_id, item.revision, persisted)
             .await?;
-        Ok(committed.then_some(item.created_seq))
+        Ok(Some(item.created_seq))
     }
 
     async fn publish_accepted_write(
@@ -2025,8 +2025,14 @@ impl SyncEngine {
         object_id: &str,
         kind: ObjectKind,
     ) -> Result<(i64, ObjectEnvelopeBody), ClientError> {
-        let encryption_key = self.current_encryption_key().await?;
-        let (_, device_id_typed, signing_key) = self.current_device_signing_context().await?;
+        let epoch = self.history_epoch.load(Ordering::SeqCst);
+        let SessionCredentials {
+            api,
+            encryption_key,
+            device_id_typed,
+            signing_key,
+            ..
+        } = self.credentials_for_session(epoch).await?;
         let object_uuid: uuid::Uuid =
             object_id.parse().map_err(|source| ClientError::InvalidId {
                 kind: "object id",
@@ -2066,7 +2072,38 @@ impl SyncEngine {
                 body: envelope_body,
             },
         };
-        match self.api.object_revise(object_id, &revise_req).await? {
+        if !self.session_is_current(epoch) {
+            return Err(ClientError::NotAuthenticated);
+        }
+        let response = match api.object_revise(object_id, &revise_req).await {
+            Ok(response) => response,
+            Err(error) => {
+                if ambiguous_write_error(&error)
+                    || matches!(error, ClientError::Api { status: 409, .. })
+                {
+                    match self
+                        .recover_tombstone_write(
+                            epoch,
+                            &api,
+                            &encryption_key,
+                            &revise_req.envelope.body,
+                        )
+                        .await
+                    {
+                        Ok(Some(seq)) => return Ok((seq, revise_req.envelope.body)),
+                        Ok(None) => {}
+                        Err(recovery_error) => {
+                            warn!(
+                                object_id,
+                                "Failed to recover tombstone write: {recovery_error}"
+                            );
+                        }
+                    }
+                }
+                return Err(error);
+            }
+        };
+        match response {
             ObjectInitResponse::Complete { created_seq } => {
                 Ok((created_seq, revise_req.envelope.body))
             }
@@ -2074,6 +2111,115 @@ impl SyncEngine {
                 "a tombstone carries no payloads and must complete immediately".into(),
             )),
         }
+    }
+
+    async fn recover_tombstone_write(
+        &self,
+        epoch: u64,
+        api: &ApiClient,
+        encryption_key: &[u8; 32],
+        sent: &ObjectEnvelopeBody,
+    ) -> Result<Option<i64>, ClientError> {
+        let object_id = sent.object_id.to_string();
+        let item = match api.get_object_head(&object_id).await {
+            Ok(item) => item,
+            Err(error) if is_not_found_error(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if item.id != sent.object_id || item.kind != sent.object_type {
+            return Err(ClientError::UnexpectedResponse(format!(
+                "deleted object {object_id} returned mismatched identity"
+            )));
+        }
+        verify_object_head_envelope(&item)?;
+        if !self.session_is_current(epoch) {
+            return Err(ClientError::NotAuthenticated);
+        }
+        let committed = item.revision == sent.revision
+            && crypto::object_envelope_parent_hash(&item.envelope.body)?
+                == crypto::object_envelope_parent_hash(sent)?;
+        if committed {
+            return Ok(Some(item.created_seq));
+        }
+        self.accept_recovered_head(epoch, api, encryption_key, &item)
+            .await?;
+        Ok(None)
+    }
+
+    async fn accept_recovered_head(
+        &self,
+        epoch: u64,
+        api: &ApiClient,
+        encryption_key: &[u8; 32],
+        item: &ObjectListItem,
+    ) -> Result<(), ClientError> {
+        let object_id = item.id.to_string();
+        if item.envelope.body.operation == ObjectEnvelopeOperation::Delete {
+            let aad = crypto::object_meta_aad(&item.envelope.body)?;
+            let meta = crypto::decrypt(
+                encryption_key,
+                &item.meta_nonce,
+                &item.meta_ciphertext,
+                &aad,
+            )?;
+            if meta != TOMBSTONE_META_PLAINTEXT {
+                return Err(object_envelope_error("tombstone metadata is invalid"));
+            }
+            let _session = self.hold_session_for_write(epoch).await?;
+            let generation = self.local_store.current_generation().await;
+            if let Some(visible) = self
+                .local_store
+                .apply_live_tombstone(
+                    &item.envelope.body,
+                    item.created_seq,
+                    generation,
+                    RECENT_CLIPBOARD_LIMIT,
+                )
+                .await?
+            {
+                self.publish_visible_state(visible).await;
+            }
+            return Ok(());
+        }
+        let persisted = match item.kind {
+            ObjectKind::Schedule => {
+                let (record, encrypted) = self
+                    .decrypt_schedule_object_item(api, item, encryption_key)
+                    .await?;
+                let _session = self.hold_session_for_write(epoch).await?;
+                self.local_store
+                    .persist_local_schedule_present_encrypted(
+                        StoredObjectIdentity {
+                            object_id: &object_id,
+                            created_at: &item.created_at,
+                            source_device_id: &item.source_device_id.to_string(),
+                        },
+                        record,
+                        &encrypted,
+                        item.created_seq,
+                        item.created_seq,
+                        RECENT_CLIPBOARD_LIMIT,
+                    )
+                    .await
+            }
+            ObjectKind::File => {
+                self.check_revision_advance(item).await?;
+                let file = decrypt_file_object_item(item, encryption_key)?;
+                let _session = self.hold_session_for_write(epoch).await?;
+                self.local_store
+                    .persist_local_file_present_encrypted(
+                        &file,
+                        &encrypted_object_from_list_item(item),
+                        item.created_seq,
+                        item.created_seq,
+                        RECENT_CLIPBOARD_LIMIT,
+                    )
+                    .await
+            }
+            _ => return Err(object_envelope_error("object kind cannot be revised")),
+        };
+        self.publish_accepted_write(&object_id, item.revision, persisted)
+            .await
     }
 
     // ── Actuals ──
@@ -4724,6 +4870,17 @@ fn verify_live_tombstone(
 }
 
 fn verify_object_list_item_envelope(item: &ObjectListItem) -> Result<(), ClientError> {
+    verify_object_item_envelope(item, false)
+}
+
+fn verify_object_head_envelope(item: &ObjectListItem) -> Result<(), ClientError> {
+    verify_object_item_envelope(item, true)
+}
+
+fn verify_object_item_envelope(
+    item: &ObjectListItem,
+    include_deleted: bool,
+) -> Result<(), ClientError> {
     let body = &item.envelope.body;
     // Reject an over-count payload list up front, before the per-payload
     // matching loop below: the server is untrusted and never runs the
@@ -4745,13 +4902,15 @@ fn verify_object_list_item_envelope(item: &ObjectListItem) -> Result<(), ClientE
         // must agree, or the server could relabel which revision this is while
         // serving a genuinely signed body.
         || body.revision != item.revision
-        // A listing serves live heads. A `Delete` here would mean the server
-        // offered a tombstone as current content, and a `Create` above revision
-        // 1 is a chain restarting on top of itself.
         || match body.operation {
             ObjectEnvelopeOperation::Create => body.revision != 1,
             ObjectEnvelopeOperation::Revise => body.revision < 2,
-            ObjectEnvelopeOperation::Delete => true,
+            ObjectEnvelopeOperation::Delete => {
+                !include_deleted
+                    || body.revision < 2
+                    || body.parent_hash.is_none()
+                    || !body.payloads.is_empty()
+            }
         }
         || body.source_device_id != item.source_device_id
         || body.created_at != item.created_at
@@ -4909,6 +5068,13 @@ fn is_supported_clipboard_mime_type(mime_type: &str) -> bool {
 
 fn same_mime_type(a: &str, b: &str) -> bool {
     normalized_clipboard_mime_type(a) == normalized_clipboard_mime_type(b)
+}
+
+fn ambiguous_write_error(error: &ClientError) -> bool {
+    matches!(
+        error,
+        ClientError::Http(_) | ClientError::Api { status: 502..=504 | 520..=527, .. }
+    )
 }
 
 fn is_not_found_error(error: &ClientError) -> bool {

@@ -12,7 +12,8 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use clipper_core::crypto;
 use sea_orm::{
-    ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+    ColumnTrait, ConnectionTrait, Database, DatabaseConnection, DatabaseTransaction, DbErr,
+    EntityTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use sea_orm_migration::MigratorTrait;
 use tokio::sync::broadcast::{self, Receiver};
@@ -33,6 +34,13 @@ use crate::{
 const WS_TICKET_BYTES: usize = 32;
 const WS_TICKET_TTL_SECS: i64 = 60;
 const WS_BROADCAST_CAPACITY: usize = 256;
+
+pub(crate) async fn begin_write(db: &DatabaseConnection) -> Result<DatabaseTransaction, DbErr> {
+    let txn = db.begin().await?;
+    txn.execute_unprepared("UPDATE objects SET updated_at = updated_at WHERE 0")
+        .await?;
+    Ok(txn)
+}
 
 #[derive(Clone)]
 pub struct AppState {
