@@ -17,7 +17,7 @@ Each entry has:
 
 ### 1. A malicious server can swap the revision a device accepted, through its own delete reply
 
-- **Status:** fixing
+- **Status:** fixed in `f6c55b2`
 - **Severity:** high (needs a malicious server). Not on main.
 - **Where:** `crates/client/src/local_store.rs`, `apply_delete_inner`.
 - **What happens:** when this device deletes an object, it waits for the
@@ -32,7 +32,7 @@ Each entry has:
 
 ### 2. Two downloads running at once can accept two different bodies for one revision
 
-- **Status:** fixing
+- **Status:** fixed in `f6c55b2`
 - **Severity:** high (needs a malicious server). Not on main.
 - **Where:** `crates/client/src/engine.rs`, `retain_downloaded_file`.
 - **What happens:** when a download finishes, retention skips the anchor check
@@ -43,7 +43,7 @@ Each entry has:
 
 ### 3. A download that finishes after logout still returns the old account's file
 
-- **Status:** fixing
+- **Status:** fixed in `f6c55b2`
 - **Severity:** high. Not on main (this return path is new).
 - **Where:** `crates/client/src/engine.rs`, `retain_downloaded_file` and
   `download_file_bytes`.
@@ -55,7 +55,7 @@ Each entry has:
 
 ### 4. A clipboard push spanning a login uses two accounts' credentials
 
-- **Status:** fixing
+- **Status:** fixed in `f6c55b2`
 - **Severity:** medium. On main.
 - **Where:** `crates/client/src/engine.rs`, `send_clipboard_payload`.
 - **What happens:** the push reads A's data key, then after a logout and login
@@ -66,7 +66,7 @@ Each entry has:
 
 ### 5. A screen update built for one account can be shown to the next
 
-- **Status:** fixing
+- **Status:** fixed in `f6c55b2`
 - **Severity:** low in practice. On main.
 - **Where:** `crates/client/src/engine.rs`, `publish_visible_state`.
 - **What happens:** a sync task builds the list of visible items for account
@@ -79,7 +79,7 @@ Each entry has:
 
 ### 6. Logging in installs the new token before the old session is stopped
 
-- **Status:** fixing
+- **Status:** fixed in `f6c55b2`
 - **Severity:** low in practice. On main.
 - **Where:** `crates/client/src/engine.rs`, `resume_with_platform`;
   `crates/client/src/api_client.rs`, `login_finish`.
@@ -176,7 +176,7 @@ Each entry has:
 
 ### 15. A state change made while no screen is waiting is lost
 
-- **Status:** fixing
+- **Status:** fixed in `f6c55b2`
 - **Severity:** medium. On main.
 - **Where:** `crates/client/src/engine.rs`, `bump_version`.
 - **What happens:** the change notice is dropped when nothing is listening at
