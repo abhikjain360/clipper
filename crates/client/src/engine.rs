@@ -6529,17 +6529,13 @@ mod tests {
             let response =
                 postcard::to_allocvec(&ObjectInitResponse::Complete { created_seq: 100 })
                     .expect("encode the response");
-            socket
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: {POSTCARD_CONTENT_TYPE}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        response.len(),
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .expect("response headers");
-            socket.write_all(&response).await.expect("response body");
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {POSTCARD_CONTENT_TYPE}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.len(),
+            );
+            if socket.write_all(headers.as_bytes()).await.is_ok() {
+                _ = socket.write_all(&response).await;
+            }
         });
 
         let writer = {
