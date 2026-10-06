@@ -86,11 +86,11 @@ If code and these notes disagree, verify the code and correct the notes.
       paths do (`end_refused_session_for`, `end_refused_session_for_epoch` in
       `crates/client/src/engine.rs`). Route those through the same helper.
       Noted by the third-pass review on 2026-09-12.
-- [ ] `hydrate_ciphertext_cache` in `crates/client/src/engine.rs` replaces the
-      memory map without holding the store's `sync` lock. It runs inside
-      `finish_auth` before the new session's WebSocket starts, so nothing
-      races it today; make it take the lock so that stays true by
-      construction.
+- [ ] `LocalStore::hydrate_ciphertext_cache` in
+      `crates/client/src/local_store.rs` replaces the memory map without
+      holding the store's `sync` lock. It runs inside `finish_auth` before the
+      new session's WebSocket starts, so nothing races it today; make it take
+      the lock so that stays true by construction.
 - [ ] The web client drops the logout and validate response bodies unread, so
       Chrome logs `net::ERR_ABORTED` for both although the server processes
       them. Read the body (or use `keepalive`) to keep network logs clean.
@@ -172,6 +172,19 @@ Described with options and a recommendation as B18 to B22 in
 - [ ] Servers upgraded through migration 5 keep the old payload files
       (`{object}.{payload}.bin`, no revision in the name) in the objects
       directory with no row pointing at them; delete them by hand.
+
+## Known issues, accepted for now (2026-10-06)
+
+- [ ] On a day whose midnight is skipped by daylight saving (Santiago,
+      Cairo, Havana, Beirut, Asunción), the web day column runs from 01:00 to
+      01:00 the next day. A block early on the next day shows in both columns,
+      and an overnight block ending after midnight is drawn as a stub.
+      `dayBounds` in `web/src/schedule-layout.ts` and `periodStart` /
+      `movePeriod` in `web/src/calendar-view.ts` add a calendar day to the
+      shifted start instead of taking the next day's own start.
+- [ ] The Android alarm receiver logs each fired alarm's title to logcat in
+      plaintext (`AlarmReceiver.onReceive`). Logout cannot remove the line; it
+      stays until the log buffer rotates or the phone reboots.
 
 ## Existing boundaries, not promises of future fixes
 
