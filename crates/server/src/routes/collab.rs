@@ -161,6 +161,8 @@ pub async fn create_collab_doc(
         object_kind: ObjectKind::Collab,
         object_id: object_id.into(),
         created_at: now.clone(),
+        envelope: None,
+        source_device_signing_public_key: None,
     });
 
     info!(device_id = %device_id, object_id = %object_id, "Collab doc created");
@@ -304,6 +306,8 @@ pub async fn rename_collab_doc(
         object_kind: ObjectKind::Collab,
         object_id: object_uuid.into(),
         created_at: now,
+        envelope: None,
+        source_device_signing_public_key: None,
     });
 
     info!(device_id = %auth.device_id, object_id = %object_uuid, "Collab doc renamed");
@@ -451,6 +455,8 @@ pub async fn delete_collab_doc(
         object_kind: ObjectKind::Collab,
         object_id: object_uuid.into(),
         created_at: now,
+        envelope: None,
+        source_device_signing_public_key: None,
     });
 
     info!(device_id = %auth.device_id, object_id = %object_uuid, "Collab doc deleted");

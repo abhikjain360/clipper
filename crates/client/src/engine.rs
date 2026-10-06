@@ -1471,14 +1471,14 @@ impl SyncEngine {
             ));
         }
         let is_import = self.is_import_file(file_id).await?;
-        let (deleted_seq, tombstone_head) = self.write_tombstone(file_id, ObjectKind::File).await?;
+        let (deleted_seq, tombstone) = self.write_tombstone(file_id, ObjectKind::File).await?;
         let visible = self
             .local_store
             .apply_local_tombstone(
                 ObjectKind::File,
                 file_id,
                 deleted_seq,
-                tombstone_head,
+                &tombstone,
                 RECENT_CLIPBOARD_LIMIT,
             )
             .await?;
@@ -1805,7 +1805,7 @@ impl SyncEngine {
         &self,
         object_id: &str,
         kind: ObjectKind,
-    ) -> Result<(i64, LocalHead), ClientError> {
+    ) -> Result<(i64, ObjectEnvelopeBody), ClientError> {
         let encryption_key = self.current_encryption_key().await?;
         let (_, device_id_typed, signing_key) = self.current_device_signing_context().await?;
         let object_uuid: uuid::Uuid =
@@ -1847,12 +1847,10 @@ impl SyncEngine {
                 body: envelope_body,
             },
         };
-        let tombstone_head = LocalHead {
-            revision: revise_req.envelope.body.revision,
-            parent_hash: crypto::object_envelope_parent_hash(&revise_req.envelope.body)?,
-        };
         match self.api.object_revise(object_id, &revise_req).await? {
-            ObjectInitResponse::Complete { created_seq } => Ok((created_seq, tombstone_head)),
+            ObjectInitResponse::Complete { created_seq } => {
+                Ok((created_seq, revise_req.envelope.body))
+            }
             ObjectInitResponse::Pending { .. } => Err(ClientError::UnexpectedResponse(
                 "a tombstone carries no payloads and must complete immediately".into(),
             )),
@@ -2128,7 +2126,7 @@ impl SyncEngine {
     }
 
     async fn tombstone_schedule_object(&self, object_id: &str) -> Result<(), ClientError> {
-        let (deleted_seq, tombstone_head) = self
+        let (deleted_seq, tombstone) = self
             .write_tombstone(object_id, ObjectKind::Schedule)
             .await?;
         let visible = self
@@ -2137,7 +2135,7 @@ impl SyncEngine {
                 ObjectKind::Schedule,
                 object_id,
                 deleted_seq,
-                tombstone_head,
+                &tombstone,
                 RECENT_CLIPBOARD_LIMIT,
             )
             .await?;
@@ -2777,6 +2775,8 @@ impl SyncEngine {
                 event_type,
                 object_kind,
                 object_id,
+                envelope,
+                source_device_signing_public_key,
                 // The event's timestamp is not used: every object kind is
                 // materialized from an endpoint that reports its own
                 // authoritative `created_at`.
@@ -2821,8 +2821,15 @@ impl SyncEngine {
                             || object_kind == ObjectKind::Collab
                             || object_kind == ObjectKind::Schedule =>
                     {
-                        self.handle_deleted_event(generation, object_kind, object_id, seq)
-                            .await?;
+                        self.handle_deleted_event(
+                            generation,
+                            object_kind,
+                            object_id,
+                            seq,
+                            envelope,
+                            source_device_signing_public_key,
+                        )
+                        .await?;
                     }
                     ObjectEventType::Deleted => {
                         warn!(
@@ -3279,7 +3286,46 @@ impl SyncEngine {
         kind: ObjectKind,
         object_id: ObjectId,
         event_seq: i64,
+        envelope: Option<Box<ObjectEnvelope>>,
+        source_device_signing_public_key: Option<Vec<u8>>,
     ) -> Result<(), ClientError> {
+        if kind != ObjectKind::Collab {
+            let verified = envelope
+                .as_ref()
+                .ok_or_else(|| object_envelope_error("delete event has no tombstone"))
+                .and_then(|envelope| {
+                    verify_live_tombstone(
+                        kind,
+                        object_id,
+                        envelope,
+                        source_device_signing_public_key.as_deref(),
+                    )
+                    .map(|()| &envelope.body)
+                });
+            match verified {
+                Ok(body) => {
+                    match self
+                        .local_store
+                        .apply_live_tombstone(body, event_seq, generation, RECENT_CLIPBOARD_LIMIT)
+                        .await
+                    {
+                        Ok(visible) => {
+                            if let Some(visible) = visible {
+                                self.publish_visible_state(visible).await;
+                            }
+                            return Ok(());
+                        }
+                        Err(LocalStoreError::RevisionRejected(error)) => {
+                            warn!(%object_id, event_seq, %error, "Delete tombstone conflicts with the retained anchor; hiding content");
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Err(error) => {
+                    warn!(%object_id, event_seq, %error, "Delete tombstone could not be verified; hiding content");
+                }
+            }
+        }
         if let Some(visible) = self
             .local_store
             .apply_live_delete(
@@ -4329,6 +4375,32 @@ fn object_envelope_body(
     }
 }
 
+fn verify_live_tombstone(
+    kind: ObjectKind,
+    object_id: ObjectId,
+    envelope: &ObjectEnvelope,
+    source_device_signing_public_key: Option<&[u8]>,
+) -> Result<(), ClientError> {
+    let body = &envelope.body;
+    if body.object_id != object_id
+        || body.object_type != kind
+        || body.envelope_version != crypto::OBJECT_ENVELOPE_VERSION
+        || body.operation != ObjectEnvelopeOperation::Delete
+        || body.revision < 2
+        || body.parent_hash.is_none()
+        || !body.payloads.is_empty()
+    {
+        return Err(object_envelope_error(
+            "object envelope does not match delete event",
+        ));
+    }
+    match source_device_signing_public_key {
+        Some(public_key) => crypto::verify_object_envelope_signature(public_key, envelope)
+            .map_err(ClientError::from),
+        None => Ok(()),
+    }
+}
+
 fn verify_object_list_item_envelope(item: &ObjectListItem) -> Result<(), ClientError> {
     let body = &item.envelope.body;
     // Reject an over-count payload list up front, before the per-payload
@@ -4710,6 +4782,170 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    fn file_tombstone(item: &ObjectListItem) -> ObjectEnvelope {
+        let body = object_envelope_body_for_aad(
+            item.id,
+            item.kind,
+            EnvelopePlacement::Delete(LocalHead {
+                revision: item.revision,
+                parent_hash: crypto::object_envelope_parent_hash(&item.envelope.body).unwrap(),
+            }),
+            item.source_device_id,
+            item.created_at.clone(),
+            Vec::new(),
+        );
+        ObjectEnvelope {
+            signature: crypto::sign_object_envelope_body(&[9; 32], &body).unwrap(),
+            body,
+        }
+    }
+
+    async fn live_file_delete(
+        engine: &Arc<SyncEngine>,
+        item: &ObjectListItem,
+        envelope: Option<ObjectEnvelope>,
+    ) {
+        let mut event = serde_json::json!({
+            "type": "event",
+            "seq": 20,
+            "event_type": "deleted",
+            "object_kind": "file",
+            "object_id": item.id,
+            "created_at": item.created_at,
+        });
+        if let Some(envelope) = envelope {
+            event["envelope"] = serde_json::json!(envelope);
+            event["source_device_signing_public_key"] =
+                serde_json::json!(item.source_device_signing_public_key);
+        }
+        assert!(
+            engine
+                .handle_ws_text(
+                    &event.to_string(),
+                    engine.local_store.current_generation().await
+                )
+                .await
+                .unwrap()
+        );
+    }
+
+    async fn assert_held_file_anchor(engine: &SyncEngine, item: &ObjectListItem) {
+        engine
+            .local_store
+            .validate_incoming_revision(&item.id.to_string(), &item.envelope.body)
+            .await
+            .unwrap();
+        assert!(
+            engine
+                .local_store
+                .holds_newer_than(&item.id.to_string(), item.revision - 1)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn live_tombstone_is_an_exact_anchor_and_requires_a_chained_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", temp.path());
+        activate(&engine, "profile-a", KEY).await;
+        let (item, _) = file_item(1);
+        let visible = hold_file(&engine, &item).await;
+        engine.publish_visible_state(visible).await;
+        let tombstone = file_tombstone(&item);
+        let head = LocalHead {
+            revision: tombstone.body.revision,
+            parent_hash: crypto::object_envelope_parent_hash(&tombstone.body).unwrap(),
+        };
+        live_file_delete(&engine, &item, Some(tombstone.clone())).await;
+        live_file_delete(&engine, &item, Some(tombstone)).await;
+        live_file_delete(&engine, &item, None).await;
+        assert!(engine.state.read().await.files.is_empty());
+        assert_eq!(
+            engine
+                .local_store
+                .local_head(&item.id.to_string())
+                .await
+                .unwrap(),
+            Some(head)
+        );
+        let restarted = LocalStore::new(temp.path());
+        restarted.set_profile("profile-a".into());
+        assert_eq!(
+            restarted.local_head(&item.id.to_string()).await.unwrap(),
+            Some(head)
+        );
+        let (mut restored, _) = file_item_at(item.id, 3);
+        assert!(matches!(
+            restarted
+                .validate_incoming_revision(&item.id.to_string(), &restored.envelope.body)
+                .await,
+            Err(LocalStoreError::RevisionRejected(_))
+        ));
+        restored.envelope.body.parent_hash = Some(head.parent_hash);
+        restarted
+            .validate_incoming_revision(&item.id.to_string(), &restored.envelope.body)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_live_tombstone_hides_content_and_keeps_the_accepted_head() {
+        for wrong_id in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", temp.path());
+            activate(&engine, "profile-a", KEY).await;
+            let (item, _) = file_item(1);
+            let visible = hold_file(&engine, &item).await;
+            engine.publish_visible_state(visible).await;
+            let mut tombstone = file_tombstone(&item);
+            if wrong_id {
+                tombstone.body.object_id = uuid::Uuid::now_v7().into();
+                tombstone.signature =
+                    crypto::sign_object_envelope_body(&[9; 32], &tombstone.body).unwrap();
+            } else {
+                tombstone.signature[0] ^= 1;
+            }
+            live_file_delete(&engine, &item, Some(tombstone)).await;
+            assert!(engine.state.read().await.files.is_empty());
+            assert_held_file_anchor(&engine, &item).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_live_tombstone_hides_content_and_keeps_the_accepted_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", temp.path());
+        activate(&engine, "profile-a", KEY).await;
+        let (item, _) = file_item(1);
+        let visible = hold_file(&engine, &item).await;
+        engine.publish_visible_state(visible).await;
+        live_file_delete(&engine, &item, None).await;
+        assert!(engine.state.read().await.files.is_empty());
+        assert_held_file_anchor(&engine, &item).await;
+    }
+
+    #[tokio::test]
+    async fn conflicting_live_tombstone_hides_content_and_keeps_the_accepted_head() {
+        for revision in [2, 3, 4] {
+            let temp = tempfile::tempdir().unwrap();
+            let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", temp.path());
+            activate(&engine, "profile-a", KEY).await;
+            let (mut item, _) = file_item(3);
+            item.created_seq = 20;
+            let visible = hold_file(&engine, &item).await;
+            engine.publish_visible_state(visible).await;
+            let mut tombstone = file_tombstone(&item);
+            tombstone.body.revision = revision;
+            tombstone.body.parent_hash = Some([42; 32]);
+            tombstone.signature =
+                crypto::sign_object_envelope_body(&[9; 32], &tombstone.body).unwrap();
+            live_file_delete(&engine, &item, Some(tombstone)).await;
+            assert!(engine.state.read().await.files.is_empty());
+            assert_held_file_anchor(&engine, &item).await;
+        }
     }
 
     #[tokio::test]

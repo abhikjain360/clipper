@@ -732,7 +732,6 @@ fn object_kind(text: &str) -> Result<ObjectKind, LocalStoreError> {
 fn anchor_kind_text(kind: StoredRevisionAnchorKind) -> &'static str {
     match kind {
         StoredRevisionAnchorKind::Absent => "absent",
-        StoredRevisionAnchorKind::ObservedDelete => "observed_delete",
         StoredRevisionAnchorKind::Tombstone => "tombstone",
     }
 }
@@ -740,7 +739,6 @@ fn anchor_kind_text(kind: StoredRevisionAnchorKind) -> &'static str {
 fn anchor_kind_from_text(text: &str) -> Result<StoredRevisionAnchorKind, LocalStoreError> {
     match text {
         "absent" => Ok(StoredRevisionAnchorKind::Absent),
-        "observed_delete" => Ok(StoredRevisionAnchorKind::ObservedDelete),
         "tombstone" => Ok(StoredRevisionAnchorKind::Tombstone),
         other => Err(LocalStoreError::EncryptedCache(format!(
             "unknown stored revision anchor kind {other}"

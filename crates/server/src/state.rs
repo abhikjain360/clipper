@@ -620,6 +620,8 @@ mod tests {
             object_kind: ObjectKind::File,
             object_id: Uuid::now_v7().into(),
             created_at: Utc::now().to_rfc3339(),
+            envelope: None,
+            source_device_signing_public_key: None,
         }
     }
 

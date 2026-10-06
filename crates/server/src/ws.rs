@@ -10,8 +10,8 @@ use axum::{
 };
 use chrono::Utc;
 use clipper_core::models::{
-    ObjectEventType, ObjectId, ObjectKind, WsClientMessage, WsError, WsServerMessage,
-    WsTicketResponse,
+    ObjectEnvelope, ObjectEventType, ObjectId, ObjectKind, WsClientMessage, WsError,
+    WsServerMessage, WsTicketResponse,
 };
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::broadcast::error::RecvError;
@@ -94,6 +94,8 @@ pub struct WsBroadcast {
     pub object_kind: ObjectKind,
     pub object_id: ObjectId,
     pub created_at: String,
+    pub envelope: Option<ObjectEnvelope>,
+    pub source_device_signing_public_key: Option<Vec<u8>>,
 }
 
 pub async fn ws_handler(
@@ -336,6 +338,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, auth: AuthInfo) {
                             object_kind: evt.object_kind,
                             object_id: evt.object_id,
                             created_at: evt.created_at,
+                            envelope: evt.envelope.map(Box::new),
+                            source_device_signing_public_key: evt.source_device_signing_public_key,
                         };
                         if !send_bounded(
                             &mut socket,
@@ -488,6 +492,8 @@ mod tests {
             object_kind: ObjectKind::File,
             object_id: Uuid::now_v7().into(),
             created_at: Utc::now().to_rfc3339(),
+            envelope: None,
+            source_device_signing_public_key: None,
         }
     }
 

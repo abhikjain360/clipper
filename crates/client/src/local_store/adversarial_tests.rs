@@ -363,7 +363,7 @@ async fn skipped_link_is_accepted_as_documented() {
 }
 
 #[tokio::test]
-async fn event_stream_delete_requires_two_newer_revisions() {
+async fn unsigned_delete_retains_the_head_and_accepts_its_successor() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let store = new_store(&tmp);
     let generation = store.start_generation().await;
@@ -379,9 +379,6 @@ async fn event_stream_delete_requires_two_newer_revisions() {
         .await
         .expect("persist revision two");
 
-    // A delete learned only from the event stream: no tombstone body, so the
-    // retained head is the last visible revision and any revival must be at
-    // least two steps newer.
     store
         .apply_live_delete(ObjectKind::Clipboard, &entry.id, 3, generation, 10)
         .await
@@ -389,24 +386,13 @@ async fn event_stream_delete_requires_two_newer_revisions() {
         .expect("current generation");
 
     let rev3 = successor(&entry, &rev2, "three");
-    let error = store
+    store
         .persist_local_clipboard_present_encrypted(&entry, b"three", &rev3, 4, 4, 10)
         .await
-        .expect_err("head+1 must not revive an observed-delete object");
-    assert!(
-        revision_error_text(&error).contains("retained delete marker"),
-        "unexpected error: {error}"
-    );
-
-    // Even a body that correctly chains to the retained head is not enough.
-    let rev4 = successor(&entry, &rev3, "four");
-    store
-        .persist_local_clipboard_present_encrypted(&entry, b"four", &rev4, 5, 5, 10)
-        .await
-        .expect("head+2 is the minimum for an observed-delete revival");
+        .expect("an unsigned delete must not invent a tombstone revision");
     assert_eq!(
         store.local_head(&entry.id).await.expect("head"),
-        Some(head_of(&rev4))
+        Some(head_of(&rev3))
     );
 }
 
@@ -465,12 +451,17 @@ async fn signed_tombstone_chains_the_restore_and_rejects_wrong_parent() {
         .await
         .expect("persist revision one");
 
+    let mut body = rev1.object.envelope.body.clone();
+    body.revision = 2;
+    body.parent_hash = Some(head_of(&rev1).parent_hash);
+    body.operation = ObjectEnvelopeOperation::Delete;
+    body.payloads.clear();
     let tombstone = LocalHead {
-        revision: 2,
-        parent_hash: [42; crypto::SHA256_BYTES],
+        revision: body.revision,
+        parent_hash: crypto::object_envelope_parent_hash(&body).unwrap(),
     };
     store
-        .apply_local_tombstone(ObjectKind::Clipboard, &entry.id, 2, tombstone, 10)
+        .apply_local_tombstone(ObjectKind::Clipboard, &entry.id, 2, &body, 10)
         .await
         .expect("tombstone");
     assert_eq!(

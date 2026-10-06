@@ -204,11 +204,6 @@ enum StoredRevisionAnchorKind {
     /// is forbidden.
     #[default]
     Absent,
-    /// A delete event arrived without its signed tombstone body. `head` is the
-    /// preceding visible revision, so a future live head must be at least two
-    /// revisions newer.
-    ObservedDelete,
-    /// `head` is the locally-created signed tombstone itself.
     Tombstone,
 }
 
@@ -866,14 +861,12 @@ impl LocalStore {
         self.visible_state_inner(visible_clipboard_limit).await
     }
 
-    /// Apply a deletion initiated on this device while retaining the signed
-    /// tombstone as the newest durable chain anchor.
     pub async fn apply_local_tombstone(
         &self,
         kind: ObjectKind,
         object_id: &str,
         event_seq: i64,
-        tombstone_head: LocalHead,
+        tombstone: &ObjectEnvelopeBody,
         visible_clipboard_limit: usize,
     ) -> Result<LocalVisibleState, LocalStoreError> {
         let object_id = validate_item_id(object_id)?;
@@ -883,7 +876,7 @@ impl LocalStore {
             &object_id,
             event_seq,
             sync.generation,
-            Some(tombstone_head),
+            Some(tombstone),
         )
         .await?;
         self.visible_state_inner(visible_clipboard_limit).await
@@ -904,6 +897,30 @@ impl LocalStore {
         }
         self.apply_delete_inner(kind, &object_id, event_seq, generation, None)
             .await?;
+        self.visible_state_inner(visible_clipboard_limit)
+            .await
+            .map(Some)
+    }
+
+    pub async fn apply_live_tombstone(
+        &self,
+        tombstone: &ObjectEnvelopeBody,
+        event_seq: i64,
+        generation: u64,
+        visible_clipboard_limit: usize,
+    ) -> Result<Option<LocalVisibleState>, LocalStoreError> {
+        let sync = self.sync.lock().await;
+        if sync.generation != generation {
+            return Ok(None);
+        }
+        self.apply_delete_inner(
+            tombstone.object_type,
+            &tombstone.object_id.to_string(),
+            event_seq,
+            generation,
+            Some(tombstone),
+        )
+        .await?;
         self.visible_state_inner(visible_clipboard_limit)
             .await
             .map(Some)
@@ -1213,54 +1230,33 @@ impl LocalStore {
         object_id: &str,
         event_seq: i64,
         generation: u64,
-        tombstone_head: Option<LocalHead>,
+        tombstone: Option<&ObjectEnvelopeBody>,
     ) -> Result<(), LocalStoreError> {
         let existing = self.stored_object_record(object_id).await?;
         if let Some(record) = existing.as_ref()
-            && record.event_seq() >= event_seq
+            && record.event_seq() > event_seq
         {
-            if record.event_seq() == event_seq
-                && let Some(head) = tombstone_head
-                && matches!(record, StoredObjectRecord::Deleted(_))
-            {
-                let StoredObjectRecord::Deleted(mut marker) = record.clone() else {
-                    unreachable!();
-                };
-                if let Some(anchor) = marker.revision_anchor {
-                    validate_retained_head(object_id, head, anchor.head)?;
-                }
-                marker.revision_anchor = Some(StoredRevisionAnchor {
-                    head,
-                    kind: StoredRevisionAnchorKind::Tombstone,
-                });
-                self.write_stored_object_record(&StoredObjectRecord::Deleted(marker))
-                    .await?;
-            }
             return Ok(());
         }
         let retained_anchor = match existing.as_ref() {
             Some(record) => revision_anchor_for_record(record)?,
             None => None,
         };
-        let revision_anchor = match tombstone_head {
-            // A tombstone this device signed still has to follow the anchor it
-            // already holds. A delete response that arrives after another
-            // device's later revision was accepted carries an older head, and
-            // taking it would lower the anchor and let the revisions in
-            // between be replayed.
-            Some(head) => {
+        let revision_anchor = match tombstone {
+            Some(body) => {
                 if let Some(anchor) = retained_anchor {
-                    validate_retained_head(object_id, head, anchor.head)?;
+                    validate_revision_against_head(object_id, body, anchor.head, false)?;
                 }
                 Some(StoredRevisionAnchor {
-                    head,
+                    head: LocalHead {
+                        revision: body.revision,
+                        parent_hash: crypto::object_envelope_parent_hash(body)
+                            .map_err(|error| LocalStoreError::EncryptedCache(error.to_string()))?,
+                    },
                     kind: StoredRevisionAnchorKind::Tombstone,
                 })
             }
-            None => retained_anchor.map(|mut anchor| {
-                anchor.kind = StoredRevisionAnchorKind::ObservedDelete;
-                anchor
-            }),
+            None => retained_anchor,
         };
         self.discard_cached_payload(object_id).await?;
         self.remove_memory_record(object_id).await;
@@ -1592,13 +1588,7 @@ impl LocalStore {
         let Some(anchor) = revision_anchor_for_record(&record)? else {
             return Ok(false);
         };
-        let newer_than = match anchor.kind {
-            StoredRevisionAnchorKind::Absent | StoredRevisionAnchorKind::Tombstone => {
-                anchor.head.revision
-            }
-            StoredRevisionAnchorKind::ObservedDelete => anchor.head.revision.saturating_add(2),
-        };
-        Ok(revision < newer_than)
+        Ok(revision < anchor.head.revision)
     }
 
     /// Check a served revision against the durable anchor before the caller
@@ -1634,29 +1624,6 @@ impl LocalStore {
         let Some(anchor) = revision_anchor_for_record(&record)? else {
             return Ok(());
         };
-
-        if let StoredObjectRecord::Deleted(marker) | StoredObjectRecord::PendingCreate(marker) =
-            &record
-            && marker.revision_anchor.is_some_and(|stored| {
-                matches!(stored.kind, StoredRevisionAnchorKind::ObservedDelete)
-            })
-        {
-            // A remote delete event proves that at least one tombstone
-            // followed the last visible head, although the event does not
-            // carry that tombstone's signed body. A restored live object
-            // therefore has to be two or more revisions beyond that head.
-            let minimum = anchor.head.revision.checked_add(2).ok_or_else(|| {
-                LocalStoreError::EncryptedCache("object revision counter overflowed".into())
-            })?;
-            if incoming.revision < minimum {
-                return Err(revision_anchor_error(
-                    object_id,
-                    incoming.revision,
-                    "does not follow the retained delete marker",
-                ));
-            }
-            return Ok(());
-        }
 
         let require_newer = matches!(
             &record,
@@ -2473,28 +2440,6 @@ fn validate_revision_against_head(
     Ok(())
 }
 
-fn validate_retained_head(
-    object_id: &str,
-    incoming: LocalHead,
-    retained: LocalHead,
-) -> Result<(), LocalStoreError> {
-    if incoming.revision < retained.revision {
-        return Err(revision_anchor_error(
-            object_id,
-            incoming.revision,
-            "rolls back the retained revision anchor",
-        ));
-    }
-    if incoming.revision == retained.revision && incoming.parent_hash != retained.parent_hash {
-        return Err(revision_anchor_error(
-            object_id,
-            incoming.revision,
-            "changes the already accepted revision body",
-        ));
-    }
-    Ok(())
-}
-
 fn revision_anchor_error(object_id: &str, revision: u64, reason: &str) -> LocalStoreError {
     LocalStoreError::RevisionRejected(format!(
         "revision {revision} of object {object_id} {reason}",
@@ -2991,6 +2936,22 @@ pub enum LocalStoreError {
 
 #[cfg(test)]
 mod tests {
+    fn tombstone_body(object_id: &str, kind: ObjectKind, head: LocalHead) -> ObjectEnvelopeBody {
+        ObjectEnvelopeBody {
+            object_id: object_id.parse().unwrap(),
+            object_type: kind,
+            envelope_version: crypto::OBJECT_ENVELOPE_VERSION,
+            revision: head.revision + 1,
+            parent_hash: Some(head.parent_hash),
+            source_device_id: uuid::Uuid::now_v7().into(),
+            created_at: "2026-10-06T12:00:00Z".into(),
+            operation: ObjectEnvelopeOperation::Delete,
+            meta_nonce: Vec::new(),
+            sha256_meta_ciphertext: Vec::new(),
+            payloads: Vec::new(),
+        }
+    }
+
     fn encrypted_file(
         id: ObjectId,
         placement: EnvelopePlacement,
@@ -3130,7 +3091,13 @@ mod tests {
             .unwrap();
         assert!(matches!(
             store
-                .apply_local_tombstone(ObjectKind::File, &id.to_string(), 30, tombstone, 100)
+                .apply_local_tombstone(
+                    ObjectKind::File,
+                    &id.to_string(),
+                    30,
+                    &deleted.envelope.body,
+                    100
+                )
                 .await,
             Err(LocalStoreError::RevisionRejected(_))
         ));
@@ -3158,13 +3125,11 @@ mod tests {
                 .await,
             Err(LocalStoreError::RevisionRejected(_))
         ));
-        let lower = LocalHead {
-            revision: 1,
-            parent_hash: head.parent_hash,
-        };
+        let mut lower = deleted.envelope.body.clone();
+        lower.revision = 1;
         assert!(matches!(
             store
-                .apply_local_tombstone(ObjectKind::File, &id.to_string(), 30, lower, 100)
+                .apply_local_tombstone(ObjectKind::File, &id.to_string(), 30, &lower, 100)
                 .await,
             Err(LocalStoreError::RevisionRejected(_))
         ));
@@ -4095,8 +4060,13 @@ mod tests {
             )
             .await
             .expect("persist original");
+        let body = tombstone_body(
+            &original.id,
+            ObjectKind::Clipboard,
+            store.local_head(&original.id).await.unwrap().unwrap(),
+        );
         store
-            .apply_live_delete(ObjectKind::Clipboard, &original.id, 2, generation, 10)
+            .apply_live_tombstone(&body, 2, generation, 10)
             .await
             .expect("delete")
             .expect("current generation");
@@ -4122,7 +4092,9 @@ mod tests {
             .await
             .expect_err("a pre-delete revision must not be replayed after restart");
         assert!(
-            error.to_string().contains("retained delete marker"),
+            error
+                .to_string()
+                .contains("rolls back the retained revision anchor"),
             "unexpected error: {error}",
         );
     }
@@ -4213,9 +4185,14 @@ mod tests {
             )
             .await
             .expect("persist original");
+        let body = tombstone_body(
+            &original.id,
+            ObjectKind::Clipboard,
+            store.local_head(&original.id).await.unwrap().unwrap(),
+        );
         let tombstone = LocalHead {
-            revision: 2,
-            parent_hash: [42; crypto::SHA256_BYTES],
+            revision: body.revision,
+            parent_hash: crypto::object_envelope_parent_hash(&body).unwrap(),
         };
         store
             .apply_live_delete(
@@ -4229,9 +4206,9 @@ mod tests {
             .expect("observe delete")
             .expect("current generation");
         store
-            .apply_local_tombstone(ObjectKind::Clipboard, &original.id, 2, tombstone, 10)
+            .apply_local_tombstone(ObjectKind::Clipboard, &original.id, 2, &body, 10)
             .await
-            .expect("equal-seq local tombstone upgrades the observed-delete anchor");
+            .expect("equal-seq local tombstone replaces the absence marker");
 
         let generation = store.start_generation().await;
         store
@@ -4337,10 +4314,14 @@ mod tests {
                 ObjectKind::Schedule,
                 object_id,
                 30,
-                LocalHead {
-                    revision: 3,
-                    parent_hash: [7; crypto::SHA256_BYTES],
-                },
+                &tombstone_body(
+                    object_id,
+                    ObjectKind::Schedule,
+                    LocalHead {
+                        revision: 2,
+                        parent_hash: [7; crypto::SHA256_BYTES],
+                    },
+                ),
                 10,
             )
             .await
@@ -4404,12 +4385,17 @@ mod tests {
             )
             .await
             .expect("persist removed");
+        let body = tombstone_body(
+            &removed.id,
+            ObjectKind::Clipboard,
+            store.local_head(&removed.id).await.unwrap().unwrap(),
+        );
         let tombstone = LocalHead {
-            revision: 2,
-            parent_hash: [9; crypto::SHA256_BYTES],
+            revision: body.revision,
+            parent_hash: crypto::object_envelope_parent_hash(&body).unwrap(),
         };
         store
-            .apply_local_tombstone(ObjectKind::Clipboard, &removed.id, 4, tombstone, 10)
+            .apply_local_tombstone(ObjectKind::Clipboard, &removed.id, 4, &body, 10)
             .await
             .expect("tombstone");
 
@@ -4886,10 +4872,14 @@ mod tests {
                 ObjectKind::Clipboard,
                 &entry.id,
                 99,
-                LocalHead {
-                    revision: 2,
-                    parent_hash: [1; crypto::SHA256_BYTES],
-                },
+                &tombstone_body(
+                    &entry.id,
+                    ObjectKind::Clipboard,
+                    LocalHead {
+                        revision: 1,
+                        parent_hash: [1; crypto::SHA256_BYTES],
+                    },
+                ),
                 10,
             )
             .await
@@ -5001,10 +4991,8 @@ mod tests {
             .expect("the immediate successor is accepted");
     }
 
-    /// A delete event with no tombstone body proves one revision followed the
-    /// last visible head, so a restored object has to be two revisions on.
     #[tokio::test]
-    async fn validating_an_incoming_revision_honours_an_observed_delete_anchor() {
+    async fn validating_an_incoming_revision_honours_a_live_tombstone() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = LocalStore::new(tmp.path());
         store.set_profile("profile-a".into());
@@ -5027,11 +5015,22 @@ mod tests {
             Some([4; crypto::SHA256_BYTES]),
             ObjectEnvelopeOperation::Revise,
         );
+        let body = tombstone_body(
+            &entry.id,
+            ObjectKind::Clipboard,
+            LocalHead {
+                revision: 3,
+                parent_hash: crypto::object_envelope_parent_hash(
+                    &revision_three.object.envelope.body,
+                )
+                .unwrap(),
+            },
+        );
         let revision_five = encrypted_clipboard_at(
             &entry,
             b"revision five",
             5,
-            Some([5; crypto::SHA256_BYTES]),
+            Some(crypto::object_envelope_parent_hash(&body).unwrap()),
             ObjectEnvelopeOperation::Revise,
         );
         store
@@ -5046,19 +5045,18 @@ mod tests {
             .await
             .expect("persist revision three");
         store
-            .apply_live_delete(
-                ObjectKind::Clipboard,
-                &entry.id,
-                4,
-                store.current_generation().await,
-                10,
-            )
+            .apply_live_tombstone(&body, 4, store.current_generation().await, 10)
             .await
-            .expect("observe delete")
+            .expect("apply tombstone")
             .expect("current generation");
-        assert!(
-            store.local_head(&entry.id).await.expect("head").is_none(),
-            "an observed delete leaves an anchor but no head",
+        assert_eq!(
+            store
+                .local_head(&entry.id)
+                .await
+                .expect("head")
+                .unwrap()
+                .revision,
+            4
         );
 
         store
