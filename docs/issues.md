@@ -1240,6 +1240,34 @@ Each entry has:
   locally were planned and not built.
 - **Decision:**
 
+### 118. Clipper as a data store for vibe-coded apps and agents
+
+- **Status:** decided; design doc to write after the scheduler PR merges.
+- **What happens:** the cooking, gym and similar tools keep their data in
+  their own backends, and LLM agents reach them through generic note or
+  markdown tools that are not shaped to the data.
+- **Decision (owner, 2026-10-06):**
+  - Core tools (clipboard, files, schedule, alarms) stay built into Clipper.
+    Vibe-coded apps are a frontend plus a schema over shared collections, so
+    apps can read each other's data. learn-german stays out.
+  - Each device keeps real SQLite tables for app collections. The server
+    stores encrypted row changes and syncs them; it does not store queryable
+    blobs for private data. Conflicts resolve per row.
+  - The server can hold triggers (a fire time in plaintext, an encrypted
+    payload) and wake a device to run the job, which gives apps a "remind me"
+    tool without the server reading anything.
+  - Desktop agents driven by Claude Code or Codex reach every collection,
+    encrypted ones included, through the local daemon, using the owner's
+    subscription.
+  - A collection can be marked server-visible. Visible collections are
+    plaintext on the server and reachable through a hosted MCP endpoint for
+    other agent tools (claude.ai, ChatGPT). Agents may read and write them
+    under per-collection read or read-write scopes, with schema checks on
+    every write, version checks on updates, soft deletes, a change log with
+    undo, and a separate rate limit. Making a collection visible or private
+    again shows a warning: the server keeps what it has seen.
+- **Open:** an in-app chat backed by an API key, for the phone.
+
 ## Code and features
 
 ### 26. `UnparseableRule` carried its reason as a string
