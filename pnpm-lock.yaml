@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  js-yaml: 4.3.2
+  js-yaml: 5.4.3
   uuid: 11.1.1
   esbuild: 0.28.2
   esbuild-wasm: 0.28.2
@@ -3770,8 +3770,8 @@ packages:
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
 
-  js-yaml@4.3.2:
-    resolution: {integrity: sha512-SFNOvSJ+Dgf/9An904Yx+CgSlIPCkIpao4qo51lpee25TIRejdH3rhR4EZMGoNx3/TP3O+wzWuiTFl4sqbltzA==}
+  js-yaml@5.4.3:
+    resolution: {integrity: sha512-yzzNtgczwgoVHNigCyKTXcQJU4Y8t/ikU4UxXW0BvrLfHTGWZhsNcOT2s/a7vn81/4KqVnNmHjaUEPlvWnNwVw==}
     hasBin: true
 
   jsc-safe-url@0.2.4:
@@ -6159,7 +6159,7 @@ snapshots:
     dependencies:
       '@babel/code-frame': 7.29.7
       chalk: 4.1.2
-      js-yaml: 4.3.2
+      js-yaml: 5.4.3
 
   '@floating-ui/core@1.8.0':
     dependencies:
@@ -8721,7 +8721,7 @@ snapshots:
       find-root: 1.1.0
       fs-extra: 11.4.1
       invariant: 2.2.4
-      js-yaml: 4.3.2
+      js-yaml: 5.4.3
       react: 19.2.3
       react-native-web: 0.21.3(react-dom@19.3.0(react@19.2.3))(react@19.2.3)
       typescript: 5.9.3
@@ -8765,7 +8765,7 @@ snapshots:
       find-root: 1.1.0
       fs-extra: 11.4.1
       invariant: 2.2.4
-      js-yaml: 4.3.2
+      js-yaml: 5.4.3
       react: 19.3.0
       react-native-web: 0.21.3(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       typescript: 5.9.3
@@ -9768,7 +9768,7 @@ snapshots:
       commander: 11.1.0
       edit-json-file: 1.8.1
       globby: 13.2.2
-      js-yaml: 4.3.2
+      js-yaml: 5.4.3
       semver: 7.8.5
       table: 6.9.0
       type-fest: 4.41.0
@@ -10442,7 +10442,7 @@ snapshots:
 
   js-tokens@4.0.0: {}
 
-  js-yaml@4.3.2:
+  js-yaml@5.4.3:
     dependencies:
       argparse: 2.0.1
 

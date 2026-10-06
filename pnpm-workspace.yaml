@@ -11,7 +11,7 @@ packageExtensions:
     dependencies:
       typescript: ~5.9.2
 overrides:
-  js-yaml: 4.3.2
+  js-yaml: 5.4.3
   uuid: 11.1.1
   esbuild: 0.28.2
   esbuild-wasm: 0.28.2
@@ -51,6 +51,7 @@ minimumReleaseAgeExclude:
   - expo-modules-core@57.0.13
   - expo@57.0.16
   - expo-sharing@57.0.15
+  - js-yaml@5.4.3
 peerDependencyRules:
   allowedVersions:
     # Tamagui's cross-platform peer graph (via @floating-ui/react-native and
