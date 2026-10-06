@@ -31,7 +31,7 @@ clipper-fs-txn = { path = "crates/fs-txn" }
 clipper-schedule = { path = "crates/schedule" }
 
 # shared third-party crates
-argon2 = "0.5.3"
+argon2 = "0.6.0"
 base64 = "0.23.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 chrono-tz = { version = "0.10.4", features = ["serde"] }
