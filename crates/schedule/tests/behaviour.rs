@@ -8,8 +8,8 @@ use chrono_tz::Tz;
 use clipper_schedule::{
     BlockDuration, Cadence, EngineError, Expansion, Frequency, ImportedRuleResolver, MonthDay,
     NthWeekday, Occurrence, OccurrenceOrigin, OccurrenceOverrideData, OverrideChange, OverrideId,
-    Recurrence, RecurrenceEngine, RecurrenceError, RecurrenceId, RruleEngine, ScheduleItem,
-    ScheduleItemId, ScheduleSpan, TimeError, TimeRange, TimedStart, ValidatedRrule, WeekdaySet,
+    Recurrence, RecurrenceEngine, RecurrenceError, RecurrenceId, ScheduleItem, ScheduleItemId,
+    ScheduleSpan, TimeError, TimeRange, TimedStart, ValidatedRrule, WeekdaySet,
 };
 
 fn local(text: &str) -> NaiveDateTime {
@@ -41,7 +41,7 @@ fn expand(
     overrides: &[OccurrenceOverrideData],
     expansion: &Expansion,
 ) -> Vec<Occurrence> {
-    RruleEngine::new()
+    RecurrenceEngine::new()
         .occurrences(item, overrides, expansion)
         .expect("expansion succeeds")
 }
@@ -452,7 +452,7 @@ fn a_dense_old_rule_hits_the_history_scan_bound() {
     let mut rules = ImportedRuleResolver::new();
     rules.insert(import, uid, "FREQ=MINUTELY").unwrap();
 
-    let result = RruleEngine::with_imported_rules(rules).occurrences(
+    let result = RecurrenceEngine::with_imported_rules(rules).occurrences(
         &item,
         &[],
         &Expansion {
@@ -483,7 +483,7 @@ fn an_impossible_finite_raw_rule_is_empty() {
         .insert(import, uid, "FREQ=YEARLY;COUNT=2;BYMONTH=2;BYMONTHDAY=30")
         .unwrap();
 
-    let occurrences = RruleEngine::with_imported_rules(rules)
+    let occurrences = RecurrenceEngine::with_imported_rules(rules)
         .occurrences(
             &item,
             &[],
@@ -518,12 +518,12 @@ fn an_overnight_occurrence_overlaps_the_next_days_window() {
     };
 
     assert!(
-        RruleEngine::new()
+        RecurrenceEngine::new()
             .occurrences(&item, &[], &expansion)
             .expect("expands")
             .is_empty()
     );
-    let overlapping = RruleEngine::new()
+    let overlapping = RecurrenceEngine::new()
         .overlapping_occurrences(&item, &[], &expansion)
         .expect("overlap expansion succeeds");
     assert_eq!(overlapping.len(), 1);
@@ -548,7 +548,7 @@ fn a_multi_day_occurrence_overlaps_a_window_across_dst() {
         observer: Tz::Europe__Berlin,
     };
 
-    let overlapping = RruleEngine::new()
+    let overlapping = RecurrenceEngine::new()
         .overlapping_occurrences(&item, &[], &expansion)
         .expect("overlap expansion succeeds");
     assert_eq!(overlapping.len(), 1);
@@ -582,7 +582,7 @@ fn a_longer_override_can_overlap_from_before_the_window() {
         observer: Tz::UTC,
     };
 
-    let overlapping = RruleEngine::new()
+    let overlapping = RecurrenceEngine::new()
         .overlapping_occurrences(&item, &[moved], &expansion)
         .expect("overlap expansion succeeds");
     assert_eq!(overlapping.len(), 1);
@@ -598,7 +598,7 @@ fn expansion_limit_errors_rather_than_truncating() {
         zone: Tz::UTC,
     });
 
-    let result = RruleEngine::with_max_candidates(5).occurrences(
+    let result = RecurrenceEngine::with_max_candidates(5).occurrences(
         &item,
         &[],
         &Expansion {
@@ -624,7 +624,7 @@ fn overlap_expansion_keeps_the_candidate_limit() {
     };
     *duration = BlockDuration::from_minutes(7 * 24 * 60).expect("non-zero");
 
-    let result = RruleEngine::with_max_candidates(5).overlapping_occurrences(
+    let result = RecurrenceEngine::with_max_candidates(5).overlapping_occurrences(
         &item,
         &[],
         &Expansion {
@@ -644,7 +644,7 @@ fn exactly_the_candidate_limit_is_complete() {
         local: local("20260101T080000"),
         zone: Tz::UTC,
     });
-    let occurrences = RruleEngine::with_max_candidates(5)
+    let occurrences = RecurrenceEngine::with_max_candidates(5)
         .occurrences(
             &item,
             &[],
@@ -799,7 +799,7 @@ fn an_imported_rule_without_its_snapshot_fails_clearly() {
         uid: uid.into(),
     };
 
-    let result = RruleEngine::new().occurrences(
+    let result = RecurrenceEngine::new().occurrences(
         &item,
         &[],
         &Expansion {

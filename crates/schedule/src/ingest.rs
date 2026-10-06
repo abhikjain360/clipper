@@ -234,7 +234,7 @@ pub fn parse_ics(
 
 /// Reads the validated opaque recurrence rules out of one import snapshot.
 ///
-/// Merge the results for several snapshots to build one [`crate::RruleEngine`]
+/// Merge the results for several snapshots to build one [`crate::RecurrenceEngine`]
 /// that expands every event in them.
 pub fn parse_imported_recurrence_rules(
     text: &str,

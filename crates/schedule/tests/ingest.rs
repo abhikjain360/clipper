@@ -258,9 +258,7 @@ fn ids_are_stable_across_passes_and_distinct_per_source() {
 #[test]
 fn an_ingested_series_expands() {
     use chrono::{TimeZone, Utc};
-    use clipper_schedule::{
-        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, TimeRange,
-    };
+    use clipper_schedule::{Expansion, RecurrenceEngine, ScheduleItem, ScheduleItemId, TimeRange};
 
     let standup = event("standup@example.com");
     let item = ScheduleItem {
@@ -276,7 +274,7 @@ fn an_ingested_series_expands() {
         .with_ymd_and_hms(2026, 9, 7, 0, 0, 0)
         .single()
         .expect("valid");
-    let occurrences = RruleEngine::new()
+    let occurrences = RecurrenceEngine::new()
         .occurrences(
             &item,
             &[],
@@ -490,9 +488,7 @@ DURATION:P2D\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 #[test]
 fn exdate_rdate_and_recurrence_id_components_become_overrides() {
     use chrono::{TimeZone, Utc};
-    use clipper_schedule::{
-        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, TimeRange,
-    };
+    use clipper_schedule::{Expansion, RecurrenceEngine, ScheduleItem, ScheduleItemId, TimeRange};
 
     let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
 UID:series@example.com\r\nSUMMARY:Series\r\nDTSTART:20260901T090000Z\r\n\
@@ -529,7 +525,7 @@ END:VCALENDAR\r\n";
         alarm: None,
     };
     let from = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).single().unwrap();
-    let occurrences = RruleEngine::new()
+    let occurrences = RecurrenceEngine::new()
         .occurrences(
             &series,
             &event.overrides,
@@ -585,9 +581,7 @@ EXDATE:20260905T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 #[test]
 fn a_detached_instance_moved_across_the_window_boundary_still_overlaps() {
     use chrono::{TimeZone, Utc};
-    use clipper_schedule::{
-        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, TimeRange,
-    };
+    use clipper_schedule::{Expansion, RecurrenceEngine, ScheduleItem, ScheduleItemId, TimeRange};
 
     let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
 UID:overnight-series@example.com\r\nDTSTART:20260901T090000Z\r\n\
@@ -609,7 +603,7 @@ DTEND:20260904T013000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         alarm: None,
     };
     let from = Utc.with_ymd_and_hms(2026, 9, 4, 0, 0, 0).single().unwrap();
-    let overlapping = RruleEngine::new()
+    let overlapping = RecurrenceEngine::new()
         .overlapping_occurrences(
             &series,
             &event.overrides,
@@ -629,9 +623,7 @@ DTEND:20260904T013000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 #[test]
 fn an_unsupported_rule_is_resolved_from_the_referenced_snapshot() {
     use chrono::{TimeZone, Utc};
-    use clipper_schedule::{
-        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, TimeRange,
-    };
+    use clipper_schedule::{Expansion, RecurrenceEngine, ScheduleItem, ScheduleItemId, TimeRange};
 
     let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
 UID:opaque@example.com\r\nDTSTART:20260101T090000Z\r\n\
@@ -668,7 +660,7 @@ END:VEVENT\r\nEND:VCALENDAR\r\n";
         reference: None,
         alarm: None,
     };
-    let occurrences = RruleEngine::with_imported_rules(rules)
+    let occurrences = RecurrenceEngine::with_imported_rules(rules)
         .occurrences(
             &item,
             &[],
@@ -829,9 +821,7 @@ fn boundary_interval_and_count_are_kept() {
 #[test]
 fn boundary_interval_expands_with_that_interval() {
     use chrono::{TimeDelta, TimeZone, Utc};
-    use clipper_schedule::{
-        Expansion, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, TimeRange,
-    };
+    use clipper_schedule::{Expansion, RecurrenceEngine, ScheduleItem, ScheduleItemId, TimeRange};
 
     let event = parse_ics(
         &feed_with_rrule("FREQ=DAILY;INTERVAL=65535"),
@@ -851,7 +841,7 @@ fn boundary_interval_expands_with_that_interval() {
         alarm: None,
     };
     let from = Utc.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).single().unwrap();
-    let occurrences = RruleEngine::new()
+    let occurrences = RecurrenceEngine::new()
         .occurrences(
             &item,
             &[],

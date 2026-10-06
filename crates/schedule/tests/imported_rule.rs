@@ -1,8 +1,8 @@
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use clipper_schedule::{
-    BlockDuration, Expansion, ImportedRuleResolver, Recurrence, RecurrenceEngine, RruleEngine,
-    ScheduleItem, ScheduleItemId, ScheduleSpan, TimeRange, TimedStart,
+    BlockDuration, Expansion, ImportedRuleResolver, Recurrence, RecurrenceEngine, ScheduleItem,
+    ScheduleItemId, ScheduleSpan, TimeRange, TimedStart,
 };
 
 fn import_id() -> clipper_api_types::ObjectId {
@@ -28,7 +28,7 @@ fn starts(
         reference: None,
         alarm: None,
     };
-    RruleEngine::with_imported_rules(imported_rules)
+    RecurrenceEngine::with_imported_rules(imported_rules)
         .occurrences(
             &item,
             &[],

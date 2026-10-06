@@ -16,7 +16,7 @@ pub use clipper_app_types::{
 use clipper_core::{crypto, models::*};
 pub use clipper_schedule::{
     CalendarSource, Expansion, IngestedEvent, IngestedStatus, OccurrenceOverride, RecurrenceEngine,
-    RruleEngine, ScheduleItem, ScheduleSpan, SourceId, SourceKind, TimeRange,
+    ScheduleItem, ScheduleSpan, SourceId, SourceKind, TimeRange,
 };
 use futures_util::{StreamExt, stream};
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard, watch};

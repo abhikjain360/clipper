@@ -9,7 +9,7 @@ use chrono_tz::Tz;
 use clipper_schedule::{
     BlockDuration, Cadence, Expansion, Frequency, ImportedRuleResolver, OccurrenceOverrideData,
     OverrideChange, OverrideId, Recurrence, RecurrenceEnd, RecurrenceEngine, RecurrenceId,
-    RruleEngine, ScheduleItem, ScheduleItemId, ScheduleSpan, TimeRange, TimedStart,
+    ScheduleItem, ScheduleItemId, ScheduleSpan, TimeRange, TimedStart,
 };
 
 fn local(text: &str) -> NaiveDateTime {
@@ -66,7 +66,7 @@ fn expand(
     item: &ScheduleItem,
     expansion: &Expansion,
 ) -> Result<Vec<DateTime<Utc>>, clipper_schedule::EngineError> {
-    Ok(RruleEngine::new()
+    Ok(RecurrenceEngine::new()
         .occurrences(item, &[], expansion)?
         .into_iter()
         .map(|occurrence| occurrence.span.start())
@@ -78,7 +78,7 @@ fn expand_imported(
     rules: ImportedRuleResolver,
     expansion: &Expansion,
 ) -> Result<Vec<DateTime<Utc>>, clipper_schedule::EngineError> {
-    Ok(RruleEngine::with_imported_rules(rules)
+    Ok(RecurrenceEngine::with_imported_rules(rules)
         .occurrences(item, &[], expansion)?
         .into_iter()
         .map(|occurrence| occurrence.span.start())
@@ -179,7 +179,7 @@ fn until_before_start_is_empty_but_added_override_remains() {
         window: TimeRange::new(utc(2024, 3, 1, 0, 0), utc(2024, 4, 1, 0, 0)).unwrap(),
         observer: Tz::Europe__Berlin,
     };
-    let occurrences = RruleEngine::new()
+    let occurrences = RecurrenceEngine::new()
         .occurrences(&item, &overrides, &expansion)
         .expect("a rule ending before its start is empty");
     assert_eq!(occurrences.len(), 1);
@@ -220,7 +220,7 @@ fn until_slack_skips_an_unresolvable_day_past_the_cutoff() {
         window: local_midnight_window(Tz::Pacific__Apia, (2011, 12, 29), (2011, 12, 31)),
         observer: Tz::Pacific__Apia,
     };
-    let out = RruleEngine::new()
+    let out = RecurrenceEngine::new()
         .occurrences(&item, &[], &expansion)
         .expect("the skipped day past the cutoff must not fail the window");
     let ids: Vec<_> = out.iter().map(|o| o.recurrence_id).collect();

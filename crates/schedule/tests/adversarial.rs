@@ -14,8 +14,8 @@ use clipper_schedule::{
     AlarmPolicy, BlockDuration, Cadence, EngineError, Expansion, Frequency, ImportedRuleResolver,
     MonthDay, MonthlyRule, NthWeekday, Occurrence, OccurrenceOrigin, OccurrenceOverrideData,
     OverrideChange, OverrideId, Recurrence, RecurrenceEnd, RecurrenceEngine, RecurrenceId,
-    RruleEngine, ScheduleItem, ScheduleItemId, ScheduleSpan, SourceId, TimeError, TimeRange,
-    TimedStart, WeekdaySet, parse_ics, parse_imported_recurrence_rules, plan_alarms,
+    ScheduleItem, ScheduleItemId, ScheduleSpan, SourceId, TimeError, TimeRange, TimedStart,
+    WeekdaySet, parse_ics, parse_imported_recurrence_rules, plan_alarms,
 };
 
 fn local(text: &str) -> NaiveDateTime {
@@ -73,7 +73,7 @@ fn expand(
     overrides: &[OccurrenceOverrideData],
     expansion: &Expansion,
 ) -> Result<Vec<Occurrence>, EngineError> {
-    RruleEngine::new().occurrences(item, overrides, expansion)
+    RecurrenceEngine::new().occurrences(item, overrides, expansion)
 }
 
 fn in_zone(instant: DateTime<Utc>, zone: Tz) -> String {
@@ -822,7 +822,7 @@ fn fortnightly_weeks_start_on_monday_across_year_boundary() {
             .expect("non-zero"),
         ),
     );
-    let next = RruleEngine::new()
+    let next = RecurrenceEngine::new()
         .next_after(
             &item,
             &[],
@@ -1155,7 +1155,7 @@ fn occurrence_ending_exactly_at_window_start_is_excluded_everywhere() {
         "plain expansion selects by start"
     );
     assert!(
-        RruleEngine::new()
+        RecurrenceEngine::new()
             .overlapping_occurrences(&item, &[], &exp)
             .expect("expands")
             .is_empty(),
@@ -1182,7 +1182,7 @@ fn overnight_event_needs_overlap_expansion() {
     };
     let exp = expansion(utc(2026, 6, 10, 0, 0), utc(2026, 6, 10, 1, 0), Tz::UTC);
     assert!(expand(&item, &[], &exp).expect("expands").is_empty());
-    let overlapping = RruleEngine::new()
+    let overlapping = RecurrenceEngine::new()
         .overlapping_occurrences(&item, &[], &exp)
         .expect("expands");
     assert_eq!(overlapping.len(), 1);
@@ -1209,7 +1209,7 @@ fn multi_day_all_day_overlaps_each_covered_window() {
         utc(2026, 3, 29, 12, 0),
         Tz::Europe__Berlin,
     );
-    let overlapping = RruleEngine::new()
+    let overlapping = RecurrenceEngine::new()
         .overlapping_occurrences(&item, &[], &exp)
         .expect("expands");
     assert_eq!(overlapping.len(), 1);
@@ -1250,12 +1250,12 @@ fn zero_length_windows_are_rejected() {
         daily(),
     );
     assert!(
-        RruleEngine::new()
+        RecurrenceEngine::new()
             .next_after(&item, &[], instant, TimeDelta::zero(), Tz::UTC)
             .is_err()
     );
     assert!(
-        RruleEngine::new()
+        RecurrenceEngine::new()
             .next_after(&item, &[], instant, TimeDelta::minutes(-1), Tz::UTC)
             .is_err()
     );
@@ -1300,7 +1300,7 @@ END:VCALENDAR\r\n";
         alarm: None,
     };
 
-    let out = RruleEngine::with_imported_rules(rules)
+    let out = RecurrenceEngine::with_imported_rules(rules)
         .occurrences(
             &item,
             &[],
@@ -1345,7 +1345,7 @@ fn an_imported_rule_with_a_utc_until_keeps_the_matching_day() {
         uid: uid.to_string(),
     };
 
-    let out = RruleEngine::with_imported_rules(rules)
+    let out = RecurrenceEngine::with_imported_rules(rules)
         .occurrences(
             &item,
             &[],
@@ -1382,7 +1382,7 @@ fn single_candidate_with_limit_one_is_complete() {
         },
         daily(),
     );
-    let out = RruleEngine::with_max_candidates(1)
+    let out = RecurrenceEngine::with_max_candidates(1)
         .occurrences(
             &item,
             &[],
@@ -1403,7 +1403,7 @@ fn two_candidates_with_limit_one_errors() {
         daily(),
     );
     assert_eq!(
-        RruleEngine::with_max_candidates(1).occurrences(
+        RecurrenceEngine::with_max_candidates(1).occurrences(
             &item,
             &[],
             &expansion(utc(2026, 1, 1, 0, 0), utc(2026, 1, 3, 0, 0), Tz::UTC),
@@ -1425,7 +1425,7 @@ fn very_old_daily_series_hits_the_historical_scan_limit() {
         daily(),
     );
     assert_eq!(
-        RruleEngine::new().occurrences(
+        RecurrenceEngine::new().occurrences(
             &item,
             &[],
             &expansion(utc(2026, 6, 10, 0, 0), utc(2026, 6, 12, 0, 0), Tz::UTC),

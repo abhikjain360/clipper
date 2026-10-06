@@ -38,69 +38,6 @@ pub struct Expansion {
     pub observer: Tz,
 }
 
-pub trait RecurrenceEngine {
-    /// Every occurrence of `item` whose start falls in the expansion window,
-    /// with overrides applied, ordered by start.
-    ///
-    /// `overrides` may contain entries for other items; they are ignored.
-    fn occurrences(
-        &self,
-        item: &ScheduleItem,
-        overrides: &[OccurrenceOverrideData],
-        expansion: &Expansion,
-    ) -> Result<Vec<Occurrence>, EngineError>;
-
-    /// Every occurrence whose half-open span intersects the expansion window.
-    ///
-    /// Calendar views use this instead of [`Self::occurrences`]: an overnight
-    /// block that starts yesterday still occupies time today. Widening the rule
-    /// window by the longest span keeps it bounded, and the candidate ceiling
-    /// still applies.
-    fn overlapping_occurrences(
-        &self,
-        item: &ScheduleItem,
-        overrides: &[OccurrenceOverrideData],
-        expansion: &Expansion,
-    ) -> Result<Vec<Occurrence>, EngineError> {
-        let lookback = maximum_lookback(item, overrides)?;
-        let from = expansion
-            .window
-            .start()
-            .checked_sub_signed(lookback)
-            .ok_or(TimeError::DateOverflow)?;
-        let widened = Expansion {
-            window: TimeRange::new(from, expansion.window.end())?,
-            observer: expansion.observer,
-        };
-        let mut occurrences = self.occurrences(item, overrides, &widened)?;
-        occurrences.retain(|occurrence| occurrence.span.overlaps(&expansion.window));
-        Ok(occurrences)
-    }
-
-    /// The first occurrence starting strictly after `after`, looking at most
-    /// `within` ahead.
-    ///
-    /// `within` is required. A rule with no end may have its next occurrence
-    /// arbitrarily far away, so an unbounded search has nothing to stop it.
-    fn next_after(
-        &self,
-        item: &ScheduleItem,
-        overrides: &[OccurrenceOverrideData],
-        after: DateTime<Utc>,
-        within: TimeDelta,
-        observer: Tz,
-    ) -> Result<Option<Occurrence>, EngineError> {
-        let expansion = Expansion {
-            window: TimeRange::new(after, after + within)?,
-            observer,
-        };
-        Ok(self
-            .occurrences(item, overrides, &expansion)?
-            .into_iter()
-            .find(|occurrence| occurrence.span.start() > after))
-    }
-}
-
 /// How far before a window an occurrence may start and still overlap it.
 /// Rounded up, never down.
 fn maximum_lookback(
@@ -134,19 +71,19 @@ fn span_lookback(span: &ScheduleSpan) -> Result<TimeDelta, TimeError> {
     }
 }
 
-/// [`RecurrenceEngine`] backed by the `rrule` crate.
+/// Expands recurrences with the `rrule` crate.
 ///
 /// At a DST gap an occurrence shifts forward, not back, matching platform
 /// alarm clocks.
 #[derive(Debug, Clone)]
-pub struct RruleEngine {
+pub struct RecurrenceEngine {
     /// Most rule-generated candidates one expansion may produce. A dense rule
     /// over a wide window hits this and errors; it never truncates silently.
     max_candidates: usize,
     imported_rules: Arc<ImportedRuleResolver>,
 }
 
-impl Default for RruleEngine {
+impl Default for RecurrenceEngine {
     fn default() -> Self {
         Self {
             max_candidates: 10_000,
@@ -155,7 +92,7 @@ impl Default for RruleEngine {
     }
 }
 
-impl RruleEngine {
+impl RecurrenceEngine {
     pub fn new() -> Self {
         Self::default()
     }
@@ -364,8 +301,12 @@ impl ImportedRuleResolver {
     }
 }
 
-impl RecurrenceEngine for RruleEngine {
-    fn occurrences(
+impl RecurrenceEngine {
+    /// Every occurrence of `item` whose start falls in the expansion window,
+    /// with overrides applied, ordered by start.
+    ///
+    /// `overrides` may contain entries for other items; they are ignored.
+    pub fn occurrences(
         &self,
         item: &ScheduleItem,
         overrides: &[OccurrenceOverrideData],
@@ -433,6 +374,56 @@ impl RecurrenceEngine for RruleEngine {
 
         out.sort_by_key(|occurrence| occurrence.span.start());
         Ok(out)
+    }
+
+    /// Every occurrence whose half-open span intersects the expansion window.
+    ///
+    /// Calendar views use this instead of [`Self::occurrences`]: an overnight
+    /// block that starts yesterday still occupies time today. Widening the rule
+    /// window by the longest span keeps it bounded, and the candidate ceiling
+    /// still applies.
+    pub fn overlapping_occurrences(
+        &self,
+        item: &ScheduleItem,
+        overrides: &[OccurrenceOverrideData],
+        expansion: &Expansion,
+    ) -> Result<Vec<Occurrence>, EngineError> {
+        let lookback = maximum_lookback(item, overrides)?;
+        let from = expansion
+            .window
+            .start()
+            .checked_sub_signed(lookback)
+            .ok_or(TimeError::DateOverflow)?;
+        let widened = Expansion {
+            window: TimeRange::new(from, expansion.window.end())?,
+            observer: expansion.observer,
+        };
+        let mut occurrences = self.occurrences(item, overrides, &widened)?;
+        occurrences.retain(|occurrence| occurrence.span.overlaps(&expansion.window));
+        Ok(occurrences)
+    }
+
+    /// The first occurrence starting strictly after `after`, looking at most
+    /// `within` ahead.
+    ///
+    /// `within` is required. A rule with no end may have its next occurrence
+    /// arbitrarily far away, so an unbounded search has nothing to stop it.
+    pub fn next_after(
+        &self,
+        item: &ScheduleItem,
+        overrides: &[OccurrenceOverrideData],
+        after: DateTime<Utc>,
+        within: TimeDelta,
+        observer: Tz,
+    ) -> Result<Option<Occurrence>, EngineError> {
+        let expansion = Expansion {
+            window: TimeRange::new(after, after + within)?,
+            observer,
+        };
+        Ok(self
+            .occurrences(item, overrides, &expansion)?
+            .into_iter()
+            .find(|occurrence| occurrence.span.start() > after))
     }
 }
 

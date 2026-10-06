@@ -9,8 +9,8 @@ use chrono::{Month, NaiveDateTime, TimeDelta, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use clipper_schedule::{
     BlockDuration, Cadence, Frequency, MonthDay, MonthlyRule, NthWeekday, Recurrence,
-    RecurrenceEnd, RecurrenceEngine, RruleEngine, ScheduleItem, ScheduleItemId, ScheduleSpan,
-    TimedStart, WeekdaySet,
+    RecurrenceEnd, RecurrenceEngine, ScheduleItem, ScheduleItemId, ScheduleSpan, TimedStart,
+    WeekdaySet,
 };
 
 /// Five years covers the longest gap in the corpus, a leap-day yearly rule
@@ -42,7 +42,7 @@ fn next_after(item: &ScheduleItem, after: (i32, u32, u32, u32, u32)) -> Option<S
         .with_ymd_and_hms(after.0, after.1, after.2, after.3, after.4, 0)
         .single()
         .expect("unambiguous UTC instant");
-    RruleEngine::new()
+    RecurrenceEngine::new()
         .next_after(item, &[], after, TimeDelta::days(LOOKAHEAD_DAYS), Tz::UTC)
         .expect("expansion succeeds")
         .map(|occurrence| occurrence.span.start().format("%Y-%m-%dT%H:%M").to_string())
@@ -310,7 +310,7 @@ fn dst_gap_shifts_forward_like_java() {
         .expect("unambiguous")
         .with_timezone(&Utc);
 
-    let next = RruleEngine::new()
+    let next = RecurrenceEngine::new()
         .next_after(&item, &[], after, TimeDelta::days(7), Tz::Europe__Berlin)
         .expect("expansion succeeds")
         .expect("a daily rule has an occurrence within a week");
