@@ -53,9 +53,11 @@ pub struct PlannedAlarm {
     /// no encrypted store to read a title from.
     pub label: String,
     /// When the alarm rings.
+    #[serde(deserialize_with = "crate::time::deserialize_date")]
     pub fire_at: DateTime<Utc>,
     /// When the block itself starts, which differs from `fire_at` whenever the
     /// policy has a lead time.
+    #[serde(deserialize_with = "crate::time::deserialize_date")]
     pub occurrence_start: DateTime<Utc>,
 }
 

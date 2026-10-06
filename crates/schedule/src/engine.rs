@@ -26,7 +26,7 @@ use crate::{
         Cadence, Frequency, MonthlyRule, Recurrence, RecurrenceEnd, ValidatedRrule,
         until_scan_bound, until_wall_clock,
     },
-    time::{ScheduleSpan, TimeError, TimeRange, TimedStart},
+    time::{ScheduleSpan, TimeError, TimeRange, TimedStart, local_in_zone, validate_date},
 };
 
 /// Where and when to expand.
@@ -120,6 +120,7 @@ impl RecurrenceEngine {
         item: &ScheduleItem,
         expansion: &Expansion,
     ) -> Result<Vec<(RecurrenceId, TimeRange)>, EngineError> {
+        validate_date(&item.span.local_start())?;
         let zone = effective_zone(item, expansion.observer);
         let (rule_line, until_cutoff) = match &item.recurrence {
             // A one-off has no rule to expand.
@@ -134,7 +135,7 @@ impl RecurrenceEngine {
                     Vec::new()
                 });
             }
-            Recurrence::Every(cadence) => rrule_line(cadence, zone),
+            Recurrence::Every(cadence) => rrule_line(cadence, zone)?,
             Recurrence::Imported { import, uid } => until_wall_clock(
                 self.imported_rules
                     .lookup(*import, uid)
@@ -144,7 +145,7 @@ impl RecurrenceEngine {
                     })?
                     .as_str(),
                 zone,
-            ),
+            )?,
         };
 
         if rule_until_before_start(&rule_line, item.span.local_start()) {
@@ -180,11 +181,7 @@ impl RecurrenceEngine {
         // because the window end is exclusive, so the loop below skips them
         // before resolving. The window check below is on the instant and
         // decides the real edge.
-        let before_local = expansion
-            .window
-            .end()
-            .with_timezone(&zone)
-            .naive_local()
+        let before_local = local_in_zone(expansion.window.end(), zone)?
             .checked_add_days(Days::new(1))
             .ok_or(TimeError::DateOverflow)?;
         let before = Utc
@@ -206,15 +203,12 @@ impl RecurrenceEngine {
         // its edge because the window end is exclusive and a candidate exactly
         // on it resolves at or past the end. The window check below is on the
         // instant and decides the real edge.
-        let after_local = expansion
-            .window
-            .start()
-            .with_timezone(&zone)
-            .naive_local()
+        let after_local = local_in_zone(expansion.window.start(), zone)?
             .checked_sub_days(Days::new(1))
             .ok_or(TimeError::DateOverflow)?;
 
         let mut spans = Vec::new();
+        let mut identities = HashSet::new();
         for occurrence in result.dates {
             // DTSTART was UTC, so this carries a wall clock, not an instant.
             let local = occurrence.naive_utc();
@@ -232,7 +226,7 @@ impl RecurrenceEngine {
                 Ok(resolved) => resolved,
                 Err(error) => {
                     if let Some(cutoff) = until_cutoff {
-                        let cutoff_wall = cutoff.with_timezone(&zone).naive_local();
+                        let cutoff_wall = local_in_zone(cutoff, zone)?;
                         if local > cutoff_wall {
                             continue;
                         }
@@ -249,12 +243,16 @@ impl RecurrenceEngine {
             if until_cutoff.is_some_and(|cutoff| resolved.start() > cutoff) {
                 continue;
             }
+            let identity = recurrence_id(item, local, expansion)?;
+            if !identities.insert(identity) {
+                continue;
+            }
             if spans.len() >= self.max_candidates {
                 return Err(EngineError::ExpansionLimitExceeded {
                     limit: self.max_candidates,
                 });
             }
-            spans.push((recurrence_id(item, local, expansion)?, resolved));
+            spans.push((identity, resolved));
         }
         Ok(spans)
     }
@@ -503,7 +501,7 @@ fn span_at(item: &ScheduleItem, local: chrono::NaiveDateTime, zone: Tz) -> Sched
 /// the instant shows in the expansion zone, plus one day. That bound only
 /// stops `rrule` from scanning forever; the caller applies the returned
 /// instant as the true inclusive cutoff on each resolved occurrence.
-fn rrule_line(cadence: &Cadence, zone: Tz) -> (String, Option<DateTime<Utc>>) {
+fn rrule_line(cadence: &Cadence, zone: Tz) -> Result<(String, Option<DateTime<Utc>>), TimeError> {
     // RFC 5545 requires FREQ first.
     let mut parts = Vec::new();
     match &cadence.frequency {
@@ -537,12 +535,12 @@ fn rrule_line(cadence: &Cadence, zone: Tz) -> (String, Option<DateTime<Utc>>) {
         RecurrenceEnd::On(instant) => {
             parts.push(format!(
                 "UNTIL={}",
-                until_scan_bound(instant, zone).format("%Y%m%dT%H%M%SZ")
+                until_scan_bound(instant, zone)?.format("%Y%m%dT%H%M%SZ")
             ));
             cutoff = Some(instant);
         }
     }
-    (parts.join(";"), cutoff)
+    Ok((parts.join(";"), cutoff))
 }
 
 fn rule_until_before_start(rule: &str, start: NaiveDateTime) -> bool {

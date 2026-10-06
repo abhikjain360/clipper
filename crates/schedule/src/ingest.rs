@@ -83,6 +83,7 @@ pub struct CalendarSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalendarImport {
     pub object_id: clipper_api_types::ObjectId,
+    #[serde(deserialize_with = "crate::time::deserialize_date")]
     pub fetched_at: chrono::DateTime<chrono::Utc>,
     pub events: Vec<clipper_api_types::ObjectId>,
 }
@@ -297,18 +298,37 @@ fn parse_calendar(text: &str) -> Result<calcard::icalendar::ICalendar, IngestErr
     use calcard::icalendar::ICalendar;
 
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    validate_calendar_envelope(text)?;
+    if text.len() > MAX_ICS_BYTES {
+        return Err(IngestError::LimitExceeded("calendar exceeds 8 MiB"));
+    }
     // Counted before parsing. The component and property caps below only apply
     // once the parser has allocated the whole tree, which for 8 MiB of
     // two-byte properties is hundreds of megabytes.
     if text.lines().count() > MAX_CONTENT_LINES {
         return Err(IngestError::LimitExceeded("too many calendar lines"));
     }
+    validate_calendar_envelope(text)?;
+    validate_value_count(text)?;
     validate_rrule_numbers(text)?;
-    let calendar =
-        ICalendar::parse(text).map_err(|error| IngestError::Malformed(format!("{error:?}")))?;
-    if calendar.components.len() > MAX_COMPONENTS {
-        return Err(IngestError::LimitExceeded("too many calendar components"));
+    let mut parser = calcard::Parser::new(text);
+    let mut calendar = ICalendar::default();
+    loop {
+        match parser.entry() {
+            calcard::Entry::ICalendar(mut block) => {
+                if calendar.components.len() + block.components.len() > MAX_COMPONENTS {
+                    return Err(IngestError::LimitExceeded("too many calendar components"));
+                }
+                let offset = calendar.components.len() as u32;
+                for component in &mut block.components {
+                    for id in &mut component.component_ids {
+                        *id += offset;
+                    }
+                }
+                calendar.components.extend(block.components);
+            }
+            calcard::Entry::Eof => break,
+            error => return Err(IngestError::Malformed(format!("{error:?}"))),
+        }
     }
     let property_count = calendar
         .components
@@ -324,23 +344,78 @@ fn parse_calendar(text: &str) -> Result<calcard::icalendar::ICalendar, IngestErr
 }
 
 fn validate_calendar_envelope(text: &str) -> Result<(), IngestError> {
-    if text.len() > MAX_ICS_BYTES {
-        return Err(IngestError::LimitExceeded("calendar exceeds 8 MiB"));
-    }
-    let mut nonempty = text.lines().map(str::trim).filter(|line| !line.is_empty());
-    let first = nonempty.next();
-    let last = nonempty.next_back();
+    let mut stack = Vec::new();
+    let mut calendars = 0;
     let mut has_version = false;
-    for line in text.lines().map(str::trim) {
-        has_version |= line.eq_ignore_ascii_case("VERSION:2.0");
+    for line in unfold_content_lines(text) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let raw_name = &line[..line.find([';', ':', ',', '=']).unwrap_or(line.len())];
+        let name = name_characters(raw_name);
+        if name.eq_ignore_ascii_case("BEGIN") || name.eq_ignore_ascii_case("END") {
+            let Some((key, component)) = line.split_once(':') else {
+                return Err(IngestError::Malformed("invalid component boundary".into()));
+            };
+            if key != raw_name || name != raw_name || component != name_characters(component) {
+                return Err(IngestError::Malformed("invalid component boundary".into()));
+            }
+            if name.eq_ignore_ascii_case("BEGIN") {
+                if stack.is_empty() {
+                    if !component.eq_ignore_ascii_case("VCALENDAR") {
+                        return Err(IngestError::Malformed("expected VCALENDAR".into()));
+                    }
+                    calendars += 1;
+                    has_version = false;
+                }
+                stack.push(component.to_ascii_uppercase());
+            } else if !stack
+                .pop()
+                .is_some_and(|expected| expected.eq_ignore_ascii_case(component))
+            {
+                return Err(IngestError::Malformed("mismatched component end".into()));
+            } else if stack.is_empty() && !has_version {
+                return Err(IngestError::Malformed("expected VERSION:2.0".into()));
+            }
+        } else if stack.is_empty() {
+            return Err(IngestError::Malformed("content outside VCALENDAR".into()));
+        } else if stack.len() == 1 && line.eq_ignore_ascii_case("VERSION:2.0") {
+            has_version = true;
+        }
     }
-    if !first.is_some_and(|line| line.eq_ignore_ascii_case("BEGIN:VCALENDAR"))
-        || !last.is_some_and(|line| line.eq_ignore_ascii_case("END:VCALENDAR"))
-        || !has_version
-    {
+    if calendars == 0 || !stack.is_empty() {
         return Err(IngestError::Malformed(
             "expected a complete VERSION:2.0 VCALENDAR".to_string(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_value_count(text: &str) -> Result<(), IngestError> {
+    let mut values = 0usize;
+    for line in unfold_content_lines(text) {
+        let mut quoted_parameter = false;
+        let mut in_value = false;
+        let mut escaped = false;
+        for byte in line.bytes() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match byte {
+                b'\\' => escaped = true,
+                b'"' if !in_value => quoted_parameter = !quoted_parameter,
+                b':' if !quoted_parameter && !in_value => {
+                    in_value = true;
+                    values += 1;
+                }
+                b',' if !quoted_parameter => values += 1,
+                _ => {}
+            }
+            if values > MAX_PROPERTIES {
+                return Err(IngestError::LimitExceeded("too many calendar values"));
+            }
+        }
     }
     Ok(())
 }
@@ -371,7 +446,7 @@ fn value_separator(line: &str) -> Option<usize> {
 /// exactly is rejected rather than rewritten.
 fn validate_rrule_numbers(text: &str) -> Result<(), IngestError> {
     for line in unfold_content_lines(text) {
-        let raw_name = &line[..line.find([';', ':']).unwrap_or(line.len())];
+        let raw_name = &line[..line.find([';', ':', ',', '=']).unwrap_or(line.len())];
         let name = name_characters(raw_name);
         if !name.eq_ignore_ascii_case("RRULE") {
             continue;
@@ -992,6 +1067,7 @@ fn feed_time_from_partial(
         u32::from(partial.day.ok_or(IngestError::InvalidDateTime)?),
     )
     .ok_or(IngestError::InvalidDateTime)?;
+    crate::time::validate_date(&date)?;
     let time = partial
         .hour
         .map(|hour| {
@@ -1012,6 +1088,12 @@ fn feed_time_from_partial(
         Some(param) => match &param.value {
             ICalendarParameterValue::Text(name) => Some(match name.parse::<Tz>() {
                 Ok(zone) => zone,
+                Err(_) if name == "UTC-11" => Tz::Etc__GMTPlus11,
+                Err(_) if name == "UTC-09" => Tz::Etc__GMTPlus9,
+                Err(_) if name == "UTC-08" => Tz::Etc__GMTPlus8,
+                Err(_) if name == "UTC-02" => Tz::Etc__GMTPlus2,
+                Err(_) if name == "UTC+12" => Tz::Etc__GMTMinus12,
+                Err(_) if name == "UTC+13" => Tz::Etc__GMTMinus13,
                 Err(_) => resolver
                     .resolve(name)
                     .and_then(|resolved| match resolved {

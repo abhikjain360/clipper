@@ -115,9 +115,9 @@ pub struct OccurrenceOverride {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "at", rename_all = "snake_case")]
 pub enum RecurrenceId {
-    Floating(NaiveDateTime),
-    Instant(DateTime<Utc>),
-    Date(NaiveDate),
+    Floating(#[serde(deserialize_with = "crate::time::deserialize_date")] NaiveDateTime),
+    Instant(#[serde(deserialize_with = "crate::time::deserialize_date")] DateTime<Utc>),
+    Date(#[serde(deserialize_with = "crate::time::deserialize_date")] NaiveDate),
 }
 
 /// One occurrence that differs from its series.
@@ -185,7 +185,10 @@ pub struct PlannedRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ActualSpan {
-    Running { started: DateTime<Utc> },
+    Running {
+        #[serde(deserialize_with = "crate::time::deserialize_date")]
+        started: DateTime<Utc>,
+    },
     Complete(TimeRange),
 }
 

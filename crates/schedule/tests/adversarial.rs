@@ -22,6 +22,182 @@ fn local(text: &str) -> NaiveDateTime {
     NaiveDateTime::parse_from_str(text, "%Y%m%dT%H%M%S").expect("valid local datetime")
 }
 
+#[test]
+fn dates_outside_four_digit_years_are_refused_without_panicking() {
+    let date = NaiveDate::from_ymd_opt(-262143, 1, 1).unwrap();
+    let floating = TimedStart::Floating(date.and_hms_opt(0, 0, 0).unwrap());
+    let all_day = ScheduleSpan::AllDay {
+        start: date,
+        days: NonZeroU32::new(1).unwrap(),
+    };
+    for value in [
+        serde_json::to_value(&all_day).unwrap(),
+        serde_json::to_value(ScheduleSpan::Timed {
+            start: floating.clone(),
+            duration: BlockDuration::from_minutes(30).unwrap(),
+        })
+        .unwrap(),
+    ] {
+        assert!(serde_json::from_value::<ScheduleSpan>(value).is_err());
+    }
+    assert!(
+        serde_json::from_value::<TimedStart>(serde_json::to_value(&floating).unwrap()).is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(|| floating.resolve(Tz::Asia__Tokyo))
+            .unwrap()
+            .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(|| all_day.resolve(Tz::Asia__Tokyo))
+            .unwrap()
+            .is_err()
+    );
+    let end = utc(262142, 12, 31, 23, 59) + TimeDelta::seconds(59);
+    assert!(
+        serde_json::from_value::<RecurrenceEnd>(
+            serde_json::to_value(RecurrenceEnd::On(end)).unwrap()
+        )
+        .is_err()
+    );
+    assert!(TimeRange::new(end - TimeDelta::minutes(1), end).is_err());
+    let item = timed_item(
+        TimedStart::Zoned {
+            local: local("20260907T090000"),
+            zone: Tz::Asia__Tokyo,
+        },
+        Recurrence::Every(Cadence::each(Frequency::Daily).ending(RecurrenceEnd::On(end))),
+    );
+    assert!(
+        std::panic::catch_unwind(|| expand(
+            &item,
+            &[],
+            &expansion(
+                utc(2026, 9, 7, 0, 0),
+                utc(2026, 9, 8, 0, 0),
+                Tz::Asia__Tokyo
+            )
+        ))
+        .unwrap()
+        .is_err()
+    );
+    for year in [-262143, 0, 10000, 262142] {
+        let date = NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
+        let local = date.and_hms_opt(12, 0, 0).unwrap();
+        let instant = Utc.from_utc_datetime(&local);
+        assert!(
+            Recurrence::from_imported_rule(
+                "FREQ=DAILY",
+                local,
+                uuid::Uuid::new_v4().into(),
+                "date"
+            )
+            .is_err()
+        );
+        for start in [
+            TimedStart::Floating(local),
+            TimedStart::Zoned {
+                local,
+                zone: Tz::Asia__Tokyo,
+            },
+        ] {
+            assert!(
+                serde_json::from_value::<TimedStart>(serde_json::to_value(start).unwrap()).is_err()
+            );
+        }
+        for id in [
+            RecurrenceId::Date(date),
+            RecurrenceId::Floating(local),
+            RecurrenceId::Instant(instant),
+        ] {
+            assert!(
+                serde_json::from_value::<RecurrenceId>(serde_json::to_value(id).unwrap()).is_err()
+            );
+        }
+        let span = ScheduleSpan::AllDay {
+            start: date,
+            days: NonZeroU32::new(1).unwrap(),
+        };
+        let change = OverrideChange::Rescheduled(span);
+        assert!(
+            serde_json::from_value::<OverrideChange>(serde_json::to_value(change).unwrap())
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TimeRange>(
+                serde_json::json!({ "start": instant, "end": instant + TimeDelta::hours(1) })
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<RecurrenceEnd>(
+                serde_json::to_value(RecurrenceEnd::On(instant)).unwrap()
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<clipper_schedule::ActualSpan>(
+                serde_json::json!({ "state": "running", "started": instant })
+            )
+            .is_err()
+        );
+    }
+    for year in [1, 9999] {
+        let date = NaiveDate::from_ymd_opt(year, 6, 1).unwrap();
+        let local = date.and_hms_opt(12, 0, 0).unwrap();
+        json_round_trip(&TimedStart::Floating(local));
+        json_round_trip(&TimedStart::Zoned {
+            local,
+            zone: Tz::Asia__Tokyo,
+        });
+        json_round_trip(&ScheduleSpan::AllDay {
+            start: date,
+            days: NonZeroU32::new(1).unwrap(),
+        });
+        json_round_trip(&RecurrenceEnd::On(Utc.from_utc_datetime(&local)));
+    }
+}
+
+#[test]
+fn hourly_occurrences_in_a_dst_gap_have_unique_identities() {
+    let import = uuid::Uuid::new_v4().into();
+    let mut resolver = ImportedRuleResolver::new();
+    resolver
+        .insert(import, "hourly", "FREQ=HOURLY;COUNT=6")
+        .unwrap();
+    let item = timed_item(
+        TimedStart::Zoned {
+            local: local("20260329T000000"),
+            zone: Tz::Europe__Berlin,
+        },
+        Recurrence::Imported {
+            import,
+            uid: "hourly".into(),
+        },
+    );
+    let occurrences = RecurrenceEngine::with_imported_rules(resolver)
+        .occurrences(
+            &item,
+            &[],
+            &expansion(
+                utc(2026, 3, 28, 22, 0),
+                utc(2026, 3, 29, 6, 0),
+                Tz::Europe__Berlin,
+            ),
+        )
+        .unwrap();
+    assert_eq!(occurrences.len(), 5);
+    let ids: std::collections::HashSet<_> = occurrences
+        .iter()
+        .map(|occurrence| occurrence.recurrence_id)
+        .collect();
+    assert_eq!(ids.len(), occurrences.len());
+    assert_eq!(
+        occurrences.last().unwrap().span.start(),
+        utc(2026, 3, 29, 3, 0)
+    );
+}
+
 fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(y, m, d, h, min, 0)
         .single()
