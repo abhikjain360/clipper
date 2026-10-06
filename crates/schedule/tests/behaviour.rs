@@ -828,8 +828,9 @@ fn a_raw_rule_cannot_smuggle_a_second_property() {
         "FREQ=DAILY;COUNT=2\nRRULE:FREQ=MONTHLY;COUNT=5",
         "FREQ=DAILY;COUNT=2\rEXDATE:20240102T090000Z",
     ] {
-        assert!(
-            ValidatedRrule::new(smuggled).is_err(),
+        assert_eq!(
+            ValidatedRrule::new(smuggled),
+            Err(RecurrenceError::ControlCharacterInRule),
             "a folded line must not validate: {smuggled:?}"
         );
     }
@@ -855,11 +856,9 @@ fn a_non_ascii_rule_is_refused_rather_than_crashing() {
         "FREQ=WEEKLY;BYDAY=2😀",
         "FREQ=DAILY;COUNT=2;X-NOTE=café",
     ] {
-        assert!(
-            matches!(
-                ValidatedRrule::new(rule),
-                Err(RecurrenceError::UnparseableRule(_))
-            ),
+        assert_eq!(
+            ValidatedRrule::new(rule),
+            Err(RecurrenceError::NonAsciiRule),
             "a non-ASCII rule must be refused: {rule:?}"
         );
     }

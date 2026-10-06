@@ -64,12 +64,10 @@ impl ValidatedRrule {
         // non-ASCII token panics inside the parser. Refuse those bytes here,
         // before anything looks at the rule.
         if !trimmed.is_ascii() {
-            return Err(RecurrenceError::UnparseableRule(
-                "rule contains a non-ASCII character".into(),
-            ));
+            return Err(RecurrenceError::NonAsciiRule);
         }
         if trimmed.is_empty() {
-            return Err(RecurrenceError::UnparseableRule("empty rule".into()));
+            return Err(RecurrenceError::EmptyRule);
         }
         // A rule is one property, not a document. Expansion splices this
         // stored value verbatim after `RRULE:`, against the real DTSTART and
@@ -79,9 +77,7 @@ impl ValidatedRrule {
         // unchecked. Reject the whole control range, so a bare CR or a NUL
         // cannot fold lines either.
         if trimmed.contains(|character: char| character.is_control()) {
-            return Err(RecurrenceError::UnparseableRule(
-                "rule contains a control character".into(),
-            ));
+            return Err(RecurrenceError::ControlCharacterInRule);
         }
         // One probe, in the shape expansion actually uses: a UTC wall-clock
         // DTSTART and an UNTIL rewritten to match it. Probing another shape
@@ -95,8 +91,7 @@ impl ValidatedRrule {
             })
             .unwrap_or("20200101T000000Z");
         let probe = format!("DTSTART:{probe_start}\nRRULE:{probe_rule}");
-        rrule::RRuleSet::from_str(&probe)
-            .map_err(|error| RecurrenceError::UnparseableRule(error.to_string()))?;
+        rrule::RRuleSet::from_str(&probe).map_err(RecurrenceError::UnparseableRule)?;
         Ok(Self(trimmed))
     }
 
@@ -563,8 +558,14 @@ impl RecurrenceEnd {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecurrenceError {
+    #[error("a recurrence rule must be ASCII")]
+    NonAsciiRule,
+    #[error("a recurrence rule cannot be empty")]
+    EmptyRule,
+    #[error("a recurrence rule cannot contain a control character")]
+    ControlCharacterInRule,
     #[error("recurrence rule could not be parsed: {0}")]
-    UnparseableRule(String),
+    UnparseableRule(rrule::RRuleError),
     #[error("a repeat interval must be at least 1")]
     ZeroInterval,
     #[error("a repeat interval must fit in an RFC 5545 interval ({0} is too large)")]
