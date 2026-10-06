@@ -219,5 +219,4 @@ These isolation properties have tests:
   `challenge_for_unknown_user_is_indistinguishable`.
 
 A scoped database helper, composite device foreign keys, and a two-user
-isolation test for every private route are open; see `docs/issues.md`, entry
-59.
+isolation test for every private route are open; see `docs/issues.md`, entry 59.
