@@ -103,7 +103,7 @@ Each entry has:
 
 ### 8. A crafted RRULE name still gets past the numeric check
 
-- **Status:** fixing
+- **Status:** fixed in `21f1cc5`
 - **Severity:** medium. Not on main.
 - **Where:** `crates/schedule/src/ingest.rs`, `validate_rrule_numbers`.
 - **What happens:** the check ends a property name at `;` or `:`, but the
@@ -113,7 +113,7 @@ Each entry has:
 
 ### 9. A feed of empty comma-separated values costs about 470 MB to parse
 
-- **Status:** fixing
+- **Status:** fixed in `21f1cc5`
 - **Severity:** medium. Not on main.
 - **Where:** `crates/schedule/src/ingest.rs`, the pre-scan in
   `parse_calendar`.
@@ -124,7 +124,7 @@ Each entry has:
 
 ### 10. A synced item with an extreme date crashes the calendar
 
-- **Status:** fixing
+- **Status:** fixed in `21f1cc5`
 - **Severity:** low (only a record signed by one of the user's own devices).
   Not on main.
 - **Where:** `crates/schedule/src/time.rs`, `resolve_local`;
@@ -230,7 +230,7 @@ Each entry has:
 
 ### 20. Events after a second calendar block in a feed are dropped silently
 
-- **Status:** fixing
+- **Status:** fixed in `21f1cc5`
 - **Severity:** medium. Not on main.
 - **Where:** `crates/schedule/src/ingest.rs`, `parse_calendar`.
 - **What happens:** the parser stops at the first closing `END`, so a feed
@@ -240,7 +240,7 @@ Each entry has:
 
 ### 21. Two occurrences share one identity inside a daylight-saving gap
 
-- **Status:** fixing
+- **Status:** fixed in `21f1cc5`
 - **Severity:** low. Not on main.
 - **Where:** `crates/schedule/src/engine.rs`, `rule_spans`.
 - **What happens:** an imported hourly rule across a gap produces two
@@ -249,7 +249,7 @@ Each entry has:
 
 ### 22. Windows fixed-offset zone names are refused
 
-- **Status:** fixing
+- **Status:** fixed in `21f1cc5`
 - **Severity:** low. Not on main.
 - **Where:** `crates/schedule/src/ingest.rs`, `feed_time_from_partial`.
 - **What happens:** Outlook's `TZID=UTC-11` and similar exact ids are refused
@@ -258,7 +258,7 @@ Each entry has:
 
 ### 23. A revise that arrives after a purge and re-create skips revision numbers
 
-- **Status:** fixing
+- **Status:** fixed in `09b037a`
 - **Severity:** low (only the same account can cause it). Not on main.
 - **Where:** `crates/server/src/routes/objects.rs`, `revise_object`,
   `advance_object_head`.
