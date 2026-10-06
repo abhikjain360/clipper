@@ -132,12 +132,13 @@ with the version 1 AAD.
 
 The client persists the newest accepted revision body hash as a local anchor.
 It rejects a served revision below that anchor, rejects a different body at the
-same revision, and checks the parent hash for an immediate successor. Locally
-created tombstones are retained as exact signed anchors. A delete learned only
-from the event stream has no tombstone body, so the client retains the preceding
-signed head and requires any later visible revision to be at least two steps
-newer. Snapshot absence retains the accepted head but permits that same head to
-reappear.
+same revision, and checks the parent hash for an immediate successor. A
+tombstone becomes an exact signed anchor whether this device signed it or a
+live `deleted` event carried it: the event carries the tombstone's envelope and
+the source device's signing key, and the client checks the tombstone against
+the event and the held anchor before keeping it. A missing, unverifiable or
+conflicting tombstone hides the content and keeps the held anchor. Snapshot
+absence retains the accepted head but permits that same head to reappear.
 
 How durable those anchors are differs by platform, and the difference is not
 one of degree. On native the anchors are rows in the client's database, kept
