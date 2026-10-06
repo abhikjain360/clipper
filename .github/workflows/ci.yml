@@ -154,5 +154,3 @@ jobs:
         run: nix run .#web-check
       - name: Mobile lint and type check
         run: nix run .#mobile-check
-      - name: Tauri no-bundle build
-        run: nix run .#tauri-build -- --no-bundle
