@@ -2284,7 +2284,7 @@ pub async fn purge_object(
     let locked = objects::Entity::update_many()
         .col_expr(
             objects::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::col(objects::Column::UpdatedAt).into(),
+            sea_orm::sea_query::Expr::col(objects::Column::UpdatedAt),
         )
         .filter(objects::Column::Id.eq(object_uuid))
         .filter(objects::Column::UserId.eq(auth.user_id))
