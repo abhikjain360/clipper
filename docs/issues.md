@@ -94,7 +94,7 @@ Each entry has:
 
 ### 7. A file listed as clipboard is installed as a clipboard item
 
-- **Status:** open (queued for the next client fix pass)
+- **Status:** fixed in `3ccc245`
 - **Severity:** low (needs a malicious server). On main.
 - **Where:** `crates/client/src/engine.rs`, `snapshot_clipboard` and the other
   snapshot loops.
@@ -760,7 +760,7 @@ Each entry has:
 
 ### 16. A lost reply to a timer write leaves the timer stuck or duplicated
 
-- **Status:** open (queued for the next client fix pass)
+- **Status:** fixed in `3ccc245`
 - **Severity:** medium. Not on main.
 - **Where:** `crates/client/src/engine.rs`, `start_actual`,
   `stop_actual_inner`, `write_schedule_record_for_session`.
@@ -774,7 +774,7 @@ Each entry has:
 
 ### 17. Each retry of a failed calendar sync uploads another copy of the feed
 
-- **Status:** open (queued for the next client fix pass)
+- **Status:** fixed in `3ccc245`
 - **Severity:** low. Not on main.
 - **Where:** `crates/client/src/calendar_import.rs`, `sync_calendar_source`.
 - **What happens:** after a lost reply, each Sync uploads a new raw feed file
@@ -785,7 +785,7 @@ Each entry has:
 
 ### 18. One damaged anchor row stops cleanup for that kind on every pass
 
-- **Status:** open (queued for the next client fix pass)
+- **Status:** fixed in `3ccc245`
 - **Severity:** medium. Not on main.
 - **Where:** `crates/client/src/local_store/sqlite.rs`, `forget_object`.
 - **What happens:** reads skip a damaged anchor, but cleanup refuses to
@@ -795,7 +795,7 @@ Each entry has:
 
 ### 19. A listed file that cannot be decrypted is hidden by cleanup
 
-- **Status:** open (queued for the next client fix pass)
+- **Status:** fixed in `3ccc245`
 - **Severity:** low. On main.
 - **Where:** `crates/client/src/engine.rs`, `snapshot_files`.
 - **What happens:** clipboard and schedule mark such an item as seen and keep
