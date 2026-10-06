@@ -7,11 +7,9 @@ wire types are `ObjectEnvelopeBody`, `ObjectEnvelopePayload`, and
 `crates/core/src/crypto.rs`; the client creates and verifies envelopes; the
 server validates placement and stores the chain.
 
-Version 1 is the initial supported format, including revision chains. Unsupported
-versions are rejected. Abandoned development formats are not supported; existing
-QA objects from those formats must be regenerated. Future incompatible format
-changes must increment the version. Object revision numbers are independent of
-this format version.
+Version 1 is the only supported format, and it includes revision chains.
+Unsupported versions are rejected. An incompatible format change must increment
+the version. Object revision numbers are independent of this format version.
 
 ## Keys and primitives
 
@@ -129,7 +127,7 @@ history remains until the whole tombstoned object is purged.
 For a listed or fetched live head, the client checks that the clear response and
 signed body agree on id, kind, revision, source device, timestamp, metadata, and
 payload descriptors. It verifies the signature when the source device public
-key is still available, checks downloaded payload hashes, and then decrypts
+key is available, checks downloaded payload hashes, and then decrypts
 with the version 1 AAD.
 
 The client persists the newest accepted revision body hash as a local anchor.
@@ -161,7 +159,9 @@ anchor. If the server jumps forward by more than one revision, the client does
 not possess the intermediate bodies and cannot verify each missing link. The
 server can still omit objects or revisions and deny service. The local anchor
 prevents rollback of history this device has already accepted; it does not
-prove that the server showed the device every revision.
+prove that the server showed the device every revision. Confirming these limits,
+and whether browser anchors need durable storage, is
+[`docs/issues.md`](issues.md), entry 64.
 
 ## Exact historical references
 
@@ -194,13 +194,11 @@ History is immutable, not immortal. Permanent purge removes it; a server can
 also withhold it. The client reports historical context as unavailable rather
 than silently substituting the latest definition. Resolved planned bounds and
 observer timezone on the actual remain usable even when its source history is
-unavailable. References do not currently prevent purge or implement a retention
-policy. A previously verified definition can remain available in memory after
-server purge until eviction or session invalidation; server deletion cannot
-retroactively erase client-held content. A process restart discards this cache.
-
-Validation of this revision-aware historical-read change is pending integration
-completion; the earlier verification guarantees above remain the baseline.
+unavailable. References do not prevent purge, and there is no retention policy
+for history ([`docs/issues.md`](issues.md), entry 66). A verified definition can
+remain available in memory after server purge until eviction or session
+invalidation; server deletion cannot retroactively erase client-held content. A
+process restart discards this cache.
 
 ## Trust model
 
@@ -211,9 +209,10 @@ public key and re-sign a matching body, but it still cannot create ciphertext
 that authenticates under `K`.
 
 Deleting a device sets revision source-device foreign keys to null. The signed
-body still carries the original device id, but the server can no longer return
-that device's public key. The client then skips the provenance signature check
-while retaining all response/body checks and the load-bearing AEAD verification.
+body still carries the original device id, but the server cannot return that
+device's public key. The client then skips the provenance signature check while
+keeping all response/body checks and the AEAD verification, which is the real
+authenticity check.
 
 ## Device key storage
 
@@ -225,5 +224,5 @@ XChaCha20-Poly1305, and its AAD is
 profile_id))`. That binds the record's cleartext header to the secret, so a
 rewritten `device_id` or a record copied between profiles fails to unwrap.
 Native files and directories are permission-restricted and written atomically.
-Plaintext or forged legacy identity records are rejected rather than migrated,
-and so is a malformed `device_id`.
+Plaintext or forged identity records are rejected, and so is a malformed
+`device_id`.

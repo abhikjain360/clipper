@@ -472,6 +472,9 @@ Each entry has:
 - **Recommendation:** keep same-user trust and say so, or harden: byte-based
   file IPC instead of paths, an app-bound keychain ACL, a code-signature check
   of the peer on macOS, and the shared regular-file check on the Tauri side.
+- **Linux options:** an AppArmor or SELinux profile, the Flatpak or Snap
+  sandbox identity of the peer, and failing closed when a required peer label
+  cannot be verified.
 - **Decision:**
 
 ### 54. Whether a username exists can still be learned
@@ -1362,7 +1365,7 @@ Each entry has:
 
 ### 115. Docs point to the wrong issue list or describe old behaviour
 
-- **Status:** open
+- **Status:** fixed by the docs consolidation
 - **What happens:** README, SECURITY.md and CONTRIBUTING.md call
   `docs/rust-code-review.md` the list of known issues; SECURITY.md describes a
   "plaintext local clipboard cache" (the cache is encrypted) and an "Accepted /

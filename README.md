@@ -4,8 +4,8 @@ Encrypted clipboard and file sync.
 
 > **Status: early and experimental.** Clipper is pre-1.0, has not been security
 > audited, and has known unfixed issues tracked in
-> [`docs/rust-code-review.md`](docs/rust-code-review.md). Don't trust it with
-> secrets you can't afford to lose yet. See [SECURITY.md](SECURITY.md).
+> [`docs/issues.md`](docs/issues.md). Don't trust it with secrets you can't
+> afford to lose yet. See [SECURITY.md](SECURITY.md).
 
 > **Contributions:** upstream pull requests are closed for now. Clipper is
 > experimental both as a product and as a development-process experiment: it is
@@ -32,6 +32,8 @@ bearer tokens or sync metadata from plain HTTP.
 
 `crates/server` is the Axum API and SQLite storage.
 `crates/client` is the shared Rust sync client.
+`crates/schedule` is the scheduling domain: series, recurrence expansion,
+calendar ingest and the alarm plan.
 `crates/web-wasm` is the wasm-bindgen adapter for the browser client.
 `crates/mobile-uniffi` is the UniFFI adapter for React Native mobile.
 `crates/daemon` is the local macOS/Linux background process.
@@ -47,11 +49,12 @@ bearer tokens or sync metadata from plain HTTP.
 The browser client is a Vite/React app that uses the shared Rust sync client
 through `crates/web-wasm`.
 
-The native desktop client is a Tauri shell around the same React UI. Its Rust
-backend runs `clipper-client` in-process, stores client data under the app data
-directory, and uses Tauri plugins for native file dialogs and clipboard access.
-On macOS and Linux, `clipper-client` starts its platform clipboard watcher after
-login.
+The native desktop client is a Tauri shell around the same React UI. The shell
+starts the local `clipper-daemon` and talks to it over local IPC. The daemon
+runs `clipper-client` and stores client data under the user's data directory, so
+sync continues after the window closes. The shell uses Tauri plugins for native
+file dialogs and clipboard access. On macOS and Linux, `clipper-client` starts
+its platform clipboard watcher after login.
 
 The mobile client is React Native/Expo for Android. It has native RN components
 under `mobile/src`, shares frontend contracts through `packages/shared`, and

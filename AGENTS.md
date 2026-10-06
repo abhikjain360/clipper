@@ -3,13 +3,14 @@
 - Always use built in harness commands for reading and writing instead of bash/python, whenever possible.
 - **Do not talk in prose.** Talk in simple English, your explanations should follow linearly/serially, or at least like a waterfall, not requiring cyclic back-and-forth of reading paragraphs or sentences to understand. No mannered prose. If there's a literal phrase available, please use it. The same applies for comments.
 
-## Scheduler status
+## Known issues and scheduler specs
 
-- For outstanding scheduler work and undecided behavior, start with
-  `docs/scheduler-backlog.md`. Keep it updated when scheduler work lands or a
-  product decision changes. `docs/scheduler-review.md` holds QA evidence and
-  `docs/schedule-plan.md` holds the detailed design/history.
-  `docs/calendar-imports.md` specifies import snapshots, replacement and deletion.
+- Known bugs, security issues and undecided product questions are in
+  `docs/issues.md`. Add an entry when you find one and update its status when it
+  is fixed or decided.
+- `docs/schedule-model.md` specifies the schedule data model.
+  `docs/calendar-imports.md` specifies import snapshots, replacement and
+  deletion.
 
 ## Environment
 
@@ -132,12 +133,34 @@
   no narrower static origin list to use.
 - `sha2` must stay on the `0.10` line while `opaque-ke` depends on the `digest`
   0.10 trait ecosystem.
+- The `pnpm-workspace.yaml` package extension gives `@tamagui/static` a
+  TypeScript `~5.9` dependency. Tamagui's static extractor imports the
+  TypeScript JavaScript compiler API at runtime to read tsconfig files and
+  resolve aliases, declares it only as a dev dependency, and TypeScript 7 does
+  not expose that API. Clipper's own type checks use `tsgo` and are not affected.
+  Before removing or changing the extension on a Tamagui upgrade:
+  - Check the published `@tamagui/static` package, not only its release notes,
+    for imports of `sys`, `findConfigFile`, `readConfigFile`,
+    `parseJsonConfigFileContent` and `nodeModuleNameResolver` from
+    `typescript`, or for a correctly declared runtime dependency.
+  - Upgrade the pinned Tamagui packages together.
+  - Verify a frozen-lockfile install, the Vite development transforms of
+    `main.tsx`, `App.tsx` and `SchedulePanel.tsx`, and the production web build.
+    Read the build logs: Tamagui can report extraction errors while Vite exits
+    successfully.
 
 ## Boundaries
 
 - Shared HTTP/WebSocket payloads live in `crates/api-types`.
-- Daemon IPC types live in `crates/daemon-types`.
+- Daemon IPC types live in `crates/daemon-types`. Its state types re-export
+  `crates/app-types`, so daemon IPC and app state share one definition.
 - Display-ready app state lives in `crates/app-types`.
+- The scheduling domain (series, overrides, recordings, recurrence expansion,
+  calendar ingest and the alarm plan) lives in `crates/schedule`. It does no
+  I/O, crypto or storage.
+- The crypto core lives in `crates/core`. The filesystem rollback guard for file
+  writes lives in `crates/fs-txn`.
+- `web/src/backend/index.ts` chooses the Tauri or the wasm backend at runtime.
 - Browser wasm bindings live in `crates/web-wasm`.
 - Tauri desktop commands live in `web/src-tauri`.
 - Shared browser/native React UI lives in `web/src`.

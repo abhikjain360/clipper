@@ -42,7 +42,7 @@ the same meeting or feed imported through two sources is intentionally duplicate
    from its saved raw file; otherwise fetch a new response.
 2. Parse and validate the entire response. Any skipped/unreadable event, duplicate
    UID, invalid feed, oversized event or oversized source manifest rejects the
-   replacement. The previously active calendar stays active. An explicitly valid
+   replacement, and the active batch stays active. An explicitly valid
    empty calendar is a valid replacement and removes the previous events.
 3. Upload the raw file and publish the pending manifest. Upload/verify every event
    in the pending batch. Deterministic object IDs allow resuming accepted writes
@@ -59,8 +59,17 @@ the same meeting or feed imported through two sources is intentionally duplicate
 Refresh and source/file deletion are serialized locally with authentication
 changes, so a batch cannot cross an account switch. Concurrent devices may resume
 one pending batch; they cannot activate competing source revisions silently.
-Even identical successful refreshes currently replace the previous batch. There
-is no cross-source or same-source content deduplication policy.
+Every successful refresh replaces the previous batch, even when the feed is
+unchanged. Nothing deduplicates events across sources or within one source.
+
+A pending batch must finish before its source or raw file can be removed, and it
+cannot be cancelled. The previous active batch stays in use while the pending
+one uploads. A crash or an ambiguous network failure between the raw-file upload
+and publishing the pending manifest leaves a raw file that no manifest
+references; it activates no events, and nothing removes it. On a device that
+does not hold the raw file's accepted head, cleanup waits for normal file sync
+instead of creating a revision anchor. Recovery for these cases is open; see
+`docs/issues.md`, entry 92.
 
 The raw feed is limited to 8 MiB. Parsed records and source manifests must fit the
 existing 256 KiB encrypted schedule-record limit; they are checked before staging.
@@ -84,26 +93,10 @@ The calendar UI explains consequences and asks for confirmation:
 A recording pins the exact imported plan revision it originally used. After that
 plan is purged, historical-plan lookup reports unavailable instead of substituting
 an event from a newer import. Captured recording times and planned bounds remain
-in the recording. Previously decrypted history may remain cached on another device
-until eviction/logout; purge does not erase another device's memory.
+in the recording. History that another device already decrypted can stay cached
+there until eviction or logout; purge does not erase another device's memory.
 
-Standalone overrides retain their old base references. They are not automatically
-reattached to a new imported batch. A resolution/reattachment UI remains deferred.
-Deleting a raw file through Files also purges it when it is identified as an import
-by a locally available source manifest; ordinary file deletion remains a tombstone.
-
-## Remaining recovery limits
-
-A pending import must finish before its source or raw file can be removed through
-these commands. Cancellation/recovery UI for a permanently unfinishable pending
-batch is still needed. The calendar's previous active batch remains usable while
-an upload is pending.
-
-A crash or ambiguous network failure between raw-file upload and publishing the
-pending manifest can leave an unreferenced file in Files. It does not activate
-any events. Automatic orphan-file cleanup is not implemented. Cleanup on a device
-missing the raw file's accepted head waits for normal file sync rather than
-inventing a revision anchor.
-
-This format intentionally does not migrate abandoned development imports. Rebuild
-clients and regenerate calendar sources when testing the cutover.
+Standalone overrides keep their old base references. They are not reattached to
+a new imported batch, and there is no UI to reattach them.
+Deleting a raw file through Files also purges it when a locally available source
+manifest identifies it as an import; ordinary file deletion writes a tombstone.

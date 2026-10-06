@@ -22,14 +22,14 @@ Cipher suite: `Ristretto255 + TripleDH + SHA-512 + Argon2id`
 
 ## Key stretching
 
-`KSF` is Argon2id with memory 19456 KiB (19 MiB), 2 iterations, and parallelism
-
-1. The parameters are written out in `crates/core/src/crypto.rs`
-   (`OPAQUE_KSF_M_COST_KIB`, `OPAQUE_KSF_T_COST`, `OPAQUE_KSF_P_COST`) and passed
-   to both `opaque_client_register_finish` and `opaque_client_login_finish`, so
-   registration and login provably stretch the same way. They match the `argon2`
-   crate's current defaults, but they are stated rather than inherited: a
-   dependency bump that moved the default would otherwise change `rwd` silently.
+`KSF` is Argon2id with 19456 KiB (19 MiB) of memory, 2 iterations and a
+parallelism of 1. The parameters are written out in `crates/core/src/crypto.rs`
+(`OPAQUE_KSF_M_COST_KIB`, `OPAQUE_KSF_T_COST`, `OPAQUE_KSF_P_COST`) and passed to
+both `opaque_client_register_finish` and `opaque_client_login_finish`, so
+registration and login provably stretch the same way. They match the `argon2`
+crate's defaults, but they are stated rather than inherited: a dependency bump
+that moved the default would otherwise change `rwd` silently. Whether to raise
+them before deployment is [`docs/issues.md`](issues.md), entry 58.
 
 The parameters are not stored in the password file, so they are not negotiated
 per user. Changing any of the three changes `rwd`, and therefore the export key
@@ -106,9 +106,8 @@ Consequences worth understanding before reading the steps below:
   auth tests.
 - So while `register/start` is non-revealing, the full two-step flow still lets a
   caller who holds a valid unused access key learn — at `register/finish` — whether
-  a chosen username exists (200 then `409`), now without spending the key. This
-  residual oracle is recorded in
-  [`docs/security-review.md`](security-review.md) rather than blessed here.
+  a chosen username exists (200 then `409`), without spending the key. Whether to
+  accept this is open: [`docs/issues.md`](issues.md), entry 54.
 
 ### Round 1 — client (`opaque_client_register_start(pw)`)
 
@@ -375,7 +374,44 @@ most once per `LAST_SEEN_REFRESH_SECS` (60 s) to avoid a write per request.
 `logout` deletes the current session row.
 
 There is no token rotation/refresh: a token is valid until it expires (30 days)
-or its session is deleted (logout, or cascade on device/user delete).
+or its session is deleted (logout, or cascade on device/user delete). There is no
+in-memory session cache, so deleting a session row revokes its token on the next
+request.
+
+### Devices and their removal
+
+Each `devices` row is keyed by its `id`, belongs to one `user_id`, and holds the
+device's Ed25519 signing public key, a name, a platform and `last_seen_at`. The number of devices
+per user is capped by `limits.max_user_devices`, enforced in `issue_session` (see
+[`server-resource-limits.md`](server-resource-limits.md)).
+
+Two routes let a user manage their own devices. Both are scoped to the
+authenticated `user_id`:
+
+- `GET /api/auth/devices` lists the user's devices (id, name, platform,
+  created-at, last-seen), most recently seen first.
+- `DELETE /api/auth/devices/{id}` deletes one device row. An unknown id, or a
+  device of another user, returns 404. A user may remove the device they are
+  using; that ends the current session, like logging out.
+
+Deleting a device row has two effects through foreign keys:
+
+- `sessions.device_id` is `ON DELETE CASCADE`, so every session of that device
+  is deleted and its bearer tokens stop working.
+- `object_revisions.source_device_id` is `ON DELETE SET NULL`, so the revisions
+  the device signed stay in place with no source device.
+
+A removed device's signed history stays valid and decryptable. The envelope
+signature proves only server-checked provenance; the authenticity check that
+matters is the AEAD under the data key (see
+[`object-envelopes.md`](object-envelopes.md)). For a revision whose source device
+is gone, list and get responses return
+`source_device_signing_public_key = None`, and the client skips the provenance
+check while still verifying the AEAD.
+
+Removal is a hard delete, so the same device id can register again. There is no
+way to list or revoke single sessions, and no cross-user revocation by an
+operator: [`docs/issues.md`](issues.md), entry 56.
 
 ## Clipper deviations from a "stock" OPAQUE deployment
 
@@ -398,8 +434,8 @@ or its session is deleted (logout, or cascade on device/user delete).
     AEAD-wrap the persisted device signing secret at rest on the client (see
     `crates/client/src/local_store.rs`, `AAD_WRAP_DEVICE_SIGNING_SECRET_V1`).
 
-  The server never receives either key and no longer returns a separate
-  encryption salt / KDF parameter set.
+  The server never receives either key and returns no encryption salt or KDF
+  parameters.
 
 - Access keys are an invite-gate that lives entirely outside OPAQUE.
 
@@ -471,10 +507,10 @@ ciphertext cannot be moved between columns):
 
 - `server_config.opaque_server_setup`
 - `users.opaque_password_file` (AAD also binds the `user_id`)
-- `users.encryption_salt` (legacy non-null column; now wrapped over an **empty**
-  byte string as a placeholder until a schema migration removes it — new clients
-  derive object-encryption keys from OPAQUE's `export_key`, so the server no
-  longer generates or returns a salt)
+- `users.encryption_salt` (a non-null column that registration fills with a
+  wrapped **empty** byte string; nothing reads it, because clients derive
+  object-encryption keys from OPAQUE's `export_key`. Removing the column is
+  [`docs/issues.md`](issues.md), entry 111.)
 - `server_config.access_key_hash_salt`
 
 Access keys:
@@ -487,8 +523,9 @@ Plaintext on disk:
 
 - `sessions.token_hash` — SHA-256 of a 32-byte (default) random token; not
   brute-forceable.
-- `objects.meta_ciphertext` and `object_payloads/*.bin` — already
-  client-encrypted with a key derived from the OPAQUE `export_key`.
+- `object_revisions.meta_ciphertext` and the per-revision payload files
+  (`{object_id}.r{revision}.{payload_id}.bin` in the objects directory) —
+  already client-encrypted with a key derived from the OPAQUE `export_key`.
 
 Wrap format and key derivation live in `clipper_core::crypto`
 (`wrap_with_key`, `unwrap_with_key`, `derive_subkey`, `HKDF_LABEL_*`,

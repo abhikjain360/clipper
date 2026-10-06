@@ -17,8 +17,8 @@ The relevant code is:
 - `crates/client/src/api_client.rs` — derivation of the data key and the
   device-identity wrapping key from the OPAQUE export key.
 - `crates/core/src/crypto.rs` — the AEAD, KDF, and wrap/unwrap primitives.
-- `crates/fs-txn/src/lib.rs` — a separate rollback guard for staged file writes
-  (used elsewhere; see the caveat below).
+- `crates/fs-txn/src/lib.rs` — a separate rollback guard for staged file writes,
+  used by the server rather than the client (see the last section).
 
 ## Key material and where it comes from
 
@@ -29,21 +29,22 @@ logins, and it never leaves the client. From it the client derives two
 independent 32-byte keys with HKDF-SHA256, using distinct domain-separation
 labels (`crates/core/src/crypto.rs`):
 
-| Key                              | Derivation                                                   | Label                                               | Purpose                                                                                                                                                           |
-| -------------------------------- | ------------------------------------------------------------ | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Data key**                     | `derive_data_key_from_opaque_export_key`                     | `clipper:opaque-export:data-key:v1`                 | Encrypts/decrypts all object material (clipboard meta, clipboard payloads, file meta, file blobs). This is the E2EE key shared with the server-stored ciphertext. |
-| **Device-identity wrapping key** | `derive_device_identity_wrapping_key_from_opaque_export_key` | `clipper:opaque-export:device-identity-wrap-key:v1` | Wraps the persisted device signing secret at rest.                                                                                                                |
+- **Data key**: `derive_data_key_from_opaque_export_key`, label
+  `clipper:opaque-export:data-key:v1`. It encrypts and decrypts all object
+  material (clipboard meta, clipboard payloads, file meta, file blobs). This is
+  the end-to-end key behind the ciphertext the server stores.
+- **Device-identity wrapping key**:
+  `derive_device_identity_wrapping_key_from_opaque_export_key`, label
+  `clipper:opaque-export:device-identity-wrap-key:v1`. It wraps the persisted
+  device signing secret at rest.
 
-Crucially, **neither key is persisted anywhere** — not on disk, not in the OS
-keychain, not in `localStorage`. Both are re-derived from the OPAQUE export key
-on every login or registration (`ApiClient::login_prepare` /
-`register_prepare`), held only in memory inside `SyncEngine`
-(`encryption_key` and, indirectly via the loaded signing key, the wrapping key),
-and dropped on logout. They live inside `Zeroizing` wrappers so per-call copies
-are wiped on drop. Two known exceptions (2026-07-19 audit R23): the `cache_key`
-stack copy held across cache hydration (`engine.rs:380`), and the plain
-`Vec<u8>` returned by `crypto::decrypt` / `unwrap_with_key` during
-device-identity unwrap, are not wiped on drop.
+**Neither key is persisted anywhere** — not on disk, not in the OS keychain, not
+in `localStorage`. Both are re-derived from the OPAQUE export key on every login
+or registration (`ApiClient::login_prepare` / `register_prepare`), held only in
+memory inside `SyncEngine` (`encryption_key` and, indirectly via the loaded
+signing key, the wrapping key), and dropped on logout. They live inside
+`Zeroizing` wrappers, but not every copy is wiped on drop:
+[`docs/issues.md`](issues.md), entry 42.
 
 This means a cold attacker who reads the on-disk cache (or `localStorage`) but
 does not know the passphrase cannot decrypt anything: the only persisted secret
@@ -64,8 +65,7 @@ The passphrase and all encryption/wrapping/signing key material are
 intentionally not persisted, so the daemon waits for the app to provide it after
 startup"). The daemon cannot decrypt the local cache on its own after a restart;
 it waits for the UI to re-supply the passphrase, which re-derives the keys via
-OPAQUE login. Legacy `Credentials` JSON that still carries a `passphrase` field
-is migrated by re-storing the record without it on the next load.
+OPAQUE login.
 
 ## What is encrypted at rest
 
@@ -104,8 +104,8 @@ On hydration (`hydrate_ciphertext_cache`) the cache decrypts each held record
 with the in-memory data key. A record that fails to decrypt or fails its
 integrity checks is logged and its content discarded rather than surfaced — but
 not its revision anchor, which is retained so that an unreadable cache entry
-costs a refetch and not the rollback protection for that object (see
-[`local-store-plan.md`](local-store-plan.md), S7). Before a cached clipboard payload is
+costs a refetch and not the rollback protection for that object. Before a
+cached clipboard payload is
 decrypted, `verify_payload_ciphertext` re-checks its length and SHA-256 against
 the descriptor, so a tampered or truncated ciphertext file is rejected.
 
@@ -156,7 +156,7 @@ in-memory `signing_secret_key` is held in `Zeroizing`.
 
 #### Plaintext records
 
-Legacy or forged plaintext identity records are not accepted. A record without
+Plaintext identity records are not accepted. A record without
 `version = 3` and `wrapped_signing_secret_key` fails closed and is not silently
 promoted into a wrapped identity (`rejects_plaintext_device_identity_record`).
 
@@ -197,14 +197,14 @@ leak through them. The same test asserts `0600` on both the database and its
 write-ahead log, and searches the bytes of both for the plaintext
 (`"super-secret"`).
 
-The database runs in WAL mode with `synchronous = FULL`, matching the `sync_all`
-the file store performed on every record it wrote. Writes that used to be a
-sequence of separate file operations — a record and its payload, or a delete
-that removed a payload and then rewrote a record — are single transactions, so
-the half-applied states in between are no longer reachable.
+The database runs in WAL mode with `synchronous = FULL`, so a committed write
+survives an app crash. On macOS it does not set `fullfsync`, so a commit may not
+survive a power loss: [`docs/issues.md`](issues.md), entry 78. A record and its
+payload, or a delete that removes a payload and rewrites a record, are each one
+transaction, so a half-applied state is never stored.
 
-`write_private_file_atomic` still writes the one thing that is not a database
-row, the device-identity file:
+`write_private_file_atomic` writes the one thing that is not a database row, the
+device-identity file:
 
 1. Open a uniquely named temp file (`*.<uuid_v7>.tmp`) with `create_new(true)`
    (fails if it already exists) and, on Unix, mode `0600` at open time.
@@ -212,9 +212,8 @@ row, the device-identity file:
 3. `rename` the temp file over the final path.
 
 Deletes drop the object row; the payload row is tied to it and goes with it, for
-every object kind. What survives is the revision anchor, in its own table (see
-[`local-store-plan.md`](local-store-plan.md), S2) — dropping cached content is
-always safe and can never reach one.
+every object kind. What survives is the revision anchor, in its own table, so
+dropping cached content is always safe and can never remove an anchor.
 
 ## Browser (`wasm`) storage
 
@@ -252,8 +251,7 @@ resume the client re-installs the token, confirms it is still live
 with the stored wrapping key and re-mounts the engine — no OPAQUE login runs and
 no new device is enrolled.
 
-This is a deliberate confidentiality trade-off, recorded here per the client
-security audit (finding A1):
+This is a deliberate confidentiality trade-off:
 
 - `sessionStorage` is plaintext and same-origin-script readable, and the data
   key must be present as raw bytes for the wasm XChaCha20-Poly1305 AEAD (a
@@ -264,26 +262,23 @@ security audit (finding A1):
   **server-revocable** (logout or device removal deletes the session row), and
   the blob is wiped when the tab closes. So unlike persisting the passphrase,
   removing the device or rotating the token bounds an attacker's **API
-  access** — with an important limit (2026-07-19 audit R14): the data key is
-  static (HKDF of the OPAQUE export key, never rotated), so revocation cannot
-  claw back ciphertext an attacker already recorded (including the
-  `localStorage` ciphertext cache, which outlives the tab); against a malicious
-  server that archives ciphertext, content confidentiality past and future is
-  lost until a passphrase-rotation feature exists.
+  access**. The limit is that the data key is static (HKDF of the OPAQUE export
+  key, never rotated), so revocation cannot claw back ciphertext an attacker
+  already recorded (including the `localStorage` ciphertext cache, which
+  outlives the tab). Against a malicious server that archives ciphertext,
+  content confidentiality past and future is lost until the passphrase can be
+  changed: [`docs/issues.md`](issues.md), entry 57.
 - Under Tauri the daemon owns the session and survives webview reloads. Mobile
-  now exports the same resume operations over UniFFI and stores token, data key,
-  identity wrapping key, and profile in `clipper.session.v2` using biometric-gated
-  SecureStore. It never saves the passphrase. Startup deletes the obsolete v1
-  credential slot; users of that local state log in again. Resume reuses the
-  device identity and validates the revocable session with the server. The static
-  data-key caveat above still applies: revocation bounds API access, not access
-  to ciphertext already obtained. This resolves audit R1/CR6's persisted-root
-  issue; it does not implement key rotation.
+  exports the same resume operations over UniFFI and stores the token, data key,
+  identity wrapping key and profile in `clipper.session.v2` in biometric-gated
+  SecureStore. It never saves the passphrase. Resume reuses the device identity
+  and validates the revocable session with the server. The static data-key limit
+  above applies here too.
 
 ## The `fs-txn` crate is a different mechanism
 
 `crates/fs-txn/src/lib.rs` (`FsTransaction`) is **not** what `local_store` uses
-for atomic writes, and it is worth not conflating the two:
+for atomic writes. The server uses it for staged payload files. The two differ:
 
 - `FsTransaction` writes files to their **final paths immediately** and tracks
   them so that, unless `commit()` is called, `Drop` removes them. Its own doc
@@ -295,26 +290,6 @@ for atomic writes, and it is worth not conflating the two:
   provide rollback across multiple files.
 
 `FsTransaction` is the on-disk analogue of a database transaction's rollback (undo
-filesystem side effects on the same error paths that roll back the DB). It also
-sets `0600` on the files it creates, via the same `create_new` + `set_permissions`
-sequence.
-
-## Flagged gaps
-
-These are factual descriptions of current behavior that may warrant a closer
-security look; they are reported in the discrepancy list accompanying this
-document.
-
-- **`device_id` is stored in cleartext** in the device-identity record (both the
-  wrapped native record and the `localStorage` record). Only the signing secret
-  is wrapped. This is a low-sensitivity identifier, but it is metadata that is
-  not protected at rest. It is no longer unauthenticated: the wrap AAD binds
-  `label ‖ version ‖ device_id ‖ profile_id`, so substituting another UUID
-  fails the tag rather than silently migrating the device identity, and a
-  malformed id is an error rather than a re-mint (2026-07-19 audit R25, crypto
-  review CR4 — closed).
-- **`FsTransaction` sets `0600` after creating files**, not via the open mode.
-  There is a brief window in which a staged server payload file exists with
-  default-umask permissions before the `chmod`. The client local store no longer
-  has that window: `write_private_file_atomic` opens temp files with mode `0600`
-  on Unix.
+filesystem side effects on the same error paths that roll back the DB). It
+creates each file with `create_new` and, on Unix, opens it with mode `0600`, so
+a staged file is never readable by other users.

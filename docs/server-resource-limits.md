@@ -1,7 +1,7 @@
 # Server Resource Limits
 
 This document describes the abuse and resource-limit controls the Clipper
-server enforces today: request rate limiting, per-user storage quotas, and the
+server enforces: request rate limiting, per-user storage quotas, and the
 in-memory caps that bound WebSocket and auth state. It reflects the code in
 `crates/server/src`, not an aspirational policy.
 
@@ -21,16 +21,21 @@ rate is `N` per minute and whose burst capacity is also `N`: a fresh key may
 spend `N` cells immediately, after which cells replenish at `N`/minute. A
 rejected check does not consume a cell.
 
-The `RateLimiter` holds six independent buckets:
+The `RateLimiter` holds six independent buckets. Each item gives the bucket,
+its key, its default rate per minute and its config field:
 
-| Bucket               | Key                                                      | Default `/min` | Config field                                |
-| -------------------- | -------------------------------------------------------- | -------------- | ------------------------------------------- |
-| `auth_by_client`     | resolved client IP (see keying below)                    | 10             | `rate_limit.auth_per_client_per_minute`     |
-| `auth_by_username`   | SHA-256 of the submitted username, truncated to 16 bytes | 30             | `rate_limit.auth_per_username_per_minute`   |
-| `auth_global`        | none (one direct bucket for the whole server)            | 3000           | `rate_limit.auth_global_per_minute`         |
-| `api_by_client`      | resolved client IP                                       | 2400           | `rate_limit.api_per_client_per_minute`      |
-| `api_by_user`        | authenticated `user_id` (UUID)                           | 1200           | `rate_limit.api_per_user_per_minute`        |
-| `ws_tickets_by_user` | authenticated `user_id` (UUID)                           | 30             | `rate_limit.ws_tickets_per_user_per_minute` |
+- `auth_by_client`: the resolved client IP (see keying below); 10;
+  `rate_limit.auth_per_client_per_minute`.
+- `auth_by_username`: SHA-256 of the submitted username, truncated to 16 bytes;
+  30; `rate_limit.auth_per_username_per_minute`.
+- `auth_global`: no key (one direct bucket for the whole server); 3000;
+  `rate_limit.auth_global_per_minute`.
+- `api_by_client`: the resolved client IP; 2400;
+  `rate_limit.api_per_client_per_minute`.
+- `api_by_user`: the authenticated `user_id`; 1200;
+  `rate_limit.api_per_user_per_minute`.
+- `ws_tickets_by_user`: the authenticated `user_id`; 30;
+  `rate_limit.ws_tickets_per_user_per_minute`.
 
 `garde` rejects any of these set to `0`. There is no separate burst knob.
 
@@ -89,6 +94,9 @@ only `challenge` consults it.
 The authenticated routes:
 
 - `POST /api/auth/logout`
+- `GET /api/auth/validate`
+- `GET /api/auth/devices`
+- `DELETE /api/auth/devices/{id}`
 - `POST /api/ws-ticket`
 - `POST /api/objects/init`
 - `GET` / `PUT /api/objects/{id}/payloads/{payload_id}`
@@ -98,6 +106,9 @@ The authenticated routes:
 - `GET /api/objects/{id}/revisions/{revision}/payloads/{payload_id}`
 - `GET` / `DELETE /api/objects/{id}`
 - `GET /api/objects`
+- `GET` / `POST /api/collab-docs`
+- `GET /api/collab-docs/{id}/meta`
+- `PATCH` / `DELETE /api/collab-docs/{id}`
 - `GET /api/ws`
 
 are wrapped by three layers. From outermost to innermost:
@@ -124,17 +135,25 @@ This second, tighter per-user bucket exists because all minted tickets share
 one in-memory map; unbounded minting by one account would let it churn that
 shared map (see the per-user pending-ticket cap below).
 
-### Routes with no rate-limit middleware
+### Unauthenticated routes outside the auth router
 
 One route is merged at the top level of the router with **no** rate-limit
 layer:
 
 - `GET /api/health`
 
-`GET /api/ws-ticket/connect` is also merged at the top level, but has
-`api_rate_limit_middleware` applied per client IP. It is unauthenticated (it
-authenticates by consuming a ticket) and does a SHA-256 plus an in-memory map
-lookup per request. See "Gaps" below.
+Three other unauthenticated routes are merged at the top level with
+`api_rate_limit_middleware` applied per client IP:
+
+- `GET /api/ws-ticket/connect` authenticates by consuming a ticket and does a
+  SHA-256 plus an in-memory map lookup per request.
+- `GET /api/collab-docs/{id}/ws` (the collab Y-sync socket) and
+  `GET /api/s/{share_token}/meta` (the share-page lookup) authenticate by the
+  share token.
+
+The server sets no header-read timeout, whole-request deadline or connection
+cap, and the rate limiters run only after request headers are parsed:
+[`docs/issues.md`](issues.md), entry 30.
 
 ### Response on rejection
 
@@ -164,10 +183,9 @@ cleanup (`crates/server/src/cleanup.rs`).
 
 ### Limits
 
-| Limit                           | Default                | Config field                    |
-| ------------------------------- | ---------------------- | ------------------------------- |
-| Aggregate stored bytes per user | 10 GiB (`10 * 1024^3`) | `limits.max_user_storage_bytes` |
-| Object rows per user            | 10,000                 | `limits.max_user_objects`       |
+- Aggregate stored bytes per user: default 10 GiB (`10 * 1024^3`),
+  `limits.max_user_storage_bytes`.
+- Object rows per user: default 10,000, `limits.max_user_objects`.
 
 Both are validated to be non-zero and to fit in a signed 64-bit integer (they
 are stored and compared as `i64` database counters).
@@ -185,14 +203,13 @@ transaction, so concurrent new-device logins cannot race past the cap and a
 failed session insert cannot orphan a device. The value is validated like the
 other quotas (non-zero, fits `i64`).
 
-A user at the cap frees a slot by reclaiming a device. The
+A user at the cap frees a slot by removing a device with
+`DELETE /api/auth/devices/{id}`, which also deletes that device's sessions (see
+"Sessions and bearer tokens" in [`opaque.md`](opaque.md)). The
 `object_revisions.source_device_id` foreign key is `ON DELETE SET NULL`, so
 deleting a device detaches the revisions it created rather than blocking the
 delete or cascading into object history; the authoritative source device id
-still lives, signed, inside each revision envelope. (The
-user-facing device-removal endpoint is shipped: `DELETE /api/auth/devices/{id}`,
-user-scoped, with the device's sessions cascade-deleted — see
-`docs/revocation.md`.)
+stays, signed, inside each revision envelope.
 
 ### What counts toward the quota
 
@@ -211,7 +228,8 @@ This means:
   payloads still reserves its metadata length. Metadata is separately bounded
   by `limits.max_object_meta_ciphertext_bytes` (default 64 KiB) per revision.
 - **The signed envelope bytes do not count** toward `storage_bytes`. Only
-  payload and metadata ciphertext are charged.
+  payload and metadata ciphertext are charged, so a revision with empty payloads
+  and empty metadata costs nothing: [`docs/issues.md`](issues.md), entry 102.
 - A genesis revision increments `object_count` by exactly 1. Later revisions
   reserve their payload bytes with `objects_added = 0`, so retained history is
   charged without consuming another object slot.
@@ -397,6 +415,16 @@ capacity an **arbitrary** existing entry is evicted to make room (unlike the
 WS-ticket map, which evicts oldest-first and is per-user). These are global, not
 per-user, caps.
 
+### Request body size
+
+The public auth router sets a 64 KiB `DefaultBodyLimit`. The authenticated
+router sets none, so it gets axum's implicit 2 MiB limit. `Postcard::from_request`
+(`routes/mod.rs`) reads the whole request body into memory before any
+size-specific check, so an `init_object` body with an inline payload above about
+2 MiB gets a generic 400 rather than `PayloadTooLarge`:
+[`docs/issues.md`](issues.md), entry 31. Streamed payload uploads
+(`PUT .../payloads/...`) are bounded incrementally against the declared size.
+
 ## Configuration Summary
 
 Resource limits are configured through `ServerConfig` (`crates/server/src/config.rs`).
@@ -416,50 +444,6 @@ override flag. The relevant sections:
 
 The WebSocket message-size cap, pre-hello timeout, ping interval, idle timeout,
 and broadcast channel capacity are **not** configurable; they are constants in
-`ws.rs` and `state.rs`. The per-user concurrent-connection cap
-(`limits.max_user_ws_connections`) is the one WebSocket lifecycle limit that is
-configurable.
-
-## Gaps / Not Covered Today
-
-These are factual gaps in the current controls, called out so they are not
-mistaken for safeguards that exist:
-
-- **The authed router has no explicit request body size limit (`init_object`
-  buffers before its size checks).** The public-auth router carries a 64 KiB
-  `DefaultBodyLimit`, but the authed router has no explicit limit and inherits
-  axum's implicit 2 MiB `DefaultBodyLimit`. `Postcard::from_request`
-  (`routes/mod.rs`) reads the entire request body into memory with
-  `Bytes::from_request` before any size-specific check runs, so for `init_object`
-  the full postcard body — inline payload ciphertext plus metadata ciphertext —
-  is buffered (capped at the implicit 2 MiB) before
-  `max_object_meta_ciphertext_bytes` and the per-payload `max_file_blob_bytes`
-  checks run. Consequence: an inline payload above ~2 MiB is rejected with a
-  generic 400 rather than `PayloadTooLarge`, and raising
-  `max_object_meta_ciphertext_bytes` above 2 MiB silently has no effect.
-  (Streamed payload uploads via `PUT .../payloads/...` are the exception: they
-  are bounded incrementally against the declared size.)
-
-- **`/api/health` is unthrottled.** It is not behind a per-client or global
-  rate-limit layer. (`/api/ws-ticket/connect` is now covered by the
-  `api_rate_limit_middleware`.)
-
-- **No HTTP header-read timeout, whole-request timeout, or connection/concurrency
-  cap.** The server runs a bare `axum::serve`; hyper applies no header-read or
-  whole-request deadline by default and Tokio caps no accepted connections, and
-  the rate limiters run only _after_ hyper has parsed the request line + headers.
-  A peer that trickles headers one byte at a time is therefore never counted
-  against any bucket — an unauthenticated slow-loris that also pins a task + FD
-  per connection. The streaming upload path has no per-chunk read timeout either.
-  Partly mitigated in the documented reverse-proxy deployment (proxies usually
-  apply their own header/idle timeouts); enforce in-process or require the proxy.
-
-- **Signed envelope bytes are not charged to the storage quota.** Payload and
-  metadata ciphertext count toward `storage_bytes`; the stored signed envelope
-  bytes do not.
-
-- **No global aggregate cap on collab WebSocket connections.** The per-user cap
-  (`max_user_ws_connections`) and the process-wide ceiling
-  (`max_ws_connections`) bound the authenticated event sockets, and the server
-  ping / idle close reaps dead connections, but the unauthenticated collab
-  Y-sync sockets are bounded only per document room (`MAX_CONNS_PER_ROOM`).
+`ws.rs` and `state.rs`. The per-user and process-wide connection caps
+(`limits.max_user_ws_connections`, `limits.max_ws_connections`) are the
+WebSocket limits that are configurable.
