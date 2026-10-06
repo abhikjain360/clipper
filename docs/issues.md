@@ -1565,7 +1565,7 @@ Each entry has:
 
 ### 129. Updated web dependencies resolve a second React through peer contexts
 
-- **Status:** fixed by the npm web dependency upgrade
+- **Status:** fixed in `9279752`
 - **Severity:** high; the web app can fail to render.
 - **Where:** `web/vite.config.ts`.
 - **What happened:** the React 19.3 dependency graph included the mobile
@@ -1575,7 +1575,7 @@ Each entry has:
 
 ### 130. The shared package does not declare its AbortSignal types
 
-- **Status:** fixed by the npm web dependency upgrade
+- **Status:** fixed in `9279752`
 - **Severity:** low; the shared package type check fails.
 - **Where:** `packages/shared/tsconfig.json`.
 - **What happened:** the backend contract uses `AbortSignal`, but the package
@@ -1591,6 +1591,39 @@ Each entry has:
   launcher executes it with Node, which throws a JavaScript syntax error.
 - **Decision:** use the latest stable pnpm 11 release. Upgrade the flake's
   package-manager bootstrap before switching to pnpm 12.
+
+### 132. Tamagui development prebundling cannot resolve inline-style-prefixer
+
+- **Status:** fixed in `20bbce5`
+- **Severity:** low; Vite reports a dependency optimization failure.
+- **Where:** `web/package.json`.
+- **What happened:** Tamagui adds `inline-style-prefixer` to Vite's dependency
+  optimizer, but pnpm exposes it only inside React Native Web's dependency tree.
+- **Decision:** declare the optimizer's dependency directly in the web package.
+  All three required development transforms now pass without the warning.
+
+### 133. Metro's config properties are read-only in the updated types
+
+- **Status:** fixed in `dc05a06`
+- **Severity:** low; the workspace JavaScript type check fails.
+- **Where:** `mobile/metro.config.js`.
+- **What happened:** assignments to `maxWorkers` and `resolveRequest` fail
+  against Metro's updated config types. Different Expo Metro wrapper versions
+  also disagree on the resolver context type.
+- **Decision:** use `mergeConfig` and one Expo Metro 56.1.0 wrapper version.
+  Keep the macOS worker limit and the lib0 Web Crypto resolver. The workspace
+  type check and the Android JavaScript export pass.
+
+### 134. The configured npm linker differs from the installed linker
+
+- **Status:** open; checked during the npm dependency upgrade
+- **Severity:** low; the configuration is misleading.
+- **Where:** `.npmrc`.
+- **What happens:** `.npmrc` requests `node-linker=hoisted`, but pnpm 11.28.2
+  reports no configured `nodeLinker` and `node_modules/.modules.yaml` records
+  `isolated`.
+- **Decision:** keep the working installed layout during this upgrade. Review
+  the workspace configuration before changing the linker.
 
 ## Docs
 
