@@ -73,8 +73,8 @@ impl SyncEngine {
         let ciphertext = match cached {
             Some(bytes) if verify_payload_hash(payload, &bytes).is_ok() => bytes,
             _ => {
-                self.api
-                    .download_object_payload(&id, &payload.id.to_string(), payload.ciphertext_size)
+                let api = self.api_for_session(epoch).await?;
+                api.download_object_payload(&id, &payload.id.to_string(), payload.ciphertext_size)
                     .await?
             }
         };

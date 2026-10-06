@@ -130,6 +130,14 @@ struct DecryptedClipboardObject {
     encrypted: EncryptedInlineObject,
 }
 
+struct SessionCredentials {
+    api: ApiClient,
+    encryption_key: Zeroizing<[u8; 32]>,
+    device_id: String,
+    device_id_typed: DeviceId,
+    signing_key: Zeroizing<[u8; crypto::DEVICE_SIGNING_SECRET_KEY_BYTES]>,
+}
+
 /// The sync engine that owns all client state.
 pub struct SyncEngine {
     api: ApiClient,
@@ -248,7 +256,7 @@ impl SyncEngine {
 
     fn bump_version(&self) {
         let v = self.state_version.fetch_add(1, Ordering::AcqRel) + 1;
-        _ = self.state_tx.send(v);
+        self.state_tx.send_replace(v);
     }
 
     // ── Auth ──
@@ -261,6 +269,7 @@ impl SyncEngine {
         platform: &str,
     ) -> Result<(), ClientError> {
         let _calendar = self.calendar_write.lock().await;
+        self.clear_local_session().await;
         let prepared = self.api.login_prepare(passphrase, username).await?;
         // The encryption key from `prepare` is the same value `finish_auth`
         // later hashes into the profile id, so the device identity is keyed to
@@ -324,6 +333,7 @@ impl SyncEngine {
         platform: &str,
     ) -> Result<String, ClientError> {
         let _calendar = self.calendar_write.lock().await;
+        self.clear_local_session().await;
         let prepared = self
             .api
             .register_prepare(access_key, username, passphrase)
@@ -401,6 +411,7 @@ impl SyncEngine {
         device_name: &str,
     ) -> Result<(), ClientError> {
         let _calendar = self.calendar_write.lock().await;
+        self.clear_local_session().await;
         self.api.restore_token(token);
         if let Err(error) = self.api.validate_session().await {
             // Never leave a dead token resident; force a clean re-login instead.
@@ -443,8 +454,9 @@ impl SyncEngine {
     /// re-run login, or enroll a new device, and the token is server-revocable.
     /// The caller owns where these land (the web client uses `sessionStorage`).
     pub async fn session_resume_material(&self) -> Option<SessionResumeMaterial> {
+        let active_key = self.encryption_key.read().await;
+        let data_key = active_key.as_ref().cloned()?;
         let token = self.api.token()?;
-        let data_key = self.encryption_key.read().await.as_ref().cloned()?;
         let device_identity_wrapping_key = self
             .device_identity_wrapping_key
             .read()
@@ -468,8 +480,8 @@ impl SyncEngine {
         signing_identity: DeviceSigningIdentity,
     ) -> Result<(), ClientError> {
         let cache_key = *encryption_key;
+        let mut active_key = self.encryption_key.write().await;
         let epoch = {
-            let mut active_key = self.encryption_key.write().await;
             let epoch = self.history_epoch.fetch_add(1, Ordering::SeqCst) + 1;
             self.schedule_history.lock().await.clear();
             self.import_rules.lock().await.clear();
@@ -500,6 +512,7 @@ impl SyncEngine {
             state.connection_status = ConnectionStatus::Connecting;
             state.error = None;
         }
+        drop(active_key);
         self.bump_version();
 
         match self
@@ -578,9 +591,9 @@ impl SyncEngine {
     /// still passes the generation check and writes into whichever profile
     /// database the next login opens.
     async fn clear_local_session(&self) {
+        let mut active_key = self.encryption_key.write().await;
         self.api.clear_token();
         {
-            let mut active_key = self.encryption_key.write().await;
             self.history_epoch.fetch_add(1, Ordering::SeqCst);
             *active_key = None;
             self.schedule_history.lock().await.clear();
@@ -590,6 +603,7 @@ impl SyncEngine {
         *self.device_identity_wrapping_key.write().await = None;
         self.local_store.fence_and_clear_memory().await;
         *self.state.write().await = AppState::default();
+        drop(active_key);
         self.bump_version();
     }
 
@@ -702,6 +716,46 @@ impl SyncEngine {
         Ok(active_key)
     }
 
+    async fn credentials_for_session(&self, epoch: u64) -> Result<SessionCredentials, ClientError> {
+        let active_key = self.hold_session_for_write(epoch).await?;
+        let encryption_key = active_key
+            .as_ref()
+            .cloned()
+            .ok_or(ClientError::NotAuthenticated)?;
+        let (device_id, device_id_typed, signing_key) =
+            self.current_device_signing_context().await?;
+        Ok(SessionCredentials {
+            api: self.api.with_current_token()?,
+            encryption_key,
+            device_id,
+            device_id_typed,
+            signing_key,
+        })
+    }
+
+    async fn api_for_session(&self, epoch: u64) -> Result<ApiClient, ClientError> {
+        let _active_key = self.hold_session_for_write(epoch).await?;
+        if self.state.read().await.session.is_none() {
+            return Err(ClientError::NotAuthenticated);
+        }
+        self.api.with_current_token()
+    }
+
+    async fn credentials_for_generation(
+        &self,
+        generation: u64,
+    ) -> Result<(ApiClient, Zeroizing<[u8; 32]>), ClientError> {
+        let active_key = self.encryption_key.read().await;
+        if self.local_store.current_generation().await != generation {
+            return Err(ClientError::NotAuthenticated);
+        }
+        let encryption_key = active_key
+            .as_ref()
+            .cloned()
+            .ok_or(ClientError::NotAuthenticated)?;
+        Ok((self.api.with_current_token()?, encryption_key))
+    }
+
     // ── Devices ──
 
     /// List the user's registered devices, marking the one this client is
@@ -785,7 +839,13 @@ impl SyncEngine {
         // Read before the network work, so the persist below can tell whether
         // the session that started this push is still the one running.
         let epoch = self.history_epoch.load(Ordering::SeqCst);
-        let encryption_key = self.current_encryption_key().await?;
+        let SessionCredentials {
+            api,
+            encryption_key,
+            device_id,
+            device_id_typed,
+            signing_key,
+        } = self.credentials_for_session(epoch).await?;
         let payload_digest = clipboard_payload_digest(mime_type, data);
         {
             let suppressed = self.suppressed_payload.read().await;
@@ -821,9 +881,6 @@ impl SyncEngine {
                 return Ok(first.id.clone());
             }
         }
-
-        let (device_id, device_id_typed, signing_key) =
-            self.current_device_signing_context().await?;
 
         let object_uuid = uuid::Uuid::now_v7();
         let payload_uuid = uuid::Uuid::now_v7();
@@ -895,16 +952,19 @@ impl SyncEngine {
         };
         let encrypted = encrypted_clipboard_from_init(&init_req, encrypted_payload.clone());
 
-        let created_seq = self
-            .submit_single_payload_object(
-                &object_id,
-                &payload_id,
-                &init_req,
-                encrypted_payload,
-                payload_size,
-                payload_hash,
-            )
-            .await?;
+        if !self.session_is_current(epoch) {
+            return Err(ClientError::NotAuthenticated);
+        }
+        let created_seq = Self::submit_single_payload_object(
+            &api,
+            &object_id,
+            &payload_id,
+            &init_req,
+            encrypted_payload,
+            payload_size,
+            payload_hash,
+        )
+        .await?;
 
         let item = DecryptedClipboardItem {
             id: object_id.clone(),
@@ -1029,7 +1089,7 @@ impl SyncEngine {
     }
 
     async fn submit_single_payload_object(
-        &self,
+        api: &ApiClient,
         object_id: &str,
         payload_id: &str,
         init_req: &ObjectInitRequest,
@@ -1037,8 +1097,9 @@ impl SyncEngine {
         payload_size: i64,
         payload_hash: Vec<u8>,
     ) -> Result<i64, ClientError> {
-        let init_resp = self.api.object_init(init_req).await?;
-        self.finish_single_payload_object(
+        let init_resp = api.object_init(init_req).await?;
+        Self::finish_single_payload_object(
+            api,
             object_id,
             payload_id,
             init_resp,
@@ -1055,7 +1116,7 @@ impl SyncEngine {
     /// them: after that a write is a write, and an inline payload means it is
     /// already finished.
     async fn finish_single_payload_object(
-        &self,
+        api: &ApiClient,
         object_id: &str,
         payload_id: &str,
         init_resp: ObjectInitResponse,
@@ -1063,7 +1124,6 @@ impl SyncEngine {
         payload_size: i64,
         payload_hash: Vec<u8>,
     ) -> Result<i64, ClientError> {
-        let api = &self.api;
         let payload_id_typed = payload_id
             .parse()
             .map_err(|source| ClientError::InvalidId {
@@ -1147,8 +1207,13 @@ impl SyncEngine {
         let mime_type =
             normalized_mime_type(mime_type).unwrap_or_else(|| mime_guess_from_filename(&filename));
 
-        let (device_id, device_id_typed, signing_key) =
-            self.current_device_signing_context().await?;
+        let SessionCredentials {
+            api,
+            encryption_key,
+            device_id,
+            device_id_typed,
+            signing_key,
+        } = self.credentials_for_session(epoch).await?;
 
         let meta = FileMeta {
             filename: filename.clone(),
@@ -1172,14 +1237,10 @@ impl SyncEngine {
             vec![payload_id_typed],
         );
         let (meta_nonce, meta_ciphertext, blob_nonce, encrypted_blob) = {
-            let encryption_key = self.encryption_key.read().await;
-            let encryption_key = encryption_key
-                .as_ref()
-                .ok_or(ClientError::NotAuthenticated)?;
             let (meta_nonce, meta_ciphertext) =
-                encrypt_file_meta_bytes(&meta, encryption_key, &aad_body)?;
+                encrypt_file_meta_bytes(&meta, &encryption_key, &aad_body)?;
             let (blob_nonce, encrypted_blob) =
-                encrypt_file_blob_bytes(data, encryption_key, &aad_body, payload_id_typed)?;
+                encrypt_file_blob_bytes(data, &encryption_key, &aad_body, payload_id_typed)?;
             (meta_nonce, meta_ciphertext, blob_nonce, encrypted_blob)
         };
 
@@ -1221,16 +1282,19 @@ impl SyncEngine {
         };
         let encrypted = encrypted_object_from_init(&init_req);
 
-        let created_seq = self
-            .submit_single_payload_object(
-                &file_id,
-                &payload_id,
-                &init_req,
-                encrypted_blob,
-                blob_size,
-                blob_hash,
-            )
-            .await?;
+        if !self.session_is_current(epoch) {
+            return Err(ClientError::NotAuthenticated);
+        }
+        let created_seq = Self::submit_single_payload_object(
+            &api,
+            &file_id,
+            &payload_id,
+            &init_req,
+            encrypted_blob,
+            blob_size,
+            blob_hash,
+        )
+        .await?;
 
         let item = DecryptedFileItem {
             id: file_id.clone(),
@@ -1262,8 +1326,8 @@ impl SyncEngine {
         // whether the session that asked for this file is still the one
         // running when the bytes come back.
         let epoch = self.history_epoch.load(Ordering::SeqCst);
+        let api = self.api.with_current_token()?;
         let (file_item, payload, encrypted_blob) = {
-            let api = &self.api;
             let file_item = api.get_object(file_id).await?;
             verify_object_list_item_envelope(&file_item)?;
             if file_item.id.to_string() != file_id {
@@ -1329,29 +1393,21 @@ impl SyncEngine {
                 file_id = %object_id,
                 "Dropping a download that outlived the session it was started under",
             );
-            return Ok(());
-        }
-        // Already at this revision: the record is the one this would write.
-        if self
-            .local_store
-            .local_head(&object_id)
-            .await?
-            .is_some_and(|head| head.revision >= item.revision)
-        {
-            return Ok(());
+            return Err(ClientError::NotAuthenticated);
         }
         let file = decrypt_file_object_item(item, encryption_key)?;
-        let visible = self
+        if let Some(visible) = self
             .local_store
-            .persist_local_file_present_encrypted(
+            .retain_file_present_encrypted(
                 &file,
                 &encrypted_object_from_list_item(item),
                 item.created_seq,
-                item.created_seq,
                 RECENT_CLIPBOARD_LIMIT,
             )
-            .await?;
-        self.publish_visible_state(visible).await;
+            .await?
+        {
+            self.publish_visible_state(visible).await;
+        }
         Ok(())
     }
 
@@ -1488,12 +1544,13 @@ impl SyncEngine {
         record: ScheduleRecord,
         placement: EnvelopePlacement,
     ) -> Result<i64, ClientError> {
-        let encryption_key = self.current_encryption_key().await?;
-        let (device_id, device_id_typed, signing_key) =
-            self.current_device_signing_context().await?;
-        if !self.session_is_current(epoch) {
-            return Err(ClientError::NotAuthenticated);
-        }
+        let SessionCredentials {
+            api,
+            encryption_key,
+            device_id,
+            device_id_typed,
+            signing_key,
+        } = self.credentials_for_session(epoch).await?;
 
         let object_uuid: uuid::Uuid =
             object_id.parse().map_err(|source| ClientError::InvalidId {
@@ -1556,6 +1613,9 @@ impl SyncEngine {
             inline_ciphertext: inline_ciphertext(&encrypted_payload),
         }];
 
+        if !self.session_is_current(epoch) {
+            return Err(ClientError::NotAuthenticated);
+        }
         let (encrypted_object, write_resp) = match placement {
             EnvelopePlacement::Create => {
                 let init_req = ObjectInitRequest {
@@ -1567,7 +1627,7 @@ impl SyncEngine {
                     envelope,
                 };
                 let encrypted = encrypted_object_from_init(&init_req);
-                let resp = self.api.object_init(&init_req).await?;
+                let resp = api.object_init(&init_req).await?;
                 (encrypted, resp)
             }
             EnvelopePlacement::Revise(_) | EnvelopePlacement::Delete(_) => {
@@ -1578,7 +1638,7 @@ impl SyncEngine {
                     envelope,
                 };
                 let encrypted = encrypted_object_from_revise(&revise_req);
-                let resp = self.api.object_revise(object_id, &revise_req).await?;
+                let resp = api.object_revise(object_id, &revise_req).await?;
                 (encrypted, resp)
             }
         };
@@ -1587,16 +1647,16 @@ impl SyncEngine {
             object: encrypted_object,
             payload_ciphertext: encrypted_payload.clone(),
         };
-        let created_seq = self
-            .finish_single_payload_object(
-                object_id,
-                &payload_id,
-                write_resp,
-                encrypted_payload,
-                payload_size,
-                payload_hash,
-            )
-            .await?;
+        let created_seq = Self::finish_single_payload_object(
+            &api,
+            object_id,
+            &payload_id,
+            write_resp,
+            encrypted_payload,
+            payload_size,
+            payload_hash,
+        )
+        .await?;
 
         let _session = self.hold_session_for_write(epoch).await?;
         let persisted = self
@@ -2270,8 +2330,8 @@ impl SyncEngine {
         generation: u64,
         stream_start_seq: i64,
     ) -> Result<(), ClientError> {
-        let api = &self.api;
-        let encryption_key = self.current_encryption_key().await?;
+        let (api, encryption_key) = self.credentials_for_generation(generation).await?;
+        let api = &api;
         let mut after = None;
         loop {
             let page = api
@@ -2401,7 +2461,8 @@ impl SyncEngine {
         // Read before the network work, so the persist below can tell whether
         // the session that created the doc is still the one running.
         let epoch = self.history_epoch.load(Ordering::SeqCst);
-        let response = self.api.create_collab_doc().await?;
+        let api = self.api_for_session(epoch).await?;
+        let response = api.create_collab_doc().await?;
         let item = collab_item_from_meta(&response.doc);
         let object_id = item.id.clone();
         let created_seq = collab_created_seq(&item.created_at);
@@ -2433,7 +2494,8 @@ impl SyncEngine {
         // Read before the network work, so the persist below can tell whether
         // the session that renamed the doc is still the one running.
         let epoch = self.history_epoch.load(Ordering::SeqCst);
-        let meta = self.api.rename_collab_doc(object_id, title).await?;
+        let api = self.api_for_session(epoch).await?;
+        let meta = api.rename_collab_doc(object_id, title).await?;
         if meta.object_id.to_string() != object_id {
             return Err(ClientError::UnexpectedResponse(format!(
                 "renamed collab doc {object_id} returned mismatched identity"
@@ -2467,7 +2529,8 @@ impl SyncEngine {
         // Read before the network work, so the tombstone below can tell whether
         // the session that deleted the doc is still the one running.
         let epoch = self.history_epoch.load(Ordering::SeqCst);
-        self.api.delete_collab_doc(object_id).await?;
+        let api = self.api_for_session(epoch).await?;
+        api.delete_collab_doc(object_id).await?;
         let delete_seq = chrono::Utc::now().timestamp_micros();
         let _session = self.hold_session_for_write(epoch).await?;
         let visible = self
@@ -2536,7 +2599,8 @@ impl SyncEngine {
             let mut state = self.state.write().await;
             // Nothing to show without a session, and a straggling snapshot from
             // the previous one must not repopulate the screen after logout.
-            if state.session.is_none() {
+            if state.session.is_none() || visible.session_epoch != self.local_store.session_epoch()
+            {
                 return;
             }
             // Views are built under the store lock but published without one,
@@ -2699,8 +2763,7 @@ impl SyncEngine {
         generation: u64,
         stream_start_seq: i64,
     ) -> Result<(), ClientError> {
-        let api = &self.api;
-        let encryption_key = self.current_encryption_key().await?;
+        let (api, encryption_key) = self.credentials_for_generation(generation).await?;
         let mut after = None;
         loop {
             let page = api
@@ -2770,7 +2833,8 @@ impl SyncEngine {
         generation: u64,
         stream_start_seq: i64,
     ) -> Result<(), ClientError> {
-        let listing = self.api.list_collab_docs().await?;
+        let (api, _) = self.credentials_for_generation(generation).await?;
+        let listing = api.list_collab_docs().await?;
         for meta in &listing.docs {
             let item = collab_item_from_meta(meta);
             let created_seq = collab_created_seq(&item.created_at);
@@ -2798,8 +2862,8 @@ impl SyncEngine {
         generation: u64,
         stream_start_seq: i64,
     ) -> Result<(), ClientError> {
-        let api = &self.api;
-        let encryption_key = self.current_encryption_key().await?;
+        let (api, encryption_key) = self.credentials_for_generation(generation).await?;
+        let api = &api;
         // Capture a shared borrow so the per-item `async move` blocks copy the
         // reference, not the key material.
         let encryption_key = &encryption_key;
@@ -3162,7 +3226,8 @@ impl SyncEngine {
             return self.materialize_collab(generation, object_id).await;
         }
 
-        let api = &self.api;
+        let (api, encryption_key) = self.credentials_for_generation(generation).await?;
+        let api = &api;
         let object_id_text = object_id.to_string();
         let item = match api.get_object(&object_id_text).await {
             Ok(item) => item,
@@ -3188,7 +3253,6 @@ impl SyncEngine {
             );
         }
 
-        let encryption_key = self.current_encryption_key().await?;
         match kind {
             ObjectKind::Clipboard => {
                 let object = match self
@@ -3257,8 +3321,9 @@ impl SyncEngine {
         generation: u64,
         object_id: ObjectId,
     ) -> Result<(), ClientError> {
+        let (api, _) = self.credentials_for_generation(generation).await?;
         let object_id_text = object_id.to_string();
-        let meta = match self.api.get_collab_doc_meta(&object_id_text).await {
+        let meta = match api.get_collab_doc_meta(&object_id_text).await {
             Ok(meta) => meta,
             Err(error) if is_not_found_error(&error) => {
                 self.remove_absent_object(generation, &object_id_text)
@@ -3380,7 +3445,7 @@ impl SyncEngine {
         crate::ensure_crypto_provider();
 
         let (token, ws_url, host) = {
-            let api = &self.api;
+            let api = self.api_for_session(epoch).await?;
             let t = api
                 .token()
                 .ok_or(ClientError::NotAuthenticated)?
@@ -3596,7 +3661,7 @@ impl SyncEngine {
 
     #[cfg(target_family = "wasm")]
     async fn ws_connect(self: &Arc<Self>, epoch: u64) -> Result<(), ClientError> {
-        let api = &self.api;
+        let api = self.api_for_session(epoch).await?;
         let ticket = api.websocket_ticket().await?;
         let ws_url = api.websocket_ticket_url()?;
 
@@ -4415,6 +4480,489 @@ mod schedule_integration_tests;
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn request(socket: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            let n = socket.read(&mut buffer).await.unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&buffer[..n]);
+            let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+            let length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map(|value| value.trim().parse::<usize>().unwrap())
+                .unwrap_or(0);
+            if bytes.len() >= end + 4 + length {
+                return (headers, bytes[end + 4..end + 4 + length].to_vec());
+            }
+        }
+    }
+
+    async fn response(socket: &mut tokio::net::TcpStream, body: &[u8]) {
+        socket.write_all(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {POSTCARD_CONTENT_TYPE}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()
+        ).as_bytes()).await.unwrap();
+        socket.write_all(body).await.unwrap();
+    }
+
+    const KEY: [u8; 32] = [7; 32];
+
+    async fn activate(engine: &SyncEngine, name: &str, key: [u8; 32]) {
+        engine.local_store.set_profile(name.into());
+        *engine.encryption_key.write().await = Some(Zeroizing::new(key));
+        engine.api.restore_token(name.into());
+        engine.state.write().await.session = Some(AuthenticatedSession {
+            username: name.into(),
+            device_id: uuid::Uuid::now_v7().to_string(),
+            device_name: name.into(),
+            server_url: engine.base_url(),
+        });
+    }
+
+    fn file_item(revision: u64) -> (ObjectListItem, Vec<u8>) {
+        file_item_at(uuid::Uuid::now_v7().into(), revision)
+    }
+
+    fn file_item_at(object_id: ObjectId, revision: u64) -> (ObjectListItem, Vec<u8>) {
+        let payload_id = uuid::Uuid::now_v7().into();
+        let device_id = uuid::Uuid::now_v7().into();
+        let placement = if revision == 1 {
+            EnvelopePlacement::Create
+        } else {
+            EnvelopePlacement::Revise(LocalHead {
+                revision: revision - 1,
+                parent_hash: [1; 32],
+            })
+        };
+        let mut body = object_envelope_body_for_aad(
+            object_id,
+            ObjectKind::File,
+            placement,
+            device_id,
+            chrono::Utc::now().to_rfc3339(),
+            vec![payload_id],
+        );
+        let meta = FileMeta {
+            filename: "account-a-secret.txt".into(),
+            mime_type: "text/plain".into(),
+            size: Some(16),
+        };
+        let (meta_nonce, meta_ciphertext) = encrypt_file_meta_bytes(&meta, &KEY, &body).unwrap();
+        let (nonce, ciphertext) =
+            encrypt_file_blob_bytes(b"account A secret", &KEY, &body, payload_id).unwrap();
+        body.meta_nonce = meta_nonce.clone();
+        body.sha256_meta_ciphertext = crypto::sha256(&meta_ciphertext).to_vec();
+        body.payloads[0] = ObjectEnvelopePayload {
+            id: payload_id,
+            nonce: nonce.clone(),
+            ciphertext_size: ciphertext.len() as i64,
+            sha256_ciphertext: crypto::sha256(&ciphertext).to_vec(),
+        };
+        let signature = crypto::sign_object_envelope_body(&[9; 32], &body).unwrap();
+        let item = ObjectListItem {
+            id: object_id,
+            kind: ObjectKind::File,
+            revision,
+            created_seq: revision as i64,
+            meta_nonce,
+            meta_ciphertext,
+            payloads: vec![ObjectPayloadDescriptor {
+                id: payload_id,
+                nonce,
+                ciphertext_size: ciphertext.len() as i64,
+                sha256_ciphertext: crypto::sha256(&ciphertext).to_vec(),
+            }],
+            created_at: body.created_at.clone(),
+            source_device_id: device_id,
+            source_device_signing_public_key: Some(
+                crypto::device_signing_public_key(&[9; 32]).to_vec(),
+            ),
+            envelope: ObjectEnvelope { body, signature },
+        };
+        (item, ciphertext)
+    }
+
+    async fn hold_file(engine: &SyncEngine, item: &ObjectListItem) -> LocalVisibleState {
+        engine
+            .local_store
+            .persist_local_file_present_encrypted(
+                &decrypt_file_object_item(item, &KEY).unwrap(),
+                &encrypted_object_from_list_item(item),
+                item.created_seq,
+                item.created_seq,
+                100,
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_clipboard_push_stops_before_sending_after_its_session_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let engine = SyncEngine::new_with_data_dir(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            tmp.path(),
+        );
+        let device_a = uuid::Uuid::now_v7().to_string();
+        engine.local_store.set_profile("a".into());
+        engine.state.write().await.session = Some(AuthenticatedSession {
+            username: "a".into(),
+            device_id: device_a,
+            device_name: "a".into(),
+            server_url: engine.base_url(),
+        });
+        *engine.encryption_key.write().await = Some(Zeroizing::new([7; 32]));
+        *engine.device_signing_key.write().await =
+            Some(crypto::generate_device_signing_secret_key().into());
+        engine.api.restore_token("token-a".into());
+
+        let suppressed = engine.suppressed_payload.write().await;
+        let mut push =
+            Box::pin(engine.send_clipboard_payload("text/plain", b"account A clipboard"));
+        assert!(futures_util::poll!(push.as_mut()).is_pending());
+        let signing_b = crypto::generate_device_signing_secret_key();
+        let public_b = crypto::device_signing_public_key(&signing_b);
+        let device_b = uuid::Uuid::now_v7().to_string();
+        {
+            let _calendar = engine.calendar_write.lock().await;
+            engine.clear_local_session().await;
+            engine.api.restore_token("token-b".into());
+            engine
+                .finish_auth(
+                    "b",
+                    "b".into(),
+                    device_b.clone(),
+                    Zeroizing::new([8; 32]),
+                    Zeroizing::new([9; 32]),
+                    DeviceSigningIdentity {
+                        device_id: Some(device_b.clone()),
+                        signing_secret_key: signing_b.into(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let (sent, mut received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (headers, body) = request(&mut socket).await;
+                if !headers.starts_with("post /api/objects/init ") {
+                    socket.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                    continue;
+                }
+                assert!(headers.contains("authorization: bearer token-b"));
+                let init: ObjectInitRequest = postcard::from_bytes(&body).unwrap();
+                assert_eq!(init.envelope.body.source_device_id.to_string(), device_b);
+                crypto::verify_object_envelope_signature(&public_b, &init.envelope).unwrap();
+                let payload = &init.payloads[0];
+                let ciphertext = payload.inline_ciphertext.as_ref().unwrap();
+                assert_eq!(
+                    decrypt_clipboard_payload(
+                        &payload.nonce,
+                        ciphertext,
+                        &[7; 32],
+                        &init.envelope.body,
+                        payload.id
+                    )
+                    .unwrap(),
+                    b"account A clipboard"
+                );
+                assert!(
+                    decrypt_clipboard_payload(
+                        &payload.nonce,
+                        ciphertext,
+                        &[8; 32],
+                        &init.envelope.body,
+                        payload.id
+                    )
+                    .is_err()
+                );
+                sent.send(()).unwrap();
+                response(
+                    &mut socket,
+                    &postcard::to_allocvec(&ObjectInitResponse::Complete { created_seq: 100 })
+                        .unwrap(),
+                )
+                .await;
+                return;
+            }
+        });
+        drop(suppressed);
+        assert!(matches!(push.await, Err(ClientError::NotAuthenticated)));
+        let request_sent = received.try_recv();
+        server.abort();
+        assert!(matches!(
+            request_sent,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn resuming_fences_the_previous_profiles_collab_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let engine = SyncEngine::new_with_data_dir(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            tmp.path(),
+        );
+        let profile_a = profile_id_from_encryption_key(&[7; 32]);
+        engine.local_store.set_profile(profile_a.clone());
+        engine.state.write().await.session = Some(AuthenticatedSession {
+            username: "a".into(),
+            device_id: uuid::Uuid::now_v7().to_string(),
+            device_name: "a".into(),
+            server_url: engine.base_url(),
+        });
+        *engine.encryption_key.write().await = Some(Zeroizing::new([7; 32]));
+        engine.api.restore_token("token-a".into());
+        let generation = engine.local_store.start_generation().await;
+        engine
+            .local_store
+            .persist_device_signing_identity(
+                &profile_id_from_encryption_key(&[8; 32]),
+                &DeviceSigningIdentity {
+                    device_id: Some(uuid::Uuid::now_v7().to_string()),
+                    signing_secret_key: crypto::generate_device_signing_secret_key().into(),
+                },
+                &[9; 32],
+            )
+            .await
+            .unwrap();
+        let doc_id: ObjectId = uuid::Uuid::now_v7().into();
+        let listing = serde_json::to_vec(&CollabDocListResponse {
+            docs: vec![CollabDocMeta {
+                object_id: doc_id,
+                title: "B private document".into(),
+                share_token: "B-private-capability".into(),
+                share_url: None,
+                created_at: "2026-10-06T12:00:00Z".into(),
+                updated_at: "2026-10-06T12:00:00Z".into(),
+            }],
+        })
+        .unwrap();
+        let (validate_sent, validate_seen) = tokio::sync::oneshot::channel();
+        let (release, mut wait_release) = tokio::sync::oneshot::channel();
+        let (sent, mut received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut validate, _) = listener.accept().await.unwrap();
+            let (headers, _) = request(&mut validate).await;
+            assert!(headers.starts_with("get /api/auth/validate "));
+            assert!(headers.contains("authorization: bearer token-b"));
+            validate_sent.send(()).unwrap();
+            let incoming = tokio::select! {
+                incoming = listener.accept() => Some(incoming.unwrap()),
+                _ = &mut wait_release => None,
+            };
+            if let Some((mut socket, _)) = incoming {
+                let (headers, _) = request(&mut socket).await;
+                assert!(headers.starts_with("get /api/collab-docs "));
+                assert!(headers.contains("authorization: bearer token-b"));
+                sent.send(()).unwrap();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", listing.len()).as_bytes()).await.unwrap();
+                socket.write_all(&listing).await.unwrap();
+                wait_release.await.unwrap();
+            }
+            validate
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let resume = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .resume_with_platform(
+                        "token-b".into(),
+                        Zeroizing::new([8; 32]),
+                        Zeroizing::new([9; 32]),
+                        "b",
+                        "b",
+                    )
+                    .await
+            })
+        };
+        validate_seen.await.unwrap();
+        let snapshot = engine.snapshot_collab_docs(generation, i64::MAX).await;
+        let state = engine.get_state().await;
+
+        release.send(()).unwrap();
+        resume.await.unwrap().unwrap();
+        server.await.unwrap();
+        let reopened = LocalStore::new(tmp.path());
+        reopened.set_profile(profile_a);
+        let visible = reopened
+            .hydrate_ciphertext_cache(&[7; 32], 100)
+            .await
+            .unwrap();
+        assert!(matches!(snapshot, Err(ClientError::NotAuthenticated)));
+        assert!(matches!(
+            received.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(state.session.is_none());
+        assert!(state.collab_docs.is_empty());
+        assert!(visible.collab_docs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_state_change_between_waiters_is_available_to_the_next_waiter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", tmp.path());
+        let seen = engine.state_version();
+        engine.set_saved_profile(Some("changed".into()), None).await;
+        assert_eq!(engine.state_version(), seen + 1);
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                engine.wait_for_state_change_after(seen)
+            )
+            .await
+            .expect("the change is already available")
+            .unwrap(),
+            seen + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delayed_view_is_dropped_during_the_next_accounts_hydration() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", dir.path());
+        activate(&engine, "account-a", KEY).await;
+        let (item, _) = file_item(1);
+        let delayed = hold_file(&engine, &item).await;
+        engine.clear_local_session().await;
+        let (entered, held) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let holding = {
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                engine
+                    .local_store
+                    .hold_database_for_test(entered, released)
+                    .await
+            })
+        };
+        held.await.unwrap();
+        let mut login = Box::pin(engine.finish_auth(
+            "device-b",
+            "account-b".into(),
+            uuid::Uuid::now_v7().to_string(),
+            Zeroizing::new([8; 32]),
+            Zeroizing::new([6; 32]),
+            DeviceSigningIdentity {
+                device_id: None,
+                signing_secret_key: Zeroizing::new([5; 32]),
+            },
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut login)
+                .await
+                .is_err()
+        );
+        engine.publish_visible_state(delayed).await;
+        let state = engine.get_state().await;
+        assert_eq!(state.session.unwrap().username, "account-b");
+        assert!(state.files.is_empty());
+        release.send(()).unwrap();
+        login.await.unwrap();
+        holding.await.unwrap();
+        assert!(
+            engine
+                .local_store
+                .local_head(&item.id.to_string())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn download_retention_rejects_conflicting_and_older_revisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SyncEngine::new_with_data_dir("http://127.0.0.1:1", dir.path());
+        activate(&engine, "account-a", KEY).await;
+        let (first, _) = file_item(2);
+        let (second, _) = file_item_at(first.id, 2);
+        verify_object_list_item_envelope(&first).unwrap();
+        verify_object_list_item_envelope(&second).unwrap();
+        engine.check_revision_advance(&first).await.unwrap();
+        engine.check_revision_advance(&second).await.unwrap();
+        let epoch = engine.history_epoch.load(Ordering::SeqCst);
+        engine
+            .retain_downloaded_file(&first, &KEY, epoch)
+            .await
+            .unwrap();
+        assert!(engine.check_revision_advance(&second).await.is_err());
+        assert!(matches!(
+            engine.retain_downloaded_file(&second, &KEY, epoch).await,
+            Err(ClientError::RevisionRejected(_))
+        ));
+        engine
+            .retain_downloaded_file(&first, &KEY, epoch)
+            .await
+            .unwrap();
+        let (older, _) = file_item_at(first.id, 1);
+        assert!(matches!(
+            engine.retain_downloaded_file(&older, &KEY, epoch).await,
+            Err(ClientError::RevisionRejected(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_download_returns_no_plaintext_after_its_session_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let engine = SyncEngine::new_with_data_dir(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            dir.path(),
+        );
+        activate(&engine, "account-a", KEY).await;
+        let (item, ciphertext) = file_item(1);
+        let object_id = item.id.to_string();
+        let server = tokio::spawn(async move {
+            for body in [postcard::to_allocvec(&item).unwrap(), ciphertext] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buffer[..n]);
+                }
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {POSTCARD_CONTENT_TYPE}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+            }
+        });
+        let guard = engine.encryption_key.write().await;
+        let mut download = Box::pin(engine.download_file_bytes(&object_id));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut download)
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+        let mut replace = Box::pin(async {
+            engine.clear_local_session().await;
+            activate(&engine, "account-b", [8; 32]).await;
+        });
+        assert!(futures_util::poll!(&mut replace).is_pending());
+        drop(guard);
+        let (result, ()) = tokio::join!(download, replace);
+        assert!(matches!(result, Err(ClientError::NotAuthenticated)));
+        assert_eq!(
+            engine.get_state().await.session.unwrap().username,
+            "account-b"
+        );
+        assert!(engine.get_state().await.files.is_empty());
+    }
+
     use super::*;
 
     #[test]
@@ -4672,6 +5220,7 @@ mod tests {
 
     fn visible_state(stamp: u64, text: &str) -> LocalVisibleState {
         LocalVisibleState {
+            session_epoch: 0,
             stamp,
             clipboard_items: vec![DecryptedClipboardItem {
                 id: "11111111-1111-4111-8111-111111111111".into(),
@@ -4840,7 +5389,7 @@ mod tests {
             futures_util::poll!(&mut clearing).is_pending(),
             "logout must wait for that writer rather than clear around it",
         );
-        assert!(engine.encryption_key.read().await.is_none());
+        assert!(engine.encryption_key.try_read().is_err());
 
         release.send(()).expect("release the database");
         holder.await.expect("holder");
@@ -5076,10 +5625,10 @@ mod tests {
         open_session(&engine).await;
 
         let item = signed_file_item("account-a-secret.txt");
-        engine
+        let result = engine
             .retain_downloaded_file(&item, &RETAIN_TEST_KEY, epoch)
-            .await
-            .expect("a fenced retention is not a failure");
+            .await;
+        assert!(matches!(result, Err(ClientError::NotAuthenticated)));
 
         assert!(
             engine

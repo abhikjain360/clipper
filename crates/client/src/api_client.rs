@@ -84,6 +84,15 @@ impl ApiClient {
         self.token.read().expect("api token lock poisoned").clone()
     }
 
+    pub(crate) fn with_current_token(&self) -> Result<Self, ClientError> {
+        let token = self.token().ok_or(ClientError::NotAuthenticated)?;
+        Ok(Self {
+            http: self.http.clone(),
+            base_url: self.base_url.clone(),
+            token: RwLock::new(Some(token)),
+        })
+    }
+
     pub fn base_url(&self) -> Url {
         self.base_url.clone()
     }

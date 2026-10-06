@@ -75,8 +75,8 @@ impl SyncEngine {
         }) {
             record.clone()
         } else {
-            let item = self
-                .api
+            let api = self.api_for_session(epoch).await?;
+            let item = api
                 .get_object_revision(&pin.object_id.to_string(), pin.revision)
                 .await?;
             verify_pin(&item, pin)?;
@@ -88,8 +88,7 @@ impl SyncEngine {
             )?;
             let payload = single_payload(&item)?;
             check_payload_ciphertext_size(payload, MAX_SCHEDULE_PAYLOAD_CIPHERTEXT_BYTES)?;
-            let ciphertext = self
-                .api
+            let ciphertext = api
                 .download_object_revision_payload(
                     &pin.object_id.to_string(),
                     pin.revision,
