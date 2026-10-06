@@ -179,6 +179,7 @@ async fn run_connection(
         } => {}
     }
 
+    requests_in_flight.close();
     if let Err(error) = shutdown_connection(reader.get_ref()) {
         warn!(client_id, %error, "Failed to shut down IPC connection");
     }

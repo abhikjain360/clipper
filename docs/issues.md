@@ -1089,7 +1089,8 @@ Each entry has:
 - **Decision:** fix (Claude): the desktop app reads while it writes, Logout
   skips the slot limit, and the daemon closes the socket when its read loop
   ends. A request beyond the eighth waits for a slot in its own task, so the
-  read loop always keeps reading.
+  read loop always keeps reading, and a waiting request is dropped when its
+  connection ends, so a retry after reconnecting cannot run twice.
 
 ### 121. Lost replies to deletes, and gateway errors, skip recovery
 
@@ -1108,17 +1109,17 @@ Each entry has:
 
 ### 122. Calendar feed copies left behind
 
-- **Status:** fixed in `90e4a4a` for an upload whose source save never
-  reached the server. Open for a sync cancelled by logout
-  between the upload and the save.
+- **Status:** open
 - **Severity:** low. Not on main.
 - **Where:** `crates/client/src/calendar_import.rs`, `sync_calendar_source`.
 - **What happens:** the raw feed upload stays in Files and counts toward quota
-  when the source save never commits.
-- **Decision:** remove the raw upload after an ambiguous save failure only
-  when an authenticated re-read confirms the old source head. Logout
-  cancellation cleanup is outside this fix.
-
+  when the source save does not commit. It is removed only when the save gets
+  a 409, which proves the save can never commit. After a dropped connection or
+  a gateway error the save may still be running on the server, and reading the
+  old head back does not prove it will not commit later; removing the upload
+  then would leave the source pointing at a purged file, stuck for good. A
+  sync cancelled by logout between the upload and the save leaves one too.
+- **Decision:**
 ### 123. A series ending on 9999-12-31 never expands
 
 - **Status:** fixed in `90e4a4a`

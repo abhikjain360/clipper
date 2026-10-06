@@ -424,65 +424,6 @@ async fn lost_delete_replies_recover_tombstones_and_competing_heads() {
 
 #[tokio::test]
 #[ignore = "build clipper-server first; starts an isolated local server"]
-async fn an_uncommitted_calendar_source_save_removes_its_raw_upload() {
-    crate::ensure_crypto_provider();
-    let temp = tempfile::tempdir().unwrap();
-    let (_server, upstream) = start_server(temp.path()).await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let armed = Arc::new(std::sync::Mutex::new(None));
-    let proxy = tokio::spawn(failing_proxy(
-        listener,
-        upstream,
-        Arc::clone(&armed),
-        None,
-        true,
-    ));
-    let registered = register_proxy_engine(&url, &temp.path().join("registration")).await;
-    let engine = copy_session(&registered, &url, &temp.path().join("client")).await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let feed_url = format!("http://{}/feed.ics", listener.local_addr().unwrap());
-    let feed = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut buffer = [0_u8; 4096];
-        assert!(socket.read(&mut buffer).await.unwrap() > 0);
-        let body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:meeting\r\nDTSTART:20260908T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-        socket
-            .write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-    });
-    let source = engine.add_calendar_source("Work", &feed_url).await.unwrap();
-    let old = engine.local_head(&source).await.unwrap();
-    *armed.lock().unwrap() = Some(b"/revisions HTTP/1.1");
-    assert!(matches!(
-        engine.sync_calendar_source(&source).await,
-        Err(ClientError::Http(_))
-    ));
-    assert!(armed.lock().unwrap().is_none());
-    assert_eq!(engine.local_head(&source).await.unwrap(), old);
-    assert!(
-        engine
-            .api
-            .list_objects(Some(ObjectKind::File), Some(100), None, None)
-            .await
-            .unwrap()
-            .items
-            .is_empty()
-    );
-    registered.logout(true).await.unwrap();
-    feed.await.unwrap();
-    proxy.abort();
-}
-
-#[tokio::test]
-#[ignore = "build clipper-server first; starts an isolated local server"]
 async fn lost_timer_replies_recover_committed_starts_and_stops() {
     crate::ensure_crypto_provider();
     let temp = tempfile::tempdir().unwrap();
