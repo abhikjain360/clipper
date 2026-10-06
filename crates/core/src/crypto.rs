@@ -1,7 +1,7 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
-    aead::{Aead, AeadCore, KeyInit, generic_array::typenum::Unsigned},
+    aead::{Aead, AeadCore, KeyInit, array::typenum::Unsigned},
 };
 pub use clipper_api_types::{
     ARGON2_MAX_M_COST_KIB, ARGON2_MAX_P_COST, ARGON2_MAX_T_COST, ARGON2_MIN_M_COST_KIB,
@@ -754,7 +754,7 @@ pub fn encrypt(
     aad: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     let nonce_bytes = generate_nonce();
-    let nonce = XNonce::from_slice(&nonce_bytes);
+    let nonce: &XNonce = (&nonce_bytes).into();
     let cipher = XChaCha20Poly1305::new(key.into());
 
     use chacha20poly1305::aead::Payload;
@@ -778,15 +778,13 @@ pub fn decrypt(
     ciphertext: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    if nonce.len() != XCHACHA20_NONCE_BYTES {
-        return Err(CryptoError::Decrypt(format!(
+    let nonce = <&XNonce>::try_from(nonce).map_err(|_| {
+        CryptoError::Decrypt(format!(
             "invalid nonce length: expected {} bytes, got {}",
             XCHACHA20_NONCE_BYTES,
             nonce.len()
-        )));
-    }
-
-    let nonce = XNonce::from_slice(nonce);
+        ))
+    })?;
     let cipher = XChaCha20Poly1305::new(key.into());
 
     use chacha20poly1305::aead::Payload;
