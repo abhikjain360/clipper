@@ -675,14 +675,17 @@ Each entry has:
   patch; keep the module off `globalThis`.
 - **Decision:**
 
-### 70. Two dependency advisories are carried
+### 70. Some dependency advisories remain
 
-- **Status:** open (out of scope for this branch); not re-checked
+- **Status:** open; re-checked during the 2026-10-06 Rust dependency upgrade
 - **Severity:** low. On main.
 - **Where:** `Cargo.lock`, `osv-scanner.toml`.
-- **What happens:** the Linux desktop pulls unmaintained GTK and glib 0.18
-  through Tauri, and a dead `rsa` crate sits in the lockfile through sqlx.
-- **Recommendation:** track the Tauri upgrade; keep `cargo tree -i rsa` empty.
+- **What happens:** the Linux desktop still pulls GTK and glib 0.18 through
+  Tauri. The audit filters the glib, proc-macro-error and smallstr advisories,
+  plus existing JavaScript tooling advisories. SQLx 0.9 removed `rsa` from
+  the lockfile; the upgrades also removed rkyv 0.7 and the unic crates.
+- **Recommendation:** track upstream fixes for the remaining advisories.
+- **Resolved:** obsolete rsa, rkyv and unic audit ignores were removed.
 - **Decision:**
 
 ### 116. A live delete event is not signed, so the device keeps a weaker anchor
@@ -1532,6 +1535,21 @@ Each entry has:
   client, server, daemon IPC, three adapters and both UIs. A kind registry and
   an `AppState` reshape were proposed.
 - **Decision:** deferred; not part of this branch (owner).
+
+### 127. Some Rust dependencies must stay on older version lines
+
+- **Status:** decided
+- **Severity:** low.
+- **Where:** workspace and crate `Cargo.toml` files.
+- **What happens:** OPAQUE 4.0.1 requires digest 0.10 and Rand 0.8. HMAC
+  0.13 and HKDF 0.13 require digest 0.11. SQLx 0.9 requires
+  `libsqlite3-sys < 0.38`, while rusqlite 0.40 requires 0.38. The React
+  Native UniFFI generator and runtime require UniFFI 0.31. Calcard's ahash
+  dependency needs getrandom 0.3's browser feature enabled on that version.
+- **Decision:** keep direct SHA-2 0.10, HMAC 0.12, HKDF 0.12, the OPAQUE
+  Rand alias on 0.8, rusqlite on 0.39, UniFFI on 0.31, and the getrandom
+  browser-feature alias on 0.3. Upgrade these when their upstream users
+  support the newer lines. Other Rust dependencies were upgraded.
 
 ## Docs
 

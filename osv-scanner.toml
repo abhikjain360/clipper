@@ -2,10 +2,6 @@
 # packages fails the scan and needs an explicit entry here to be accepted.
 
 [[IgnoredVulns]]
-id = "RUSTSEC-2023-0071"
-reason = "Marvin timing attack in rsa, pulled into Cargo.lock through sea-orm-migration's scanner-visible sea-orm-cli/sqlx-mysql metadata path; the server uses SQLite migrations only, and OSV reports no fixed rsa version."
-
-[[IgnoredVulns]]
 id = "RUSTSEC-2024-0411"
 reason = "gdkwayland-sys: unmaintained gtk-rs GTK3 bindings, transitive Linux Tauri/Wry GTK 0.18 stack via gtk/webkit2gtk. Revisit when Tauri/Wry moves to a maintained GTK binding line."
 
@@ -55,10 +51,6 @@ id = "RUSTSEC-2024-0370"
 reason = "proc-macro-error is unmaintained; transitive through glib-macros/gtk3-macros in Tauri's Linux GTK stack. No direct manifest upgrade removes it while Tauri/Wry stays on gtk-rs 0.18."
 
 [[IgnoredVulns]]
-id = "RUSTSEC-2026-0235"
-reason = "rkyv 0.7.46 is an optional dependency of rust_decimal whose feature is not enabled anywhere in the workspace build graph (cargo tree -i finds no consumers); the 0.8.17 fix is not compatible with rust_decimal 1.x."
-
-[[IgnoredVulns]]
 id = "RUSTSEC-2026-0215"
 reason = "smallstr 0.3.1 is transitive through yrs (sync engine); no fixed version exists."
 
@@ -77,23 +69,3 @@ reason = "braces is transitive through Metro and Tamagui build tooling (via micr
 [[IgnoredVulns]]
 id = "GHSA-86w9-cpqp-85rv"
 reason = "node-forge is transitive through Expo CLI/code-signing tooling, not shipped in app bundles; no fixed version exists."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2025-0075"
-reason = "unic-char-range is unmaintained; transitive through Tauri's urlpattern 0.3.0 dependency. No fixed unic/urlpattern upgrade is available from current Tauri manifests."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2025-0080"
-reason = "unic-common is unmaintained; transitive through Tauri's urlpattern 0.3.0 dependency. No fixed unic/urlpattern upgrade is available from current Tauri manifests."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2025-0081"
-reason = "unic-char-property is unmaintained; transitive through Tauri's urlpattern 0.3.0 dependency. No fixed unic/urlpattern upgrade is available from current Tauri manifests."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2025-0098"
-reason = "unic-ucd-version is unmaintained; transitive through Tauri's urlpattern 0.3.0 dependency. No fixed unic/urlpattern upgrade is available from current Tauri manifests."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2025-0100"
-reason = "unic-ucd-ident is unmaintained; transitive through Tauri's urlpattern 0.3.0 dependency. No fixed unic/urlpattern upgrade is available from current Tauri manifests."
