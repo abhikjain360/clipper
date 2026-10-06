@@ -51,7 +51,9 @@ Each entry has:
   in. Retention notices the session changed and skips saving the record, but
   reports success, so the decrypted bytes reach the caller. On desktop they are
   written to the folder A chose.
-- **Decision:** fix (Claude): fail with the session-ended error.
+- **Decision:** acceptable on desktop, where A chose the folder (owner). The fix
+  stays for now because on the web the file is saved into the next user's
+  browser session; revert on request.
 
 ### 4. A clipboard push spanning a login uses two accounts' credentials
 
@@ -74,8 +76,8 @@ Each entry has:
   shows A's items on B's screen until B's data finishes loading. Two reviewers
   reproduced it by holding the task by hand; ordinary scheduling does not
   stall a task for the length of a login.
-- **Decision:** fix (Claude): tag each update with its session and drop
-  updates from an ended one.
+- **Decision:** ignore for now (owner). The fix landed with the other session
+  fixes in `f6c55b2` and is kept.
 
 ### 6. Logging in installs the new token before the old session is stopped
 
@@ -142,6 +144,579 @@ Each entry has:
 - **What happens:** each fired alarm writes its title to logcat. Logout
   cannot remove it; it stays until the log rotates or the phone reboots.
 - **Decision:** accepted as a known issue for now.
+
+### 30. The server has no header timeout, request deadline or connection cap
+
+- **Status:** open; checked in code
+- **Severity:** medium. On main.
+- **Where:** `crates/server/src/main.rs`, the bare `axum::serve` call; the
+  streamed payload upload in `crates/server/src/routes/objects.rs`.
+- **What happens:** hyper waits for request headers with no deadline and Tokio
+  accepts any number of connections. The rate limiters run only after headers
+  are parsed, so a client that sends headers one byte at a time is never
+  counted. This works without an account against the auth routes, and
+  `/api/health` has no rate limit at all. The upload stream has no per-chunk
+  read timeout.
+- **Recommendation:** add a header-read timeout, a connection or concurrency
+  cap, and either a short whole-request deadline on auth and health or a
+  per-chunk upload timeout. If a reverse proxy is to do this instead, state it
+  as a deployment requirement in `server-resource-limits.md`.
+- **Decision:**
+
+### 31. Authenticated routes rely on axum's implicit 2 MiB body limit
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `crates/server/src/main.rs`, the authenticated router (only the
+  public auth router sets `DefaultBodyLimit`); the `Postcard` extractor in
+  `crates/server/src/routes/mod.rs`; `init_object`.
+- **What happens:** the whole inline object body is read into memory before any
+  size check. An inline payload above about 2 MiB gets a generic 400 instead of
+  `PayloadTooLarge`, and setting `max_object_meta_ciphertext_bytes` above 2 MiB
+  has no effect.
+- **Recommendation:** decide whether inline payloads above 2 MiB are supported,
+  then set an explicit limit on the authenticated router that matches the
+  configuration, so clients get `PayloadTooLarge`.
+- **Decision:**
+
+### 32. The per-user API limit counts requests, not bytes
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `crates/server/src/rate_limit.rs`, `check_api_user`; the payload
+  routes in `crates/server/src/routes/objects.rs`.
+- **What happens:** a 512 MiB download costs the same as a one-byte request.
+  Stored bytes are capped by the storage quota, but repeated downloads and
+  upload-then-delete churn are limited only by request count.
+- **Recommendation:** charge payload routes by bytes, or state that bandwidth
+  limits belong to a reverse proxy.
+- **Decision:**
+
+### 33. Native clients have no cap on stored objects
+
+- **Status:** open; checked in code
+- **Severity:** low (needs a malicious server). On main.
+- **Where:** `crates/client/src/local_store/sqlite.rs` (the browser store caps
+  its index at 1,000; the native store has no cap).
+- **What happens:** a server can announce or list any number of objects, and
+  each one becomes a row on the device.
+- **Recommendation:** decide a cap and what happens at it: drop the oldest or
+  refuse new objects.
+- **Decision:**
+
+### 34. Reconciliation has no total page cap and does not stop a replaced pass
+
+- **Status:** open; checked in code
+- **Severity:** low (availability against a malicious server). On main.
+- **Where:** `crates/client/src/engine.rs`, the snapshot loops.
+- **What happens:** each page must now advance the cursor, but a server can
+  return an endless run of valid pages, downloading payloads on each. After a
+  reconnect the earlier pass keeps running; generation checks only stop its
+  writes.
+- **Recommendation:** cap pages or items per pass and cancel a pass when a new
+  generation starts, if availability against a malicious server is in scope.
+- **Decision:**
+
+### 35. Sequence numbers from the server are accepted without a range check
+
+- **Status:** open; checked in code (the `server_time` in `hello_ack` is never
+  read). The effect on the current anchor-based store is not re-checked.
+- **Severity:** medium (needs a malicious server). On main.
+- **Where:** `crates/client/src/engine.rs`, live event and snapshot paths;
+  ordering in `crates/client/src/local_store.rs`.
+- **What happens:** event and listing sequence numbers are compared as
+  given. A far-future value can win every later ordering comparison for that
+  object; the audit showed it making an object immune to deletes and sweeps.
+- **Recommendation:** reject or clamp any sequence number far beyond
+  `hello_ack.server_time` plus a small grace window.
+- **Decision:**
+
+### 36. Every reconnect downloads every retained clipboard payload again
+
+- **Status:** open; checked in code
+- **Severity:** medium (also costs an honest server). On main.
+- **Where:** `crates/client/src/engine.rs`, `snapshot_clipboard`.
+- **What happens:** each pass downloads and decrypts every listed clipboard
+  item even when the device already holds that revision, up to 100 items of
+  16 MiB. A server `invalidate` ends the connection cleanly, which resets the
+  reconnect backoff to one second, so a server can repeat this continuously.
+- **Recommendation:** skip the download when the held revision and body hash
+  match the listing, and do not reset the backoff on a server `invalidate`.
+- **Decision:**
+
+### 37. Browser clipboard sync stops on large items
+
+- **Status:** open; checked in code
+- **Severity:** medium. On main.
+- **Where:** `crates/client/src/local_store.rs`, the browser
+  `write_stored_object_record_with_payload`; `snapshot_clipboard` in
+  `crates/client/src/engine.rs`.
+- **What happens:** the browser store writes payload ciphertext with
+  `serde_json::to_string(&[u8])`, a JSON array of numbers at about 3.6
+  characters per byte, into `localStorage` (5 to 10 MB per origin). A copy of
+  about 2 MB fails with a quota error, the error aborts the snapshot pass and
+  its sweep, and every reconnect repeats it.
+- **Recommendation:** store ciphertext as base64 (or in IndexedDB), and make one
+  item's write failure skip that item instead of ending the pass.
+- **Decision:**
+
+### 38. The browser WebSocket has no inbound size cap and no deadlines
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `crates/client/src/engine.rs`, `BrowserWs` and the browser
+  `ws_connect`.
+- **What happens:** every inbound frame goes into an unbounded channel, and
+  there is no connect, `hello_ack` or read timeout, so a silent server leaves
+  the browser showing Connected forever. Native clients have 30 s, 10 s and
+  75 s deadlines.
+- **Recommendation:** close the socket on frames above a few KB and add the same
+  deadlines native has.
+- **Decision:**
+
+### 39. Daemon IPC sends bytes as JSON number arrays
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `crates/daemon-types/src/protocol.rs` (plain `Vec<u8>` fields such
+  as `SendClipboardPayloadParams.bytes`); the 32 MiB line cap in
+  `crates/daemon/src/handler.rs`.
+- **What happens:** a clipboard payload above about 9 MiB serializes past the
+  32 MiB line cap, and the daemon drops the desktop app's connection.
+- **Recommendation:** send bulk bytes as base64 or length-prefixed binary, and
+  reject an oversized line without dropping the connection.
+- **Decision:**
+
+### 40. Login and resume do not check the identity the server returns
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `crates/client/src/engine.rs`, login and resume;
+  `crates/server/src/routes/auth.rs`, `validate`.
+- **What happens:** the client adopts whatever device id and username the
+  server returns, and `GET /api/auth/validate` returns an empty success, so a
+  resume mounts whatever identity the stored blob names.
+- **Recommendation:** fail on a device id or username mismatch at login; have
+  `validate` return user id, device id and username and compare them on resume.
+- **Decision:**
+
+### 41. The web resume blob survives a refused resume and removal of this device
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `web/src/backend/index.ts`, `resumeSession`; `web/src/App.tsx`,
+  `removeDevice`.
+- **What happens:** `resumeSession` keeps the stored token and keys after any
+  failure, including a definitive 401, and removing the current device does
+  not clear them. The data key stays in `sessionStorage` until the tab closes.
+- **Recommendation:** clear the blob on a 401 at resume and when the removed
+  device is this one.
+- **Decision:**
+
+### 42. Keys and passphrases are not wiped from memory on every path
+
+- **Status:** open; checked in code
+- **Severity:** low (needs a memory dump or root). On main.
+- **Where:** `crates/core/src/crypto.rs`, `decrypt` and `unwrap_with_key`
+  (return plain `Vec<u8>`); `crates/client/src/api_client.rs`, `login_prepare`
+  (takes `&str`); the cache key copy in `crates/client/src/engine.rs`;
+  passphrase state in `mobile/src/App.tsx`.
+- **What happens:** copies of the device signing key, data key, export key and
+  passphrase can stay in freed memory, swap or crash dumps.
+- **Recommendation:** return `Zeroizing` from `decrypt` and `unwrap_with_key`,
+  add a secret wrapper type for the auth APIs, and clear the mobile passphrase
+  state after login.
+- **Decision:**
+
+### 43. Collab cursor data from other participants is not validated
+
+- **Status:** open; checked in code
+- **Severity:** medium (anyone with the share link, or the server). On main.
+- **Where:** `web/src/CodeEditor.tsx` (sets only the local colour);
+  `y-codemirror.next` remote selections; the server relays awareness unchanged
+  in `crates/server/src/collab_sync.rs`.
+- **What happens:** a remote `color` value is placed into an inline `style`
+  attribute, which allows a page-covering overlay (CSS only, no script). A
+  malformed remote cursor permanently disables remote cursors in that editor
+  until it is rebuilt. Awareness has no size or rate limit beyond the 4 MiB
+  frame cap.
+- **Recommendation:** rewrite remote awareness states before the editor reads
+  them: colours from a fixed palette keyed by client id, malformed cursors
+  dropped. Validate frame shape and budget on the server too.
+- **Decision:**
+
+### 44. Collab docs have no size budget and do not count toward quota
+
+- **Status:** open; checked in code
+- **Severity:** medium. On main.
+- **Where:** `crates/server/src/collab_sync.rs`, `crates/server/src/routes/collab.rs`.
+- **What happens:** the only limit is 4 MiB per message. Anyone with the share
+  link can grow a doc without bound, CRDT tombstones make the growth permanent,
+  and every later opener downloads the whole state. `collab_docs.yjs_state` is
+  not counted in `users.storage_bytes`.
+- **Recommendation:** a cumulative size ceiling per doc and a byte and rate
+  budget per connection; decide whether collab state counts toward quota.
+- **Decision:**
+
+### 45. Deleting a collab doc does not disconnect people editing it
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `crates/server/src/routes/collab.rs`, `delete_collab_doc` (does not
+  touch the room map in `state.rs`); the `y-websocket` client.
+- **What happens:** connected peers keep editing the in-memory room after the
+  delete. A guest's editor retries the socket forever after the 403 and looks
+  normal while discarding everything typed.
+- **Recommendation:** evict the room and close its connections on delete; show
+  "document unavailable" after failed reconnects.
+- **Decision:**
+
+### 46. Collab share tokens never expire and always allow editing
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `crates/server/src/routes/collab.rs`; `web/src/CodeEditor.tsx`;
+  the browser and native local stores.
+- **What happens:** the token is a full read and write credential with no
+  expiry, revocation or read-only variant. It travels in the WebSocket URL query
+  string (proxy logs, history), is stored in plaintext in both local caches, and
+  is the one server credential that reaches the Tauri webview's JavaScript.
+- **Recommendation:** move it out of the URL, add expiry, rotation and a
+  read-only token, and encrypt the stored collab record.
+- **Decision:**
+
+### 47. Shared collab docs show the owner's account username
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `web/src/App.tsx`, `displayName={state.session?.username ?? "You"}`.
+- **What happens:** the login username goes to every share-link holder and the
+  server in cursor data.
+- **Recommendation:** a per-doc display name, or a neutral label on shared docs.
+- **Decision:**
+
+### 48. Android shows decrypted content to screenshots, recents and recorders
+
+- **Status:** open; checked in code
+- **Severity:** medium. On main.
+- **Where:** the Android main activity (no `FLAG_SECURE` in `mobile/src`,
+  `mobile/app.json` or `mobile/modules`); the viewers in `mobile/src/App.tsx`.
+- **What happens:** clipboard and file content appears in the recents
+  thumbnail, in screenshots, and in any screen-recording app the user allowed.
+  `FLAG_SECURE` would also block the user's own screenshots.
+- **Recommendation:** set `FLAG_SECURE` on the main window and, on API 33 and
+  above, `setRecentsScreenshotEnabled(false)`.
+- **Decision:**
+
+### 49. Android clipboard copies are not marked sensitive
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `mobile/src/backend.ts` copy paths (`expo-clipboard`).
+- **What happens:** copied secrets show in Android's clipboard preview and
+  clipboard history.
+- **Recommendation:** set `EXTRA_IS_SENSITIVE` through a small native module;
+  consider clearing the clipboard after a delay.
+- **Decision:**
+
+### 50. The Android app requests an overlay permission it does not use
+
+- **Status:** open; checked in code (`SYSTEM_ALERT_WINDOW` is in the generated
+  manifest; `mobile/app.json` does not block it)
+- **Severity:** low. On main.
+- **Where:** `mobile/app.json`.
+- **What happens:** the app asks for draw-over-other-apps, and no sensitive
+  button filters touches while obscured.
+- **Recommendation:** block the permission in `app.json` and add
+  `filterTouchesWhenObscured` to confirm, delete and logout.
+- **Decision:**
+
+### 51. Password-manager clipboard markers are not honoured everywhere
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `crates/client/src/clipboard_watcher_linux.rs`, `read_clipboard`
+  and `clipboard_has_password_manager_marker`.
+- **What happens:** on Linux the marker is read before the payload and never
+  re-checked after it, and a stalled marker read counts as "no marker", so a
+  password copied from a manager can sync. macOS re-checks after reading. The
+  browser and mobile apps cannot see the markers at all.
+- **Recommendation:** re-check the marker after the payload read and treat a
+  stalled read as marked; tell web and mobile users that markers are not
+  honoured there.
+- **Decision:**
+
+### 52. The Tauri window has every `core:default` permission
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `web/src-tauri/capabilities/default.json`.
+- **What happens:** the webview can call unused core commands such as image
+  loading and devtools toggling. No injection sink is known.
+- **Recommendation:** an explicit allowlist, after a desktop run confirms what
+  the app needs.
+- **Decision:**
+
+### 53. The daemon trusts every process of the same user
+
+- **Status:** open; checked in code
+- **Severity:** low (accepted so far). On main.
+- **Where:** the `upload_file` and `download_file` daemon commands;
+  `crates/daemon/src/keychain.rs` (`set_generic_password`, default ACL);
+  `web/src-tauri/src/ipc_secret.rs` (Linux read with plain `std::fs::read`).
+- **What happens:** another process of the same user can read the IPC secret
+  from the unlocked login keychain and then make the daemon read or write any
+  path. The daemon checks only the peer uid, not its code signature. The Tauri
+  Linux secret read lacks the daemon's symlink and regular-file check (no new
+  capability, since the same user can read the file anyway).
+- **Recommendation:** keep same-user trust and say so, or harden: byte-based
+  file IPC instead of paths, an app-bound keychain ACL, a code-signature check
+  of the peer on macOS, and the shared regular-file check on the Tauri side.
+- **Decision:**
+
+### 54. Whether a username exists can still be learned
+
+- **Status:** open; registration checked in code, timing not re-checked
+- **Severity:** low. On main.
+- **Where:** `crates/server/src/routes/auth.rs`, `register_finish` and
+  `challenge`.
+- **What happens:** a holder of an unused invite gets 409 from
+  `register_finish` for a taken username, without spending the invite. Login
+  challenge responses have the same shape for real and unknown users, but the
+  real path does an extra unwrap, so timing differs.
+- **Recommendation:** accept both (the first needs a valid invite), or make the
+  finish result and the challenge timing indistinguishable.
+- **Decision:**
+
+### 55. Auth rate limits allow a targeted or a global login lockout
+
+- **Status:** open; not re-checked
+- **Severity:** low (availability). On main.
+- **Where:** `crates/server/src/rate_limit.rs`.
+- **What happens:** anyone who knows a username can use up its per-username
+  challenge budget from many addresses. A slow flood spread over many
+  addresses can drain the global auth bucket and block every login.
+- **Recommendation:** count only failed logins, or key by client and username;
+  limit Argon2 work by concurrency instead of a global request bucket.
+- **Decision:**
+
+### 56. Sessions cannot be listed or revoked one at a time
+
+- **Status:** open; checked in code (only the `/api/auth/devices` routes exist)
+- **Severity:** low. On main.
+- **Where:** `crates/server/src/routes/auth.rs`; `crates/server/src/main.rs`.
+- **What happens:** a leaked 30-day token can be revoked only by removing its
+  whole device. There is no "log out other sessions" and no admin revocation.
+  Device removal deletes the row, so the same device id can register again.
+- **Recommendation:** `GET /api/auth/sessions`, `DELETE /api/auth/sessions/{id}`
+  and `POST /api/auth/sessions/revoke-others`; optionally a revoked state on
+  devices instead of a hard delete.
+- **Decision:**
+
+### 57. The data key cannot be rotated and the passphrase cannot be changed
+
+- **Status:** open; checked in code (no passphrase-change route)
+- **Severity:** low under the threat model, but it decides how bad every key
+  leak is. On main.
+- **Where:** `crates/core/src/crypto.rs`, `derive_data_key_from_opaque_export_key`.
+- **What happens:** the data key is fixed for the life of the account. If it or
+  the passphrase leaks, all past and future ciphertext stays readable; revoking
+  sessions only stops API access.
+- **Recommendation:** passphrase change through OPAQUE re-registration, plus a
+  client pass that re-encrypts retained objects under the new key.
+- **Decision:**
+
+### 58. OPAQUE passphrase stretching is at the OWASP minimum
+
+- **Status:** open; checked in code (19 MiB, 2 passes, 1 lane, pinned)
+- **Severity:** low. On main.
+- **Where:** `crates/core/src/crypto.rs`, `OPAQUE_KSF_*`.
+- **What happens:** the cost is pinned so a dependency bump cannot change it,
+  but it was not raised. Raising it later forces every account to re-register.
+- **Recommendation:** decide before deployment, for example 64 MiB and 3
+  passes, weighed against login time on mobile and in the browser.
+- **Decision:**
+
+### 59. Server user scoping relies on hand-written filters
+
+- **Status:** open; checked in code (no `UserDb` or `UserScope` helper)
+- **Severity:** low (no current leak found). On main.
+- **Where:** private handlers in `crates/server/src/routes/`.
+- **What happens:** each handler adds its own `user_id` filter, so a new handler
+  that forgets one would read across users unnoticed. The database does not stop
+  a session or revision from naming another user's device (composite foreign
+  keys not re-checked after migration 5). Not every route has a two-user
+  isolation test.
+- **Recommendation:** a scoped database helper or a CI check for raw entity
+  calls, composite device foreign keys, and a two-user test per private route.
+- **Decision:**
+
+### 60. Web client security depends on the host that serves it
+
+- **Status:** open; CSP checked in code
+- **Severity:** medium. On main.
+- **Where:** `web/index.html` (CSP in a meta tag); the production static host;
+  `crates/web-wasm`.
+- **What happens:** any script running on the web origin can ask the wasm
+  backend to decrypt everything and can read the session blob and mint
+  WebSocket tickets; the server does not check WebSocket `Origin`. The bundle
+  has no subresource integrity. `frame-ancestors` and `X-Frame-Options` must come
+  from the production host as headers, which is not chosen yet. The CSP allows
+  connections to any HTTPS or WSS server, since the user picks the server.
+- **Recommendation:** accept "script on the origin is total compromise" and
+  make the production host send a real CSP header, the framing headers and
+  SRI when a host is chosen; decide whether a build-time server allowlist is
+  worth losing the free choice of server.
+- **Decision:**
+
+### 61. No certificate pinning
+
+- **Status:** open; checked in code
+- **Severity:** info. On main.
+- **Where:** `crates/client/src/api_client.rs`.
+- **What happens:** the client trusts any certificate the system trusts.
+- **Recommendation:** accept, or pin the server's public key.
+- **Decision:**
+
+### 62. The client picks the creation time that sets clipboard expiry
+
+- **Status:** open; checked in code (bounded to a one-hour window)
+- **Severity:** info. On main.
+- **Where:** `crates/server/src/routes/objects.rs`, `expires_at` from the
+  envelope's `created_at`.
+- **What happens:** a client can shift its own clipboard items' expiry by up to
+  the accepted `created_at` window.
+- **Recommendation:** accept, or derive expiry from server time.
+- **Decision:**
+
+### 63. Collab docs are readable by the server and open to anyone with the link
+
+- **Status:** open (confirm the design)
+- **Severity:** low. On main.
+- **Where:** `crates/server/src/collab_sync.rs`, `crates/server/src/routes/collab.rs`.
+- **What happens:** collab content is plaintext on the server, which can read,
+  change or inject it, and the socket and share page accept anyone holding the
+  token with no account.
+- **Recommendation:** confirm as designed and say so in the share UI.
+- **Decision:**
+
+### 64. Rollback and provenance checks have deliberate limits
+
+- **Status:** open (confirm the design)
+- **Severity:** low. On main.
+- **Where:** `crates/client/src/local_store.rs` anchors; envelope signature
+  checks in `crates/client/src/engine.rs`.
+- **What happens:** a fresh install has no anchor; a jump of more than one
+  revision cannot check the missing links; a remote delete event carries no
+  signed tombstone. Browser anchors live in an evictable store. Envelope
+  signatures use device keys the server supplies, so they prove server-checked
+  provenance only; the AEAD under the data key is the real authenticity check.
+- **Recommendation:** confirm these limits; decide whether browser anchors need
+  durable storage.
+- **Decision:**
+
+### 65. Native revision anchors are kept forever and lost on a schema change
+
+- **Status:** open; not re-checked
+- **Severity:** low. Not on main.
+- **Where:** `crates/client/src/local_store/sqlite.rs`, `object_anchors`.
+- **What happens:** one anchor row per object ever accepted, never pruned, and
+  hydration still loads every held object (lists do not use the indexes). A
+  schema version change recreates the database and drops every anchor.
+- **Recommendation:** measure anchor growth before choosing expiry (likely per
+  kind); carry `object_anchors` across schema changes once anyone runs the
+  client long-term; add bounded queries for the clipboard list and calendar
+  range.
+- **Decision:**
+
+### 66. Historical revisions have no retention policy
+
+- **Status:** open; not re-checked
+- **Severity:** low. Not on main.
+- **Where:** `crates/server/src/routes/objects.rs`, `purge_object`; schedule
+  revision references.
+- **What happens:** a recording's reference to a plan revision does not stop
+  that revision from being purged, and nothing defines how long history is kept.
+- **Recommendation:** decide retention and purge rules for referenced revisions.
+- **Decision:**
+
+### 67. The local SQLite file itself is not encrypted
+
+- **Status:** open; not re-checked
+- **Severity:** low. Not on main.
+- **Where:** `crates/client/src/local_store/sqlite.rs`.
+- **What happens:** object content is encrypted by the app, but the database's
+  own metadata (ids, kinds, sequence numbers) is plaintext in a `0600` file.
+- **Recommendation:** keep the current boundary unless a threat model needs
+  SQLCipher.
+- **Decision:**
+
+### 68. The server pepper cannot be rotated
+
+- **Status:** open (out of scope for this branch)
+- **Severity:** low. On main.
+- **Where:** `crates/server/src/secret.rs`, `crates/server/src/secret_storage.rs`.
+- **What happens:** wrapped blobs carry no key id; changing the pepper means a
+  new database.
+- **Recommendation:** a key-id byte in wrapped blobs and an admin re-wrap
+  command.
+- **Decision:**
+
+### 69. The generated React Native bridge lacks input bounds checks
+
+- **Status:** open (out of scope for this branch); not re-checked
+- **Severity:** low (needs a malicious npm dependency). On main.
+- **Where:** generated UniFFI JSI code under `packages/mobile-bridge/cpp`.
+- **What happens:** string reads trust offsets, buffer frees trust a
+  JavaScript-writable capacity, and the raw module sits on `globalThis`.
+- **Recommendation:** bounds checks and buffer provenance in the generator
+  patch; keep the module off `globalThis`.
+- **Decision:**
+
+### 70. Two dependency advisories are carried
+
+- **Status:** open (out of scope for this branch); not re-checked
+- **Severity:** low. On main.
+- **Where:** `Cargo.lock`, `osv-scanner.toml`.
+- **What happens:** the Linux desktop pulls unmaintained GTK and glib 0.18
+  through Tauri, and a dead `rsa` crate sits in the lockfile through sqlx.
+- **Recommendation:** track the Tauri upgrade; keep `cargo tree -i rsa` empty.
+- **Decision:**
+
+### 116. A live delete event is not signed, so the device keeps a weaker anchor
+
+- **Status:** fixing
+- **Severity:** medium. Not on main.
+- **Where:** `crates/api-types` (the event shape), `crates/server/src/ws.rs`
+  and the event replay, `crates/client/src/local_store.rs`
+  (`apply_delete_inner`, the observed-delete anchor).
+- **What happens:** every revision, including a tombstone, is signed by the
+  device that made it, but a live "deleted" event only names the object and a
+  sequence number. The client cannot check it, so it keeps the previous head
+  as a weaker "seen deleted" anchor and asks any later revision to be at least
+  two steps newer. That weaker anchor is what made entry 1 possible. For an
+  encrypted object every delete event has a signed tombstone on the server
+  behind it.
+- **Decision:** build in this PR (owner): the event carries the signed
+  tombstone, the client verifies it and anchors on it exactly, and the
+  "seen deleted" anchor and the "two steps newer" rule go.
+
+### 117. Logout lets the old session's work keep running
+
+- **Status:** fixing
+- **Severity:** high as a class. Five review passes found bugs of this shape
+  (entries 3 to 6 among them); each was patched with a session check.
+- **Where:** `crates/client/src/engine.rs` and every shell: the daemon, wasm,
+  UniFFI, Tauri, and the web and mobile logout buttons.
+- **What happens:** logout clears keys and memory while uploads, downloads,
+  timer writes, calendar syncs and background sync from the old session are
+  still running, so each of them needs its own check that the session it
+  started under is still current.
+- **Decision:** build in this PR (owner). Logout lists the user-started work
+  still running and offers Wait or Cancel them. Wait keeps the user signed in;
+  the app never signs out on its own when the work ends. Cancel them stops the
+  work, waits until it has stopped, then signs out. Background sync is always
+  cancelled without asking. Quitting the app is not a logout.
 
 ## Bugs
 
@@ -277,6 +852,204 @@ Each entry has:
   days.
 - **Decision:** accepted as a known issue for now.
 
+### 71. A user action that gets a 401 does not sign the session out
+
+- **Status:** open; checked in code
+- **Severity:** low.
+- **Where:** `crates/client/src/engine.rs`; only the snapshot and WebSocket
+  paths call `end_refused_session_for`.
+- **What happens:** an upload or delete refused with 401 shows the error, but
+  the session stays signed in until a snapshot or the socket hits a 401.
+- **Recommendation:** route user actions through the same helper.
+- **Decision:**
+
+### 72. A failed live fetch is never retried
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `crates/client/src/engine.rs`, `handle_created_event` (spawns one
+  `materialize_object` and only logs a failure).
+- **What happens:** one transient error on a live create or update hides the
+  object until the next reconnect's snapshot. `ws-sync-flow.md` says the client
+  retries.
+- **Recommendation:** a bounded retry within the generation, or correct the
+  spec.
+- **Decision:**
+
+### 73. A 404 during a live fetch drops the copy this device holds
+
+- **Status:** open; checked in code
+- **Severity:** low.
+- **Where:** `crates/client/src/engine.rs`, `materialize_object`.
+- **What happens:** any 404, including a transient one on an `updated` event,
+  removes the local copy until the next reconnect.
+- **Recommendation:** treat a 404 as absence only for a `created` event; for an
+  update keep the content and let the next snapshot decide.
+- **Decision:**
+
+### 74. Logout waits for an in-flight calendar sync
+
+- **Status:** open; checked in code
+- **Severity:** low. Not on main.
+- **Where:** `crates/client/src/engine.rs`, `calendar_write` held across the
+  feed fetch.
+- **What happens:** logout can take up to the 60 s fetch timeout.
+- **Recommendation:** cancel the fetch on logout.
+- **Decision:**
+
+### 75. Collab changes use the device clock as their ordering key
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `crates/client/src/engine.rs`, `rename_collab_doc` and
+  `delete_collab_doc` (`Utc::now().timestamp_micros()`); the collab routes do
+  not return the committed `seq`.
+- **What happens:** overlapping renames settle by response order, so a rename
+  can revert locally until the next snapshot. A device clock ahead of the
+  server can make a later remote delete look stale until the next sweep.
+- **Recommendation:** return the committed `seq` from the collab create,
+  rename and delete routes and use it.
+- **Decision:**
+
+### 76. A streamed revise that fails midway blocks the object for about two hours
+
+- **Status:** open; not re-checked
+- **Where:** `crates/server/src/routes/objects.rs`, pending revisions and the
+  orphan sweep.
+- **What happens:** revision n+1 stays pending and no other revision of that
+  object is accepted until the sweep removes it. A calendar source of a few
+  thousand events takes the streamed path, so one dropped connection blocks its
+  refresh and deletion.
+- **Recommendation:** let the same device replace its own pending revision.
+- **Decision:**
+
+### 77. Floating and all-day Android alarms ring at the old zone's time after travel
+
+- **Status:** open; checked in code (`BootReceiver` re-arms the stored instants on
+  `TIMEZONE_CHANGED`)
+- **Severity:** medium for travellers. Not on main.
+- **Where:** `mobile/modules/clipper-alarm/.../BootReceiver.kt`; the alarm plan
+  export.
+- **What happens:** the plan holds instants computed in the last zone the app
+  saw, so a floating 07:00 alarm rings at the old zone's 07:00 until the app is
+  opened.
+- **Recommendation:** carry the wall-clock time and a floating flag to Kotlin
+  and convert on `TIMEZONE_CHANGED`.
+- **Decision:**
+
+### 78. SQLite commits on macOS may not survive a power loss
+
+- **Status:** open; checked in code
+- **Severity:** low. Not on main.
+- **Where:** `crates/client/src/local_store/sqlite.rs` (`synchronous = FULL`, no
+  `fullfsync`; the comment claims parity with the old file store).
+- **What happens:** a commit survives an app crash but not necessarily a power
+  cut, unlike the file store it replaced.
+- **Recommendation:** `PRAGMA fullfsync = ON`, or correct the comment.
+- **Decision:**
+
+### 79. A calendar of about 3,300 events can no longer be refreshed
+
+- **Status:** open; the 256 KiB cap is checked, the event count is not
+- **Where:** `crates/client/src/engine.rs`,
+  `MAX_SCHEDULE_PAYLOAD_CIPHERTEXT_BYTES`; the calendar source record.
+- **What happens:** the source record lists the event ids of its active,
+  pending and retired batches, about 39 bytes each. A refresh holds two
+  batches, so a large calendar exceeds the cap.
+- **Recommendation:** raise the cap for source records, or move each batch's
+  member list into its own object.
+- **Decision:**
+
+### 80. The web week grid re-expands on every state change
+
+- **Status:** open; checked in code (`AppState` has no schedule key)
+- **Severity:** low. Not on main.
+- **Where:** `web/src/SchedulePanel.tsx`; `crates/app-types/src/lib.rs`.
+- **What happens:** every clipboard or file event re-runs the week expansion,
+  and the whole `AppState` is re-serialized across the wasm boundary on each
+  change.
+- **Recommendation:** add a schedule content key to `AppState` that changes when
+  a plan, recording or override arrives, and key the grid on it.
+- **Decision:**
+
+### 81. Servers upgraded through migration 5 keep orphaned payload files
+
+- **Status:** open; not re-checked
+- **Severity:** low. Not on main.
+- **Where:** the server's objects directory.
+- **What happens:** old `{object}.{payload}.bin` files have no row pointing at
+  them and are never removed.
+- **Recommendation:** delete them by hand on any upgraded server.
+- **Decision:**
+
+### 82. An alarm due right after a reboot can fail to ring
+
+- **Status:** open; checked in code (a refused foreground-service start is only
+  logged)
+- **Severity:** medium (a missed alarm). Not on main.
+- **Where:** `mobile/modules/clipper-alarm/.../RingService.kt`, `start`.
+- **What happens:** Android 15 and later refuse a `mediaPlayback` foreground
+  service whose start is attributed to `BOOT_COMPLETED`, including an exact
+  alarm delivered in the short window after boot (reported in
+  gdelataillade/alarm#424). Whether `LOCKED_BOOT_COMPLETED` carries the same
+  attribution is untested. A later alarm after reboot works.
+- **Recommendation:** catch the refusal and ring through the notification's
+  full-screen intent and sound; test locked and unlocked reboots on a device.
+- **Decision:**
+
+### 83. Android lint crashes
+
+- **Status:** open; not re-checked
+- **Severity:** low. Not on main.
+- **Where:** the Android lint run.
+- **What happens:** lint's Kotlin analysis crashes inside
+  `react-native-worklets` ("Cannot find a KaModule for the VirtualFile").
+- **Decision:**
+
+### 84. Sparse imported recurrence rules can expand incompletely
+
+- **Status:** open; not re-checked
+- **Severity:** low. Not on main.
+- **Where:** `crates/schedule/src/engine.rs`, expansion of imported rules.
+- **What happens:** the `rrule` crate stops on long empty stretches without
+  always saying so, so an unusual sparse provider rule can show fewer
+  occurrences or none. The tested daily, weekly, monthly and yearly patterns
+  are not affected.
+- **Decision:**
+
+### 85. The mobile app never shuts its engine down
+
+- **Status:** open; checked in code
+- **Severity:** low. On main.
+- **Where:** `crates/mobile-uniffi/src/lib.rs` (no shutdown export); the
+  generated `cleanupRustCrate` returns without doing anything.
+- **What happens:** a JavaScript reload leaves the old engine running over the
+  same data directory, and the bridge's callback is not protected against a
+  runtime being recreated.
+- **Recommendation:** an engine `shutdown()` called on client swap and on React
+  Native invalidation.
+- **Decision:**
+
+### 86. A missing cached payload hides a schedule or clipboard row
+
+- **Status:** open; not re-checked
+- **Severity:** low. Not on main.
+- **Where:** `crates/client/src/local_store.rs`, preview decryption at hydration.
+- **What happens:** the object drops out of the list until it is fetched again,
+  with nothing shown to say it is loading.
+- **Recommendation:** show the row as "not loaded" instead of hiding it.
+- **Decision:**
+
+### 87. The browser logs logout and validate as failed requests
+
+- **Status:** open; checked in code
+- **Severity:** low.
+- **Where:** `crates/client/src/api_client.rs`, `logout` and `validate_session`.
+- **What happens:** the response body is dropped unread, so Chrome logs
+  `net::ERR_ABORTED` although the server handled both.
+- **Recommendation:** read the body, or use `keepalive`.
+- **Decision:**
+
 ## Product decisions
 
 ### 25. A changed occurrence without its series rejects the whole import
@@ -288,6 +1061,181 @@ Each entry has:
   series, the provider's feed holds that occurrence without its series. Today
   the import of that whole calendar is rejected.
 - **Recommendation:** import it as a one-off event.
+- **Decision:**
+
+### 88. What happens to overrides when a series' timing or recurrence changes
+
+- **Status:** open
+- **Where:** `crates/client/src/engine.rs`, `update_schedule_item`;
+  `crates/client/src/schedule_context.rs`, `effective_overrides`.
+- **What happens:** a timing or recurrence edit is refused while local
+  overrides exist, with an error that says "resolve them" though there is no UI
+  to do so. If such an edit arrives by sync, or the pinned base cannot be read,
+  the series and its alarms are skipped with a warning.
+- **Recommendation:** choose what the user is offered (discard, map to the new
+  definition, or keep them with the old series), then build that UI and its
+  write.
+- **Decision:**
+
+### 89. Editing one occurrence, or this and later occurrences
+
+- **Status:** open
+- **Where:** schedule domain and web composer.
+- **What happens:** single-occurrence overrides exist in the model but have no
+  editing UI. "This and future" needs series-split rules that are not defined.
+  Expansion always uses the latest definition.
+- **Decision:**
+
+### 90. Editing recorded time
+
+- **Status:** open
+- **Where:** schedule recordings (`ActualRecord`).
+- **What happens:** manual entry, correcting start and end, linking a recording
+  to a plan afterwards, and viewing a recording against its historical plan are
+  not designed. Linking afterwards needs a rule for which plan revision to pin.
+  The historical-plan read exists in Rust with no UI.
+- **Decision:**
+
+### 91. Timers started on two devices
+
+- **Status:** open
+- **Where:** `crates/client/src/engine.rs`, `start_actual`.
+- **What happens:** starting a timer stops every running timer this device has
+  synced, but two devices that have not synced can each run one until the next
+  start.
+- **Decision:**
+
+### 92. Recovering a calendar import that cannot finish
+
+- **Status:** open
+- **Where:** `crates/client/src/calendar_import.rs`.
+- **What happens:** a pending batch resumes on every refresh and cannot be
+  cancelled, and it blocks removing its source or raw file. A crash between the
+  raw-file upload and the pending manifest leaves an unreferenced file in Files
+  that nothing removes. Overrides that pointed at a purged import cannot be
+  reattached.
+- **Recommendation:** a cancel action for a pending batch, cleanup of raw files
+  no manifest references, and a reattach flow for overrides.
+- **Decision:**
+
+### 93. Calendar connector questions
+
+- **Status:** open
+- **Where:** future Google and Zoho connectors.
+- **What happens:** to settle before building them: which binding is primary
+  when the same meeting arrives from two sources; whether replying to an
+  invite from Clipper is supported; how provider recurrence and moved instances
+  map onto Clipper's overrides; and whether the work Google Workspace account
+  allows a personal OAuth app (if not, it is ICS-only). Today identical
+  refreshes still replace the whole batch and nothing deduplicates across or
+  within sources.
+- **Decision:**
+
+### 94. An override for a position the rule never produces adds an occurrence
+
+- **Status:** open
+- **Where:** `crates/schedule/src/engine.rs`, `occurrences`.
+- **What happens:** this is how provider `RDATE` additions work, but a local
+  override written against a wrong identity would also add one.
+- **Recommendation:** keep, and have the future override UI check identities
+  against rule positions before writing.
+- **Decision:**
+
+### 95. A cancelled occurrence still uses a COUNT slot
+
+- **Status:** open
+- **Where:** `crates/schedule/src/engine.rs`.
+- **What happens:** this is RFC 5545 behaviour; users often expect the
+  opposite.
+- **Recommendation:** keep, and say so in the composer where `COUNT` is shown.
+- **Decision:**
+
+### 96. An imported start that is not on the rule's weekdays
+
+- **Status:** open
+- **Where:** `crates/schedule/src/engine.rs`.
+- **What happens:** the `rrule` crate drops a `DTSTART` that is not on `BYDAY`;
+  Google includes it, so the event's own summary names a day the calendar never
+  shows.
+- **Recommendation:** include the `DTSTART` instance for imported events.
+- **Decision:**
+
+### 97. COUNT and UNTIL together in an imported rule
+
+- **Status:** open
+- **Where:** `crates/schedule/src/recurrence/imported_rule.rs`.
+- **What happens:** RFC 5545 forbids it; today the rule stays imported and
+  whichever clause the library honours wins.
+- **Recommendation:** reject at import, like the other strict checks.
+- **Decision:**
+
+### 98. A device clock more than an hour behind cannot edit
+
+- **Status:** open; checked in code (the error is `InvalidObjectEnvelope`)
+- **Where:** `crates/server/src/routes/objects.rs`, `validate_object_created_at`.
+- **What happens:** the one-hour `created_at` window now applies to revisions,
+  and the refusal has no distinct error code.
+- **Recommendation:** keep the window but return a distinct code so a client
+  can re-sign with server time.
+- **Decision:**
+
+### 99. A snapshot item older than the held revision is skipped
+
+- **Status:** open
+- **Where:** `crates/client/src/engine.rs`, snapshot loops.
+- **What happens:** the item is skipped with a warning and the held head is
+  kept; aborting the pass instead was an earlier bug.
+- **Recommendation:** keep.
+- **Decision:**
+
+### 100. One skipped event rejects the whole calendar refresh
+
+- **Status:** open
+- **Where:** `crates/schedule/src/ingest.rs`; `crates/client/src/calendar_import.rs`.
+- **What happens:** a single provider quirk (for example an all-day event whose
+  `DTEND` equals `DTSTART`) rejects the refresh and keeps the old calendar.
+  Entry 25 is one case of this.
+- **Recommendation:** keep strict for now; revisit with real feeds.
+- **Decision:**
+
+### 101. Deleting a file frees no storage
+
+- **Status:** open; checked in code (`delete_file` only writes a tombstone)
+- **Where:** `crates/client/src/engine.rs`, `delete_file`; server purge route.
+- **What happens:** the tombstone is charged and nothing purges ordinary files,
+  so an account at its limit cannot recover space from the UI. At the byte
+  limit a running timer also cannot be stopped, because the stop is a charged
+  revision.
+- **Recommendation:** choose between purging once the server acknowledges the
+  tombstone (delete becomes final at once), purging after every device has seen
+  it (needs a signal the server lacks), or an explicit "empty trash".
+- **Decision:**
+
+### 102. Revisions can be stored for free
+
+- **Status:** open
+- **Where:** `crates/server/src/storage_quota.rs`, `revision_cost_bytes`.
+- **What happens:** a revision is charged only its payload and metadata
+  ciphertext, both of which can be zero bytes, and revisions are not counted as
+  objects. The signed envelope bytes are never charged. An account can add
+  revision, payload and event rows and empty payload files without limit.
+- **Recommendation:** charge the envelope length plus a fixed amount per payload.
+- **Decision:**
+
+### 103. Clipboard items cannot be deleted
+
+- **Status:** open; checked in code (`ObjectDeleteUnsupported` for clipboard)
+- **Where:** `crates/server/src/routes/objects.rs`.
+- **What happens:** clipboard items leave only by the 7-day expiry or the
+  100-item cap, so a secret copied by mistake stays synced until then.
+- **Decision:**
+
+### 104. Peer-to-peer sync and a downloaded-file cache
+
+- **Status:** open
+- **Where:** none yet.
+- **What happens:** explicit-pairing LAN sync and keeping downloaded file bytes
+  locally were planned and not built.
 - **Decision:**
 
 ## Code and features
@@ -307,6 +1255,101 @@ Each entry has:
 - **Status:** fixed in `a850982`; checked in Chrome: every 3 days, every 2 weeks on chosen weekdays, every 2 months, the number kept across units, 0 and 70000 refused
 - **Decision:** build (owner).
 
+### 105. The composer cannot set yearly or nth-weekday rules or an end
+
+- **Status:** open; checked in code
+- **Where:** `web/src/schedule-recurrence.ts`, `buildRecurrence`.
+- **What happens:** the form offers once, daily, weekly, weekdays and monthly by
+  day of month (plus the interval from entry 28). Yearly rules, "second
+  Tuesday", and an end by count or date exist in the domain but have no
+  control; an existing end is carried over unchanged.
+- **Decision:**
+
+### 106. Undo and history browsing are not built
+
+- **Status:** open
+- **Where:** schedule UI.
+- **What happens:** retained revisions make undo possible; there is no UI for
+  undo or for browsing history.
+- **Decision:**
+
+### 107. Mobile has no schedule management UI
+
+- **Status:** open
+- **Where:** `mobile/src`.
+- **What happens:** the Android app shows alarms but cannot create or edit
+  plans; the browser's responsive layout does not cover the React Native app.
+- **Decision:**
+
+### 108. Calendar refresh is manual and only on native clients
+
+- **Status:** open
+- **Where:** `crates/client/src/calendar_import.rs`; the Android alarm plan.
+- **What happens:** there is no per-client opt-in or background refresh.
+  Android gets a seven-day alarm plan, so a phone whose app is never opened
+  runs out of alarms.
+- **Decision:**
+
+### 109. Remaining alarm features from abnormalarm
+
+- **Status:** open
+- **Where:** `mobile/modules/clipper-alarm`.
+- **What happens:** snooze, custom sounds and volume ramp, flashlight,
+  skip-next, widget, configurable auto-silence and a missed-alarm notification
+  are not ported; ringing stops after a fixed ten minutes.
+- **Decision:**
+
+### 110. QA still owed before merge
+
+- **Status:** open
+- **What happens:** owner Rust review, then installed Android release-build QA;
+  several nights on the POCO with HyperOS settings, permission changes and
+  reboot; logged-in Tauri desktop flows (blocked on the keychain prompt),
+  including calendar import and refresh; the biometric resume round trip on a
+  device with an enrolled fingerprint; browser reload and re-download.
+- **Decision:**
+
+### 111. Legacy-state cleanup code remains
+
+- **Status:** open; checked in code
+- **Where:** `users.encryption_salt` (a wrapped empty value written at every
+  registration); `crates/daemon/src/keychain.rs` strips a legacy `passphrase`
+  field; `web/src/backend/index.ts` removes `clipper.session.v1`;
+  `mobile/src/backend.ts` deletes the v1 credential slots;
+  `discard_legacy_file_store` in `crates/client/src/local_store.rs`.
+- **What happens:** AGENTS.md says not to keep compatibility code for abandoned
+  local state, since nothing is deployed.
+- **Recommendation:** drop the column (a migration) and the cleanup code.
+- **Decision:**
+
+### 112. `hydrate_ciphertext_cache` replaces memory without the store's lock
+
+- **Status:** open; checked in code
+- **Where:** `crates/client/src/local_store.rs`, `hydrate_ciphertext_cache`.
+- **What happens:** nothing races it today, because it runs inside
+  `finish_auth` before the new WebSocket starts.
+- **Recommendation:** take the `sync` lock so that stays true.
+- **Decision:**
+
+### 113. Shared delete paths call a no-op on native
+
+- **Status:** open; checked in code
+- **Where:** `crates/client/src/local_store.rs`, `discard_cached_payload`.
+- **What happens:** the native version does nothing (SQLite removes the payload
+  with its row), but the shared delete and absence paths call it before every
+  marker write.
+- **Recommendation:** move the browser payload removal into the browser marker
+  write and drop the shared calls.
+- **Decision:**
+
+### 114. Adding an object kind touches many files by hand
+
+- **Status:** decided
+- **What happens:** a new kind needs edits across api-types, app-types, the
+  client, server, daemon IPC, three adapters and both UIs. A kind registry and
+  an `AppState` reshape were proposed.
+- **Decision:** deferred; not part of this branch (owner).
+
 ## Docs
 
 ### 29. Doc claims the code did not satisfy
@@ -316,3 +1359,15 @@ Each entry has:
   Android alarm doc, the backlog and a migration comment each stated something
   the code does not do.
 - **Decision:** fix (Claude).
+
+### 115. Docs point to the wrong issue list or describe old behaviour
+
+- **Status:** open
+- **What happens:** README, SECURITY.md and CONTRIBUTING.md call
+  `docs/rust-code-review.md` the list of known issues; SECURITY.md describes a
+  "plaintext local clipboard cache" (the cache is encrypted) and an "Accepted /
+  Intentional Tradeoffs" section that does not exist. `rust-code-review.md` says
+  duplicate registration is hidden; it returns 409. `ws-sync-flow.md`,
+  `user-data-scoping.md`, `opaque.md`, `local-at-rest-encryption.md` and the
+  schedule model doc contain the stale claims listed in the docs consolidation.
+- **Decision:** fix (in the docs consolidation).
