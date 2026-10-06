@@ -21,6 +21,7 @@ overrides:
   # @expo/log-box 57 wants dom-webview ^57.0.1 but resolution otherwise keeps
   # the stale 56.x line.
   "@expo/dom-webview": 57.0.1
+  "@expo/metro": 56.1.0
   # CodeMirror requires a single @codemirror/state (and view) instance — facets
   # use identity checks. Transitive deps (lang packs, theme-one-dark, language)
   # pull older versions while our direct deps pin 6.7.6/6.43.13; the resulting

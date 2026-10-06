@@ -36,6 +36,7 @@
     "yjs": "13.6.33"
   },
   "devDependencies": {
+    "@expo/metro": "56.1.0",
     "@react-native/typescript-config": "0.86.3",
     "@tamagui/babel-plugin": "2.7.7",
     "@types/react": "~19.3.0",

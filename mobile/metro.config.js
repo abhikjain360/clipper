@@ -1,15 +1,10 @@
 const path = require("path");
+const { mergeConfig } = require("@expo/metro/metro-config");
 const { getDefaultConfig } = require("expo/metro-config");
 
 const projectRoot = __dirname;
 const workspaceRoot = path.resolve(projectRoot, "..");
 const config = getDefaultConfig(projectRoot);
-
-config.watchFolders = [workspaceRoot];
-config.resolver.nodeModulesPaths = [
-  path.resolve(projectRoot, "node_modules"),
-  path.resolve(workspaceRoot, "node_modules"),
-];
 
 // On macOS, Metro's multi-process transform pool intermittently aborts Node on
 // teardown during the release bundle ("Assertion failed: (errno == EINTR) ...
@@ -18,9 +13,7 @@ config.resolver.nodeModulesPaths = [
 // in a single in-process worker removes the worker-pipe fd churn that triggers
 // it, at a small bundle-time cost. The bug is macOS/kqueue-specific, so other
 // platforms keep full parallelism. See https://github.com/nodejs/node/issues/47241.
-if (process.platform === "darwin") {
-  config.maxWorkers = 1;
-}
+const maxWorkers = process.platform === "darwin" ? 1 : config.maxWorkers;
 
 // lib0 (yjs's utility layer) publishes a `react-native` export for its Web
 // Crypto shim that imports `isomorphic-webcrypto`, an unmaintained package this
@@ -43,11 +36,19 @@ const lib0Webcrypto = path.join(
 );
 const defaultResolveRequest = config.resolver.resolveRequest;
 
-config.resolver.resolveRequest = (context, moduleName, platform) => {
-  if (moduleName === "lib0/webcrypto" || moduleName === "lib0/webcrypto.js") {
-    return { type: "sourceFile", filePath: lib0Webcrypto };
-  }
-  return (defaultResolveRequest ?? context.resolveRequest)(context, moduleName, platform);
-};
-
-module.exports = config;
+module.exports = mergeConfig(config, {
+  watchFolders: [workspaceRoot],
+  maxWorkers,
+  resolver: {
+    nodeModulesPaths: [
+      path.resolve(projectRoot, "node_modules"),
+      path.resolve(workspaceRoot, "node_modules"),
+    ],
+    resolveRequest: (context, moduleName, platform) => {
+      if (moduleName === "lib0/webcrypto" || moduleName === "lib0/webcrypto.js") {
+        return { type: "sourceFile", filePath: lib0Webcrypto };
+      }
+      return (defaultResolveRequest ?? context.resolveRequest)(context, moduleName, platform);
+    },
+  },
+});
