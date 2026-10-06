@@ -304,7 +304,7 @@ Each entry has:
 
 ### 28. The web form cannot set "every N days, weeks or months"
 
-- **Status:** fixing (built, Chrome QA pending)
+- **Status:** fixed in `a850982`; checked in Chrome: every 3 days, every 2 weeks on chosen weekdays, every 2 months, the number kept across units, 0 and 70000 refused
 - **Decision:** build (owner).
 
 ## Docs
