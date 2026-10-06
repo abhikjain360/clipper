@@ -1551,6 +1551,17 @@ Each entry has:
   browser-feature alias on 0.3. Upgrade these when their upstream users
   support the newer lines. Other Rust dependencies were upgraded.
 
+### 128. Nightly compilation exceeded the async trait recursion limit
+
+- **Status:** fixed in `f420fc8`
+- **Severity:** low; compilation warning only.
+- **Where:** `crates/client/src/lib.rs`, `crates/daemon/src/main.rs`.
+- **What happened:** the nightly compiler used by `cargo-udeps` exceeded
+  its default trait recursion limit while checking `Send` on the nested
+  calendar-sync futures and the client's logout test future.
+- **Decision:** raise those two crates' compilation recursion limits to
+  256. The unused-dependency scan then passed without these warnings.
+
 ## Docs
 
 ### 29. Doc claims the code did not satisfy
